@@ -23,7 +23,7 @@ tower-http = { workspace = true }
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
-voxply-identity = { path = "../voxply-identity" }
+voxply-identity = { path = "../identity" }
 reqwest = { version = "0.12", features = ["json"] }
 sqlx = { workspace = true }
 futures-util = "0.3"

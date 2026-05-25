@@ -42,7 +42,7 @@ cargo build --release -p voxply-hub   # release binary
 Or using Docker:
 
 ```bash
-docker compose up --build        # see voxply-hub/docker-compose.yml
+docker compose up --build        # see hub/docker-compose.yml
 ```
 
 ## API

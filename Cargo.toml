@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "voxply-hub",
-    "voxply-seed",
-    "voxply-identity",
+    "hub",
+    "seed",
+    "identity",
 ]
 
 [workspace.dependencies]

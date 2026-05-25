@@ -14,4 +14,4 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 hex = "0.4"
-voxply-identity = { path = "../voxply-identity" }
+voxply-identity = { path = "../identity" }
