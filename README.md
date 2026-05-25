@@ -1,11 +1,11 @@
 # Voxply-server
 
-Hub server for the [Voxply](https://github.com/YOUR_ORG/Voxply) platform.
+Hub server for the [Voxply](https://github.com/Voxply/Voxply) platform.
 Handles authentication, channels, messaging, federation, voice relay,
 alliances, bots, security lobby, and all hub-side logic.
 
 Part of the Voxply project — see the
-[docs repo](https://github.com/YOUR_ORG/Voxply) for architecture,
+[docs repo](https://github.com/Voxply/Voxply) for architecture,
 API spec, and roadmap.
 
 ## Technologies
