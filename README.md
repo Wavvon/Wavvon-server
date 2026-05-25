@@ -19,21 +19,6 @@ API spec, and roadmap.
 - **UDP** — raw voice packet relay (codec handled client-side)
 - **reqwest** — outbound HTTP for federation
 
-## Repository structure
-
-```
-voxply-hub/          Main hub server binary + library
-  src/
-    auth/            Challenge-response auth, session tokens
-    routes/          All HTTP handlers (channels, messages, DMs, bots, …)
-    federation/      Hub-to-hub federation client + handlers
-    db/              SQLite migrations
-voxply-seed/         Seed / discovery scaffold
-voxply-identity/     Ed25519 keypairs, PoW, BIP39 recovery, wire types
-openapi.yaml         Full API specification (OpenAPI 3.0)
-docs/                Architecture docs, design decisions, threat model
-```
-
 ## Quick start
 
 ```bash
@@ -66,6 +51,58 @@ The complete API reference is in [`openapi.yaml`](openapi.yaml) —
 every endpoint, request/response shape, auth flow, and PoW algorithm
 documented in OpenAPI 3.0. Implement a client in any language against
 this spec.
+
+## How to create your client
+
+The hub speaks a plain HTTP + WebSocket API — no SDK needed. Here is
+the minimum path to a working client in any language:
+
+### 1 — Generate a keypair
+
+Create an **Ed25519** keypair and encode the 32-byte public key as a
+lowercase hex string. Optionally derive a **BIP39** 24-word mnemonic
+from the private-key seed for backup.
+
+### 2 — Solve proof-of-work
+
+Call `GET /auth/pow-challenge` to receive a challenge string and a
+`difficulty` (integer, number of leading zero bits required).
+
+Iterate a `nonce` (unsigned 64-bit little-endian) until:
+
+```
+SHA256( UTF8(public_key_hex) || LE64(nonce) )
+```
+
+has at least `difficulty` leading zero bits. Submit the solution to
+`POST /auth/register` (first visit) or `POST /auth/pow-verify`.
+
+### 3 — Sign the auth challenge
+
+After PoW, call `POST /auth/challenge` to receive a short challenge
+string. Sign the **raw UTF-8 bytes** of that string with your Ed25519
+private key. Encode the resulting 64-byte signature as a lowercase hex
+string and submit it to `POST /auth/verify`. The response contains a
+session token (Bearer).
+
+### 4 — Use the REST API
+
+Include `Authorization: Bearer <token>` on every request. All
+request/response bodies are JSON. See `openapi.yaml` for the full
+schema of every endpoint.
+
+### 5 — Connect over WebSocket
+
+Open `ws://<host>/ws?token=<token>`. The hub streams events as
+newline-delimited JSON objects with a `type` field
+(`message_created`, `member_joined`, `voice_state_update`, …).
+Send `{"type":"heartbeat"}` every 30 s to keep the connection alive.
+
+### 6 — Voice (optional)
+
+Open a UDP socket and send Opus packets prefixed with a 4-byte
+little-endian `channel_id` to the voice port (default 3001). The hub
+relays packets to all other participants in the same voice channel.
 
 ## Built with AI assistance
 
