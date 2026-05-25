@@ -5,8 +5,8 @@ Handles authentication, channels, messaging, federation, voice relay,
 alliances, bots, security lobby, and all hub-side logic.
 
 Part of the Voxply project — see the
-[docs repo](https://github.com/Voxply/Voxply) for architecture,
-API spec, and roadmap.
+[docs repo](https://github.com/Voxply/Voxply) for architecture and API spec,
+and the [roadmap](https://github.com/Voxply/Voxply/blob/main/ROADMAP.md) for what's next.
 
 ## Technologies
 
@@ -29,7 +29,7 @@ cargo run -p voxply-hub
 ```
 
 For production deployment (systemd, TLS, backups, upgrades) see
-[`docs/hosting.md`](docs/hosting.md).
+[`docs/hosting.md`](https://github.com/Voxply/Voxply/blob/main/docs/hosting.md).
 
 ## Building & testing
 
@@ -47,7 +47,7 @@ docker compose up --build        # see voxply-hub/docker-compose.yml
 
 ## API
 
-The complete API reference is in [`openapi.yaml`](openapi.yaml) —
+The complete API reference is in [`openapi.yaml`](https://github.com/Voxply/Voxply/blob/main/openapi.yaml) —
 every endpoint, request/response shape, auth flow, and PoW algorithm
 documented in OpenAPI 3.0. Implement a client in any language against
 this spec.
@@ -88,7 +88,7 @@ session token (Bearer).
 ### 4 — Use the REST API
 
 Include `Authorization: Bearer <token>` on every request. All
-request/response bodies are JSON. See `openapi.yaml` for the full
+request/response bodies are JSON. See the [API spec](https://github.com/Voxply/Voxply/blob/main/openapi.yaml) for the full
 schema of every endpoint.
 
 ### 5 — Connect over WebSocket
