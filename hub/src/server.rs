@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::middleware::from_fn;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Router;
 use tower_http::trace::TraceLayer;
 
@@ -19,6 +19,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     let auth_routes = Router::new()
         .route("/auth/challenge", post(auth::handlers::challenge))
         .route("/auth/verify", post(auth::handlers::verify))
+        .route("/auth/renew", post(auth::handlers::renew))
         .layer(from_fn(move |req, next| {
             let l = auth_limiter.clone();
             async move { rate_limit::enforce(l, req, next).await }
@@ -78,15 +79,30 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/channels/{channel_id}/messages/{message_id}/reactions/{emoji}",
             axum::routing::delete(routes::messages::remove_reaction),
         )
-        // ---- Admin bot management ----
+        // ---- Admin bot management (internal service accounts) ----
         .route("/admin/bots", get(routes::bots::admin_list_bots).post(routes::bots::admin_create_bot))
         .route("/admin/bots/{pubkey}", get(routes::bots::admin_get_bot).delete(routes::bots::admin_delete_bot))
         .route("/admin/bots/{pubkey}/webhook", put(routes::bots::admin_set_webhook))
-        // ---- Bot API (token auth) ----
+        // ---- Bot API (token auth, internal service accounts) ----
         .route("/bot/commands", put(routes::bots::bot_set_commands))
         .route("/bot/send", post(routes::bots::bot_send_message))
         .route("/bot/poll", get(routes::bots::bot_poll))
         .route("/bot/events", axum::routing::delete(routes::bots::bot_ack_events))
+        // ---- External bot system ----
+        // /bots/me, /bots/me/profile, /bots/me/commands, /bots/me/subscriptions
+        // must be registered before /bots/{pubkey} so axum doesn't match "me"
+        // as a path parameter.
+        .route("/bots/me", get(routes::bots::ext_bot_me))
+        .route("/bots/me/profile", put(routes::bots::ext_update_bot_profile))
+        .route("/bots/me/commands", put(routes::bots::ext_update_bot_commands))
+        .route("/bots/me/subscriptions", put(routes::bots::ext_update_bot_subscriptions))
+        .route("/bots/accept-invite", post(routes::bots::ext_accept_invite))
+        .route("/bots", get(routes::bots::ext_list_bots).post(routes::bots::ext_invite_bot))
+        .route("/bots/{pubkey}", delete(routes::bots::ext_remove_bot))
+        // ---- Incoming webhooks ----
+        .route("/admin/webhooks", post(routes::webhooks::create_webhook))
+        .route("/admin/webhooks/{id}", delete(routes::webhooks::delete_webhook))
+        .route("/webhooks/{id}/{token}", post(routes::webhooks::post_webhook_message))
         .route("/users", get(routes::users::list_users))
         .route("/channels/{channel_id}/members", get(routes::users::channel_members))
         .route("/voice/populations", get(routes::channels::voice_populations))

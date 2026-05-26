@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use voxply_identity::SubkeyCert;
 
+use crate::routes::bot_models::BotMeta;
+
 #[derive(Deserialize)]
 pub struct ChallengeRequest {
     pub public_key: String,
@@ -27,6 +29,14 @@ pub struct VerifyRequest {
     /// Bot challenge token (required when challenge_mode != 'off').
     #[serde(default)]
     pub challenge_token: Option<String>,
+    /// External bot self-declaration. When true, the hub expects a
+    /// pre-existing `users` row with approval_status='bot_pending'.
+    #[serde(default)]
+    pub is_bot: Option<bool>,
+    /// Bot metadata to upsert on successful auth. Only processed when
+    /// is_bot=true.
+    #[serde(default)]
+    pub bot_meta: Option<BotMeta>,
 }
 
 #[derive(Serialize, Deserialize)]

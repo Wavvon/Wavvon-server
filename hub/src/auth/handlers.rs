@@ -8,6 +8,7 @@ use rand::RngCore;
 use sqlx::SqlitePool;
 use voxply_identity::SubkeyCert;
 
+use crate::auth::middleware::AuthUser;
 use crate::auth::models::{ChallengeRequest, ChallengeResponse, VerifyRequest, VerifyResponse};
 use crate::state::{AppState, PendingChallenge};
 
@@ -136,6 +137,88 @@ pub async fn verify(
     let (canonical_pubkey, master_pubkey) =
         resolve_canonical_identity(&state.db, &req.public_key, req.subkey_cert.as_ref())
             .await?;
+
+    // External bot gate: when is_bot=true the hub requires a pre-existing
+    // users row with approval_status='bot_pending' or 'approved'. Bots cannot
+    // self-register — the invite flow creates the row first.
+    if req.is_bot == Some(true) {
+        let status: Option<String> = sqlx::query_scalar::<_, String>(
+            "SELECT approval_status FROM users WHERE public_key = ? AND is_bot = 1",
+        )
+        .bind(&canonical_pubkey)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        match status.as_deref() {
+            None => return Err((StatusCode::FORBIDDEN, "bot_not_invited".to_string())),
+            Some("bot_pending") | Some("approved") => {} // proceed
+            _ => return Err((StatusCode::FORBIDDEN, "bot_not_invited".to_string())),
+        }
+
+        // Ensure is_bot flag is set (idempotent).
+        sqlx::query("UPDATE users SET is_bot = 1 WHERE public_key = ?")
+            .bind(&canonical_pubkey)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        // Upsert bot_profiles from bot_meta and register commands.
+        if let Some(meta) = &req.bot_meta {
+            let now = unix_timestamp();
+            sqlx::query(
+                "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
+                 VALUES(?,?,?,?,?,?,?,?)
+                 ON CONFLICT(pubkey) DO UPDATE SET
+                   name=excluded.name, avatar_url=excluded.avatar_url,
+                   description=excluded.description, webhook_url=excluded.webhook_url,
+                   homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
+                   updated_at=excluded.updated_at",
+            )
+            .bind(&canonical_pubkey)
+            .bind(&meta.name)
+            .bind(&meta.avatar_url)
+            .bind(&meta.description)
+            .bind(&meta.webhook_url)
+            .bind(&meta.homepage_url)
+            .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
+            .bind(now)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+            if let Some(cmds) = &meta.commands {
+                sqlx::query("DELETE FROM bot_commands WHERE pubkey = ?")
+                    .bind(&canonical_pubkey)
+                    .execute(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+                for cmd in cmds {
+                    sqlx::query(
+                        "INSERT INTO bot_commands(pubkey,name,description,args,scope,privileged,cooldown_seconds)
+                         VALUES(?,?,?,?,?,?,?)",
+                    )
+                    .bind(&canonical_pubkey)
+                    .bind(&cmd.name)
+                    .bind(&cmd.description)
+                    .bind(&cmd.args)
+                    .bind(cmd.scope.as_deref().unwrap_or("channel"))
+                    .bind(if cmd.privileged.unwrap_or(false) { 1i64 } else { 0 })
+                    .bind(cmd.cooldown_seconds.unwrap_or(3))
+                    .execute(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+                }
+            }
+
+            // Flip approval_status to approved (idempotent if already approved).
+            sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = ?")
+                .bind(&canonical_pubkey)
+                .execute(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        }
+    }
 
     // Bans follow the canonical identity — a banned user can't
     // bypass by pairing a new device.
@@ -390,4 +473,71 @@ pub fn unix_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+/// POST /auth/renew — issue a fresh session token while the current one is
+/// still live. Intended for bots renewing their long-lived tokens proactively.
+/// The old token is NOT invalidated — the running WS session continues on it.
+pub async fn renew(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<VerifyRequest>,
+) -> Result<Json<VerifyResponse>, (StatusCode, String)> {
+    // The caller must have a valid existing session (AuthUser extractor handles that).
+    // Validate the new challenge-response the same way verify() does.
+
+    let pending = state
+        .pending_challenges
+        .write()
+        .await
+        .remove(&req.public_key)
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "No pending challenge for this key".to_string(),
+        ))?;
+
+    if Instant::now() > pending.expires_at {
+        return Err((StatusCode::UNAUTHORIZED, "Challenge expired".to_string()));
+    }
+
+    let challenge_bytes = hex::decode(&req.challenge)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid challenge hex".to_string()))?;
+
+    if challenge_bytes != pending.challenge_bytes {
+        return Err((StatusCode::UNAUTHORIZED, "Challenge mismatch".to_string()));
+    }
+
+    let signature_bytes = hex::decode(&req.signature)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
+
+    // The renewing pubkey must match the authenticated user's public key.
+    if req.public_key != user.public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Renew pubkey does not match authenticated identity".to_string(),
+        ));
+    }
+
+    voxply_identity::verify_signature(&req.public_key, &challenge_bytes, &signature_bytes)
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
+
+    let token = hex::encode({
+        let mut bytes = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        bytes
+    });
+    let now = unix_timestamp();
+
+    sqlx::query("INSERT INTO sessions (token, public_key, created_at) VALUES (?, ?, ?)")
+        .bind(&token)
+        .bind(&user.public_key)
+        .bind(&now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(VerifyResponse {
+        token,
+        scope: "member".to_string(),
+    }))
 }

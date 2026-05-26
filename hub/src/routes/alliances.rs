@@ -456,6 +456,7 @@ pub async fn get_alliance_channel_messages(
                 // Reply context not federated yet -- shows fine on the owning
                 // hub, just no preview here.
                 reply_to: None,
+                visible_to_pubkey: None,
             });
         }
         return Ok(Json(out));

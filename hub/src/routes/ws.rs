@@ -146,6 +146,17 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     continue;
                                 }
                             }
+                            // Ephemeral message filtering: if visible_to_pubkey is set,
+                            // only deliver to the named recipient. Other WS clients skip it.
+                            // This is defence-in-depth — the message content is innocuous
+                            // (an error or bot reply) but we keep it invisible to others.
+                            if let crate::routes::chat_models::ChatEvent::New { message: ref m, .. } = &event {
+                                if let Some(ref vtp) = m.visible_to_pubkey {
+                                    if vtp != &public_key {
+                                        continue;
+                                    }
+                                }
+                            }
                             let ws_msg = match event {
                                 crate::routes::chat_models::ChatEvent::New { channel_id, message } => {
                                     WsServerMessage::ChatMessage { channel_id, message }

@@ -795,6 +795,148 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- External bot system: new users columns ----
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN is_bot_removed INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN bot_invite_token TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN bot_invite_expires INTEGER")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN is_webhook INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+
+    // Ephemeral messages: only visible to a specific user. NULL = normal broadcast.
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN visible_to_pubkey TEXT")
+        .execute(pool)
+        .await;
+    // Rich embeds: JSON array of Embed objects. NULL = no embeds.
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN embeds TEXT")
+        .execute(pool)
+        .await;
+
+    // Bot profile metadata (operator-supplied, per-hub).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_profiles (
+            pubkey       TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            avatar_url   TEXT,
+            description  TEXT,
+            webhook_url  TEXT,
+            homepage_url TEXT,
+            capabilities TEXT NOT NULL DEFAULT '[]',
+            updated_at   INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Per-bot slash command registry (one row per bot × command name).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_commands (
+            pubkey           TEXT NOT NULL,
+            name             TEXT NOT NULL,
+            description      TEXT NOT NULL,
+            args             TEXT,
+            scope            TEXT NOT NULL DEFAULT 'channel',
+            privileged       INTEGER NOT NULL DEFAULT 0,
+            cooldown_seconds INTEGER NOT NULL DEFAULT 3,
+            PRIMARY KEY (pubkey, name)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Event subscriptions per bot: channel_id uses '' (empty string) as sentinel
+    // for hub-scope subscriptions (i.e. not channel-scoped). SQLite PRIMARY KEY
+    // constraints cannot use expressions like COALESCE, so we store '' instead of NULL
+    // and treat '' as "no channel filter" in the application layer.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_subscriptions (
+            bot_pubkey  TEXT NOT NULL,
+            event_type  TEXT NOT NULL,
+            channel_id  TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (bot_pubkey, event_type, channel_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Per-bot channel scope restriction. Empty table = hub-wide access (default).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_channel_scope (
+            bot_pubkey TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            PRIMARY KEY (bot_pubkey, channel_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Interactive message components (buttons, selects) attached to bot messages.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS message_components (
+            id            TEXT PRIMARY KEY,
+            message_id    TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            row_idx       INTEGER NOT NULL,
+            component_idx INTEGER NOT NULL,
+            type          TEXT NOT NULL,
+            config_json   TEXT NOT NULL,
+            expires_at    INTEGER
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Native audit log. Separate sequence counter table because SQLite
+    // AUTOINCREMENT is only clean on INTEGER PRIMARY KEY tables.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hub_audit_seq (
+            id  INTEGER PRIMARY KEY,
+            seq INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_audit_seq VALUES(1, 0)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hub_audit_log (
+            id            TEXT PRIMARY KEY,
+            seq           INTEGER NOT NULL,
+            event_type    TEXT NOT NULL,
+            at            INTEGER NOT NULL,
+            actor_pubkey  TEXT,
+            target_pubkey TEXT,
+            channel_id    TEXT,
+            payload_json  TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Incoming webhooks: a secret URL that external services POST messages to.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS webhooks (
+            id                TEXT PRIMARY KEY,
+            channel_id        TEXT NOT NULL REFERENCES channels(id),
+            secret_token_hash TEXT NOT NULL,
+            display_name      TEXT NOT NULL,
+            avatar_url        TEXT,
+            created_by_pubkey TEXT NOT NULL,
+            rate_limit        INTEGER NOT NULL DEFAULT 5,
+            active            INTEGER NOT NULL DEFAULT 1,
+            created_at        INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     // ---- Self-service bot system ----
     // Standalone bots table with webhook and hashed token support.
     // The bot's public_key is also inserted into users (is_bot=1) so that

@@ -116,6 +116,10 @@ pub struct MessageResponse {
     pub reactions: Vec<ReactionSummary>,
     #[serde(default)]
     pub reply_to: Option<ReplyContext>,
+    /// When set, only the named user should see this message.
+    /// NULL / None = normal broadcast. Used for ephemeral bot replies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible_to_pubkey: Option<String>,
 }
 
 #[derive(Deserialize)]

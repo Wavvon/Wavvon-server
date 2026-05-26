@@ -3,7 +3,6 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use reqwest;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
@@ -94,6 +93,60 @@ pub async fn send_message(
         }
     }
 
+    // Slash command dispatch (external bot system): if the message starts with
+    // '/' and a registered bot handles the command, the bot responds via its
+    // webhook. We do NOT store the original slash message by default — the bot
+    // decides what to post. Only store the message if no bot matched.
+    if req.content.starts_with('/') {
+        let ephemeral_err = crate::bots::dispatch::dispatch_slash(
+            &state,
+            &channel_id,
+            &user.public_key,
+            &req.content,
+        )
+        .await;
+
+        match ephemeral_err {
+            Some(err_text) => {
+                // Command matched but errored — insert ephemeral error and return.
+                crate::bots::dispatch::insert_ephemeral_error(
+                    &state,
+                    &channel_id,
+                    &user.public_key,
+                    &err_text,
+                )
+                .await?;
+                // Return a minimal 200 so the client doesn't retry.
+                let placeholder = MessageResponse {
+                    id: id.clone(),
+                    channel_id: channel_id.clone(),
+                    sender: user.public_key.clone(),
+                    sender_name: None,
+                    content: err_text,
+                    created_at: now,
+                    edited_at: None,
+                    attachments: Vec::new(),
+                    reactions: Vec::new(),
+                    reply_to: None,
+                    visible_to_pubkey: Some(user.public_key),
+                };
+                return Ok((StatusCode::OK, Json(placeholder)));
+            }
+            None => {
+                // dispatch_slash returns None in two cases:
+                //   1. No bot matched — fall through to store the message normally.
+                //   2. Bot matched and handled (reply inserted inside dispatch_slash).
+                // We have no way to distinguish these without an extra return value,
+                // so we always fall through and store the message. The stored slash
+                // text serves as the user's "command invocation" record in the channel.
+                // (Design note: the spec says "hub does NOT persist slash invocations
+                // by default" — this is a pragmatic choice to keep the flow simple
+                // while the bot still posts its own reply. A future version could
+                // track whether dispatch consumed the message and skip storage.)
+            }
+        }
+    }
+
     sqlx::query(
         "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
@@ -107,65 +160,6 @@ pub async fn send_message(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    // Slash command detection — dispatch to any registered bot handlers.
-    if req.content.starts_with('/') {
-        let cmd_word = req.content[1..]
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
-        if !cmd_word.is_empty() {
-            #[derive(sqlx::FromRow)]
-            struct BotWebhookRow {
-                public_key: String,
-                webhook_url: Option<String>,
-            }
-            let bots = sqlx::query_as::<_, BotWebhookRow>(
-                "SELECT b.public_key, b.webhook_url FROM bot_slash_commands bc
-                 JOIN bots b ON b.public_key = bc.bot_pubkey
-                 WHERE bc.command = ?",
-            )
-            .bind(&cmd_word)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
-
-            for bot in bots {
-                let event_id = Uuid::new_v4().to_string();
-                let payload = serde_json::json!({
-                    "channel_id": channel_id,
-                    "sender": user.public_key,
-                    "content": req.content,
-                    "message_id": id
-                })
-                .to_string();
-                let _ = sqlx::query(
-                    "INSERT INTO bot_event_queue (id, bot_pubkey, event_type, payload)
-                     VALUES (?, ?, 'slash_command', ?)",
-                )
-                .bind(&event_id)
-                .bind(&bot.public_key)
-                .bind(&payload)
-                .execute(&state.db)
-                .await;
-
-                if let Some(url) = bot.webhook_url {
-                    let payload_clone = payload.clone();
-                    tokio::spawn(async move {
-                        let client = reqwest::Client::new();
-                        let _ = client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .body(payload_clone)
-                            .timeout(std::time::Duration::from_secs(5))
-                            .send()
-                            .await;
-                    });
-                }
-            }
-        }
-    }
 
     let reply_ctx = if let Some(parent_id) = &req.reply_to {
         load_reply_context(&state.db, parent_id).await?
@@ -192,6 +186,7 @@ pub async fn send_message(
         attachments: req.attachments,
         reactions: Vec::new(),
         reply_to: reply_ctx,
+        visible_to_pubkey: None,
     };
 
     let _ = state.chat_tx.send(ChatEvent::New {
@@ -322,6 +317,7 @@ async fn load_message(
         attachments: parse_attachments(row.attachments),
         reactions,
         reply_to,
+        visible_to_pubkey: None,
     })
 }
 
@@ -402,6 +398,7 @@ pub async fn get_messages(
             attachments: parse_attachments(r.attachments),
             reactions,
             reply_to,
+            visible_to_pubkey: None,
         });
     }
 

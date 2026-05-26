@@ -1,4 +1,6 @@
 pub mod bots;
+pub mod bot_models;
+pub mod webhooks;
 pub mod alliance_models;
 pub mod challenge;
 pub mod directory;
