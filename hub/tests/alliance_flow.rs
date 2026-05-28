@@ -39,7 +39,9 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
-    });
+        farm_url: None,
+        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),    });
 
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

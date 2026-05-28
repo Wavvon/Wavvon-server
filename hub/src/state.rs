@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -104,6 +105,20 @@ pub struct AppState {
     /// broadcast so we can push targeted hub_event messages without looping
     /// through every connected client.
     pub bot_sessions: RwLock<HashMap<String, mpsc::Sender<String>>>,
+
+    // ---- Farm integration (Phase 1, dual-issue step 1) ----
+
+    /// URL of the farm process this hub is paired with, if any.
+    /// Populated from the `VOXPLY_FARM_URL` environment variable on startup.
+    /// Surfaced in `GET /info` so clients know where to route auth.
+    pub farm_url: Option<String>,
+    /// Cached farm Ed25519 public key (hex). Populated from `GET {farm_url}/farm/info`
+    /// on startup; refreshed (at most once per 60s) when a token fails verification —
+    /// handles farm key rotation without requiring a restart.
+    pub cached_farm_pubkey: Arc<RwLock<Option<String>>>,
+    /// Unix timestamp of the last farm pubkey re-fetch attempt.
+    /// Used to rate-limit re-fetch to at most once per 60s.
+    pub last_farm_pubkey_fetch: Arc<RwLock<i64>>,
 }
 
 pub struct PendingChallenge {

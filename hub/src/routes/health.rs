@@ -53,6 +53,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         min_security_level,
         invite_only,
         challenge_mode,
+        farm_url: state.farm_url.clone(),
     })
 }
 
@@ -74,4 +75,8 @@ pub struct InfoResponse {
     pub invite_only: bool,
     #[serde(default)]
     pub challenge_mode: String,
+    /// URL of the farm this hub is paired with, or null for self-contained auth.
+    /// Clients see this field and route `/auth/*` calls to the farm when set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub farm_url: Option<String>,
 }

@@ -1,14 +1,14 @@
 [package]
-name = "voxply-hub"
+name = "voxply-farm"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "voxply-hub"
+name = "voxply-farm"
 path = "src/main.rs"
 
 [lib]
-name = "voxply_hub"
+name = "voxply_farm"
 path = "src/lib.rs"
 
 [dependencies]
@@ -20,21 +20,13 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
+sqlx = { workspace = true }
 hex = "0.4"
 rand = "0.8"
-sha2 = "0.10"
 base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
 voxply-identity = { path = "../identity" }
-reqwest = { version = "0.12", features = ["json"] }
-sqlx = { workspace = true }
-futures-util = "0.3"
-uuid = { workspace = true }
-bytes = "1"
-axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 [dev-dependencies]
 axum-test = "19"
 tokio = { workspace = true }
-reqwest = { version = "0.12", features = ["json"] }
-tokio-tungstenite = "0.24"
-futures-util = "0.3"

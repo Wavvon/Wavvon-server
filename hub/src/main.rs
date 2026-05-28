@@ -85,6 +85,46 @@ async fn main() -> Result<()> {
     let (dm_tx, _) = broadcast::channel(256);
     let (screen_share_tx, _) = broadcast::channel(256);
 
+    // Farm integration: fetch the farm pubkey from VOXPLY_FARM_URL if set.
+    let farm_url = std::env::var("VOXPLY_FARM_URL").ok();
+    let http_client = reqwest::Client::new();
+    let cached_farm_pubkey: Arc<tokio::sync::RwLock<Option<String>>> =
+        Arc::new(tokio::sync::RwLock::new(None));
+    let last_farm_pubkey_fetch: Arc<tokio::sync::RwLock<i64>> =
+        Arc::new(tokio::sync::RwLock::new(0));
+
+    if let Some(ref url) = farm_url {
+        match http_client
+            .get(format!("{url}/farm/info"))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        if let Some(pk) = body.get("public_key").and_then(|v| v.as_str()) {
+                            *cached_farm_pubkey.write().await = Some(pk.to_string());
+                            tracing::info!(
+                                "Cached farm pubkey from {url}: {}",
+                                &pk[..16.min(pk.len())]
+                            );
+                        } else {
+                            tracing::warn!("Farm /farm/info response missing public_key field");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to parse farm /farm/info response: {e}"),
+                }
+            }
+            Ok(resp) => tracing::warn!(
+                "Farm /farm/info returned non-success status: {}",
+                resp.status()
+            ),
+            Err(e) => tracing::warn!(
+                "Could not reach farm at {url} on startup: {e} — hub will work with hub-issued tokens only"
+            ),
+        }
+    }
+
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),
         hub_identity,
@@ -93,7 +133,7 @@ async fn main() -> Result<()> {
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
-        http_client: reqwest::Client::new(),
+        http_client,
         voice_channels: RwLock::new(HashMap::new()),
         voice_udp_port,
         voice_event_tx,
@@ -102,6 +142,9 @@ async fn main() -> Result<()> {
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx,
         bot_sessions: RwLock::new(HashMap::new()),
+        farm_url,
+        cached_farm_pubkey,
+        last_farm_pubkey_fetch,
     });
 
     // Bind voice UDP socket and start forwarding task
