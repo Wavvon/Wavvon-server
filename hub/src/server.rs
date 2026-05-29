@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
-use axum::Router;
+use axum::{extract::Request, middleware::Next, response::Response, Router};
 use tower_http::trace::TraceLayer;
 
 use crate::auth;
@@ -10,6 +10,16 @@ use crate::federation;
 use crate::rate_limit::{self, Config, RateLimiter};
 use crate::routes;
 use crate::state::AppState;
+
+async fn attach_request_id(req: Request, next: Next) -> Response {
+    let id = uuid::Uuid::new_v4().to_string();
+    tracing::trace!(request_id = %id, method = %req.method(), uri = %req.uri(), "request");
+    let mut resp = next.run(req).await;
+    if let Ok(v) = id.parse::<axum::http::HeaderValue>() {
+        resp.headers_mut().insert("x-request-id", v);
+    }
+    resp
+}
 
 pub fn create_router(state: Arc<AppState>) -> Router {
     let auth_limiter = RateLimiter::new(Config::AUTH);
@@ -42,6 +52,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(routes::health::health))
         .route("/info", get(routes::health::info))
+        .route("/metrics", get(routes::metrics::metrics))
         .route("/hub", axum::routing::patch(routes::hub::update_hub))
         .route("/hub/members", get(routes::hub::list_members))
         .route("/hub/settings", get(routes::hub::get_hub_settings))
@@ -301,5 +312,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             put(routes::identity::put_dm_blocks).get(routes::identity::get_dm_blocks),
         )
         .layer(TraceLayer::new_for_http())
+        .layer(from_fn(attach_request_id))
         .with_state(state)
 }

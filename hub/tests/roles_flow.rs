@@ -1,4 +1,4 @@
-ï»¿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -43,7 +43,8 @@ async fn setup() -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
     let app = server::create_router(state);
     TestServer::new(app)
 }
@@ -179,7 +180,7 @@ async fn priority_enforcement() {
         .await
         .assert_status_ok();
 
-    // User2 tries to create a role at priority 50 (= their own) â€” should fail
+    // User2 tries to create a role at priority 50 (= their own) — should fail
     let resp = server
         .post("/roles")
         .authorization_bearer(&token2)
@@ -191,7 +192,7 @@ async fn priority_enforcement() {
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
 
-    // User2 creates a role at priority 49 (< their own) â€” should succeed
+    // User2 creates a role at priority 49 (< their own) — should succeed
     let resp = server
         .post("/roles")
         .authorization_bearer(&token2)
@@ -230,7 +231,7 @@ async fn permission_gating_on_channels() {
     let owner = Identity::generate();
     authenticate(&server, &owner).await;
 
-    // User2 (only @everyone) tries to create a channel â€” should fail
+    // User2 (only @everyone) tries to create a channel — should fail
     let user2 = Identity::generate();
     let token2 = authenticate(&server, &user2).await;
 

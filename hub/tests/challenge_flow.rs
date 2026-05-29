@@ -1,4 +1,4 @@
-ï»¿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -41,7 +41,8 @@ async fn setup() -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
     let app = server::create_router(state);
     TestServer::new(app)
 }
@@ -80,7 +81,7 @@ async fn challenge_new_returns_404_when_off() {
     let server = setup().await;
     let identity = Identity::generate();
 
-    // challenge_mode defaults to 'off' â€” /challenge/new should 404
+    // challenge_mode defaults to 'off' — /challenge/new should 404
     let resp = server
         .get("/challenge/new")
         .add_query_param("pubkey", identity.public_key_hex())
@@ -201,7 +202,7 @@ async fn challenge_pubkey_mismatch_rejected() {
     let challenge: Value = resp.json();
     let id = challenge["id"].as_str().unwrap().to_string();
 
-    // Try to verify with attacker's pubkey â€” should be rejected
+    // Try to verify with attacker's pubkey — should be rejected
     let resp = server
         .post("/challenge/verify")
         .json(&json!({ "id": id, "pubkey": attacker.public_key_hex() }))
@@ -262,7 +263,7 @@ async fn auth_verify_requires_challenge_token_when_mode_is_not_off() {
     // Enable click challenges
     admin_set_challenge_mode(&server, &owner_token, "click").await;
 
-    // Try to auth without a challenge token â€” should fail
+    // Try to auth without a challenge token — should fail
     let new_user = Identity::generate();
     let pub_key = new_user.public_key_hex();
     let resp = server

@@ -75,7 +75,14 @@ fn resolve_hub_bin() -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let json_logs = std::env::var("VOXPLY_LOG_FORMAT")
+        .map(|v| v.to_lowercase() == "json")
+        .unwrap_or(false);
+    if json_logs {
+        tracing_subscriber::fmt().json().init();
+    } else {
+        tracing_subscriber::fmt().init();
+    }
 
     // `voxply-farm migrate` — run migrations and exit.
     let subcommand = std::env::args().nth(1);

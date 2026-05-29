@@ -45,6 +45,7 @@ async fn setup() -> TestServer {
         active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        started_at: std::time::Instant::now(),
     });
     let app = server::create_router(state);
     TestServer::new(app)

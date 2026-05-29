@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -44,7 +44,8 @@ async fn setup() -> (TestServer, Identity) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
     let app = server::create_router(state);
     let server = TestServer::new(app);
     let identity = Identity::generate();
@@ -154,7 +155,7 @@ async fn directory_sign_rejects_non_admin() {
     // Log in the owner first to create the hub.
     let _owner_token = authenticate(&server, &owner).await;
 
-    // A second user that joins — they will only have the built-in "everyone" role.
+    // A second user that joins � they will only have the built-in "everyone" role.
     let regular_user = Identity::generate();
     let user_token = authenticate(&server, &regular_user).await;
 

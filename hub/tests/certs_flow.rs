@@ -49,6 +49,7 @@ async fn make_state() -> Arc<AppState> {
         cached_farm_pubkey: Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: Arc::new(tokio::sync::RwLock::new(0)),
         active_game_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        started_at: std::time::Instant::now(),
     })
 }
 

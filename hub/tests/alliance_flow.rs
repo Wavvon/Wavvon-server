@@ -1,4 +1,4 @@
-ï»¿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
@@ -43,7 +43,8 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
 
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -422,7 +423,7 @@ async fn push_invite_happy_path() {
 
 #[tokio::test]
 async fn push_invite_decline() {
-    // Hub B declines an invite â€” it should be removed from the pending list
+    // Hub B declines an invite — it should be removed from the pending list
     // and Hub B should not appear in the alliance.
     let (hub_a_url, _hub_a_state) = start_hub("hub-a").await;
     let (hub_b_url, _hub_b_state) = start_hub("hub-b").await;
@@ -512,7 +513,7 @@ async fn push_invite_nonexistent_alliance_rejected() {
     let user_a = Identity::generate();
     let token_a = authenticate_user(&hub_a_url, &user_a).await;
 
-    // Try to push an invite for a non-existent alliance_id â€” should get 404.
+    // Try to push an invite for a non-existent alliance_id — should get 404.
     let resp = client
         .post(format!("{hub_a_url}/alliances/does-not-exist/push-invite"))
         .bearer_auth(&token_a)

@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -42,7 +42,8 @@ async fn setup() -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
     let app = server::create_router(state);
     TestServer::new(app)
 }
@@ -89,7 +90,7 @@ async fn publish_and_fetch_dh_key() {
     let token = authenticate(&server, &alice).await;
     let pubkey = alice.public_key_hex();
 
-    // GET before any key is published → 404
+    // GET before any key is published ? 404
     server
         .get(&format!("/identity/{pubkey}/dh-key"))
         .await
@@ -121,7 +122,7 @@ async fn publish_dh_key_rejects_wrong_identity() {
     let alice_token = authenticate(&server, &alice).await;
     authenticate(&server, &bob).await;
 
-    // Alice tries to publish a DH key under Bob's pubkey — must be rejected.
+    // Alice tries to publish a DH key under Bob's pubkey � must be rejected.
     let bob_pubkey = bob.public_key_hex();
     let body = make_dh_publish_body(&bob);
     server

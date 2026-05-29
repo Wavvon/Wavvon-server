@@ -1,4 +1,5 @@
 pub mod badges;
+pub mod metrics;
 pub mod bots;
 pub mod certs;
 pub mod bot_models;

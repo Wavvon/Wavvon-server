@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -41,7 +41,8 @@ async fn setup() -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
     let app = server::create_router(state);
     TestServer::new(app)
 }
@@ -72,7 +73,7 @@ async fn lobby_status_returns_member_when_no_min_level() {
     let owner = Identity::generate();
     let token = authenticate(&server, &owner).await;
 
-    // min_security_level defaults to 0 → status should be "member"
+    // min_security_level defaults to 0 ? status should be "member"
     let resp = server
         .get("/lobby/status")
         .authorization_bearer(&token)

@@ -49,7 +49,14 @@ fn tls_config_from_env() -> Option<TlsConfig> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    let json_logs = std::env::var("VOXPLY_LOG_FORMAT")
+        .map(|v| v.to_lowercase() == "json")
+        .unwrap_or(false);
+    if json_logs {
+        tracing_subscriber::fmt().json().init();
+    } else {
+        tracing_subscriber::fmt().init();
+    }
 
     // Subcommand dispatch. `voxply-hub migrate` runs migrations and exits
     // without starting the HTTP server or UDP listener. Useful for CI,
@@ -149,6 +156,7 @@ async fn main() -> Result<()> {
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
         active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),
     });
 
     // Bind voice UDP socket and start forwarding task

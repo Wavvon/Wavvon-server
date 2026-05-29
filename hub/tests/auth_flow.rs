@@ -1,4 +1,4 @@
-ï»¿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -14,7 +14,7 @@ use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
 async fn setup() -> TestServer {
-    // In-memory SQLite for tests â€” no file created, fresh every time
+    // In-memory SQLite for tests — no file created, fresh every time
     let db = SqlitePoolOptions::new()
         .connect("sqlite::memory:")
         .await
@@ -45,7 +45,8 @@ async fn setup() -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
 
     let app = server::create_router(state);
     TestServer::new(app)
@@ -124,7 +125,7 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
 async fn pending_members_are_blocked_until_approved() {
     let server = setup().await;
 
-    // Owner signs up first â€” auto-approved since they're the hub creator.
+    // Owner signs up first — auto-approved since they're the hub creator.
     let owner = Identity::generate();
     let owner_token = authenticate(&server, &owner).await;
 
@@ -136,7 +137,7 @@ async fn pending_members_are_blocked_until_approved() {
         .await
         .assert_status_ok();
 
-    // New member joins â€” they get a token but start pending.
+    // New member joins — they get a token but start pending.
     let newbie = Identity::generate();
     let newbie_token = authenticate(&server, &newbie).await;
 

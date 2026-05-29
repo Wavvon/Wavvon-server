@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -41,7 +41,8 @@ async fn setup() -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),    });
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        started_at: std::time::Instant::now(),    });
     let app = server::create_router(state);
     TestServer::new(app)
 }
@@ -218,7 +219,7 @@ async fn survey_submit_happy_path_choice_only() {
         .await;
     resp.assert_status_ok();
     let body: Value = resp.json();
-    // No text answers → should be approved
+    // No text answers ? should be approved
     assert_eq!(body["next_state"], "approved");
     let applied: &Vec<Value> = body["applied_roles"].as_array().unwrap();
     assert!(applied.is_empty()); // c1 has no role_ids in sample_survey
@@ -254,7 +255,7 @@ async fn survey_submit_text_answer_sets_pending() {
         .await;
     resp.assert_status_ok();
     let body: Value = resp.json();
-    // Has text answer → should be pending
+    // Has text answer ? should be pending
     assert_eq!(body["next_state"], "pending");
 }
 

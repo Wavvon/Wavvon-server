@@ -145,6 +145,9 @@ pub struct AppState {
 
     // ---- Farm integration (Phase 1, dual-issue step 1) ----
 
+    /// Wall time when this hub process started. Used by /metrics.
+    pub started_at: std::time::Instant,
+
     /// URL of the farm process this hub is paired with, if any.
     /// Populated from the `VOXPLY_FARM_URL` environment variable on startup.
     /// Surfaced in `GET /info` so clients know where to route auth.
