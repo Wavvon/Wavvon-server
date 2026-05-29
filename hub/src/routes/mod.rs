@@ -29,3 +29,5 @@ pub mod role_models;
 pub mod roles;
 pub mod users;
 pub mod ws;
+pub mod post_models;
+pub mod posts;

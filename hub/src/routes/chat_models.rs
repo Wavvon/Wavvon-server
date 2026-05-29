@@ -9,6 +9,9 @@ pub struct CreateChannelRequest {
     pub is_category: bool,
     #[serde(default)]
     pub description: Option<String>,
+    /// "text" (default) or "forum". Ignored for categories.
+    #[serde(default)]
+    pub channel_type: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -24,6 +27,8 @@ pub struct ChannelResponse {
     pub color: Option<String>,
     pub custom_icon_svg: Option<String>,
     pub created_at: i64,
+    /// "text" or "forum". Always "text" for categories.
+    pub channel_type: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -168,6 +173,10 @@ pub enum ChatEvent {
         stream_id: String,
         sharer_pubkey: String,
     },
+    /// A forum post/reply event (post_created, post_updated, post_deleted,
+    /// reply_created, reply_updated, reply_deleted). The payload is the
+    /// fully-serialised JSON value carried in the WS envelope.
+    Forum { channel_id: String },
 }
 
 impl ChatEvent {
@@ -179,7 +188,8 @@ impl ChatEvent {
             | ChatEvent::ReactionsUpdated { channel_id, .. }
             | ChatEvent::Typing { channel_id, .. }
             | ChatEvent::ScreenShareStarted { channel_id, .. }
-            | ChatEvent::ScreenShareStopped { channel_id, .. } => channel_id,
+            | ChatEvent::ScreenShareStopped { channel_id, .. }
+            | ChatEvent::Forum { channel_id } => channel_id,
         }
     }
 }
@@ -346,6 +356,13 @@ pub enum WsServerMessage {
         channel_id: String,
         stream_id: String,
         sharer_pubkey: String,
+    },
+    /// Forum post/reply event. The `event` field carries the typed payload
+    /// (type, channel_id, post_id, and optionally reply_id).
+    #[serde(rename = "forum_event")]
+    ForumEvent {
+        channel_id: String,
+        event: serde_json::Value,
     },
 }
 

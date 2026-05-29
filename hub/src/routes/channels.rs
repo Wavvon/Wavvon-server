@@ -149,6 +149,19 @@ pub async fn create_channel(
     let now = crate::auth::handlers::unix_timestamp();
     let is_category_int = if req.is_category { 1i64 } else { 0 };
 
+    // Validate channel_type: only "text" and "forum" are legal on leaf channels.
+    let channel_type = if req.is_category {
+        "text".to_string()
+    } else {
+        match req.channel_type.as_deref() {
+            None | Some("text") => "text".to_string(),
+            Some("forum") => "forum".to_string(),
+            Some(other) => {
+                return Err((StatusCode::BAD_REQUEST, format!("unknown channel_type: {other}")))
+            }
+        }
+    };
+
     // Append at the end of the current order
     let next_order: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(display_order), -1) + 1 FROM channels",
@@ -158,8 +171,8 @@ pub async fn create_channel(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, channel_type, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&req.name)
@@ -168,6 +181,7 @@ pub async fn create_channel(
     .bind(is_category_int)
     .bind(next_order)
     .bind(&req.description)
+    .bind(&channel_type)
     .bind(now)
     .execute(&state.db)
     .await
@@ -191,6 +205,7 @@ pub async fn create_channel(
         color: None,
         custom_icon_svg: None,
         created_at: now,
+        channel_type,
     };
 
     // Publish channel.created audit event.
@@ -376,7 +391,7 @@ pub async fn list_channels(
     _user: AuthUser,
 ) -> Result<Json<Vec<ChannelResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at
+        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type
          FROM channels
          ORDER BY display_order, created_at",
     )
@@ -398,6 +413,7 @@ pub async fn list_channels(
             color: r.color,
             custom_icon_svg: r.custom_icon_svg,
             created_at: r.created_at,
+            channel_type: r.channel_type,
         })
         .collect();
 
@@ -532,6 +548,7 @@ struct ChannelRow {
     color: Option<String>,
     custom_icon_svg: Option<String>,
     created_at: i64,
+    channel_type: String,
 }
 
 /// Returns the code-depth a new item would sit at if placed under `parent_id`

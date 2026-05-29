@@ -1058,6 +1058,153 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Feature: Forum channel type ----
+    // channel_type discriminant: 'text' (default) or 'forum'.
+    let _ = sqlx::query(
+        "ALTER TABLE channels ADD COLUMN channel_type TEXT NOT NULL DEFAULT 'text'",
+    )
+    .execute(pool)
+    .await;
+
+    // Posts table (forum content entries).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS posts (
+            id               TEXT PRIMARY KEY,
+            channel_id       TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            author_pubkey    TEXT NOT NULL,
+            title            TEXT NOT NULL,
+            body             TEXT NOT NULL,
+            created_at       INTEGER NOT NULL,
+            edited_at        INTEGER,
+            is_pinned        INTEGER NOT NULL DEFAULT 0,
+            is_locked        INTEGER NOT NULL DEFAULT 0,
+            reply_count      INTEGER NOT NULL DEFAULT 0,
+            last_activity_at INTEGER NOT NULL,
+            deleted_at       INTEGER
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_posts_channel_activity
+         ON posts (channel_id, is_pinned DESC, last_activity_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_posts_author
+         ON posts (author_pubkey)",
+    )
+    .execute(pool)
+    .await?;
+
+    // Post replies table (threaded replies under a post).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS post_replies (
+            id            TEXT PRIMARY KEY,
+            post_id       TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            author_pubkey TEXT NOT NULL,
+            body          TEXT NOT NULL,
+            created_at    INTEGER NOT NULL,
+            edited_at     INTEGER,
+            reply_to_id   TEXT REFERENCES post_replies(id) ON DELETE SET NULL,
+            deleted_at    INTEGER
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_post_replies_post
+         ON post_replies (post_id, created_at)",
+    )
+    .execute(pool)
+    .await?;
+
+    // FTS5 virtual table covering post titles and bodies (replies use empty title).
+    sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5(
+            title, body, post_id UNINDEXED, channel_id UNINDEXED
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // FTS5 triggers: posts
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS posts_fts_ai
+         AFTER INSERT ON posts
+         WHEN new.deleted_at IS NULL BEGIN
+           INSERT INTO posts_fts(post_id, channel_id, title, body)
+           VALUES (new.id, new.channel_id, new.title, new.body);
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS posts_fts_au
+         AFTER UPDATE ON posts BEGIN
+           DELETE FROM posts_fts WHERE post_id = old.id;
+           INSERT INTO posts_fts(post_id, channel_id, title, body)
+           SELECT new.id, new.channel_id, new.title, new.body
+           WHERE new.deleted_at IS NULL;
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS posts_fts_ad
+         AFTER DELETE ON posts BEGIN
+           DELETE FROM posts_fts WHERE post_id = old.id;
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    // FTS5 triggers: post_replies (indexed with empty title)
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS post_replies_fts_ai
+         AFTER INSERT ON post_replies
+         WHEN new.deleted_at IS NULL BEGIN
+           INSERT INTO posts_fts(post_id, channel_id, title, body)
+           SELECT new.post_id, p.channel_id, '', new.body
+           FROM posts p WHERE p.id = new.post_id;
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS post_replies_fts_au
+         AFTER UPDATE ON post_replies BEGIN
+           DELETE FROM posts_fts WHERE post_id = old.post_id AND body = old.body AND title = '';
+           INSERT INTO posts_fts(post_id, channel_id, title, body)
+           SELECT new.post_id, p.channel_id, '', new.body
+           FROM posts p WHERE p.id = new.post_id AND new.deleted_at IS NULL;
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS post_replies_fts_ad
+         AFTER DELETE ON post_replies BEGIN
+           DELETE FROM posts_fts WHERE post_id = old.post_id AND body = old.body AND title = '';
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    // Seed new permissions into builtin-everyone and builtin-owner roles.
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_posts')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_posts')")
+        .execute(pool).await?;
+
     tracing::info!("Database migrations complete");
     Ok(())
 }

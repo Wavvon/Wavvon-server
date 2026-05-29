@@ -16,6 +16,8 @@ pub const MANAGE_GAMES: &str = "manage_games";
 pub const MANAGE_HUB_ICONS: &str = "manage_hub_icons";
 pub const MANAGE_CHANNEL_ICONS: &str = "manage_channel_icons";
 pub const ADMIN: &str = "admin";
+pub const CREATE_POSTS: &str = "create_posts";
+pub const MANAGE_POSTS: &str = "manage_posts";
 
 #[derive(sqlx::FromRow)]
 pub struct RoleRow {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::middleware::from_fn;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::Router;
 use tower_http::trace::TraceLayer;
 
@@ -200,6 +200,39 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/survey", get(routes::survey::admin_get_survey).put(routes::survey::admin_put_survey))
         .route("/admin/survey/responses", get(routes::survey::admin_list_responses))
         .route("/admin/survey/responses/{pubkey}", get(routes::survey::admin_get_response_for_pubkey))
+        // ---- Forum ----
+        // Search must be registered before /:post_id so axum doesn't match "search"
+        // as a path parameter.
+        .route(
+            "/channels/{channel_id}/posts/search",
+            get(routes::posts::search_posts),
+        )
+        .route(
+            "/channels/{channel_id}/posts",
+            get(routes::posts::list_posts).post(routes::posts::create_post),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}",
+            get(routes::posts::get_post)
+                .patch(routes::posts::edit_post)
+                .delete(routes::posts::delete_post),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/replies",
+            post(routes::posts::create_reply),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/replies/{reply_id}",
+            patch(routes::posts::edit_reply).delete(routes::posts::delete_reply),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/pin",
+            post(routes::posts::pin_post).delete(routes::posts::unpin_post),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/lock",
+            post(routes::posts::lock_post).delete(routes::posts::unlock_post),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
