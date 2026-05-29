@@ -138,16 +138,10 @@ pub async fn create_channel(
         let new_depth = node_depth(&state.db, req.parent_id.as_deref()).await?;
         let max_code_depth = max_depth - 1;
         if new_depth > max_code_depth {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Maximum channel depth ({max_depth}) would be exceeded"),
-            ));
+            return Err((StatusCode::BAD_REQUEST, "depth_exceeded".to_string()));
         }
         if req.is_category && new_depth >= max_code_depth {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("A category cannot be at the maximum depth ({max_depth})"),
-            ));
+            return Err((StatusCode::BAD_REQUEST, "category_at_max_depth".to_string()));
         }
     }
 
@@ -287,10 +281,7 @@ pub async fn update_channel(
                 let moved_depth = parent_depth + 1;
                 let max_code_depth = max_depth - 1;
                 if moved_depth > max_code_depth {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("Maximum channel depth ({max_depth}) would be exceeded"),
-                    ));
+                    return Err((StatusCode::BAD_REQUEST, "depth_exceeded".to_string()));
                 }
                 let is_cat: i64 =
                     sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
@@ -301,10 +292,7 @@ pub async fn update_channel(
                             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
                         })?;
                 if is_cat == 1 && moved_depth >= max_code_depth {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("A category cannot be at the maximum depth ({max_depth})"),
-                    ));
+                    return Err((StatusCode::BAD_REQUEST, "category_at_max_depth".to_string()));
                 }
             }
         }

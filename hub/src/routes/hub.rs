@@ -93,6 +93,45 @@ pub async fn approve_user(
     Ok(StatusCode::OK)
 }
 
+/// GET /admin/settings/channel-depth — returns the current max_channel_depth setting.
+pub async fn get_channel_depth(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<ChannelDepthResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ADMIN)?;
+
+    let max_channel_depth: u32 = read_setting(&state.db, "max_channel_depth")
+        .await
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    Ok(Json(ChannelDepthResponse { max_channel_depth }))
+}
+
+/// PATCH /admin/settings/channel-depth — updates the max_channel_depth setting.
+pub async fn patch_channel_depth(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<ChannelDepthRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ADMIN)?;
+
+    upsert_setting(&state.db, "max_channel_depth", &req.max_channel_depth.to_string()).await?;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Serialize)]
+pub struct ChannelDepthResponse {
+    pub max_channel_depth: u32,
+}
+
+#[derive(Deserialize)]
+pub struct ChannelDepthRequest {
+    pub max_channel_depth: u32,
+}
+
 /// Read-only admin view of hub-wide settings for the Overview tab.
 pub async fn get_hub_settings(
     State(state): State<Arc<AppState>>,
