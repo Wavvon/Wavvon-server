@@ -75,13 +75,39 @@ fn resolve_hub_bin() -> String {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _sentry_guard = std::env::var("VOXPLY_SENTRY_DSN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|dsn| {
+            sentry::init((
+                dsn.as_str(),
+                sentry::ClientOptions {
+                    release: sentry::release_name!(),
+                    ..Default::default()
+                },
+            ))
+        });
+
     let json_logs = std::env::var("VOXPLY_LOG_FORMAT")
         .map(|v| v.to_lowercase() == "json")
         .unwrap_or(false);
+
+    use tracing_subscriber::prelude::*;
+    let sentry_layer = sentry::integrations::tracing::layer();
     if json_logs {
-        tracing_subscriber::fmt().json().init();
+        tracing_subscriber::registry()
+            .with(sentry_layer)
+            .with(tracing_subscriber::fmt::layer().json())
+            .init();
     } else {
-        tracing_subscriber::fmt().init();
+        tracing_subscriber::registry()
+            .with(sentry_layer)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
+    if _sentry_guard.is_some() {
+        tracing::info!("Sentry error reporting enabled (DSN configured)");
     }
 
     // `voxply-farm migrate` — run migrations and exit.

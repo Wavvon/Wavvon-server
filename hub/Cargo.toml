@@ -31,6 +31,7 @@ futures-util = "0.3"
 uuid = { workspace = true }
 bytes = "1"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+sentry = { workspace = true }
 
 [dev-dependencies]
 axum-test = "19"

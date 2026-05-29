@@ -20,3 +20,4 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+sentry = { version = "0.34", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls", "tracing"] }

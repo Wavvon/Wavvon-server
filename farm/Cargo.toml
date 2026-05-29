@@ -29,6 +29,7 @@ ed25519-dalek = { workspace = true }
 voxply-identity = { path = "../identity" }
 reqwest = { version = "0.12", features = ["json"] }
 futures-util = "0.3"
+sentry = { workspace = true }
 
 [dev-dependencies]
 axum-test = "19"
