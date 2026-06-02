@@ -66,9 +66,12 @@ pub struct ScreenStreamMeta {
 pub struct ActiveShare {
     /// stream_id → metadata
     pub streams: HashMap<String, ScreenStreamMeta>,
-    /// Set of viewer pubkeys currently negotiating or watching this share.
-    /// Used for join/leave routing and WS-disconnect cleanup.
+    /// Set of viewer pubkeys currently negotiating or watching this share
+    /// via WebRTC (v2). Used for join/leave routing and WS-disconnect cleanup.
     pub viewers: HashSet<String>,
+    /// Pubkeys that subscribed to this share from a *different* channel via
+    /// StreamSubscribe — they receive chunks without being in the source channel.
+    pub cross_channel_subscribers: HashSet<String>,
 }
 
 /// A screen-share chunk broadcast to all WS connections.

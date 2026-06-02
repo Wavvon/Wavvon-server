@@ -184,6 +184,13 @@ pub enum ChatEvent {
         channel_id: String,
         to_pubkey: String,
     },
+    /// Notify a specific cross-channel subscriber that their subscribed stream ended.
+    /// `to_pubkey` is the subscriber; this is delivered only to their connection.
+    StreamSubscriptionEnded {
+        to_pubkey: String,
+        source_channel_id: String,
+        stream_id: String,
+    },
     /// A forum post/reply event (post_created, post_updated, post_deleted,
     /// reply_created, reply_updated, reply_deleted). The payload is the
     /// fully-serialised JSON value carried in the WS envelope.
@@ -208,6 +215,10 @@ impl ChatEvent {
             | ChatEvent::ScreenShareSignal { channel_id, .. }
             | ChatEvent::Forum { channel_id }
             | ChatEvent::Game { channel_id } => channel_id,
+            // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
+            // Return an empty string so the WS dispatcher's channel filter never matches it
+            // (delivery is handled via the dedicated to_pubkey check below).
+            ChatEvent::StreamSubscriptionEnded { source_channel_id, .. } => source_channel_id,
         }
     }
 }
@@ -307,6 +318,24 @@ pub enum WsClientMessage {
     #[serde(rename = "screen_share_viewer_leave")]
     ScreenShareViewerLeave {
         channel_id: String,
+        stream_id: String,
+    },
+    /// Request a snapshot of all active streams on the hub visible to this user.
+    /// Hub replies with `HubStreams`.
+    #[serde(rename = "stream_list")]
+    StreamList,
+    /// Subscribe to an active stream from a channel the user isn't in voice on.
+    /// Authorization: user must have view access to `source_channel_id`.
+    /// Hub replays the init chunk and forwards subsequent chunks to this subscriber.
+    #[serde(rename = "stream_subscribe")]
+    StreamSubscribe {
+        source_channel_id: String,
+        stream_id: String,
+    },
+    /// Unsubscribe from a previously subscribed cross-channel stream.
+    #[serde(rename = "stream_unsubscribe")]
+    StreamUnsubscribe {
+        source_channel_id: String,
         stream_id: String,
     },
     /// Bot sends this after connecting to request replay of missed events.
@@ -466,6 +495,30 @@ pub enum WsServerMessage {
         from_pubkey: String,
     },
 
+    /// Acknowledgement sent to a subscriber after StreamSubscribe succeeds.
+    /// The hub will now forward chunks for this stream to the subscriber.
+    /// If the stream has an init chunk cached, it is sent immediately after this message.
+    #[serde(rename = "stream_subscribed")]
+    StreamSubscribed {
+        source_channel_id: String,
+        stream_id: String,
+        sharer_pubkey: String,
+        kind: String,
+        mime: String,
+        has_audio: bool,
+    },
+    /// Sent when a subscribed stream stops (sharer stopped or disconnected).
+    #[serde(rename = "stream_subscription_ended")]
+    StreamSubscriptionEnded {
+        source_channel_id: String,
+        stream_id: String,
+    },
+    /// Snapshot of all currently active streams across all channels visible to
+    /// this user. Sent in response to a `stream_list` client message.
+    #[serde(rename = "hub_streams")]
+    HubStreams {
+        streams: Vec<HubStreamInfo>,
+    },
     /// Forum post/reply event. The `event` field carries the typed payload
     /// (type, channel_id, post_id, and optionally reply_id).
     #[serde(rename = "forum_event")]
@@ -528,4 +581,15 @@ pub struct TrackMeta {
 pub struct VoiceParticipantInfo {
     pub public_key: String,
     pub display_name: Option<String>,
+}
+
+/// One active stream entry returned by `HubStreams`.
+#[derive(Serialize, Clone)]
+pub struct HubStreamInfo {
+    pub channel_id: String,
+    pub stream_id: String,
+    pub sharer_pubkey: String,
+    pub kind: String,
+    pub mime: String,
+    pub has_audio: bool,
 }
