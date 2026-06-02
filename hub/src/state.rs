@@ -61,9 +61,8 @@ pub struct ScreenStreamMeta {
 
 /// All active streams for one (channel, sharer) pair.
 ///
-/// The map is re-keyed to `(channel_id, sharer_pubkey)` for v2 multi-sharer
-/// forward-compatibility (§5 of screen-share-webrtc.md). The runtime still
-/// enforces max_sharers_per_channel = 1 via the existing "other_sharer" check.
+/// The key is `(channel_id, sharer_pubkey)`. Multiple sharers per channel are
+/// allowed — the cap was removed to support the multi-stream overlay feature.
 pub struct ActiveShare {
     /// stream_id → metadata
     pub streams: HashMap<String, ScreenStreamMeta>,
@@ -125,8 +124,7 @@ pub struct AppState {
     // Online users: public_key set (updated by WS connect/disconnect)
     pub online_users: RwLock<std::collections::HashSet<String>>,
     /// Active screen-share sessions: (channel_id, sharer_pubkey) → ActiveShare.
-    /// Re-keyed in v2 to support multiple concurrent sharers per channel
-    /// (gated by max_sharers_per_channel config, default 1 as before).
+    /// Multiple concurrent sharers per channel are allowed (multi-stream overlay).
     /// In-memory only — cleared on process restart.
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.

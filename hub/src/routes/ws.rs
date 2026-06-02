@@ -530,23 +530,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                             }
 
                             Ok(WsClientMessage::ScreenShareStart { channel_id, stream_id, kind, mime, has_audio, .. }) => {
-                                // Enforce max 1 sharer per channel (default; flip config to allow more).
-                                {
-                                    let shares = state.screen_shares.read().await;
-                                    let other_sharer = shares.iter().any(|((ch, sharer), _)| {
-                                        ch == &channel_id && sharer != &public_key
-                                    });
-                                    if other_sharer {
-                                        let err = WsServerMessage::Error {
-                                            context: "screen_share".to_string(),
-                                            message: "Someone else is already sharing in this channel.".to_string(),
-                                        };
-                                        let _ = ws_tx
-                                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                                            .await;
-                                        continue;
-                                    }
-                                }
+                                // Multiple concurrent sharers per channel are allowed (multi-stream overlay).
+                                // No per-channel cap is enforced here; permission checks (can_screen_share)
+                                // gate who can start — that's the right control plane.
                                 {
                                     let mut shares = state.screen_shares.write().await;
                                     let active = shares
