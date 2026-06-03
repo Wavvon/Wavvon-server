@@ -1526,6 +1526,37 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_games')")
         .execute(pool).await?;
 
+    // ---- Gaming Tier 2 schema additions ----
+    // Additive columns on the existing game_sessions table.
+    let _ = sqlx::query(
+        "ALTER TABLE game_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'lobby'",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE game_sessions ADD COLUMN snapshot BLOB")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE game_sessions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await;
+
+    // game_channel_kv: spec-shape shared KV keyed by (game_id, channel_id, key).
+    // Distinct from the legacy game_shared_kv (which uses session_id as key).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS game_channel_kv (
+            game_id    TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (game_id, channel_id, key)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations complete");
     Ok(())
 }

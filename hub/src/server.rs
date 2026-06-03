@@ -276,6 +276,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/games/{id}/enable", post(routes::games::enable_game).delete(routes::games::disable_game))
         // Player-facing enabled games list
         .route("/games", get(routes::games::list_enabled_games))
+        // Spec Tier 2 session routes (must come before /:id/enable to avoid ambiguity)
+        // Note: /games/sessions must be registered before /games/{id}/sessions so axum
+        // doesn't match "sessions" as a game_id path param.
+        .route("/games/sessions", get(routes::games::list_sessions))
+        .route("/games/sessions/{session_id}", get(routes::games::get_session_v2).delete(routes::games::force_end_session))
+        .route("/games/sessions/{session_id}/join", post(routes::games::join_session_v2))
+        .route("/games/sessions/{session_id}/leave", post(routes::games::leave_session))
+        .route("/games/{game_id}/sessions", post(routes::games::create_session_v2))
+        // Legacy channel-scoped session routes (keep for existing tests)
         .route(
             "/channels/{channel_id}/game-sessions",
             post(routes::games::create_session),

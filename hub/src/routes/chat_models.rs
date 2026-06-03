@@ -349,6 +349,33 @@ pub enum WsClientMessage {
         #[serde(default)]
         values: Vec<String>,
     },
+
+    // ---- Gaming Tier 2: client → hub ----
+
+    #[serde(rename = "game_send")]
+    GameSend {
+        session_id: String,
+        payload: serde_json::Value,
+        #[serde(default)]
+        to: Option<String>,
+    },
+
+    #[serde(rename = "game_set_status")]
+    GameSetStatus { session_id: String, status: String },
+
+    #[serde(rename = "game_snapshot")]
+    GameSnapshot {
+        session_id: String,
+        /// Base64 or hex-encoded snapshot blob; stored opaque in DB.
+        blob: String,
+    },
+
+    #[serde(rename = "game_end")]
+    GameEnd {
+        session_id: String,
+        #[serde(default)]
+        result: Option<serde_json::Value>,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -536,6 +563,8 @@ pub enum WsServerMessage {
         channel_id: String,
         game_id: String,
         host_pubkey: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        max_players: Option<i64>,
     },
 
     /// A player joined an existing game session.
@@ -564,6 +593,44 @@ pub enum WsServerMessage {
     #[serde(rename = "game_session_ended")]
     GameSessionEnded {
         session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
+    },
+
+    // ---- Spec Tier 2 hub→client additions ----
+
+    /// A player joined the session roster (spec variant with display_name).
+    #[serde(rename = "game_player_joined")]
+    GamePlayerJoined {
+        session_id: String,
+        pubkey: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display_name: Option<String>,
+    },
+
+    /// A player left the session roster.
+    #[serde(rename = "game_player_left")]
+    GamePlayerLeft {
+        session_id: String,
+        pubkey: String,
+    },
+
+    /// The host role was transferred to a new player (after host disconnect).
+    #[serde(rename = "game_host_changed")]
+    GameHostChanged {
+        session_id: String,
+        new_host_pubkey: String,
+    },
+
+    /// A game move / event relayed from one player to the roster.
+    /// The payload is opaque; the hub never interprets it.
+    #[serde(rename = "game_event")]
+    GameEvent {
+        session_id: String,
+        from_pubkey: String,
+        payload: serde_json::Value,
     },
 }
 

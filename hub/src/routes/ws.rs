@@ -15,6 +15,8 @@ use crate::routes::chat_models::{
 };
 use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
 
+// `bytes` is used for game snapshot storage in the game_snapshot handler.
+
 // ---------------------------------------------------------------------------
 // Component interaction rate-limit store (in-memory, no external dep).
 // Key: (user_pubkey, custom_id); Value: last interaction instant.
@@ -948,6 +950,242 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                         break;
                                     }
                                 }
+                            }
+
+                            // ---- Gaming Tier 2: client → hub game messages ----
+                            // All handlers here must drop Mutex locks before any `.await`.
+
+                            Ok(WsClientMessage::GameSend { session_id, payload, to }) => {
+                                // Validate: sender must be in the session roster.
+                                // We extract all needed data under the lock, then drop it.
+                                enum GameSendOutcome {
+                                    NotFound,
+                                    NotInSession,
+                                    Ok { channel_id: String, roster: Vec<String> },
+                                }
+                                let outcome = {
+                                    let sessions = state.active_game_sessions.lock().unwrap();
+                                    match sessions.get(&session_id) {
+                                        None => GameSendOutcome::NotFound,
+                                        Some(s) if !s.players.contains(&public_key) => GameSendOutcome::NotInSession,
+                                        Some(s) => GameSendOutcome::Ok {
+                                            channel_id: s.channel_id.clone(),
+                                            roster: s.players.iter().cloned().collect(),
+                                        },
+                                    }
+                                };
+                                let (channel_id, roster) = match outcome {
+                                    GameSendOutcome::NotFound => {
+                                        let err = WsServerMessage::Error {
+                                            context: "game_send".to_string(),
+                                            message: "Session not found".to_string(),
+                                        };
+                                        let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                        continue;
+                                    }
+                                    GameSendOutcome::NotInSession => {
+                                        let err = WsServerMessage::Error {
+                                            context: "game_send".to_string(),
+                                            message: "Not in session".to_string(),
+                                        };
+                                        let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                        continue;
+                                    }
+                                    GameSendOutcome::Ok { channel_id, roster } => (channel_id, roster),
+                                };
+
+                                // Update last_event_at (no await in this block).
+                                {
+                                    let mut sessions = state.active_game_sessions.lock().unwrap();
+                                    if let Some(s) = sessions.get_mut(&session_id) {
+                                        s.last_event_at = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs() as i64;
+                                    }
+                                }
+
+                                let game_event = WsServerMessage::GameEvent {
+                                    session_id: session_id.clone(),
+                                    from_pubkey: public_key.clone(),
+                                    payload,
+                                };
+
+                                // Fan-out: targeted or broadcast.
+                                let should_send = if let Some(ref target) = to {
+                                    roster.contains(target)
+                                } else {
+                                    true
+                                };
+                                if should_send {
+                                    let ev = crate::routes::chat_models::ChatEvent::Game {
+                                        channel_id: channel_id.clone(),
+                                    };
+                                    let json: std::sync::Arc<str> = std::sync::Arc::from(
+                                        serde_json::to_string(&game_event).unwrap().as_str(),
+                                    );
+                                    let _ = state.chat_tx.send((ev, json));
+                                }
+                            }
+
+                            Ok(WsClientMessage::GameSetStatus { session_id, status }) => {
+                                enum GameSetStatusOutcome {
+                                    NotFound,
+                                    NotHost,
+                                    Ok(String),
+                                }
+                                let outcome = {
+                                    let mut sessions = state.active_game_sessions.lock().unwrap();
+                                    match sessions.get_mut(&session_id) {
+                                        None => GameSetStatusOutcome::NotFound,
+                                        Some(s) if s.host_pubkey != public_key => GameSetStatusOutcome::NotHost,
+                                        Some(s) => {
+                                            s.status = status.clone();
+                                            s.last_event_at = std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap()
+                                                .as_secs() as i64;
+                                            GameSetStatusOutcome::Ok(s.channel_id.clone())
+                                        }
+                                    }
+                                };
+                                let channel_id = match outcome {
+                                    GameSetStatusOutcome::NotFound => {
+                                        let err = WsServerMessage::Error {
+                                            context: "game_set_status".to_string(),
+                                            message: "Session not found".to_string(),
+                                        };
+                                        let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                        continue;
+                                    }
+                                    GameSetStatusOutcome::NotHost => {
+                                        let err = WsServerMessage::Error {
+                                            context: "game_set_status".to_string(),
+                                            message: "Only the host can change session status".to_string(),
+                                        };
+                                        let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                        continue;
+                                    }
+                                    GameSetStatusOutcome::Ok(ch) => ch,
+                                };
+
+                                let ev = crate::routes::chat_models::ChatEvent::Game { channel_id };
+                                let status_msg = WsServerMessage::GameEvent {
+                                    session_id: session_id.clone(),
+                                    from_pubkey: public_key.clone(),
+                                    payload: serde_json::json!({ "type": "status_changed", "status": status }),
+                                };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(
+                                    serde_json::to_string(&status_msg).unwrap().as_str(),
+                                );
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
+                            Ok(WsClientMessage::GameSnapshot { session_id, blob }) => {
+                                // Validate and extract under lock; no await inside.
+                                let in_session = {
+                                    let sessions = state.active_game_sessions.lock().unwrap();
+                                    sessions.get(&session_id)
+                                        .map(|s| s.players.contains(&public_key))
+                                        .unwrap_or(false)
+                                };
+                                if !in_session { continue; }
+
+                                let blob_bytes = bytes::Bytes::from(blob.into_bytes());
+                                {
+                                    let mut sessions = state.active_game_sessions.lock().unwrap();
+                                    if let Some(s) = sessions.get_mut(&session_id) {
+                                        s.snapshot = Some(blob_bytes.clone());
+                                        s.last_event_at = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs() as i64;
+                                    }
+                                }
+
+                                // Persist snapshot to DB in a separate task (no await here).
+                                let state_c = state.clone();
+                                let sid = session_id.clone();
+                                let blob_vec = blob_bytes.to_vec();
+                                let now_ts = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs() as i64;
+                                tokio::spawn(async move {
+                                    let _ = sqlx::query(
+                                        "UPDATE game_sessions SET snapshot = ?, updated_at = ? WHERE id = ?",
+                                    )
+                                    .bind(blob_vec.as_slice())
+                                    .bind(now_ts)
+                                    .bind(&sid)
+                                    .execute(&state_c.db)
+                                    .await;
+                                });
+                            }
+
+                            Ok(WsClientMessage::GameEnd { session_id, result }) => {
+                                enum GameEndOutcome {
+                                    NotFound,
+                                    NotHost,
+                                    Ok(String),
+                                }
+                                let outcome = {
+                                    let sessions = state.active_game_sessions.lock().unwrap();
+                                    match sessions.get(&session_id) {
+                                        None => GameEndOutcome::NotFound,
+                                        Some(s) if s.host_pubkey != public_key => GameEndOutcome::NotHost,
+                                        Some(s) => GameEndOutcome::Ok(s.channel_id.clone()),
+                                    }
+                                };
+                                let channel_id = match outcome {
+                                    GameEndOutcome::NotFound => {
+                                        let err = WsServerMessage::Error {
+                                            context: "game_end".to_string(),
+                                            message: "Session not found".to_string(),
+                                        };
+                                        let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                        continue;
+                                    }
+                                    GameEndOutcome::NotHost => {
+                                        let err = WsServerMessage::Error {
+                                            context: "game_end".to_string(),
+                                            message: "Only the host can end the session".to_string(),
+                                        };
+                                        let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                        continue;
+                                    }
+                                    GameEndOutcome::Ok(ch) => ch,
+                                };
+
+                                state.active_game_sessions.lock().unwrap().remove(&session_id);
+
+                                let state_c = state.clone();
+                                let sid = session_id.clone();
+                                tokio::spawn(async move {
+                                    let now_str = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs()
+                                        .to_string();
+                                    let _ = sqlx::query(
+                                        "UPDATE game_sessions SET ended_at = ?, status = 'ended' WHERE id = ?",
+                                    )
+                                    .bind(&now_str)
+                                    .bind(&sid)
+                                    .execute(&state_c.db)
+                                    .await;
+                                });
+
+                                let end_msg = WsServerMessage::GameSessionEnded {
+                                    session_id: session_id.clone(),
+                                    reason: Some("ended".to_string()),
+                                    result,
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::Game { channel_id };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(
+                                    serde_json::to_string(&end_msg).unwrap().as_str(),
+                                );
+                                let _ = state.chat_tx.send((ev, json));
                             }
 
                             Ok(WsClientMessage::ComponentInteraction {

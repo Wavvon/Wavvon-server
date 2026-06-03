@@ -354,3 +354,232 @@ async fn end_session_rejected_for_non_host() {
         .await;
     del_resp.assert_status(axum::http::StatusCode::FORBIDDEN);
 }
+
+// ---------------------------------------------------------------------------
+// Spec Tier 2 route tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn create_session_v2_happy_path() {
+    let server = setup().await;
+    let identity = Identity::generate();
+    let token = authenticate(&server, &identity).await;
+
+    let game_id = install_game(&server, &token).await;
+    let channel_id = create_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/games/{game_id}/sessions"))
+        .authorization_bearer(&token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+
+    let body: Value = resp.json();
+    assert_eq!(body["game_id"].as_str().unwrap(), game_id);
+    assert_eq!(body["channel_id"].as_str().unwrap(), channel_id);
+    assert_eq!(body["host_pubkey"].as_str().unwrap(), identity.public_key_hex());
+    assert_eq!(body["status"].as_str().unwrap(), "lobby");
+    assert!(body["session_id"].is_string());
+}
+
+#[tokio::test]
+async fn list_sessions_returns_created() {
+    let server = setup().await;
+    let identity = Identity::generate();
+    let token = authenticate(&server, &identity).await;
+
+    let game_id = install_game(&server, &token).await;
+    let channel_id = create_channel(&server, &token).await;
+
+    server
+        .post(&format!("/games/{game_id}/sessions"))
+        .authorization_bearer(&token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let list_resp = server
+        .get(&format!("/games/sessions?channel_id={channel_id}"))
+        .authorization_bearer(&token)
+        .await;
+    list_resp.assert_status_ok();
+    let body: Value = list_resp.json();
+    let sessions = body["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["game_id"].as_str().unwrap(), game_id);
+}
+
+#[tokio::test]
+async fn join_and_get_session_v2() {
+    let server = setup().await;
+    let host = Identity::generate();
+    let host_token = authenticate(&server, &host).await;
+    let player = Identity::generate();
+    let player_token = authenticate(&server, &player).await;
+
+    let game_id = install_game(&server, &host_token).await;
+    let channel_id = create_channel(&server, &host_token).await;
+
+    let create_resp = server
+        .post(&format!("/games/{game_id}/sessions"))
+        .authorization_bearer(&host_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    create_resp.assert_status(axum::http::StatusCode::CREATED);
+    let session_id = create_resp.json::<Value>()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Player joins.
+    let join_resp = server
+        .post(&format!("/games/sessions/{session_id}/join"))
+        .authorization_bearer(&player_token)
+        .await;
+    join_resp.assert_status_ok();
+    let body: Value = join_resp.json();
+    let pubkeys: Vec<&str> = body["players"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["pubkey"].as_str().unwrap())
+        .collect();
+    assert!(pubkeys.contains(&player.public_key_hex().as_str()));
+
+    // GET the session.
+    let get_resp = server
+        .get(&format!("/games/sessions/{session_id}"))
+        .authorization_bearer(&player_token)
+        .await;
+    get_resp.assert_status_ok();
+    let get_body: Value = get_resp.json();
+    assert_eq!(get_body["session_id"].as_str().unwrap(), session_id);
+    assert_eq!(get_body["status"].as_str().unwrap(), "lobby");
+}
+
+#[tokio::test]
+async fn leave_session_removes_player() {
+    let server = setup().await;
+    let host = Identity::generate();
+    let host_token = authenticate(&server, &host).await;
+    let player = Identity::generate();
+    let player_token = authenticate(&server, &player).await;
+
+    let game_id = install_game(&server, &host_token).await;
+    let channel_id = create_channel(&server, &host_token).await;
+
+    let create_resp = server
+        .post(&format!("/games/{game_id}/sessions"))
+        .authorization_bearer(&host_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    let session_id = create_resp.json::<Value>()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    server
+        .post(&format!("/games/sessions/{session_id}/join"))
+        .authorization_bearer(&player_token)
+        .await
+        .assert_status_ok();
+
+    let leave_resp = server
+        .post(&format!("/games/sessions/{session_id}/leave"))
+        .authorization_bearer(&player_token)
+        .await;
+    leave_resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // Session should still exist (host didn't leave).
+    let get_resp = server
+        .get(&format!("/games/sessions/{session_id}"))
+        .authorization_bearer(&host_token)
+        .await;
+    get_resp.assert_status_ok();
+    let body: Value = get_resp.json();
+    let pubkeys: Vec<&str> = body["players"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["pubkey"].as_str().unwrap())
+        .collect();
+    assert!(!pubkeys.contains(&player.public_key_hex().as_str()));
+}
+
+#[tokio::test]
+async fn force_end_session_by_host_v2() {
+    let server = setup().await;
+    let identity = Identity::generate();
+    let token = authenticate(&server, &identity).await;
+
+    let game_id = install_game(&server, &token).await;
+    let channel_id = create_channel(&server, &token).await;
+
+    let create_resp = server
+        .post(&format!("/games/{game_id}/sessions"))
+        .authorization_bearer(&token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    let session_id = create_resp.json::<Value>()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let del_resp = server
+        .delete(&format!("/games/sessions/{session_id}"))
+        .authorization_bearer(&token)
+        .await;
+    del_resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // GET returns 404 (removed from in-memory map).
+    let get_resp = server
+        .get(&format!("/games/sessions/{session_id}"))
+        .authorization_bearer(&token)
+        .await;
+    get_resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn force_end_session_rejected_for_non_host_v2() {
+    let server = setup().await;
+    let host = Identity::generate();
+    let host_token = authenticate(&server, &host).await;
+    let other = Identity::generate();
+    let other_token = authenticate(&server, &other).await;
+
+    let game_id = install_game(&server, &host_token).await;
+    let channel_id = create_channel(&server, &host_token).await;
+
+    let create_resp = server
+        .post(&format!("/games/{game_id}/sessions"))
+        .authorization_bearer(&host_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    let session_id = create_resp.json::<Value>()["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let del_resp = server
+        .delete(&format!("/games/sessions/{session_id}"))
+        .authorization_bearer(&other_token)
+        .await;
+    del_resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn create_session_v2_rejects_unknown_game() {
+    let server = setup().await;
+    let identity = Identity::generate();
+    let token = authenticate(&server, &identity).await;
+
+    let channel_id = create_channel(&server, &token).await;
+
+    let resp = server
+        .post("/games/no-such-game/sessions")
+        .authorization_bearer(&token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
