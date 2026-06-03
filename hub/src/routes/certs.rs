@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -157,6 +157,67 @@ pub async fn list_user_certs(
 
     let certs: Vec<Certification> = out?.into_iter().flatten().collect();
     Ok(Json(certs))
+}
+
+// ---------------------------------------------------------------------------
+// Public: GET /certs/revocations?since=<unix_ts>
+// ---------------------------------------------------------------------------
+
+/// Query parameters for the revocations endpoint.
+#[derive(Deserialize)]
+pub struct RevocationsQuery {
+    /// If provided, only revocations that occurred at or after this Unix
+    /// timestamp are returned. Omit to retrieve all revocations.
+    pub since: Option<i64>,
+}
+
+/// One entry in the revocations list.
+#[derive(Serialize)]
+pub struct RevocationEntry {
+    pub id: String,
+    pub subject_pubkey: String,
+    pub revoked_at: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct RevocationDbRow {
+    pub id: String,
+    pub subject_pubkey: String,
+    pub revoked_at: i64,
+}
+
+/// GET /certs/revocations?since=<unix_ts>
+///
+/// Public, no auth required. Returns every cert_issuances row that has been
+/// revoked (revoked_at IS NOT NULL). Other hubs poll this to sync their local
+/// revocation state without needing a push mechanism.
+pub async fn get_revocations(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RevocationsQuery>,
+) -> Result<Json<Vec<RevocationEntry>>, (StatusCode, String)> {
+    let since = params.since.unwrap_or(0);
+
+    let rows = sqlx::query_as::<_, RevocationDbRow>(
+        "SELECT id, subject_pubkey, revoked_at
+         FROM cert_issuances
+         WHERE revoked_at IS NOT NULL AND revoked_at >= ?
+         ORDER BY revoked_at DESC",
+    )
+    .bind(since)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let entries = rows
+        .into_iter()
+        .map(|r| RevocationEntry {
+            id: r.id,
+            subject_pubkey: r.subject_pubkey,
+            revoked_at: r.revoked_at,
+        })
+        .collect();
+
+    Ok(Json(entries))
 }
 
 // ---------------------------------------------------------------------------

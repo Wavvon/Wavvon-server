@@ -5,9 +5,10 @@
 //!  2. Member is `approval_status = 'approved'` and not banned.
 //!  3. No existing non-expired, non-revoked cert from this hub.
 //!  4. `cert_auto_issue` setting is 'true'.
+//!  5. Member's pow_level >= `cert_min_pow_level` setting (when set).
 //!
-//! The worker wakes once per day (configurable via POLL_INTERVAL) and sweeps
-//! all eligible members, skipping any that already have a fresh cert.
+//! The worker wakes once per hour and sweeps all eligible members,
+//! skipping any that already have a fresh cert.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +16,7 @@ use std::time::Duration;
 use crate::routes::certs::issue_cert_for;
 use crate::state::AppState;
 
-const POLL_INTERVAL: Duration = Duration::from_secs(86400); // 24 hours
+const POLL_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
@@ -51,41 +52,40 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
     .and_then(|v| v.parse().ok())
     .unwrap_or(30);
 
-    let validity_days: i64 = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM hub_settings WHERE key = 'cert_validity_days'",
+    // Minimum pow_level required for auto-issuance; 0 means no restriction.
+    let min_pow_level: i64 = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'cert_min_pow_level'",
     )
     .fetch_optional(&state.db)
     .await?
     .and_then(|v| v.parse().ok())
-    .unwrap_or(90);
+    .unwrap_or(0);
 
     let now = crate::auth::handlers::unix_timestamp();
     let threshold = now - standing_days * 86400;
 
-    // Find approved, non-banned users who joined before the threshold
-    // and whose most recent non-revoked cert from this hub has either expired
-    // or does not exist.
-    let cert_cutoff = now - validity_days * 86400; // re-issue if existing cert is old
-
-    // Candidates: approved users with first_seen_at <= threshold.
-    // We LEFT JOIN on cert_issuances to find those without a fresh, non-revoked cert.
+    // Candidates: approved, non-bot users who joined before the standing threshold
+    // and whose pow_level meets the minimum (COALESCE to 0 when column absent/null),
+    // and who have no non-revoked, non-expired cert currently active.
     let candidates: Vec<String> = sqlx::query_scalar(
         "SELECT u.public_key
          FROM users u
-         LEFT JOIN (
-             SELECT subject_pubkey, MAX(issued_at) AS latest_issued
-             FROM cert_issuances
-             WHERE standing = 'good' AND revoked_at IS NULL
-             GROUP BY subject_pubkey
-         ) ci ON ci.subject_pubkey = u.public_key
          WHERE u.approval_status = 'approved'
            AND COALESCE(u.is_bot, 0) = 0
            AND u.first_seen_at <= ?
-           AND (ci.latest_issued IS NULL OR ci.latest_issued < ?)
+           AND COALESCE(u.pow_level, 0) >= ?
+           AND NOT EXISTS (
+               SELECT 1 FROM cert_issuances ci
+               WHERE ci.subject_pubkey = u.public_key
+                 AND ci.standing = 'good'
+                 AND ci.revoked_at IS NULL
+                 AND ci.expires_at > ?
+           )
          LIMIT 500",
     )
     .bind(threshold)
-    .bind(cert_cutoff)
+    .bind(min_pow_level)
+    .bind(now)
     .fetch_all(&state.db)
     .await?;
 
