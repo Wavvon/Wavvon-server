@@ -23,9 +23,15 @@ pub struct SetContactsRequest {
 }
 
 #[derive(Serialize)]
+pub struct ContactEntry {
+    pub pubkey: String,
+    pub added_at: i64,
+}
+
+#[derive(Serialize)]
 pub struct ContactsResponse {
     pub owner_pubkey: String,
-    pub contacts: Vec<String>,
+    pub contacts: Vec<ContactEntry>,
     pub threshold: u32,
 }
 
@@ -145,13 +151,24 @@ pub async fn get_contacts(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let contacts: Vec<String> = sqlx::query_scalar(
-        "SELECT contact_pubkey FROM recovery_contacts WHERE owner_pubkey = ? ORDER BY created_at",
+    #[derive(sqlx::FromRow)]
+    struct ContactRow {
+        contact_pubkey: String,
+        created_at: i64,
+    }
+
+    let contact_rows = sqlx::query_as::<_, ContactRow>(
+        "SELECT contact_pubkey, created_at FROM recovery_contacts WHERE owner_pubkey = ? ORDER BY created_at",
     )
     .bind(&user.public_key)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let contacts = contact_rows
+        .into_iter()
+        .map(|r| ContactEntry { pubkey: r.contact_pubkey, added_at: r.created_at })
+        .collect();
 
     Ok(Json(ContactsResponse {
         owner_pubkey: user.public_key,
@@ -295,6 +312,63 @@ pub async fn post_rotate_key(
             attestation_count: valid_count,
         }),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Owner-side: list own rotation requests
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct MyRotationRequest {
+    pub id: String,
+    pub new_pubkey: String,
+    pub status: String,
+    pub created_at: i64,
+    pub attestation_count: i64,
+    pub threshold: i64,
+}
+
+/// GET /recovery/requests — list the authenticated user's own rotation requests.
+pub async fn get_my_requests(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<MyRotationRequest>>, (StatusCode, String)> {
+    let rows = sqlx::query_as::<_, RotationRow>(
+        "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at,
+                COUNT(a.id) AS attestation_count
+         FROM key_rotation_requests r
+         LEFT JOIN rotation_attestations a ON a.request_id = r.id
+         WHERE r.old_pubkey = ?
+         GROUP BY r.id
+         ORDER BY r.created_at DESC",
+    )
+    .bind(&user.public_key)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let threshold: i64 = sqlx::query_scalar(
+        "SELECT threshold FROM recovery_settings WHERE owner_pubkey = ?",
+    )
+    .bind(&user.public_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    .unwrap_or(0);
+
+    let out = rows
+        .into_iter()
+        .map(|r| MyRotationRequest {
+            id: r.id,
+            new_pubkey: r.new_pubkey,
+            status: r.status,
+            created_at: r.created_at,
+            attestation_count: r.attestation_count,
+            threshold,
+        })
+        .collect();
+
+    Ok(Json(out))
 }
 
 // ---------------------------------------------------------------------------

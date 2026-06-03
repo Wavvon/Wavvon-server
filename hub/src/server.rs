@@ -303,6 +303,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             delete(routes::recovery::delete_contact),
         )
         .route("/recovery/rotate-key", post(routes::recovery::post_rotate_key))
+        .route("/recovery/requests", get(routes::recovery::get_my_requests))
         .route("/admin/recovery/pending", get(routes::recovery::admin_list_pending))
         .route("/admin/recovery/{id}/approve", post(routes::recovery::admin_approve))
         .route("/admin/recovery/{id}/deny", post(routes::recovery::admin_deny))
