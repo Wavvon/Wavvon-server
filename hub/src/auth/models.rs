@@ -74,3 +74,13 @@ pub struct ChallengeTokenField {
     #[serde(default)]
     pub challenge_token: Option<String>,
 }
+
+/// Response body for `POST /auth/renew`.
+/// Carries the new token and its expiry so the bot can schedule the next
+/// renewal without polling.
+#[derive(Serialize, Deserialize)]
+pub struct RenewResponse {
+    pub token: String,
+    /// Unix timestamp (seconds) when this token expires.
+    pub expires_at: i64,
+}

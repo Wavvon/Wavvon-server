@@ -9,7 +9,7 @@ use sqlx::SqlitePool;
 use voxply_identity::SubkeyCert;
 
 use crate::auth::middleware::AuthUser;
-use crate::auth::models::{ChallengeRequest, ChallengeResponse, VerifyRequest, VerifyResponse};
+use crate::auth::models::{ChallengeRequest, ChallengeResponse, RenewResponse, VerifyRequest, VerifyResponse};
 use crate::state::{AppState, PendingChallenge};
 
 /// Map an authenticating (subkey, optional cert) pair to a stable
@@ -406,13 +406,23 @@ pub async fn verify(
         bytes
     });
 
-    sqlx::query("INSERT INTO sessions (token, public_key, created_at) VALUES (?, ?, ?)")
-        .bind(&token)
-        .bind(&canonical_pubkey)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Bot sessions carry a 30-day expiry; human sessions don't expire.
+    let bot_expires_at: Option<i64> = if req.is_bot == Some(true) {
+        Some(now + 30 * 24 * 3600)
+    } else {
+        None
+    };
+
+    sqlx::query(
+        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&token)
+    .bind(&canonical_pubkey)
+    .bind(&now)
+    .bind(&bot_expires_at)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Check invite requirement for new users
     let has_roles: i64 = sqlx::query_scalar(
@@ -606,14 +616,19 @@ pub fn unix_timestamp_iso() -> String {
     )
 }
 
-/// POST /auth/renew — issue a fresh session token while the current one is
-/// still live. Intended for bots renewing their long-lived tokens proactively.
-/// The old token is NOT invalidated — the running WS session continues on it.
+/// POST /auth/renew — issue a fresh 30-day session token while the current one
+/// is still live. Intended for bots renewing their long-lived tokens
+/// proactively. The old token is NOT invalidated — the running WS session
+/// continues on it until its original expiry.
+///
+/// Wire shape: same challenge-response body as `/auth/verify`. The bearer
+/// token in the Authorization header authenticates the current session; the
+/// challenge-response proves the caller still holds the private key.
 pub async fn renew(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Json(req): Json<VerifyRequest>,
-) -> Result<Json<VerifyResponse>, (StatusCode, String)> {
+) -> Result<Json<RenewResponse>, (StatusCode, String)> {
     // The caller must have a valid existing session (AuthUser extractor handles that).
     // Validate the new challenge-response the same way verify() does.
 
@@ -658,17 +673,18 @@ pub async fn renew(
         bytes
     });
     let now = unix_timestamp();
+    let expires_at = now + 30 * 24 * 3600;
 
-    sqlx::query("INSERT INTO sessions (token, public_key, created_at) VALUES (?, ?, ?)")
-        .bind(&token)
-        .bind(&user.public_key)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query(
+        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&token)
+    .bind(&user.public_key)
+    .bind(&now)
+    .bind(&expires_at)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok(Json(VerifyResponse {
-        token,
-        scope: "member".to_string(),
-    }))
+    Ok(Json(RenewResponse { token, expires_at }))
 }

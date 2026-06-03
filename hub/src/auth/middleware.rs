@@ -186,8 +186,8 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         } else {
             // --- Legacy opaque hub-token path (unchanged) ---
             // Try sessions first.
-            let row: Option<(String, String)> = sqlx::query_as(
-                "SELECT s.public_key, u.approval_status
+            let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
+                "SELECT s.public_key, u.approval_status, s.expires_at
                  FROM sessions s
                  INNER JOIN users u ON s.public_key = u.public_key
                  WHERE s.token = ?",
@@ -197,8 +197,23 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            let (pk, approval_status) = if let Some(r) = row {
-                r
+            let (pk, approval_status) = if let Some((pk, status, expires_at)) = row {
+                // Enforce session expiry. NULL expires_at means the session
+                // never expires (human sessions). Non-NULL must be in the
+                // future.
+                if let Some(exp) = expires_at {
+                    let now_ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs() as i64;
+                    if exp < now_ts {
+                        return Err((
+                            StatusCode::UNAUTHORIZED,
+                            r#"{"error":"token_expired"}"#.to_string(),
+                        ));
+                    }
+                }
+                (pk, status)
             } else {
                 // Try bot tokens.
                 let bot_key: Option<String> = sqlx::query_scalar(
