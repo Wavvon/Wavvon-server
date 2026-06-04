@@ -118,6 +118,28 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if subcommand.as_deref() == Some("backup") {
+        let out_path = std::env::args().nth(2).unwrap_or_else(|| {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            format!("hub-backup-{ts}.tar.gz")
+        });
+        backup(&out_path)?;
+        println!("Backup written to {out_path}");
+        return Ok(());
+    }
+
+    if subcommand.as_deref() == Some("restore") {
+        let src = std::env::args()
+            .nth(2)
+            .ok_or_else(|| anyhow::anyhow!("Usage: voxply-hub restore <backup.tar.gz>"))?;
+        restore(&src)?;
+        println!("Restore complete. Restart the hub to apply.");
+        return Ok(());
+    }
+
     let http_port = port_from_env("VOXPLY_HTTP_PORT", DEFAULT_HTTP_PORT)?;
     let voice_udp_port = port_from_env("VOXPLY_VOICE_UDP_PORT", DEFAULT_VOICE_UDP_PORT)?;
 
@@ -275,6 +297,9 @@ async fn main() -> Result<()> {
     // Issue certifications to eligible members daily.
     cert_worker::spawn(state.clone());
 
+    // Sweep messages and forum posts past their channel retention deadline.
+    voxply_hub::retention_worker::spawn(state.clone());
+
     // Sweep stale game sessions every 30 minutes. Any session with
     // `last_event_at < now - 7200` (2-hour TTL) is ended with reason "timeout".
     {
@@ -358,5 +383,46 @@ async fn main() -> Result<()> {
         let _ = provider.shutdown();
     }
 
+    Ok(())
+}
+
+fn backup(out_path: &str) -> anyhow::Result<()> {
+    let file = std::fs::File::create(out_path)?;
+    let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+    tar.append_path("hub.db")?;
+    if std::path::Path::new("hub_identity.json").exists() {
+        tar.append_path("hub_identity.json")?;
+    }
+    // Write a metadata JSON entry into the archive.
+    let meta = serde_json::json!({
+        "timestamp": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        "voxply_version": env!("CARGO_PKG_VERSION"),
+    });
+    let meta_bytes = serde_json::to_vec_pretty(&meta)?;
+    let mut header = tar::Header::new_gnu();
+    header.set_size(meta_bytes.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    tar.append_data(&mut header, "backup_meta.json", meta_bytes.as_slice())?;
+    tar.finish()?;
+    Ok(())
+}
+
+fn restore(src_path: &str) -> anyhow::Result<()> {
+    let file = std::fs::File::open(src_path)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    let staging = tempfile::tempdir()?;
+    archive.unpack(staging.path())?;
+    for name in &["hub.db", "hub_identity.json"] {
+        let src = staging.path().join(name);
+        if src.exists() {
+            std::fs::copy(&src, name)?;
+        }
+    }
     Ok(())
 }

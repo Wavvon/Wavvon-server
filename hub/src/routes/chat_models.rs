@@ -51,6 +51,11 @@ pub struct UpdateChannelRequest {
     /// 0 = no restriction. When set, requires ADMIN permission.
     #[serde(default)]
     pub min_talk_power: Option<i64>,
+    /// Tri-state retention policy: absent = no change, `Some(Some(n))` = keep
+    /// messages/posts for n days, `Some(None)` = clear (retain forever).
+    /// Requires ADMIN permission.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub retention_days: Option<Option<i64>>,
 }
 
 /// Lets us distinguish "field missing" from "field explicitly null" in JSON.

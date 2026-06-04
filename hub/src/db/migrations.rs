@@ -1578,6 +1578,11 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'use_video')")
         .execute(pool).await?;
 
+    // Data retention: nullable retention_days on channels
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN retention_days INTEGER")
+        .execute(pool)
+        .await;
+
     tracing::info!("Database migrations complete");
     Ok(())
 }

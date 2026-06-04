@@ -249,6 +249,7 @@ pub async fn update_channel(
     let changing_structure = req.name.is_some() || req.description.is_some() || req.parent_id.is_some();
     let changing_appearance = req.icon.is_some() || req.color.is_some() || req.custom_icon_svg.is_some();
     let changing_talk_power = req.min_talk_power.is_some();
+    let changing_retention = req.retention_days.is_some();
 
     if changing_structure {
         perms.require(permissions::MANAGE_CHANNELS)?;
@@ -256,7 +257,7 @@ pub async fn update_channel(
     if changing_appearance {
         perms.require(permissions::MANAGE_CHANNEL_ICONS)?;
     }
-    if changing_talk_power {
+    if changing_talk_power || changing_retention {
         perms.require(permissions::ADMIN)?;
     }
 
@@ -322,7 +323,8 @@ pub async fn update_channel(
         || req.color.is_some()
         || req.custom_icon_svg.is_some()
         || req.parent_id.is_some()
-        || req.min_talk_power.is_some();
+        || req.min_talk_power.is_some()
+        || req.retention_days.is_some();
 
     if needs_update {
         let mut qb = sqlx::QueryBuilder::new("UPDATE channels SET ");
@@ -350,6 +352,10 @@ pub async fn update_channel(
         if let Some(mtp) = req.min_talk_power {
             sep.push("min_talk_power = ");
             sep.push_bind_unseparated(mtp);
+        }
+        if let Some(rd_opt) = &req.retention_days {
+            sep.push("retention_days = ");
+            sep.push_bind_unseparated(*rd_opt);
         }
         qb.push(" WHERE id = ");
         qb.push_bind(&channel_id);
