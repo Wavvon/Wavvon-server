@@ -1,4 +1,6 @@
 pub mod auth;
+pub mod banlist_worker;
+pub mod bootstrap;
 pub mod bots;
 pub mod cert_worker;
 pub mod db;

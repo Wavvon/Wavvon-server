@@ -1583,6 +1583,160 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // ---- Task #29: Custom emojis ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hub_emojis (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL UNIQUE,
+            uploader    TEXT NOT NULL REFERENCES users(public_key),
+            mime        TEXT NOT NULL,
+            data_b64    TEXT NOT NULL,
+            created_at  INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Task #32: Thread reply_count ----
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN reply_count INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+
+    // ---- Task #30: Events / calendar ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hub_events (
+            id             TEXT PRIMARY KEY,
+            channel_id     TEXT NOT NULL REFERENCES channels(id),
+            creator_pubkey TEXT NOT NULL REFERENCES users(public_key),
+            title          TEXT NOT NULL,
+            description    TEXT NOT NULL DEFAULT '',
+            starts_at      INTEGER NOT NULL,
+            ends_at        INTEGER,
+            location       TEXT,
+            created_at     INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS event_rsvps (
+            event_id    TEXT NOT NULL REFERENCES hub_events(id) ON DELETE CASCADE,
+            user_pubkey TEXT NOT NULL REFERENCES users(public_key),
+            status      TEXT NOT NULL CHECK(status IN ('going','maybe','not_going')),
+            PRIMARY KEY (event_id, user_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_events')")
+        .execute(pool).await?;
+
+    // ---- Task #31: Native polls ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS polls (
+            id             TEXT PRIMARY KEY,
+            channel_id     TEXT NOT NULL REFERENCES channels(id),
+            creator_pubkey TEXT NOT NULL,
+            question       TEXT NOT NULL,
+            options        TEXT NOT NULL,
+            ends_at        INTEGER,
+            max_choices    INTEGER NOT NULL DEFAULT 1,
+            created_at     INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS poll_votes (
+            poll_id     TEXT NOT NULL REFERENCES polls(id) ON DELETE CASCADE,
+            user_pubkey TEXT NOT NULL REFERENCES users(public_key),
+            option_ids  TEXT NOT NULL,
+            PRIMARY KEY (poll_id, user_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Task #33: Content reporting ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS message_reports (
+            id              TEXT PRIMARY KEY,
+            message_id      TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            reporter_pubkey TEXT NOT NULL REFERENCES users(public_key),
+            reason          TEXT NOT NULL DEFAULT '',
+            reported_at     INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            reviewed_by     TEXT,
+            review_note     TEXT,
+            UNIQUE(message_id, reporter_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Task #34: Auto-moderation webhook settings ----
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('moderation_webhook_url', '')",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('moderation_webhook_secret', '')",
+    )
+    .execute(pool)
+    .await;
+
+    // ---- Task #35: Federated ban lists ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS federated_bans (
+            source_hub_pubkey    TEXT NOT NULL,
+            target_master_pubkey TEXT NOT NULL,
+            reason               TEXT,
+            added_at             INTEGER NOT NULL,
+            synced_at            INTEGER NOT NULL,
+            PRIMARY KEY(source_hub_pubkey, target_master_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // JSON array of hub URLs this hub pulls ban lists from.
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('banlist_sources', '[]')",
+    )
+    .execute(pool)
+    .await;
+
+    // Bootstrap marker: written by bootstrap::maybe_bootstrap after first-run
+    // template application. Seeded empty so the key always exists for SELECT.
+    let _ = sqlx::query(
+        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('bootstrapped_at', '')",
+    )
+    .execute(pool)
+    .await;
+
     tracing::info!("Database migrations complete");
+
+    // Generate web admin token on first run
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM hub_settings WHERE key = 'web_admin_token' AND value != ''"
+    )
+    .fetch_optional(pool).await.ok().flatten();
+
+    if existing.is_none() {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        let token = hex::encode(bytes);
+        let _ = sqlx::query("INSERT OR REPLACE INTO hub_settings(key, value) VALUES('web_admin_token', ?)")
+            .bind(&token).execute(pool).await;
+        tracing::info!("Hub web admin panel token (save this): {}", &token);
+    }
+
     Ok(())
 }

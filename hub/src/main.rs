@@ -140,6 +140,209 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if subcommand.as_deref() == Some("rotate-key") {
+        let new_key_path = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| "hub_identity_new.json".to_string());
+        rotate_hub_key(Path::new("hub_identity.json"), Path::new(&new_key_path))?;
+        println!("Key rotation complete. hub_identity.json now contains the new key.");
+        println!("hub_rotation.json contains the signed rotation payload.");
+        println!("Restart the hub for the change to take effect.");
+        return Ok(());
+    }
+
+    if subcommand.as_deref() == Some("admin") {
+        let admin_cmd = std::env::args().nth(2).unwrap_or_default();
+        let db_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "sqlite:hub.db?mode=ro".to_string());
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&db_url)
+            .await
+            .context("Cannot open DB for admin command")?;
+
+        match admin_cmd.as_str() {
+            "stats" => {
+                let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+                    .fetch_one(&db)
+                    .await
+                    .unwrap_or(0);
+                let channels: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM channels WHERE is_category=0",
+                )
+                .fetch_one(&db)
+                .await
+                .unwrap_or(0);
+                let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+                    .fetch_one(&db)
+                    .await
+                    .unwrap_or(0);
+                let bans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bans")
+                    .fetch_one(&db)
+                    .await
+                    .unwrap_or(0);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "users": users,
+                        "channels": channels,
+                        "messages": messages,
+                        "bans": bans
+                    }))
+                    .unwrap()
+                );
+            }
+            "users" => {
+                let action = std::env::args().nth(3).unwrap_or_default();
+                match action.as_str() {
+                    "list" => {
+                        let rows: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+                            "SELECT public_key, display_name, first_seen_at FROM users ORDER BY first_seen_at DESC LIMIT 50",
+                        )
+                        .fetch_all(&db)
+                        .await
+                        .unwrap_or_default();
+                        let json: Vec<_> = rows
+                            .iter()
+                            .map(|(pk, dn, ts)| {
+                                serde_json::json!({
+                                    "pubkey": pk,
+                                    "display_name": dn,
+                                    "first_seen_at": ts
+                                })
+                            })
+                            .collect();
+                        println!("{}", serde_json::to_string_pretty(&json).unwrap());
+                    }
+                    "ban" => {
+                        let pubkey = std::env::args()
+                            .nth(4)
+                            .context("Usage: admin users ban <pubkey>")?;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        let db_rw = SqlitePoolOptions::new()
+                            .max_connections(1)
+                            .connect("sqlite:hub.db?mode=rwc")
+                            .await
+                            .context("Cannot open DB for write")?;
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO bans(target_public_key, banned_by, reason, created_at) VALUES(?,'cli','CLI ban',?)",
+                        )
+                        .bind(&pubkey)
+                        .bind(now)
+                        .execute(&db_rw)
+                        .await?;
+                        println!("Banned {pubkey}");
+                    }
+                    "unban" => {
+                        let pubkey = std::env::args()
+                            .nth(4)
+                            .context("Usage: admin users unban <pubkey>")?;
+                        let db_rw = SqlitePoolOptions::new()
+                            .max_connections(1)
+                            .connect("sqlite:hub.db?mode=rwc")
+                            .await
+                            .context("Cannot open DB for write")?;
+                        sqlx::query("DELETE FROM bans WHERE target_public_key = ?")
+                            .bind(&pubkey)
+                            .execute(&db_rw)
+                            .await?;
+                        println!("Unbanned {pubkey}");
+                    }
+                    _ => println!(
+                        "Usage: voxply-hub admin users [list|ban|unban] [pubkey]"
+                    ),
+                }
+            }
+            "channels" => {
+                let action = std::env::args().nth(3).unwrap_or_default();
+                match action.as_str() {
+                    "list" => {
+                        let rows: Vec<(String, String)> = sqlx::query_as(
+                            "SELECT id, name FROM channels WHERE is_category=0 ORDER BY display_order",
+                        )
+                        .fetch_all(&db)
+                        .await
+                        .unwrap_or_default();
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &rows
+                                    .iter()
+                                    .map(|(id, name)| serde_json::json!({"id": id, "name": name}))
+                                    .collect::<Vec<_>>()
+                            )
+                            .unwrap()
+                        );
+                    }
+                    _ => println!("Usage: voxply-hub admin channels [list]"),
+                }
+            }
+            "tokens" => {
+                let rows: Vec<(String, String, i64)> = sqlx::query_as(
+                    "SELECT token, public_key, created_at FROM sessions ORDER BY created_at DESC LIMIT 20",
+                )
+                .fetch_all(&db)
+                .await
+                .unwrap_or_default();
+                let json: Vec<_> = rows
+                    .iter()
+                    .map(|(t, pk, ts)| {
+                        serde_json::json!({
+                            "token_prefix": &t[..8.min(t.len())],
+                            "public_key": pk,
+                            "created_at": ts
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            }
+            "backup" => {
+                let out = std::env::args().nth(3).unwrap_or_else(|| {
+                    format!(
+                        "hub-backup-{}.tar.gz",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs()
+                    )
+                });
+                backup(&out)?;
+                println!("Backup written to {out}");
+            }
+            "restore" => {
+                let src = std::env::args()
+                    .nth(3)
+                    .context("Usage: admin restore <backup.tar.gz>")?;
+                restore(&src)?;
+                println!("Restore complete. Restart the hub.");
+            }
+            "rotate-admin-token" => {
+                let new_token = hex::encode(rand::random::<[u8; 32]>());
+                let db_rw = SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect("sqlite:hub.db?mode=rwc")
+                    .await
+                    .context("Cannot open DB for write")?;
+                sqlx::query(
+                    "INSERT OR REPLACE INTO hub_settings(key, value) VALUES('web_admin_token', ?)",
+                )
+                .bind(&new_token)
+                .execute(&db_rw)
+                .await?;
+                println!("New admin token: {new_token}");
+            }
+            _ => {
+                println!(
+                    "Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore|rotate-admin-token]"
+                );
+            }
+        }
+        return Ok(());
+    }
+
     let http_port = port_from_env("VOXPLY_HTTP_PORT", DEFAULT_HTTP_PORT)?;
     let voice_udp_port = port_from_env("VOXPLY_VOICE_UDP_PORT", DEFAULT_VOICE_UDP_PORT)?;
 
@@ -156,6 +359,16 @@ async fn main() -> Result<()> {
         .await?;
 
     db::migrations::run(&db).await?;
+
+    // First-run bootstrap: applies a template from VOXPLY_TEMPLATE_URL or
+    // redeems VOXPLY_BOOTSTRAP_TOKEN when the channels table is empty.
+    // Non-fatal — a bad template or unreachable URL never blocks startup.
+    {
+        let bootstrap_client = reqwest::Client::new();
+        voxply_hub::bootstrap::maybe_bootstrap(&db, &bootstrap_client)
+            .await
+            .unwrap_or_else(|e| tracing::warn!("Bootstrap failed (non-fatal): {e}"));
+    }
 
     let (chat_tx, _) = broadcast::channel::<(voxply_hub::routes::chat_models::ChatEvent, std::sync::Arc<str>)>(256);
     let (voice_event_tx, _) = broadcast::channel(256);
@@ -300,6 +513,9 @@ async fn main() -> Result<()> {
     // Sweep messages and forum posts past their channel retention deadline.
     voxply_hub::retention_worker::spawn(state.clone());
 
+    // Sync federated ban lists from subscribed sources every 6 hours.
+    voxply_hub::banlist_worker::spawn(state.clone());
+
     // Sweep stale game sessions every 30 minutes. Any session with
     // `last_event_at < now - 7200` (2-hour TTL) is ended with reason "timeout".
     {
@@ -424,5 +640,44 @@ fn restore(src_path: &str) -> anyhow::Result<()> {
             std::fs::copy(&src, name)?;
         }
     }
+    Ok(())
+}
+
+/// Generate a new hub keypair, sign a rotation payload with the old key,
+/// write it to `hub_rotation.json`, and replace `hub_identity.json` with
+/// the new key. The operator must restart the hub afterwards.
+fn rotate_hub_key(current_path: &Path, _new_path: &Path) -> anyhow::Result<()> {
+    let old_identity = Identity::load(current_path)
+        .context("Failed to load current hub identity")?;
+
+    let new_identity = Identity::generate();
+
+    let old_pubkey_hex = old_identity.public_key_hex();
+    let new_pubkey_hex = new_identity.public_key_hex();
+
+    let effective_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    // Canonical signing bytes: "<old>:<new>:<effective_at>"
+    let payload_str = format!("{old_pubkey_hex}:{new_pubkey_hex}:{effective_at}");
+    let sig = old_identity.sign(payload_str.as_bytes());
+
+    let rotation = serde_json::json!({
+        "old_pubkey": old_pubkey_hex,
+        "new_pubkey": new_pubkey_hex,
+        "effective_at": effective_at,
+        "signature": hex::encode(sig.to_bytes()),
+    });
+
+    std::fs::write(
+        "hub_rotation.json",
+        serde_json::to_string_pretty(&rotation)?,
+    )?;
+
+    // Replace the live identity file with the new key.
+    new_identity.save(current_path)?;
+
     Ok(())
 }
