@@ -200,6 +200,9 @@ pub enum ChatEvent {
     /// match by channel_id for subscription filtering; the full typed envelope
     /// is pre-serialised into the Arc<str> that travels alongside.
     Game { channel_id: String },
+    /// Voice zone lifecycle and position-update events (voice_zone_created,
+    /// voice_zone_destroyed, voice_position_updated). Routing is by channel_id.
+    VoiceZone { channel_id: String },
 }
 
 impl ChatEvent {
@@ -214,7 +217,8 @@ impl ChatEvent {
             | ChatEvent::ScreenShareStopped { channel_id, .. }
             | ChatEvent::ScreenShareSignal { channel_id, .. }
             | ChatEvent::Forum { channel_id }
-            | ChatEvent::Game { channel_id } => channel_id,
+            | ChatEvent::Game { channel_id }
+            | ChatEvent::VoiceZone { channel_id } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
             // (delivery is handled via the dedicated to_pubkey check below).
@@ -348,6 +352,32 @@ pub enum WsClientMessage {
         custom_id: String,
         #[serde(default)]
         values: Vec<String>,
+    },
+
+    // ---- Proximity voice: client → hub ----
+
+    #[serde(rename = "voice_zone_create")]
+    VoiceZoneCreate {
+        zone_id: String,
+        name: String,
+        #[serde(default = "default_coord_system")]
+        coordinate_system: String,
+        attenuation: AttenuationConfigMsg,
+        #[serde(default = "default_auth_mode")]
+        auth_mode: String,
+        #[serde(default)]
+        session_id: Option<String>,
+    },
+
+    #[serde(rename = "voice_zone_destroy")]
+    VoiceZoneDestroy {
+        zone_id: String,
+    },
+
+    #[serde(rename = "voice_position_update")]
+    VoicePositionUpdate {
+        zone_id: String,
+        position: Vec<f64>,
     },
 
     // ---- Gaming Tier 2: client → hub ----
@@ -559,6 +589,41 @@ pub enum WsServerMessage {
         event: serde_json::Value,
     },
 
+    // ---- Proximity voice: hub → client ----
+
+    /// Broadcast to the channel when a voice zone is created.
+    #[serde(rename = "voice_zone_created")]
+    VoiceZoneCreated {
+        channel_id: String,
+        zone_id: String,
+        name: String,
+        coordinate_system: String,
+        attenuation: AttenuationConfigMsg,
+    },
+
+    /// Broadcast to the channel when a voice zone is destroyed.
+    #[serde(rename = "voice_zone_destroyed")]
+    VoiceZoneDestroyed {
+        channel_id: String,
+        zone_id: String,
+    },
+
+    /// Broadcast to the channel on every accepted position update.
+    #[serde(rename = "voice_position_updated")]
+    VoicePositionUpdated {
+        channel_id: String,
+        zone_id: String,
+        pubkey: String,
+        position: Vec<f64>,
+    },
+
+    /// Sent to a client on voice join — snapshot of all active zones in the channel.
+    #[serde(rename = "voice_zone_state")]
+    VoiceZoneState {
+        channel_id: String,
+        zones: Vec<VoiceZoneSnapshot>,
+    },
+
     // ---- Gaming Tier 2: game session envelopes ----
 
     /// A new game session was created in a channel.
@@ -661,6 +726,41 @@ pub struct VoiceRosterEntry {
     pub public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Proximity voice types
+// ---------------------------------------------------------------------------
+
+fn default_coord_system() -> String { "2d".to_string() }
+fn default_auth_mode() -> String { "any_channel_member".to_string() }
+fn default_attenuation_model() -> String { "linear".to_string() }
+fn default_max_radius() -> f64 { 200.0 }
+fn default_ref_dist() -> f64 { 20.0 }
+fn default_rolloff() -> f64 { 1.0 }
+
+/// Attenuation configuration carried in zone-create and zone-state messages.
+#[derive(Deserialize, Serialize, Clone)]
+pub struct AttenuationConfigMsg {
+    #[serde(default = "default_attenuation_model")]
+    pub model: String,
+    #[serde(default = "default_max_radius")]
+    pub max_radius: f64,
+    #[serde(default = "default_ref_dist")]
+    pub ref_dist: f64,
+    #[serde(default = "default_rolloff")]
+    pub rolloff: f64,
+}
+
+/// One zone entry in a `voice_zone_state` snapshot.
+#[derive(Serialize, Clone)]
+pub struct VoiceZoneSnapshot {
+    pub zone_id: String,
+    pub name: String,
+    pub coordinate_system: String,
+    pub attenuation: AttenuationConfigMsg,
+    /// pubkey → position
+    pub positions: std::collections::HashMap<String, Vec<f64>>,
 }
 
 /// One active stream entry returned by `HubStreams`.

@@ -470,6 +470,35 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     },
                                 ));
 
+                                // Send current voice zone state for this channel to the joining participant.
+                                let zones_snapshot: Vec<crate::routes::chat_models::VoiceZoneSnapshot> = {
+                                    let zones = state.voice_zones.read().await;
+                                    zones
+                                        .iter()
+                                        .filter(|((ch, _), _)| ch == &channel_id)
+                                        .map(|((_, zone_id), z)| crate::routes::chat_models::VoiceZoneSnapshot {
+                                            zone_id: zone_id.clone(),
+                                            name: z.name.clone(),
+                                            coordinate_system: z.coordinate_system.clone(),
+                                            attenuation: crate::routes::chat_models::AttenuationConfigMsg {
+                                                model: z.attenuation.model.clone(),
+                                                max_radius: z.attenuation.max_radius,
+                                                ref_dist: z.attenuation.ref_dist,
+                                                rolloff: z.attenuation.rolloff,
+                                            },
+                                            positions: z.positions.clone(),
+                                        })
+                                        .collect()
+                                };
+                                if !zones_snapshot.is_empty() {
+                                    let msg = WsServerMessage::VoiceZoneState {
+                                        channel_id: channel_id.clone(),
+                                        zones: zones_snapshot,
+                                    };
+                                    let json = serde_json::to_string(&msg).unwrap();
+                                    let _ = ws_tx.send(Message::Text(json.into())).await;
+                                }
+
                                 // Publish member.joined audit event.
                                 {
                                     let state_c = state.clone();
@@ -521,6 +550,151 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     },
                                 ));
                             }
+
+                            // ---- Proximity voice: zone lifecycle and position updates ----
+
+                            Ok(WsClientMessage::VoiceZoneCreate { zone_id, name, coordinate_system, attenuation, auth_mode, session_id }) => {
+                                // Auth: must have manage_voice permission OR be a game session host if session_id is set.
+                                let can_create = {
+                                    let perms = crate::permissions::user_permissions(&state.db, &public_key).await;
+                                    perms.map(|p| p.has("manage_voice") || p.has("admin")).unwrap_or(false)
+                                };
+                                let can_create = can_create || {
+                                    if let Some(ref sid) = session_id {
+                                        let sessions = state.active_game_sessions.lock().unwrap();
+                                        sessions.get(sid).map(|s| s.host_pubkey == public_key).unwrap_or(false)
+                                    } else {
+                                        false
+                                    }
+                                };
+                                if !can_create {
+                                    let err = WsServerMessage::Error {
+                                        context: "voice_zone_create".to_string(),
+                                        message: "Requires manage_voice permission.".to_string(),
+                                    };
+                                    let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                    continue;
+                                }
+                                // Need a channel_id — use voice_channel if in voice, else reject.
+                                let ch_id = match voice_channel.clone() {
+                                    Some(ch) => ch,
+                                    None => {
+                                        let err = WsServerMessage::Error {
+                                            context: "voice_zone_create".to_string(),
+                                            message: "Must be in voice to create a zone.".to_string(),
+                                        };
+                                        let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                        continue;
+                                    }
+                                };
+                                let zone = crate::state::VoiceZone {
+                                    zone_id: zone_id.clone(),
+                                    channel_id: ch_id.clone(),
+                                    name: name.clone(),
+                                    coordinate_system: coordinate_system.clone(),
+                                    attenuation: crate::state::AttenuationConfig {
+                                        model: attenuation.model.clone(),
+                                        max_radius: attenuation.max_radius,
+                                        ref_dist: attenuation.ref_dist,
+                                        rolloff: attenuation.rolloff,
+                                    },
+                                    auth_mode: auth_mode.clone(),
+                                    creator_pubkey: public_key.clone(),
+                                    session_id: session_id.clone(),
+                                    positions: std::collections::HashMap::new(),
+                                };
+                                state.voice_zones.write().await.insert((ch_id.clone(), zone_id.clone()), zone);
+
+                                let msg = WsServerMessage::VoiceZoneCreated {
+                                    channel_id: ch_id.clone(),
+                                    zone_id: zone_id.clone(),
+                                    name: name.clone(),
+                                    coordinate_system: coordinate_system.clone(),
+                                    attenuation: attenuation.clone(),
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::VoiceZone { channel_id: ch_id.clone() };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
+                                tracing::info!("Voice zone created: {} in channel {}", &zone_id[..8.min(zone_id.len())], &ch_id[..8.min(ch_id.len())]);
+                            }
+
+                            Ok(WsClientMessage::VoiceZoneDestroy { zone_id }) => {
+                                let ch_id = match voice_channel.clone() {
+                                    Some(ch) => ch,
+                                    None => continue,
+                                };
+                                // Creator may destroy their own zone; manage_voice/admin may destroy any.
+                                let can_destroy = {
+                                    let zones = state.voice_zones.read().await;
+                                    zones.get(&(ch_id.clone(), zone_id.clone()))
+                                        .map(|z| z.creator_pubkey == public_key)
+                                        .unwrap_or(false)
+                                };
+                                let can_destroy = can_destroy || {
+                                    let perms = crate::permissions::user_permissions(&state.db, &public_key).await;
+                                    perms.map(|p| p.has("manage_voice") || p.has("admin")).unwrap_or(false)
+                                };
+                                if !can_destroy { continue; }
+
+                                state.voice_zones.write().await.remove(&(ch_id.clone(), zone_id.clone()));
+
+                                let msg = WsServerMessage::VoiceZoneDestroyed {
+                                    channel_id: ch_id.clone(),
+                                    zone_id: zone_id.clone(),
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::VoiceZone { channel_id: ch_id.clone() };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
+                            Ok(WsClientMessage::VoicePositionUpdate { zone_id, position }) => {
+                                let ch_id = match voice_channel.clone() {
+                                    Some(ch) => ch,
+                                    None => continue,
+                                };
+                                // Validate position dimensions (2D or 3D only).
+                                if position.is_empty() || position.len() > 3 {
+                                    continue;
+                                }
+                                // Check auth_mode before accepting the update.
+                                let allowed = {
+                                    let zones = state.voice_zones.read().await;
+                                    if let Some(z) = zones.get(&(ch_id.clone(), zone_id.clone())) {
+                                        match z.auth_mode.as_str() {
+                                            "creator_only" => z.creator_pubkey == public_key,
+                                            "session_roster" => {
+                                                if let Some(ref sid) = z.session_id {
+                                                    let sessions = state.active_game_sessions.lock().unwrap();
+                                                    sessions.get(sid).map(|s| s.players.contains(&public_key)).unwrap_or(false)
+                                                } else {
+                                                    false
+                                                }
+                                            }
+                                            _ => true, // any_channel_member (default)
+                                        }
+                                    } else {
+                                        false // zone doesn't exist
+                                    }
+                                };
+                                if !allowed { continue; }
+
+                                // Update position.
+                                state.voice_zones.write().await
+                                    .entry((ch_id.clone(), zone_id.clone()))
+                                    .and_modify(|z| { z.positions.insert(public_key.clone(), position.clone()); });
+
+                                // Broadcast to channel members.
+                                let msg = WsServerMessage::VoicePositionUpdated {
+                                    channel_id: ch_id.clone(),
+                                    zone_id: zone_id.clone(),
+                                    pubkey: public_key.clone(),
+                                    position: position.clone(),
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::VoiceZone { channel_id: ch_id.clone() };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
                             Ok(WsClientMessage::Typing { channel_id, typing }) => {
                                 let display_name: Option<String> = sqlx::query_scalar(
                                     "SELECT display_name FROM users WHERE public_key = ?",
@@ -1461,6 +1635,15 @@ async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
         let channels = state.voice_channels.read().await;
         if !channels.contains_key(channel_id) {
             state.voice_next_sender_id.write().await.remove(channel_id);
+        }
+    }
+    // Remove this user's position from all voice zones in this channel.
+    {
+        let mut zones = state.voice_zones.write().await;
+        for ((ch, _), zone) in zones.iter_mut() {
+            if ch == channel_id {
+                zone.positions.remove(public_key);
+            }
         }
     }
     // Broadcast updated roster

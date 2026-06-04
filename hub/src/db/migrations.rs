@@ -1557,6 +1557,12 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Task #9: Proximity Voice ----
+    // Seed manage_voice permission. Hub owners can grant it to other roles
+    // to allow zone creation without full admin access.
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_voice')")
+        .execute(pool).await?;
+
     tracing::info!("Database migrations complete");
     Ok(())
 }

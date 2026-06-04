@@ -203,6 +203,7 @@ async fn main() -> Result<()> {
         farm_url,
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
+        voice_zones: RwLock::new(HashMap::new()),
         active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         started_at: std::time::Instant::now(),
     });

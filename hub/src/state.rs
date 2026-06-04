@@ -85,6 +85,35 @@ pub struct ScreenChunkEvent {
     pub data: Bytes,
 }
 
+/// Attenuation parameters for a voice zone.
+#[derive(Clone, Debug)]
+pub struct AttenuationConfig {
+    pub model: String,        // "linear" | "inverse_square" | "step" | "exponential"
+    pub max_radius: f64,
+    pub ref_dist: f64,
+    pub rolloff: f64,
+}
+
+/// In-memory state for one live voice zone.
+///
+/// Zones are channel-scoped and ephemeral (cleared on hub restart).
+/// A future refinement can persist flagged zones to a DB table.
+#[derive(Clone, Debug)]
+pub struct VoiceZone {
+    pub zone_id: String,
+    pub channel_id: String,
+    pub name: String,
+    /// "2d" | "3d"
+    pub coordinate_system: String,
+    pub attenuation: AttenuationConfig,
+    /// "creator_only" | "any_channel_member" | "session_roster"
+    pub auth_mode: String,
+    pub creator_pubkey: String,
+    pub session_id: Option<String>,
+    /// pubkey → position (2 or 3 floats)
+    pub positions: HashMap<String, Vec<f64>>,
+}
+
 /// A single player in a live game session.
 #[derive(Clone, Debug)]
 pub struct GamePlayer {
@@ -160,6 +189,10 @@ pub struct AppState {
     /// broadcast so we can push targeted hub_event messages without looping
     /// through every connected client.
     pub bot_sessions: RwLock<HashMap<String, mpsc::Sender<String>>>,
+
+    /// Active voice zones: (channel_id, zone_id) → VoiceZone.
+    /// Ephemeral — cleared on hub restart.
+    pub voice_zones: RwLock<HashMap<(String, String), VoiceZone>>,
 
     // ---- Gaming Tier 2 ----
     /// In-memory index of live game sessions: session_id → GameSessionState.
