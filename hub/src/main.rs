@@ -516,6 +516,34 @@ async fn main() -> Result<()> {
     // Sync federated ban lists from subscribed sources every 6 hours.
     voxply_hub::banlist_worker::spawn(state.clone());
 
+    // Farm heartbeat: POST /farm/heartbeat every 60 seconds when VOXPLY_FARM_URL is set.
+    if let Some(ref farm_url_for_hb) = state.farm_url {
+        let hb_state = state.clone();
+        let hb_url = farm_url_for_hb.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // skip the immediate first tick
+            loop {
+                interval.tick().await;
+                let online = hb_state.online_users.read().await.len() as u64;
+                let db_size = std::fs::metadata("hub.db").map(|m| m.len()).unwrap_or(0);
+                let uptime = hb_state.started_at.elapsed().as_secs();
+                let payload = serde_json::json!({
+                    "hub_pubkey": hb_state.hub_identity.public_key_hex(),
+                    "online_users": online,
+                    "storage_bytes": db_size,
+                    "uptime_seconds": uptime,
+                });
+                let _ = hb_state
+                    .http_client
+                    .post(format!("{hb_url}/farm/heartbeat"))
+                    .json(&payload)
+                    .send()
+                    .await;
+            }
+        });
+    }
+
     // Sweep stale game sessions every 30 minutes. Any session with
     // `last_event_at < now - 7200` (2-hour TTL) is ended with reason "timeout".
     {

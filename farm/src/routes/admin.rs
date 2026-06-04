@@ -62,6 +62,14 @@ async fn get_admin_pubkey(db: &sqlx::SqlitePool) -> Option<String> {
 }
 
 /// Require a valid farm session whose `sub` matches `farms.admin_pubkey`.
+/// Public alias used by other route modules (e.g. heartbeat).
+pub async fn require_admin_pub(
+    headers: &HeaderMap,
+    state: &FarmState,
+) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
+    require_admin(headers, state).await
+}
+
 async fn require_admin(
     headers: &HeaderMap,
     state: &FarmState,

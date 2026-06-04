@@ -43,6 +43,10 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         )
         // Phase 3 — public discovery probe (unauthenticated).
         .route("/farm/public-info", get(routes::admin::public_info))
+        // Hub heartbeat — pushed by each hub every 60 s.
+        .route("/farm/heartbeat", post(routes::heartbeat::receive_heartbeat))
+        // Farm admin fleet view — requires farm admin auth.
+        .route("/farm/admin/fleet", get(routes::heartbeat::get_fleet))
         // Gaming — farm-level game catalogue.
         .route(
             "/farm/games",

@@ -163,5 +163,23 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Heartbeat: cache of the last stats ping received from each hub.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hub_heartbeats (
+            hub_pubkey     TEXT PRIMARY KEY,
+            online_users   INTEGER NOT NULL DEFAULT 0,
+            storage_bytes  INTEGER NOT NULL DEFAULT 0,
+            uptime_seconds INTEGER NOT NULL DEFAULT 0,
+            last_seen_at   INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Add hub_pubkey to hubs so heartbeats can be matched back to a registered hub.
+    let _ = sqlx::query("ALTER TABLE hubs ADD COLUMN hub_pubkey TEXT")
+        .execute(pool)
+        .await;
+
     Ok(())
 }
