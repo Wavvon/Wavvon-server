@@ -276,6 +276,7 @@ pub async fn post_webhook_message(
         reactions: Vec::new(),
         reply_to: None,
         visible_to_pubkey: None,
+        reply_count: 0,
     };
 
     {

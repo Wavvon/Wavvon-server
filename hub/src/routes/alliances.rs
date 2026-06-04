@@ -457,6 +457,7 @@ pub async fn get_alliance_channel_messages(
                 // hub, just no preview here.
                 reply_to: None,
                 visible_to_pubkey: None,
+                reply_count: 0,
             });
         }
         return Ok(Json(out));

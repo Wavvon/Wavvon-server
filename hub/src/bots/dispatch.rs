@@ -254,6 +254,7 @@ pub async fn dispatch_slash(
             reactions: Vec::new(),
             reply_to: None,
             visible_to_pubkey: visible_to.map(|s| s.to_string()),
+            reply_count: 0,
         };
 
         {
@@ -309,6 +310,7 @@ pub async fn insert_ephemeral_error(
         reactions: Vec::new(),
         reply_to: None,
         visible_to_pubkey: Some(invoker_pubkey.to_string()),
+        reply_count: 0,
     };
 
     {
@@ -600,6 +602,7 @@ async fn apply_component_response(
             reactions: Vec::new(),
             reply_to: None,
             visible_to_pubkey: Some(interacting_user.to_string()),
+            reply_count: 0,
         };
 
         {
@@ -638,5 +641,6 @@ async fn load_updated_message(
         reactions: Vec::new(),
         reply_to: None,
         visible_to_pubkey: None,
+        reply_count: 0,
     })
 }
