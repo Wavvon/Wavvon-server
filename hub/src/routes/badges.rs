@@ -523,3 +523,100 @@ struct IssuedBadgeRow {
     pub issued_at: String,
     pub expires_at: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Badge revocation
+// ---------------------------------------------------------------------------
+
+/// DELETE /admin/badges/issued/:id  — revoke a badge this hub issued.
+/// Sets `revoked_at` on the row; the badge is excluded from future
+/// /federation/badge-revocations responses until `since` moves past it.
+pub async fn revoke_issued_badge(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ADMIN)?;
+
+    let now = iso_from_unix(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    );
+
+    let result = sqlx::query(
+        "UPDATE issued_badges SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+    )
+    .bind(&now)
+    .bind(&id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, "Badge not found or already revoked".to_string()));
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// One entry in the revocations list.
+#[derive(Serialize)]
+pub struct RevokedBadgeEntry {
+    pub id: String,
+    pub recipient_hub_pubkey: String,
+    pub label: String,
+    pub revoked_at: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct RevocationsQuery {
+    /// Return only revocations that happened at or after this ISO-8601 timestamp.
+    pub since: Option<String>,
+}
+
+/// GET /federation/badge-revocations?since=<iso-timestamp>
+///
+/// Public endpoint — external hubs poll this to learn which badges
+/// issued by this hub have been revoked. The `since` parameter limits
+/// the response to revocations that happened after a given time so
+/// pollers can do incremental checks.
+pub async fn federation_badge_revocations(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<RevocationsQuery>,
+) -> Result<Json<Vec<RevokedBadgeEntry>>, (StatusCode, String)> {
+    let rows = if let Some(since) = params.since {
+        sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT id, recipient_hub_pubkey, label, revoked_at
+             FROM issued_badges
+             WHERE revoked_at IS NOT NULL AND revoked_at >= ?
+             ORDER BY revoked_at",
+        )
+        .bind(since)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        sqlx::query_as::<_, (String, String, String, String)>(
+            "SELECT id, recipient_hub_pubkey, label, revoked_at
+             FROM issued_badges
+             WHERE revoked_at IS NOT NULL
+             ORDER BY revoked_at",
+        )
+        .fetch_all(&state.db)
+        .await
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let out = rows
+        .into_iter()
+        .map(|(id, recipient_hub_pubkey, label, revoked_at)| RevokedBadgeEntry {
+            id,
+            recipient_hub_pubkey,
+            label,
+            revoked_at,
+        })
+        .collect();
+
+    Ok(Json(out))
+}

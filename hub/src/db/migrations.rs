@@ -1563,6 +1563,15 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_voice')")
         .execute(pool).await?;
 
+    // ---- Badge revocations ----
+    // Add revoked_at column to issued_badges so the /federation/badge-revocations
+    // endpoint can tell other hubs which badges this hub has revoked.
+    let _ = sqlx::query(
+        "ALTER TABLE issued_badges ADD COLUMN revoked_at TEXT",
+    )
+    .execute(pool)
+    .await;  // ignore error — column may already exist on older schemas
+
     tracing::info!("Database migrations complete");
     Ok(())
 }
