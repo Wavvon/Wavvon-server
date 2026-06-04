@@ -152,6 +152,15 @@ pub struct GameSessionState {
     pub in_memory_state: serde_json::Value,
 }
 
+/// One element of a whisper target specification.
+/// Carries the original descriptor so the hub can re-resolve on voice join/leave.
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct WhisperTargetDef {
+    #[serde(rename = "type")]
+    pub target_type: String, // "user" | "channel" | "role"
+    pub id: String,
+}
+
 pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
@@ -219,6 +228,13 @@ pub struct AppState {
     /// Unix timestamp of the last farm pubkey re-fetch attempt.
     /// Used to rate-limit re-fetch to at most once per 60s.
     pub last_farm_pubkey_fetch: Arc<RwLock<i64>>,
+
+    /// Active whisper sessions: sender_pubkey → set of target SocketAddrs.
+    /// When a sender has an entry here the UDP relay routes their frames
+    /// exclusively to this set with packet_type = 0x01.
+    pub whisper_targets: RwLock<HashMap<String, HashSet<SocketAddr>>>,
+    /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
+    pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
 }
 
 pub struct PendingChallenge {

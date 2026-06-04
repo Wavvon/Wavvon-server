@@ -442,6 +442,8 @@ async fn main() -> Result<()> {
         active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
+        whisper_targets: RwLock::new(HashMap::new()),
+        whisper_target_defs: RwLock::new(HashMap::new()),
     });
 
     // Bind voice UDP socket and start forwarding task
@@ -461,7 +463,7 @@ async fn main() -> Result<()> {
                         map.get(&from_addr).cloned()
                     };
                     if let Some((channel_id, sender_pk)) = lookup {
-                        // Look up the sender's sender_id for this channel
+                        // Look up the sender's sender_id for this channel.
                         let sender_id: u16 = {
                             let sids = voice_state.voice_sender_ids.read().await;
                             sids.get(&channel_id)
@@ -471,23 +473,34 @@ async fn main() -> Result<()> {
                         };
                         let sender_id_bytes = sender_id.to_be_bytes();
 
-                        // Collect destinations under the read lock, then drop it.
-                        let dests: Vec<SocketAddr> = {
-                            let channels = voice_state.voice_channels.read().await;
-                            channels
-                                .get(&channel_id)
-                                .map(|participants| {
-                                    participants
-                                        .values()
-                                        .filter(|a| **a != from_addr)
-                                        .copied()
-                                        .collect()
-                                })
-                                .unwrap_or_default()
+                        // Determine destinations and packet_type:
+                        //   0x01 = whisper (fan-out to resolved whisper target set only)
+                        //   0x00 = normal channel voice
+                        let (dests, packet_type): (Vec<SocketAddr>, u8) = {
+                            let wt = voice_state.whisper_targets.read().await;
+                            if let Some(whisper_addrs) = wt.get(&sender_pk) {
+                                (whisper_addrs.iter().copied().collect(), 0x01u8)
+                            } else {
+                                drop(wt);
+                                let channels = voice_state.voice_channels.read().await;
+                                let normal = channels
+                                    .get(&channel_id)
+                                    .map(|participants| {
+                                        participants
+                                            .values()
+                                            .filter(|a| **a != from_addr)
+                                            .copied()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                (normal, 0x00u8)
+                            }
                         };
-                        // Build outbound packet with sender_id prepended
-                        let mut outbound = Vec::with_capacity(2 + packet_data.len());
+
+                        // Build outbound: [sender_id: 2][packet_type: 1][original packet]
+                        let mut outbound = Vec::with_capacity(3 + packet_data.len());
                         outbound.extend_from_slice(&sender_id_bytes);
+                        outbound.push(packet_type);
                         outbound.extend_from_slice(&packet_data);
                         for addr in dests {
                             let _ = voice_socket.send_to(&outbound, addr).await;

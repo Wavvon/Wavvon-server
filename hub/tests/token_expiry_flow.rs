@@ -53,6 +53,8 @@ async fn make_state() -> Arc<AppState> {
         active_game_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
+        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
     })
 }
 

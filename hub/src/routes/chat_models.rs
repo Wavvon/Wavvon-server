@@ -218,6 +218,13 @@ pub enum ChatEvent {
     Video { channel_id: String },
     /// Native poll vote-tally broadcast after every upsert.
     Poll { channel_id: String },
+    /// Whisper start/stop notification — delivered only to the resolved recipient set.
+    /// `channel_id` is the whisperer's current voice channel (used only to satisfy the
+    /// channel_id() contract; filtering is done via `to_pubkeys` in the WS dispatch loop).
+    WhisperSignal {
+        channel_id: String,
+        to_pubkeys: Vec<String>,
+    },
 }
 
 impl ChatEvent {
@@ -235,7 +242,8 @@ impl ChatEvent {
             | ChatEvent::Game { channel_id }
             | ChatEvent::VoiceZone { channel_id }
             | ChatEvent::Video { channel_id }
-            | ChatEvent::Poll { channel_id } => channel_id,
+            | ChatEvent::Poll { channel_id }
+            | ChatEvent::WhisperSignal { channel_id, .. } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
             // (delivery is handled via the dedicated to_pubkey check below).
@@ -379,6 +387,15 @@ pub enum WsClientMessage {
 
     #[serde(rename = "video_ice")]
     VideoIce { channel_id: String, to_pubkey: String, candidate: String },
+
+    /// Sender opens a whisper session to the listed targets.
+    #[serde(rename = "voice_whisper_start")]
+    VoiceWhisperStart {
+        targets: Vec<crate::state::WhisperTargetDef>,
+    },
+    /// Sender closes their active whisper session.
+    #[serde(rename = "voice_whisper_stop")]
+    VoiceWhisperStop,
 
     /// Bot sends this after connecting to request replay of missed events.
     #[serde(rename = "resume")]
@@ -775,6 +792,14 @@ pub enum WsServerMessage {
         poll_id: String,
         totals: std::collections::HashMap<String, i64>,
     },
+
+    /// Delivered only to the resolved whisper target set when a sender opens a whisper session.
+    #[serde(rename = "voice_whisper_started")]
+    VoiceWhisperStarted { sender_pubkey: String },
+
+    /// Delivered only to the resolved whisper target set when a sender stops whispering.
+    #[serde(rename = "voice_whisper_stopped")]
+    VoiceWhisperStopped { sender_pubkey: String },
 }
 
 /// Track metadata carried in `ScreenShareStart.tracks` (v2, additive).

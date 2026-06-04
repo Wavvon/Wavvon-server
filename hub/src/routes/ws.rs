@@ -224,6 +224,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     }
                                 }
                             }
+                            // WhisperSignal is targeted to specific pubkeys only.
+                            if let crate::routes::chat_models::ChatEvent::WhisperSignal {
+                                to_pubkeys, ..
+                            } = &event
+                            {
+                                if !to_pubkeys.contains(&public_key) {
+                                    continue;
+                                }
+                            }
                             let json = pre_json.to_string();
                             if is_replaying {
                                 replay_buffer.push(json);
@@ -480,6 +489,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     },
                                 ));
 
+                                // Re-resolve active whisper sessions whose targets include
+                                // this channel or this user — the new participant should
+                                // start receiving whispers directed at them.
+                                re_resolve_whisper_sessions(&state).await;
+
                                 // Send current voice zone state for this channel to the joining participant.
                                 let zones_snapshot: Vec<crate::routes::chat_models::VoiceZoneSnapshot> = {
                                     let zones = state.voice_zones.read().await;
@@ -548,6 +562,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                             Ok(WsClientMessage::VoiceLeave { channel_id }) => {
                                 leave_voice(&state, &public_key, &channel_id).await;
                                 voice_channel = None;
+                                // Re-resolve whisper sessions in case any session targeted this user.
+                                re_resolve_whisper_sessions(&state).await;
                                 // Publish member.left audit event.
                                 {
                                     let state_c = state.clone();
@@ -575,6 +591,99 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                         speaking,
                                     },
                                 ));
+                            }
+
+                            Ok(WsClientMessage::VoiceWhisperStart { targets }) => {
+                                // Sender must be in voice.
+                                let my_addr = {
+                                    let vc = state.voice_channels.read().await;
+                                    if let Some(ch) = &voice_channel {
+                                        vc.get(ch).and_then(|p| p.get(&public_key)).copied()
+                                    } else {
+                                        None
+                                    }
+                                };
+                                let my_addr = match my_addr {
+                                    Some(a) => a,
+                                    None => continue,
+                                };
+
+                                // Resolve user/channel targets (no DB needed).
+                                let mut addrs = resolve_whisper_targets(&state, &targets, my_addr).await;
+                                // Resolve role targets separately (needs a DB query).
+                                for def in &targets {
+                                    if def.target_type == "role" {
+                                        addrs.extend(
+                                            resolve_role_addrs(&state, &def.id, my_addr).await,
+                                        );
+                                    }
+                                }
+
+                                // Persist resolved set and original defs.
+                                state
+                                    .whisper_targets
+                                    .write()
+                                    .await
+                                    .insert(public_key.clone(), addrs.clone());
+                                state
+                                    .whisper_target_defs
+                                    .write()
+                                    .await
+                                    .insert(public_key.clone(), targets.clone());
+
+                                // Notify resolved recipients.
+                                let target_pubkeys: Vec<String> = {
+                                    let addr_map = state.voice_addr_map.read().await;
+                                    addrs
+                                        .iter()
+                                        .filter_map(|a| {
+                                            addr_map.get(a).map(|(_, pk)| pk.clone())
+                                        })
+                                        .collect()
+                                };
+                                let msg = WsServerMessage::VoiceWhisperStarted {
+                                    sender_pubkey: public_key.clone(),
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::WhisperSignal {
+                                    channel_id: voice_channel.clone().unwrap_or_default(),
+                                    to_pubkeys: target_pubkeys,
+                                };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(
+                                    serde_json::to_string(&msg).unwrap().as_str(),
+                                );
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
+                            Ok(WsClientMessage::VoiceWhisperStop) => {
+                                let prev_addrs = state
+                                    .whisper_targets
+                                    .write()
+                                    .await
+                                    .remove(&public_key);
+                                state.whisper_target_defs.write().await.remove(&public_key);
+
+                                if let Some(addrs) = prev_addrs {
+                                    let target_pubkeys: Vec<String> = {
+                                        let addr_map = state.voice_addr_map.read().await;
+                                        addrs
+                                            .iter()
+                                            .filter_map(|a| {
+                                                addr_map.get(a).map(|(_, pk)| pk.clone())
+                                            })
+                                            .collect()
+                                    };
+                                    let msg = WsServerMessage::VoiceWhisperStopped {
+                                        sender_pubkey: public_key.clone(),
+                                    };
+                                    let ev = crate::routes::chat_models::ChatEvent::WhisperSignal {
+                                        channel_id: voice_channel.clone().unwrap_or_default(),
+                                        to_pubkeys: target_pubkeys,
+                                    };
+                                    let json: std::sync::Arc<str> = std::sync::Arc::from(
+                                        serde_json::to_string(&msg).unwrap().as_str(),
+                                    );
+                                    let _ = state.chat_tx.send((ev, json));
+                                }
                             }
 
                             // ---- Video signaling: enable/disable and WebRTC relay ----
@@ -1788,6 +1897,10 @@ async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
         }
     }
 
+    // Clean up the departing user's whisper session if they were whispering.
+    state.whisper_targets.write().await.remove(public_key);
+    state.whisper_target_defs.write().await.remove(public_key);
+
     // Broadcast updated roster
     let roster = get_voice_roster(state, channel_id).await;
     let _ = state.voice_event_tx.send((
@@ -1839,6 +1952,111 @@ async fn get_voice_participants(state: &AppState, channel_id: &str) -> Vec<Voice
         });
     }
     result
+}
+
+/// Resolve "user" and "channel" target defs into SocketAddrs.
+/// Role targets require a DB query and must be handled by the caller via `resolve_role_addrs`.
+async fn resolve_whisper_targets(
+    state: &AppState,
+    defs: &[crate::state::WhisperTargetDef],
+    exclude_addr: std::net::SocketAddr,
+) -> HashSet<std::net::SocketAddr> {
+    let voice_channels = state.voice_channels.read().await;
+    let mut addrs = HashSet::new();
+    for def in defs {
+        match def.target_type.as_str() {
+            "user" => {
+                // Search all channels for the target pubkey.
+                for participants in voice_channels.values() {
+                    if let Some(addr) = participants.get(&def.id) {
+                        if *addr != exclude_addr {
+                            addrs.insert(*addr);
+                        }
+                    }
+                }
+            }
+            "channel" => {
+                if let Some(participants) = voice_channels.get(&def.id) {
+                    for addr in participants.values() {
+                        if *addr != exclude_addr {
+                            addrs.insert(*addr);
+                        }
+                    }
+                }
+            }
+            _ => {} // "role" handled separately; unknown types silently ignored
+        }
+    }
+    addrs
+}
+
+/// Resolve all users with `role_id` that are currently in voice into SocketAddrs.
+async fn resolve_role_addrs(
+    state: &AppState,
+    role_id: &str,
+    exclude_addr: std::net::SocketAddr,
+) -> HashSet<std::net::SocketAddr> {
+    let role_users: Vec<String> = sqlx::query_scalar(
+        "SELECT user_public_key FROM user_roles WHERE role_id = ?",
+    )
+    .bind(role_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let voice_channels = state.voice_channels.read().await;
+    let mut addrs = HashSet::new();
+    for pk in &role_users {
+        for participants in voice_channels.values() {
+            if let Some(addr) = participants.get(pk.as_str()) {
+                if *addr != exclude_addr {
+                    addrs.insert(*addr);
+                }
+            }
+        }
+    }
+    addrs
+}
+
+/// Walk every active whisper session and rebuild its resolved SocketAddr set from stored defs.
+/// Called after any VoiceJoin or VoiceLeave so the live target set stays correct.
+async fn re_resolve_whisper_sessions(state: &AppState) {
+    // Snapshot the current defs outside the write lock.
+    let defs_map: Vec<(String, Vec<crate::state::WhisperTargetDef>)> = {
+        state
+            .whisper_target_defs
+            .read()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+    for (sender_pk, defs) in defs_map {
+        // Find the sender's current SocketAddr (they may have just left voice).
+        let sender_addr = {
+            let vc = state.voice_channels.read().await;
+            vc.values().find_map(|p| p.get(&sender_pk)).copied()
+        };
+        let sender_addr = match sender_addr {
+            Some(a) => a,
+            None => {
+                // Sender is no longer in voice; their session will be cleaned up by leave_voice.
+                continue;
+            }
+        };
+        let mut new_addrs =
+            resolve_whisper_targets(state, &defs, sender_addr).await;
+        for def in &defs {
+            if def.target_type == "role" {
+                new_addrs.extend(resolve_role_addrs(state, &def.id, sender_addr).await);
+            }
+        }
+        state
+            .whisper_targets
+            .write()
+            .await
+            .insert(sender_pk, new_addrs);
+    }
 }
 
 async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<VoiceRosterEntry> {
