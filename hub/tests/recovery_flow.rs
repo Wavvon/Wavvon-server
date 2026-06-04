@@ -145,7 +145,7 @@ async fn put_replaces_existing_contacts() {
     let body = resp.json::<serde_json::Value>();
     let contacts = body["contacts"].as_array().unwrap();
     assert_eq!(contacts.len(), 1);
-    assert_eq!(contacts[0], c3.public_key_hex());
+    assert_eq!(contacts[0]["pubkey"], c3.public_key_hex());
 }
 
 #[tokio::test]
@@ -189,7 +189,7 @@ async fn delete_one_contact() {
         .await;
     let body = resp.json::<serde_json::Value>();
     assert_eq!(body["contacts"].as_array().unwrap().len(), 1);
-    assert_eq!(body["contacts"][0], c2.public_key_hex());
+    assert_eq!(body["contacts"][0]["pubkey"], c2.public_key_hex());
 }
 
 // ---------------------------------------------------------------------------
