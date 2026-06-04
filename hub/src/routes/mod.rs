@@ -1,4 +1,5 @@
 pub mod badges;
+pub mod key_rotation;
 pub mod metrics;
 pub mod bots;
 pub mod certs;
@@ -37,3 +38,9 @@ pub mod posts;
 pub mod tags;
 pub mod games;
 pub mod recovery;
+pub mod reports;
+pub mod search;
+pub mod emojis;
+pub mod events;
+pub mod polls;
+pub mod admin_panel;

@@ -269,6 +269,33 @@ pub struct HubBranding {
     pub icon: Option<String>,
 }
 
+/// PATCH /admin/settings/moderation — sets the auto-mod webhook URL and HMAC secret.
+pub async fn patch_moderation_settings(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<ModerationSettingsRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ADMIN)?;
+
+    if let Some(url) = req.webhook_url.as_deref() {
+        upsert_setting(&state.db, "moderation_webhook_url", url).await?;
+    }
+    if let Some(secret) = req.webhook_secret.as_deref() {
+        upsert_setting(&state.db, "moderation_webhook_secret", secret).await?;
+    }
+
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub struct ModerationSettingsRequest {
+    #[serde(default)]
+    pub webhook_url: Option<String>,
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
+}
+
 /// Read all three branding fields with fallback to the value seeded in AppState.
 pub async fn read_branding(state: &AppState) -> HubBranding {
     let name = current_hub_name(state).await;

@@ -52,6 +52,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(routes::health::health))
         .route("/info", get(routes::health::info))
+        .route("/key-rotation", get(routes::key_rotation::get_key_rotation))
         .route("/metrics", get(routes::metrics::metrics))
         .route("/hub", axum::routing::patch(routes::hub::update_hub))
         .route("/hub/members", get(routes::hub::list_members))
@@ -66,6 +67,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/admin/settings/pow", get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings))
         .route("/admin/settings/channel-depth", get(routes::hub::get_channel_depth).patch(routes::hub::patch_channel_depth))
+        .route("/admin/settings/moderation", patch(routes::hub::patch_moderation_settings))
         .route("/admin/settings/tags", get(routes::tags::get_tags).patch(routes::tags::patch_tags))
         .route("/admin/directory-sign", post(routes::directory::sign_for_directory))
         .route("/profile/{pubkey}", get(routes::profile::get_profile).put(routes::profile::put_profile))
@@ -93,6 +95,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/channels/{channel_id}/messages/{message_id}/reactions/{emoji}",
             axum::routing::delete(routes::messages::remove_reaction),
         )
+        // ---- Content reporting (Task #33) ----
+        .route("/messages/{id}/report", post(routes::reports::report_message))
+        .route("/admin/reports", get(routes::reports::list_reports))
+        .route("/admin/reports/{id}/review", post(routes::reports::review_report))
         // ---- Admin bot management (internal service accounts) ----
         .route("/admin/bots", get(routes::bots::admin_list_bots).post(routes::bots::admin_create_bot))
         .route("/admin/bots/{pubkey}", get(routes::bots::admin_get_bot).delete(routes::bots::admin_delete_bot))
@@ -132,6 +138,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/federation/dm", post(routes::dms::receive_federated_dm))
         .route("/federation/badge-offer", post(federation::handlers::receive_badge_offer))
         .route("/federation/badge-revocations", get(routes::badges::federation_badge_revocations))
+        .route("/federation/banlist", get(routes::moderation::get_federation_banlist))
         .route("/friends", get(routes::friends::list_friends).post(routes::friends::send_friend_request))
         .route("/friends/pending", get(routes::friends::list_pending_requests))
         .route("/friends/{public_key}/accept", post(routes::friends::accept_friend_request))
@@ -324,6 +331,33 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/identity/dm-blocks",
             put(routes::identity::put_dm_blocks).get(routes::identity::get_dm_blocks),
         )
+        // ---- Global message search (Task #28) ----
+        .route("/search", get(routes::search::search_messages))
+        // ---- Custom emojis (Task #29) ----
+        .route("/emojis", get(routes::emojis::list_emojis))
+        .route("/emojis/{id}/image", get(routes::emojis::get_emoji_image))
+        .route("/admin/emojis", post(routes::emojis::create_emoji))
+        .route("/admin/emojis/{id}", axum::routing::delete(routes::emojis::delete_emoji))
+        // ---- Events / calendar (Task #30) ----
+        .route("/events", post(routes::events::create_event).get(routes::events::list_events))
+        .route(
+            "/events/{event_id}",
+            get(routes::events::get_event)
+                .put(routes::events::update_event)
+                .delete(routes::events::delete_event),
+        )
+        .route("/events/{event_id}/rsvp", post(routes::events::rsvp_event))
+        .route("/events/{event_id}/rsvps", get(routes::events::list_rsvps))
+        // ---- Native polls (Task #31) ----
+        .route("/channels/{channel_id}/polls", post(routes::polls::create_poll))
+        .route(
+            "/polls/{poll_id}",
+            get(routes::polls::get_poll).delete(routes::polls::delete_poll),
+        )
+        .route("/polls/{poll_id}/vote", post(routes::polls::vote_poll))
+        // ---- Web admin panel ----
+        .route("/admin/panel", get(routes::admin_panel::serve_panel))
+        .route("/admin/stats", get(routes::admin_panel::get_stats))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(attach_request_id))
         .with_state(state)

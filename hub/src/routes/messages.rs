@@ -129,6 +129,7 @@ pub async fn send_message(
                     reactions: Vec::new(),
                     reply_to: None,
                     visible_to_pubkey: Some(user.public_key),
+                    reply_count: 0,
                 };
                 return Ok((StatusCode::OK, Json(placeholder)));
             }
@@ -147,6 +148,74 @@ pub async fn send_message(
         }
     }
 
+    // Auto-mod webhook check (fail-open: allow on timeout, error, or any non-403 response).
+    // Runs BEFORE the INSERT so a block never stores anything.
+    {
+        let webhook_url = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM hub_settings WHERE key = 'moderation_webhook_url'",
+        )
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+
+        if !webhook_url.is_empty() {
+            let secret = sqlx::query_scalar::<_, String>(
+                "SELECT value FROM hub_settings WHERE key = 'moderation_webhook_secret'",
+            )
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+
+            let payload = serde_json::json!({
+                "message_id": &id,
+                "channel_id": &channel_id,
+                "sender_pubkey": &user.public_key,
+                "content": &req.content,
+                "attachments_count": req.attachments.len(),
+                "timestamp": now,
+            });
+            let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+
+            // HMAC-SHA256 signature over the payload bytes.
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            let sig = if !secret.is_empty() {
+                let mut mac =
+                    Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+                mac.update(payload_str.as_bytes());
+                hex::encode(mac.finalize().into_bytes())
+            } else {
+                String::new()
+            };
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                state
+                    .http_client
+                    .post(&webhook_url)
+                    .header("X-Voxply-Signature", &sig)
+                    .header("Content-Type", "application/json")
+                    .body(payload_str)
+                    .send(),
+            )
+            .await;
+
+            // Block only on an explicit 403 from the webhook; everything else is fail-open.
+            if let Ok(Ok(resp)) = result {
+                if resp.status() == reqwest::StatusCode::FORBIDDEN {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        "Message blocked by moderation policy".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     sqlx::query(
         "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
@@ -160,6 +229,16 @@ pub async fn send_message(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Increment reply_count on the parent message when this is a reply.
+    if let Some(parent_id) = &req.reply_to {
+        let _ = sqlx::query(
+            "UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = ?",
+        )
+        .bind(parent_id)
+        .execute(&state.db)
+        .await;
+    }
 
     let reply_ctx = if let Some(parent_id) = &req.reply_to {
         load_reply_context(&state.db, parent_id).await?
@@ -187,6 +266,7 @@ pub async fn send_message(
         reactions: Vec::new(),
         reply_to: reply_ctx,
         visible_to_pubkey: None,
+        reply_count: 0,
     };
 
     {
@@ -280,15 +360,15 @@ pub async fn delete_message(
     user: AuthUser,
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT sender, channel_id FROM messages WHERE id = ?",
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT sender, channel_id, reply_to FROM messages WHERE id = ?",
     )
     .bind(&message_id)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (sender, msg_channel) = row
+    let (sender, msg_channel, reply_to) = row
         .ok_or((StatusCode::NOT_FOUND, "Message not found".to_string()))?;
     if msg_channel != channel_id {
         return Err((StatusCode::NOT_FOUND, "Message not in this channel".to_string()));
@@ -305,6 +385,16 @@ pub async fn delete_message(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Decrement reply_count on the parent when a reply is removed.
+    if let Some(parent_id) = reply_to {
+        let _ = sqlx::query(
+            "UPDATE messages SET reply_count = MAX(0, COALESCE(reply_count, 0) - 1) WHERE id = ?",
+        )
+        .bind(&parent_id)
+        .execute(&state.db)
+        .await;
+    }
 
     {
         let ws_msg = crate::routes::chat_models::WsServerMessage::MessageDeleted {
@@ -333,7 +423,8 @@ async fn load_message(
 ) -> Result<MessageResponse, (StatusCode, String)> {
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
-                m.content, m.attachments, m.reply_to, m.created_at, m.edited_at
+                m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
+                COALESCE(m.reply_count, 0) as reply_count
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = ?",
     )
@@ -360,6 +451,7 @@ async fn load_message(
         reactions,
         reply_to,
         visible_to_pubkey: None,
+        reply_count: row.reply_count,
     })
 }
 
@@ -376,50 +468,66 @@ pub async fn get_messages(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
 
-    let rows = match (search, &params.before) {
-        // Search mode: ignores `before` for now — search returns the most
-        // recent N matches across the whole channel. Good enough for v1.
-        (Some(q), _) => {
-            sqlx::query_as::<_, MessageRow>(
-                "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at
-                 FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                 WHERE m.channel_id = ?
-                   AND m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
-                 ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
-            )
-            .bind(&channel_id)
-            .bind(q)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await
+    let rows = if let Some(ref root_id) = params.thread_root {
+        // Thread mode: return all replies to this root, oldest first.
+        sqlx::query_as::<_, MessageRow>(
+            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+             FROM messages m LEFT JOIN users u ON m.sender = u.public_key
+             WHERE m.channel_id = ? AND m.reply_to = ?
+             ORDER BY m.created_at ASC, m.rowid ASC LIMIT ?",
+        )
+        .bind(&channel_id)
+        .bind(root_id)
+        .bind(limit)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    } else {
+        match (search, &params.before) {
+            // Search mode: ignores `before` for now — search returns the most
+            // recent N matches across the whole channel. Good enough for v1.
+            (Some(q), _) => {
+                sqlx::query_as::<_, MessageRow>(
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                     FROM messages m LEFT JOIN users u ON m.sender = u.public_key
+                     WHERE m.channel_id = ?
+                       AND m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
+                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+                )
+                .bind(&channel_id)
+                .bind(q)
+                .bind(limit)
+                .fetch_all(&state.db)
+                .await
+            }
+            (None, Some(before_id)) => {
+                sqlx::query_as::<_, MessageRow>(
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                     FROM messages m LEFT JOIN users u ON m.sender = u.public_key
+                     WHERE m.channel_id = ? AND m.rowid < (SELECT rowid FROM messages WHERE id = ?)
+                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+                )
+                .bind(&channel_id)
+                .bind(before_id)
+                .bind(limit)
+                .fetch_all(&state.db)
+                .await
+            }
+            (None, None) => {
+                sqlx::query_as::<_, MessageRow>(
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                     FROM messages m LEFT JOIN users u ON m.sender = u.public_key
+                     WHERE m.channel_id = ?
+                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+                )
+                .bind(&channel_id)
+                .bind(limit)
+                .fetch_all(&state.db)
+                .await
+            }
         }
-        (None, Some(before_id)) => {
-            sqlx::query_as::<_, MessageRow>(
-                "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at
-                 FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                 WHERE m.channel_id = ? AND m.rowid < (SELECT rowid FROM messages WHERE id = ?)
-                 ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
-            )
-            .bind(&channel_id)
-            .bind(before_id)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await
-        }
-        (None, None) => {
-            sqlx::query_as::<_, MessageRow>(
-                "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at
-                 FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                 WHERE m.channel_id = ?
-                 ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
-            )
-            .bind(&channel_id)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await
-        }
-    }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    };
 
     let mut messages: Vec<MessageResponse> = Vec::with_capacity(rows.len());
     for r in rows {
@@ -441,6 +549,7 @@ pub async fn get_messages(
             reactions,
             reply_to,
             visible_to_pubkey: None,
+            reply_count: r.reply_count,
         });
     }
 
@@ -458,6 +567,7 @@ struct MessageRow {
     reply_to: Option<String>,
     created_at: i64,
     edited_at: Option<i64>,
+    reply_count: i64,
 }
 
 /// Load a small preview of a parent message for the reply chip. Returns
