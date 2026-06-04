@@ -191,6 +191,8 @@ async fn main() -> Result<()> {
         http_client,
         voice_channels: RwLock::new(HashMap::new()),
         voice_addr_map: RwLock::new(HashMap::new()),
+        voice_sender_ids: RwLock::new(HashMap::new()),
+        voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_udp_port,
         voice_event_tx,
         dm_tx,
@@ -221,7 +223,17 @@ async fn main() -> Result<()> {
                         let map = voice_state.voice_addr_map.read().await;
                         map.get(&from_addr).cloned()
                     };
-                    if let Some((channel_id, _sender_pk)) = lookup {
+                    if let Some((channel_id, sender_pk)) = lookup {
+                        // Look up the sender's sender_id for this channel
+                        let sender_id: u16 = {
+                            let sids = voice_state.voice_sender_ids.read().await;
+                            sids.get(&channel_id)
+                                .and_then(|m| m.get(&sender_pk))
+                                .copied()
+                                .unwrap_or(0)
+                        };
+                        let sender_id_bytes = sender_id.to_be_bytes();
+
                         // Collect destinations under the read lock, then drop it.
                         let dests: Vec<SocketAddr> = {
                             let channels = voice_state.voice_channels.read().await;
@@ -236,9 +248,12 @@ async fn main() -> Result<()> {
                                 })
                                 .unwrap_or_default()
                         };
-                        // Lock is dropped. Do syscalls without holding it.
+                        // Build outbound packet with sender_id prepended
+                        let mut outbound = Vec::with_capacity(2 + packet_data.len());
+                        outbound.extend_from_slice(&sender_id_bytes);
+                        outbound.extend_from_slice(&packet_data);
                         for addr in dests {
-                            let _ = voice_socket.send_to(&packet_data, addr).await;
+                            let _ = voice_socket.send_to(&outbound, addr).await;
                         }
                     }
                 }

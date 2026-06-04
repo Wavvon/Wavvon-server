@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::routes::chat_models::{
     HubStreamInfo, VoiceParticipantInfo, WsClientMessage, WsParams, WsServerMessage,
+    VoiceRosterEntry,
 };
 use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
 
@@ -416,6 +417,19 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
 
                                 voice_channel = Some(channel_id.clone());
 
+                                // Assign sender_id to this participant
+                                let sender_id: u16 = {
+                                    let mut counter = state.voice_next_sender_id.write().await;
+                                    let c = counter.entry(channel_id.clone()).or_insert(0);
+                                    let id = *c;
+                                    *c = c.wrapping_add(1);
+                                    id
+                                };
+                                state.voice_sender_ids.write().await
+                                    .entry(channel_id.clone())
+                                    .or_default()
+                                    .insert(public_key.clone(), sender_id);
+
                                 let participants = get_voice_participants(&state, &channel_id).await;
 
                                 let msg = WsServerMessage::VoiceJoined {
@@ -443,6 +457,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                             public_key: public_key.clone(),
                                             display_name: display_name.clone(),
                                         },
+                                    },
+                                ));
+
+                                // Broadcast current roster (with sender_ids) so all clients can update their maps
+                                let roster = get_voice_roster(&state, &channel_id).await;
+                                let _ = state.voice_event_tx.send((
+                                    channel_id.clone(),
+                                    WsServerMessage::VoiceRosterUpdate {
+                                        channel_id: channel_id.clone(),
+                                        participants: roster,
                                     },
                                 ));
 
@@ -1421,6 +1445,33 @@ async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
             public_key: public_key.to_string(),
         },
     ));
+
+    // Remove sender_id mapping
+    {
+        let mut sids = state.voice_sender_ids.write().await;
+        if let Some(ch_map) = sids.get_mut(channel_id) {
+            ch_map.remove(public_key);
+            if ch_map.is_empty() {
+                sids.remove(channel_id);
+            }
+        }
+    }
+    // Also clean up counter if channel is now empty
+    {
+        let channels = state.voice_channels.read().await;
+        if !channels.contains_key(channel_id) {
+            state.voice_next_sender_id.write().await.remove(channel_id);
+        }
+    }
+    // Broadcast updated roster
+    let roster = get_voice_roster(state, channel_id).await;
+    let _ = state.voice_event_tx.send((
+        channel_id.to_string(),
+        WsServerMessage::VoiceRosterUpdate {
+            channel_id: channel_id.to_string(),
+            participants: roster,
+        },
+    ));
 }
 
 /// Broadcast a v2 signaling envelope via `chat_tx` using `ChatEvent::ScreenShareSignal`
@@ -1459,6 +1510,33 @@ async fn get_voice_participants(state: &AppState, channel_id: &str) -> Vec<Voice
 
         result.push(VoiceParticipantInfo {
             public_key: pk.clone(),
+            display_name,
+        });
+    }
+    result
+}
+
+async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<VoiceRosterEntry> {
+    let sender_ids = state.voice_sender_ids.read().await;
+    let ch_map = match sender_ids.get(channel_id) {
+        Some(m) => m.clone(),
+        None => return vec![],
+    };
+    drop(sender_ids);
+
+    let mut result = Vec::new();
+    for (pk, sid) in ch_map {
+        let display_name: Option<String> = sqlx::query_scalar(
+            "SELECT display_name FROM users WHERE public_key = ?",
+        )
+        .bind(&pk)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        result.push(VoiceRosterEntry {
+            sender_id: sid,
+            public_key: pk,
             display_name,
         });
     }

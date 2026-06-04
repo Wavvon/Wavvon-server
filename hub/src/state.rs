@@ -139,6 +139,10 @@ pub struct AppState {
     /// Reverse index: SocketAddr → (channel_id, public_key).
     /// Kept in sync with voice_channels by VoiceJoin/VoiceLeave handlers in ws.rs.
     pub voice_addr_map: RwLock<HashMap<SocketAddr, (String, String)>>,
+    /// sender_id assignment: channel_id → { pubkey → sender_id }
+    pub voice_sender_ids: RwLock<HashMap<String, HashMap<String, u16>>>,
+    /// Next available sender_id counter per channel
+    pub voice_next_sender_id: RwLock<HashMap<String, u16>>,
     pub voice_udp_port: u16,
     pub voice_event_tx: broadcast::Sender<(String, WsServerMessage)>,
     // DM relay: broadcast DMs to all WS clients (they filter by conversation membership)

@@ -431,6 +431,11 @@ pub enum WsServerMessage {
         public_key: String,
         speaking: bool,
     },
+    #[serde(rename = "voice_roster_update")]
+    VoiceRosterUpdate {
+        channel_id: String,
+        participants: Vec<VoiceRosterEntry>,
+    },
     /// Generic error message, shown to the user as a toast. `context` is a
     /// short machine-readable hint (e.g. "voice_join") so the client can
     /// route the message contextually if it wants.
@@ -647,6 +652,14 @@ pub struct TrackMeta {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VoiceParticipantInfo {
     pub public_key: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct VoiceRosterEntry {
+    pub sender_id: u16,
+    pub public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
 }
 
