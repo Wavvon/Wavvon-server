@@ -134,6 +134,10 @@ pub struct MessageResponse {
     /// NULL / None = normal broadcast. Used for ephemeral bot replies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_to_pubkey: Option<String>,
+    /// Number of direct replies to this message (denormalized counter).
+    /// 0 for replies themselves; only root messages accumulate a non-zero count.
+    #[serde(default)]
+    pub reply_count: i64,
 }
 
 #[derive(Deserialize)]
@@ -212,6 +216,8 @@ pub enum ChatEvent {
     /// Broadcasts go to all voice-channel subscribers; offer/answer/ice are
     /// targeted and filtered in the WS dispatch loop by to_pubkey.
     Video { channel_id: String },
+    /// Native poll vote-tally broadcast after every upsert.
+    Poll { channel_id: String },
 }
 
 impl ChatEvent {
@@ -228,7 +234,8 @@ impl ChatEvent {
             | ChatEvent::Forum { channel_id }
             | ChatEvent::Game { channel_id }
             | ChatEvent::VoiceZone { channel_id }
-            | ChatEvent::Video { channel_id } => channel_id,
+            | ChatEvent::Video { channel_id }
+            | ChatEvent::Poll { channel_id } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
             // (delivery is handled via the dedicated to_pubkey check below).
@@ -244,6 +251,9 @@ pub struct PaginationParams {
     /// Optional search query: if present, filter messages by content LIKE
     /// %q% (case-insensitive on SQLite). Pagination via before still works.
     pub q: Option<String>,
+    /// Optional thread root message id. When present, return only replies
+    /// (messages where reply_to = thread_root) ordered by created_at ASC.
+    pub thread_root: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -756,6 +766,14 @@ pub enum WsServerMessage {
         session_id: String,
         from_pubkey: String,
         payload: serde_json::Value,
+    },
+
+    /// Live vote-tally update broadcast after every vote upsert.
+    #[serde(rename = "poll_vote_updated")]
+    PollVoteUpdated {
+        channel_id: String,
+        poll_id: String,
+        totals: std::collections::HashMap<String, i64>,
     },
 }
 

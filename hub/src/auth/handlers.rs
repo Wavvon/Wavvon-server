@@ -226,6 +226,23 @@ pub async fn verify(
         return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
     }
 
+    // Federated bans: check against the master pubkey (or canonical pubkey for
+    // legacy single-key users) so a new subkey cert can't bypass the ban.
+    {
+        let check_pubkey = master_pubkey.as_deref().unwrap_or(&canonical_pubkey);
+        let is_fed_banned: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 0 FROM federated_bans WHERE target_master_pubkey = ?",
+        )
+        .bind(check_pubkey)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false);
+
+        if is_fed_banned {
+            return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+        }
+    }
+
     // Check security level requirement
     let min_level: u32 = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'min_security_level'",

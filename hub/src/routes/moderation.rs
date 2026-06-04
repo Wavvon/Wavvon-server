@@ -889,3 +889,62 @@ pub async fn is_voice_muted(
 
     Ok(count > 0)
 }
+
+// ---- Federated ban list endpoint ----
+
+/// GET /federation/banlist
+///
+/// Returns this hub's local ban list as a signed JSON payload so subscribing
+/// hubs can ingest it via banlist_worker. Unauthenticated — the Ed25519
+/// signature is the authority, matching the badge and cert patterns.
+pub async fn get_federation_banlist(
+    State(state): State<Arc<AppState>>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let bans: Vec<(String, Option<String>, i64)> = sqlx::query_as(
+        "SELECT target_public_key, reason, created_at FROM bans ORDER BY created_at DESC LIMIT 1000",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let entries: Vec<serde_json::Value> = bans
+        .iter()
+        .map(|(pubkey, reason, added_at)| {
+            serde_json::json!({
+                "master_pubkey": pubkey,
+                "reason": reason,
+                "added_at": added_at,
+            })
+        })
+        .collect();
+
+    let payload = serde_json::json!({
+        "issuer_pubkey": state.hub_identity.public_key_hex(),
+        "issued_at": now,
+        "entries": entries,
+    });
+
+    let payload_str = match serde_json::to_string(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialise error: {e}"))
+                .into_response();
+        }
+    };
+
+    let sig = state.hub_identity.sign(payload_str.as_bytes());
+    let signed = serde_json::json!({
+        "payload": payload,
+        "signature": hex::encode(sig.to_bytes()),
+    });
+
+    Json(signed).into_response()
+}

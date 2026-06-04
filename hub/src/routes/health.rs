@@ -61,6 +61,19 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     let branding = crate::routes::hub::read_branding(&state).await;
     let cert_requirement = crate::routes::certs::load_cert_requirement(&state).await;
 
+    let emoji_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_emojis")
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+
+    // Include the hub key rotation payload if one is active.
+    let rotation: Option<serde_json::Value> =
+        std::fs::read_to_string("hub_rotation.json")
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok());
+
     Json(InfoResponse {
         name: branding.name,
         description: branding.description,
@@ -78,6 +91,8 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         cert_requirement,
         screen_share_v2: true,
         sfu_url: std::env::var("VOXPLY_SFU_URL").ok(),
+        emoji_count,
+        rotation,
     })
 }
 
@@ -127,4 +142,12 @@ pub struct InfoResponse {
     /// instead of doing full mesh WebRTC. Read from `VOXPLY_SFU_URL` env var.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sfu_url: Option<String>,
+    /// Number of custom emojis uploaded to this hub. Clients can skip
+    /// fetching the emoji list when this is 0.
+    pub emoji_count: i64,
+    /// Hub key rotation payload, present during the transition window after
+    /// a `rotate-key` ceremony. Peers verify the old-key signature and
+    /// re-pin the new pubkey. Absent when no rotation is in progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation: Option<serde_json::Value>,
 }
