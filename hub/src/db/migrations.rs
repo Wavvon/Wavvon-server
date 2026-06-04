@@ -1572,6 +1572,12 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await;  // ignore error — column may already exist on older schemas
 
+    // ---- Task #17: Video signaling ----
+    // Grant use_video to builtin-owner; open to all by default in WS handler
+    // (admins can restrict via role management).
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'use_video')")
+        .execute(pool).await?;
+
     tracing::info!("Database migrations complete");
     Ok(())
 }

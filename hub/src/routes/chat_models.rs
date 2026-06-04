@@ -203,6 +203,10 @@ pub enum ChatEvent {
     /// Voice zone lifecycle and position-update events (voice_zone_created,
     /// voice_zone_destroyed, voice_position_updated). Routing is by channel_id.
     VoiceZone { channel_id: String },
+    /// Video enable/disable broadcasts and targeted offer/answer/ICE signals.
+    /// Broadcasts go to all voice-channel subscribers; offer/answer/ice are
+    /// targeted and filtered in the WS dispatch loop by to_pubkey.
+    Video { channel_id: String },
 }
 
 impl ChatEvent {
@@ -218,7 +222,8 @@ impl ChatEvent {
             | ChatEvent::ScreenShareSignal { channel_id, .. }
             | ChatEvent::Forum { channel_id }
             | ChatEvent::Game { channel_id }
-            | ChatEvent::VoiceZone { channel_id } => channel_id,
+            | ChatEvent::VoiceZone { channel_id }
+            | ChatEvent::Video { channel_id } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
             // (delivery is handled via the dedicated to_pubkey check below).
@@ -342,6 +347,24 @@ pub enum WsClientMessage {
         source_channel_id: String,
         stream_id: String,
     },
+
+    // ---- Video signaling: client → hub ----
+
+    #[serde(rename = "video_enable")]
+    VideoEnable { channel_id: String },
+
+    #[serde(rename = "video_disable")]
+    VideoDisable { channel_id: String },
+
+    #[serde(rename = "video_offer")]
+    VideoOffer { channel_id: String, to_pubkey: String, sdp: String },
+
+    #[serde(rename = "video_answer")]
+    VideoAnswer { channel_id: String, to_pubkey: String, sdp: String },
+
+    #[serde(rename = "video_ice")]
+    VideoIce { channel_id: String, to_pubkey: String, candidate: String },
+
     /// Bot sends this after connecting to request replay of missed events.
     #[serde(rename = "resume")]
     Resume { since_seq: i64 },
@@ -556,6 +579,33 @@ pub enum WsServerMessage {
         stream_id: String,
         from_pubkey: String,
     },
+
+    // ---- Video signaling: hub → client ----
+
+    /// Broadcast to voice channel: a participant enabled their webcam.
+    #[serde(rename = "video_participant_enabled")]
+    VideoParticipantEnabled { channel_id: String, pubkey: String },
+
+    /// Broadcast to voice channel: a participant disabled their webcam.
+    #[serde(rename = "video_participant_disabled")]
+    VideoParticipantDisabled { channel_id: String, pubkey: String },
+
+    /// Snapshot of all currently video-enabled pubkeys in a channel.
+    /// Sent to a joining voice participant.
+    #[serde(rename = "video_participants")]
+    VideoParticipants { channel_id: String, pubkeys: Vec<String> },
+
+    /// SDP offer forwarded to the target peer (from_pubkey = offerer).
+    #[serde(rename = "video_offer_in")]
+    VideoOfferIn { channel_id: String, from_pubkey: String, to_pubkey: String, sdp: String },
+
+    /// SDP answer forwarded to the target peer (from_pubkey = answerer).
+    #[serde(rename = "video_answer_in")]
+    VideoAnswerIn { channel_id: String, from_pubkey: String, to_pubkey: String, sdp: String },
+
+    /// ICE candidate forwarded to the target peer.
+    #[serde(rename = "video_ice_in")]
+    VideoIceIn { channel_id: String, from_pubkey: String, to_pubkey: String, candidate: String },
 
     /// Acknowledgement sent to a subscriber after StreamSubscribe succeeds.
     /// The hub will now forward chunks for this stream to the subscriber.

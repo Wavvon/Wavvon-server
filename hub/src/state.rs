@@ -200,6 +200,9 @@ pub struct AppState {
     /// snapshots for games that opt into persistence.
     pub active_game_sessions: Arc<Mutex<HashMap<String, GameSessionState>>>,
 
+    /// channel_id → pubkeys currently with video enabled
+    pub video_channels: RwLock<HashMap<String, HashSet<String>>>,
+
     // ---- Farm integration (Phase 1, dual-issue step 1) ----
 
     /// Wall time when this hub process started. Used by /metrics.

@@ -214,6 +214,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     continue;
                                 }
                             }
+                            // Video offer/answer/ice are targeted to to_pubkey.
+                            // video_participant_enabled/disabled are broadcasts (no to_pubkey).
+                            if let crate::routes::chat_models::ChatEvent::Video { .. } = &event {
+                                let val: serde_json::Value = serde_json::from_str(&pre_json).unwrap_or_default();
+                                if let Some(target) = val.get("to_pubkey").and_then(|v| v.as_str()) {
+                                    if target != &public_key {
+                                        continue;
+                                    }
+                                }
+                            }
                             let json = pre_json.to_string();
                             if is_replaying {
                                 replay_buffer.push(json);
@@ -499,6 +509,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     let _ = ws_tx.send(Message::Text(json.into())).await;
                                 }
 
+                                // Send current video participants snapshot to the joining client.
+                                let video_pubkeys: Vec<String> = {
+                                    let vc = state.video_channels.read().await;
+                                    vc.get(&channel_id)
+                                        .map(|s| s.iter().cloned().collect())
+                                        .unwrap_or_default()
+                                };
+                                if !video_pubkeys.is_empty() {
+                                    let msg = WsServerMessage::VideoParticipants {
+                                        channel_id: channel_id.clone(),
+                                        pubkeys: video_pubkeys,
+                                    };
+                                    let json = serde_json::to_string(&msg).unwrap();
+                                    let _ = ws_tx.send(Message::Text(json.into())).await;
+                                }
+
                                 // Publish member.joined audit event.
                                 {
                                     let state_c = state.clone();
@@ -549,6 +575,88 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                         speaking,
                                     },
                                 ));
+                            }
+
+                            // ---- Video signaling: enable/disable and WebRTC relay ----
+
+                            Ok(WsClientMessage::VideoEnable { channel_id }) => {
+                                // Require that the user is currently in voice on this channel.
+                                let in_voice = state.voice_channels.read().await
+                                    .get(&channel_id)
+                                    .map(|c| c.contains_key(&public_key))
+                                    .unwrap_or(false);
+                                if !in_voice {
+                                    let err = WsServerMessage::Error {
+                                        context: "video_enable".to_string(),
+                                        message: "Must be in voice to enable video.".to_string(),
+                                    };
+                                    let _ = ws_tx.send(Message::Text(serde_json::to_string(&err).unwrap().into())).await;
+                                    continue;
+                                }
+                                state.video_channels.write().await
+                                    .entry(channel_id.clone())
+                                    .or_default()
+                                    .insert(public_key.clone());
+                                let msg = WsServerMessage::VideoParticipantEnabled {
+                                    channel_id: channel_id.clone(),
+                                    pubkey: public_key.clone(),
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::Video { channel_id };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
+                            Ok(WsClientMessage::VideoDisable { channel_id }) => {
+                                {
+                                    let mut vc = state.video_channels.write().await;
+                                    if let Some(set) = vc.get_mut(&channel_id) {
+                                        set.remove(&public_key);
+                                        if set.is_empty() { vc.remove(&channel_id); }
+                                    }
+                                }
+                                let msg = WsServerMessage::VideoParticipantDisabled {
+                                    channel_id: channel_id.clone(),
+                                    pubkey: public_key.clone(),
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::Video { channel_id };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
+                            Ok(WsClientMessage::VideoOffer { channel_id, to_pubkey, sdp }) => {
+                                let msg = WsServerMessage::VideoOfferIn {
+                                    channel_id: channel_id.clone(),
+                                    from_pubkey: public_key.clone(),
+                                    to_pubkey: to_pubkey.clone(),
+                                    sdp,
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::Video { channel_id };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
+                            Ok(WsClientMessage::VideoAnswer { channel_id, to_pubkey, sdp }) => {
+                                let msg = WsServerMessage::VideoAnswerIn {
+                                    channel_id: channel_id.clone(),
+                                    from_pubkey: public_key.clone(),
+                                    to_pubkey: to_pubkey.clone(),
+                                    sdp,
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::Video { channel_id };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
+                            }
+
+                            Ok(WsClientMessage::VideoIce { channel_id, to_pubkey, candidate }) => {
+                                let msg = WsServerMessage::VideoIceIn {
+                                    channel_id: channel_id.clone(),
+                                    from_pubkey: public_key.clone(),
+                                    to_pubkey: to_pubkey.clone(),
+                                    candidate,
+                                };
+                                let ev = crate::routes::chat_models::ChatEvent::Video { channel_id };
+                                let json: std::sync::Arc<str> = std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+                                let _ = state.chat_tx.send((ev, json));
                             }
 
                             // ---- Proximity voice: zone lifecycle and position updates ----
@@ -1646,6 +1754,40 @@ async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
             }
         }
     }
+    // Remove from video_channels if present and broadcast disable to channel.
+    {
+        let should_broadcast = {
+            let mut vc = state.video_channels.write().await;
+            if let Some(ch_set) = vc.get_mut(channel_id) {
+                if ch_set.remove(public_key) {
+                    if ch_set.is_empty() {
+                        vc.remove(channel_id);
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        if should_broadcast {
+            let _ = state.chat_tx.send((
+                crate::routes::chat_models::ChatEvent::Video {
+                    channel_id: channel_id.to_string(),
+                },
+                std::sync::Arc::from(
+                    serde_json::to_string(&WsServerMessage::VideoParticipantDisabled {
+                        channel_id: channel_id.to_string(),
+                        pubkey: public_key.to_string(),
+                    })
+                    .unwrap()
+                    .as_str(),
+                ),
+            ));
+        }
+    }
+
     // Broadcast updated roster
     let roster = get_voice_roster(state, channel_id).await;
     let _ = state.voice_event_tx.send((

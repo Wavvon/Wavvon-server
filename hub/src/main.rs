@@ -205,6 +205,7 @@ async fn main() -> Result<()> {
         last_farm_pubkey_fetch,
         voice_zones: RwLock::new(HashMap::new()),
         active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
     });
 
