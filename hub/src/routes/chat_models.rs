@@ -218,6 +218,10 @@ pub enum ChatEvent {
     Video { channel_id: String },
     /// Native poll vote-tally broadcast after every upsert.
     Poll { channel_id: String },
+    /// Message pinned in a channel.
+    MessagePinned { channel_id: String },
+    /// Message unpinned from a channel.
+    MessageUnpinned { channel_id: String },
     /// Whisper start/stop notification — delivered only to the resolved recipient set.
     /// `channel_id` is the whisperer's current voice channel (used only to satisfy the
     /// channel_id() contract; filtering is done via `to_pubkeys` in the WS dispatch loop).
@@ -243,6 +247,8 @@ impl ChatEvent {
             | ChatEvent::VoiceZone { channel_id }
             | ChatEvent::Video { channel_id }
             | ChatEvent::Poll { channel_id }
+            | ChatEvent::MessagePinned { channel_id }
+            | ChatEvent::MessageUnpinned { channel_id }
             | ChatEvent::WhisperSignal { channel_id, .. } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
@@ -783,6 +789,20 @@ pub enum WsServerMessage {
         session_id: String,
         from_pubkey: String,
         payload: serde_json::Value,
+    },
+
+    /// A message was pinned in a channel.
+    #[serde(rename = "message_pinned")]
+    MessagePinned {
+        channel_id: String,
+        message_id: String,
+    },
+
+    /// A message was unpinned from a channel.
+    #[serde(rename = "message_unpinned")]
+    MessageUnpinned {
+        channel_id: String,
+        message_id: String,
     },
 
     /// Live vote-tally update broadcast after every vote upsert.

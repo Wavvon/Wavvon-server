@@ -1758,6 +1758,39 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Feature: File / image uploads ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS upload_files (
+            id              TEXT PRIMARY KEY,
+            filename        TEXT NOT NULL,
+            original_name   TEXT NOT NULL,
+            mime_type       TEXT NOT NULL,
+            size_bytes      INTEGER NOT NULL,
+            uploader_pubkey TEXT NOT NULL,
+            channel_id      TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            created_at      INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Feature: Message pinning ----
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS channel_pins (
+            channel_id  TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            pinned_by   TEXT NOT NULL,
+            pinned_at   INTEGER NOT NULL,
+            PRIMARY KEY (channel_id, message_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // manage_messages permission seed (pins require it)
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_messages')")
+        .execute(pool).await?;
+
     tracing::info!("Database migrations complete");
 
     // Generate web admin token on first run

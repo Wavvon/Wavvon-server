@@ -1,0 +1,202 @@
+use std::sync::Arc;
+
+use axum::extract::{Multipart, Path, State};
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::Response;
+use axum::Json;
+use serde::Serialize;
+use uuid::Uuid;
+
+use crate::auth::middleware::AuthUser;
+use crate::state::AppState;
+
+// Max upload size: 25 MB in raw bytes
+const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+/// Allowed mime types for uploads.
+fn is_allowed_mime(mime: &str) -> bool {
+    mime.starts_with("image/")
+        || mime == "video/mp4"
+        || mime == "application/pdf"
+        || mime == "text/plain"
+}
+
+fn uploads_dir() -> String {
+    std::env::var("VOXPLY_UPLOADS_DIR").unwrap_or_else(|_| "./uploads/".to_string())
+}
+
+#[derive(Serialize)]
+pub struct UploadResponse {
+    pub url: String,
+    pub filename: String,
+    pub size_bytes: usize,
+    pub mime_type: String,
+}
+
+/// POST /channels/:channel_id/upload
+pub async fn upload_file(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(channel_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<UploadResponse>), (StatusCode, String)> {
+    // Verify channel exists.
+    let exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+            .bind(&channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
+    }
+
+    // Extract the "file" field from the multipart body.
+    let mut file_bytes: Option<Vec<u8>> = None;
+    let mut original_name = String::from("upload");
+    let mut content_type = String::from("application/octet-stream");
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Multipart error: {e}")))?
+    {
+        let field_name = field.name().unwrap_or("").to_string();
+        if field_name != "file" {
+            continue;
+        }
+
+        if let Some(fname) = field.file_name() {
+            original_name = fname.to_string();
+        }
+        if let Some(ct) = field.content_type() {
+            content_type = ct.to_string();
+        }
+
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Read error: {e}")))?;
+
+        if data.len() > MAX_UPLOAD_BYTES {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("File exceeds {}MB limit", MAX_UPLOAD_BYTES / 1024 / 1024),
+            ));
+        }
+
+        file_bytes = Some(data.to_vec());
+        break;
+    }
+
+    let bytes = file_bytes
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "No 'file' field in upload".to_string()))?;
+
+    // Mime type validation.
+    if !is_allowed_mime(&content_type) {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            format!("Mime type '{}' is not allowed", content_type),
+        ));
+    }
+
+    // Derive extension from original filename or mime type.
+    let ext = original_name
+        .rsplit('.')
+        .next()
+        .filter(|e| !e.is_empty() && e.len() <= 10)
+        .unwrap_or("bin");
+
+    let stored_filename = format!("{}.{}", Uuid::new_v4(), ext);
+    let dir = uploads_dir();
+
+    // Ensure directory exists.
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("FS error: {e}")))?;
+
+    let path = format!("{}/{}", dir.trim_end_matches('/'), stored_filename);
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Write error: {e}")))?;
+
+    let size = bytes.len();
+    let now = crate::auth::handlers::unix_timestamp();
+    let id = Uuid::new_v4().to_string();
+
+    sqlx::query(
+        "INSERT INTO upload_files (id, filename, original_name, mime_type, size_bytes, uploader_pubkey, channel_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(&stored_filename)
+    .bind(&original_name)
+    .bind(&content_type)
+    .bind(size as i64)
+    .bind(&user.public_key)
+    .bind(&channel_id)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadResponse {
+            url: format!("/uploads/{}", stored_filename),
+            filename: stored_filename,
+            size_bytes: size,
+            mime_type: content_type,
+        }),
+    ))
+}
+
+/// GET /uploads/:filename
+/// Public — no auth needed, filenames are unguessable UUIDs.
+pub async fn serve_upload(
+    Path(filename): Path<String>,
+) -> Result<Response, (StatusCode, String)> {
+    // Reject path traversal attempts.
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err((StatusCode::BAD_REQUEST, "Invalid filename".to_string()));
+    }
+
+    let dir = uploads_dir();
+    let path = format!("{}/{}", dir.trim_end_matches('/'), filename);
+
+    let data = tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            (StatusCode::NOT_FOUND, "File not found".to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("FS error: {e}"))
+        }
+    })?;
+
+    // Infer content-type from extension.
+    let mime = infer_mime_from_ext(&filename);
+
+    let mut resp = Response::new(axum::body::Body::from(data));
+    *resp.status_mut() = StatusCode::OK;
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_str(mime)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+
+    Ok(resp)
+}
+
+fn infer_mime_from_ext(filename: &str) -> &'static str {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp4" => "video/mp4",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}

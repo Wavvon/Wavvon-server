@@ -126,6 +126,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/webhooks/{id}", delete(routes::webhooks::delete_webhook))
         .route("/webhooks/{id}/{token}", post(routes::webhooks::post_webhook_message))
         .route("/users", get(routes::users::list_users))
+        .route("/users/{pubkey}/profile", get(routes::users::get_user_profile))
         .route("/channels/{channel_id}/members", get(routes::users::channel_members))
         .route("/voice/populations", get(routes::channels::voice_populations))
         .route("/voice/active-users", get(routes::channels::voice_active_users))
@@ -360,6 +361,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/events/{event_id}/rsvp", post(routes::events::rsvp_event))
         .route("/events/{event_id}/rsvps", get(routes::events::list_rsvps))
+        // ---- File uploads ----
+        .route("/channels/{channel_id}/upload", post(routes::uploads::upload_file))
+        .route("/uploads/{filename}", get(routes::uploads::serve_upload))
+        // ---- Message pinning ----
+        .route(
+            "/channels/{channel_id}/pins/{message_id}",
+            post(routes::pins::pin_message).delete(routes::pins::unpin_message),
+        )
+        .route("/channels/{channel_id}/pins", get(routes::pins::list_pins))
         // ---- Native polls (Task #31) ----
         .route("/channels/{channel_id}/polls", post(routes::polls::create_poll))
         .route(

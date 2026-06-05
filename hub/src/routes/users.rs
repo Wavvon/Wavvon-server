@@ -123,3 +123,108 @@ struct UserRow {
     avatar: Option<String>,
     is_bot: i64,
 }
+
+// ---------------------------------------------------------------------------
+// User profile endpoint
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct RoleSummary {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BadgeSummary {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Serialize)]
+pub struct UserProfileResponse {
+    pub public_key: String,
+    pub display_name: Option<String>,
+    pub avatar: Option<String>,
+    pub joined_at: i64,
+    pub roles: Vec<RoleSummary>,
+    pub badges: Vec<BadgeSummary>,
+}
+
+/// GET /users/:pubkey/profile
+pub async fn get_user_profile(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Path(pubkey): Path<String>,
+) -> Result<Json<UserProfileResponse>, (StatusCode, String)> {
+    let row: Option<(Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT display_name, avatar, first_seen_at FROM users WHERE public_key = ?",
+    )
+    .bind(&pubkey)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let (display_name, avatar, joined_at) =
+        row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    // Fetch roles assigned to this user (reuse the RoleResponse pattern from me.rs).
+    #[derive(sqlx::FromRow)]
+    struct RoleRow {
+        id: String,
+        name: String,
+        color: Option<String>,
+    }
+
+    let roles: Vec<RoleRow> = sqlx::query_as(
+        "SELECT r.id, r.name, NULL as color
+         FROM roles r
+         INNER JOIN user_roles ur ON r.id = ur.role_id
+         WHERE ur.user_public_key = ?
+         ORDER BY r.priority DESC",
+    )
+    .bind(&pubkey)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let role_summaries: Vec<RoleSummary> = roles
+        .into_iter()
+        .map(|r| RoleSummary {
+            id: r.id,
+            name: r.name,
+            color: r.color,
+        })
+        .collect();
+
+    // Fetch badges held by this user (from hub_badges table, linked via subject_pubkey
+    // stored inside the JSON payload).
+    #[derive(sqlx::FromRow)]
+    struct BadgeRow {
+        id: String,
+        label: String,
+    }
+
+    let badges: Vec<BadgeRow> = sqlx::query_as(
+        "SELECT id, label FROM issued_badges WHERE recipient_hub_pubkey = ? AND revoked_at IS NULL",
+    )
+    .bind(&pubkey)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let badge_summaries: Vec<BadgeSummary> = badges
+        .into_iter()
+        .map(|b| BadgeSummary { id: b.id, label: b.label })
+        .collect();
+
+    Ok(Json(UserProfileResponse {
+        public_key: pubkey,
+        display_name,
+        avatar,
+        joined_at,
+        roles: role_summaries,
+        badges: badge_summaries,
+    }))
+}
+
