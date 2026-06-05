@@ -443,13 +443,15 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await;
 
-    // Persisted DM messages (both local and federated deliveries land here)
+    // Persisted DM messages (both local and federated deliveries land here).
+    // content is nullable: encrypted messages (is_encrypted=1 or is_group_encrypted=1)
+    // set content to NULL and store the ciphertext in ciphertext_json instead.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dm_messages (
             id              TEXT PRIMARY KEY,
             conversation_id TEXT NOT NULL,
             sender          TEXT NOT NULL,
-            content         TEXT NOT NULL,
+            content         TEXT,
             signature       TEXT,
             created_at      INTEGER NOT NULL
         )",
@@ -1719,6 +1721,29 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await;
+
+    // Group E2E: sender key distribution store
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS group_sender_key_distributions (
+            id                 TEXT PRIMARY KEY,
+            conv_id            TEXT NOT NULL,
+            sender_pubkey      TEXT NOT NULL,
+            recipient_pubkey   TEXT NOT NULL,
+            sender_key_version INTEGER NOT NULL,
+            iteration          INTEGER NOT NULL,
+            wrapped_key_hex    TEXT NOT NULL,
+            wrap_nonce_hex     TEXT NOT NULL,
+            created_at         INTEGER NOT NULL,
+            UNIQUE(conv_id, sender_pubkey, recipient_pubkey, sender_key_version)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Group E2E: discriminate group vs 1:1 encrypted messages in dm_messages
+    let _ = sqlx::query("ALTER TABLE dm_messages ADD COLUMN is_group_encrypted INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
 
     tracing::info!("Database migrations complete");
 

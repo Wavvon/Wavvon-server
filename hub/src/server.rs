@@ -135,6 +135,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/conversations/{conversation_id}/messages",
             get(routes::dms::list_dm_messages),
         )
+        .route(
+            "/conversations/{conversation_id}/sender-keys",
+            get(routes::dms::get_sender_keys).put(routes::dms::push_sender_keys),
+        )
         .route("/federation/dm", post(routes::dms::receive_federated_dm))
         .route("/federation/badge-offer", post(federation::handlers::receive_badge_offer))
         .route("/federation/badge-revocations", get(routes::badges::federation_badge_revocations))

@@ -29,8 +29,10 @@ pub struct SendDmRequest {
     pub content: Option<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
-    /// Present instead of content when the message is E2E encrypted.
+    /// Present instead of content when the message is 1:1 E2E encrypted.
     pub encrypted_envelope: Option<EncryptedDmEnvelope>,
+    /// Present instead of content when the message is group E2E encrypted.
+    pub group_encrypted_envelope: Option<GroupEncryptedEnvelope>,
 }
 
 /// Wire envelope for an E2E encrypted 1:1 DM.
@@ -44,13 +46,55 @@ pub struct EncryptedDmEnvelope {
     pub signature_hex: String,
 }
 
+/// Wire envelope for a group E2E encrypted DM.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GroupEncryptedEnvelope {
+    pub sender_pubkey: String,
+    pub conv_id: String,
+    pub sender_key_version: u32,
+    pub iteration: u32,
+    pub ciphertext_hex: String,
+    pub nonce_hex: String,
+    pub signature_hex: String,
+}
+
+/// One recipient blob in a sender-key distribution push.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SenderKeyRecipientBlob {
+    pub recipient_pubkey: String,
+    /// AES-256-GCM ciphertext of (chain_key[32] || iteration_be[4])
+    pub wrapped_key_hex: String,
+    pub wrap_nonce_hex: String,
+    pub iteration: u32,
+}
+
+/// Body for PUT /conversations/:id/sender-keys
+#[derive(Deserialize)]
+pub struct PushSenderKeyRequest {
+    pub sender_key_version: u32,
+    pub recipients: Vec<SenderKeyRecipientBlob>,
+    /// Ed25519 sig over canonical bytes (see design doc)
+    pub signature_hex: String,
+}
+
+/// Row returned from GET /conversations/:id/sender-keys
+#[derive(Serialize)]
+pub struct GroupSenderKeyEntry {
+    pub sender_pubkey: String,
+    pub sender_key_version: u32,
+    pub iteration: u32,
+    pub wrapped_key_hex: String,
+    pub wrap_nonce_hex: String,
+    pub created_at: i64,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DmMessageResponse {
     pub id: String,
     pub conversation_id: String,
     pub sender: String,
     pub sender_name: Option<String>,
-    /// None when is_encrypted is true
+    /// None when is_encrypted or is_group_encrypted is true
     pub content: Option<String>,
     pub created_at: i64,
     #[serde(default)]
@@ -61,11 +105,13 @@ pub struct DmMessageResponse {
     /// remote recipients.
     #[serde(default)]
     pub delivery_failed: bool,
-    /// True when the message body is E2E encrypted
+    /// True when the message body is 1:1 E2E encrypted
     #[serde(default)]
     pub is_encrypted: bool,
     /// Present when is_encrypted is true
     pub encrypted_envelope: Option<EncryptedDmEnvelope>,
+    /// Present when the message is group E2E encrypted
+    pub group_encrypted_envelope: Option<GroupEncryptedEnvelope>,
 }
 
 /// Hub-to-hub DM delivery envelope (POST /federation/dm).
@@ -83,4 +129,5 @@ pub struct FederatedDmRequest {
     pub signature: Option<String>,
     pub created_at: i64,
     pub encrypted_envelope: Option<EncryptedDmEnvelope>,
+    pub group_encrypted_envelope: Option<GroupEncryptedEnvelope>,
 }

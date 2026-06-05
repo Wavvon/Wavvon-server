@@ -801,3 +801,364 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
     assert_eq!(arr[0]["content"], "fallback delivery");
 }
 
+// ---------------------------------------------------------------------------
+// Group E2E: sender-key distribution and encrypted group messages
+// ---------------------------------------------------------------------------
+
+/// Helper: build a deterministic (fake) group envelope signed by the given identity.
+fn make_group_envelope(
+    sender: &Identity,
+    conv_id: &str,
+    version: u32,
+    iteration: u32,
+) -> serde_json::Value {
+    let ciphertext_hex = "deadbeef".to_string();
+    let nonce_hex = "cafebabe000000000000000000000000".to_string();
+
+    // Canonical signing bytes (mirrors group_envelope_signing_bytes in dms.rs)
+    let mut signing_msg = b"voxply/group-dm-ciphertext/v1\0".to_vec();
+    for s in [conv_id, &version.to_string(), &iteration.to_string(), &ciphertext_hex, &nonce_hex] {
+        let b = s.as_bytes();
+        signing_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        signing_msg.extend_from_slice(b);
+    }
+    let sig = sender.sign(&signing_msg);
+
+    json!({
+        "sender_pubkey": sender.public_key_hex(),
+        "conv_id": conv_id,
+        "sender_key_version": version,
+        "iteration": iteration,
+        "ciphertext_hex": ciphertext_hex,
+        "nonce_hex": nonce_hex,
+        "signature_hex": hex::encode(sig.to_bytes()),
+    })
+}
+
+/// Helper: build a signed sender-key distribution request.
+fn make_push_sender_key_request(
+    sender: &Identity,
+    conv_id: &str,
+    version: u32,
+    recipients: &[(&Identity, &str, &str)], // (identity, wrapped_key_hex, wrap_nonce_hex)
+) -> serde_json::Value {
+    let recipient_blobs: Vec<serde_json::Value> = recipients
+        .iter()
+        .map(|(id, wk, wn)| {
+            json!({
+                "recipient_pubkey": id.public_key_hex(),
+                "wrapped_key_hex": wk,
+                "wrap_nonce_hex": wn,
+                "iteration": 0u32,
+            })
+        })
+        .collect();
+
+    // Build canonical signing bytes (mirrors sender_key_dist_signing_bytes in dms.rs)
+    let mut sorted: Vec<(&Identity, &str, &str)> = recipients.to_vec();
+    sorted.sort_by(|a, b| a.0.public_key_hex().cmp(&b.0.public_key_hex()));
+
+    let mut signing_msg = b"voxply/group-key-dist/v1\0".to_vec();
+    for s in [conv_id, &version.to_string()] {
+        let b = s.as_bytes();
+        signing_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
+        signing_msg.extend_from_slice(b);
+    }
+    for (id, wk, _wn) in &sorted {
+        for s in [&id.public_key_hex(), &wk.to_string()] {
+            let b = s.as_bytes();
+            signing_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            signing_msg.extend_from_slice(b);
+        }
+    }
+    let sig = sender.sign(&signing_msg);
+
+    json!({
+        "sender_key_version": version,
+        "recipients": recipient_blobs,
+        "signature_hex": hex::encode(sig.to_bytes()),
+    })
+}
+
+#[tokio::test]
+async fn push_and_get_sender_keys_happy_path() {
+    let server = setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let charlie = Identity::generate();
+    let alice_token = authenticate(&server, &alice).await;
+    authenticate(&server, &bob).await;
+    authenticate(&server, &charlie).await;
+
+    // Create a group conversation
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex(), charlie.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+
+    // Alice pushes sender keys for Bob and Charlie
+    let req = make_push_sender_key_request(
+        &alice,
+        &conv.id,
+        1,
+        &[
+            (&bob, "aabbccdd", "112233445566778899aabbccddeeff00"),
+            (&charlie, "eeff0011", "aabbccddeeff00112233445566778899"),
+        ],
+    );
+    let resp = server
+        .put(&format!("/conversations/{}/sender-keys", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&req)
+        .await;
+    resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // Bob retrieves his sender-key entry from Alice
+    let bob_token = authenticate(&server, &bob).await;
+    let resp = server
+        .get(&format!("/conversations/{}/sender-keys", conv.id))
+        .authorization_bearer(&bob_token)
+        .await;
+    resp.assert_status_ok();
+    let entries: serde_json::Value = resp.json();
+    let arr = entries.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "Bob should see exactly one sender-key entry (from Alice)");
+    assert_eq!(arr[0]["sender_pubkey"], alice.public_key_hex());
+    assert_eq!(arr[0]["sender_key_version"], 1);
+    assert_eq!(arr[0]["wrapped_key_hex"], "aabbccdd");
+}
+
+#[tokio::test]
+async fn push_sender_keys_rejected_for_non_member() {
+    let server = setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let eve = Identity::generate();
+    let alice_token = authenticate(&server, &alice).await;
+    authenticate(&server, &bob).await;
+    let eve_token = authenticate(&server, &eve).await;
+
+    // Alice creates a group with Bob
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+
+    // Eve (not a member) tries to push sender keys
+    let req = make_push_sender_key_request(
+        &eve,
+        &conv.id,
+        1,
+        &[(&bob, "aabbccdd", "112233445566778899aabbccddeeff00")],
+    );
+    let resp = server
+        .put(&format!("/conversations/{}/sender-keys", conv.id))
+        .authorization_bearer(&eve_token)
+        .json(&req)
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn push_sender_keys_rejected_for_dm_conversation() {
+    let server = setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let alice_token = authenticate(&server, &alice).await;
+    authenticate(&server, &bob).await;
+
+    // Create a 1:1 DM
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+    assert_eq!(conv.conv_type, "dm");
+
+    // Sender-key distribution must be rejected for 1:1 DMs
+    let req = make_push_sender_key_request(
+        &alice,
+        &conv.id,
+        1,
+        &[(&bob, "aabbccdd", "112233445566778899aabbccddeeff00")],
+    );
+    let resp = server
+        .put(&format!("/conversations/{}/sender-keys", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&req)
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn send_group_encrypted_dm_happy_path() {
+    let server = setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let charlie = Identity::generate();
+    let alice_token = authenticate(&server, &alice).await;
+    authenticate(&server, &bob).await;
+    authenticate(&server, &charlie).await;
+
+    // Create a group conversation
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex(), charlie.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+
+    // Alice sends a group-encrypted message
+    let envelope = make_group_envelope(&alice, &conv.id, 1, 0);
+    let resp = server
+        .post(&format!("/conversations/{}/messages", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "group_encrypted_envelope": envelope }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let msg: serde_json::Value = resp.json();
+    assert!(msg["group_encrypted_envelope"].is_object(), "response should include group envelope");
+    assert!(msg["encrypted_envelope"].is_null(), "1:1 envelope must be absent");
+
+    // Bob reads the conversation
+    let bob_token = authenticate(&server, &bob).await;
+    let resp = server
+        .get(&format!("/conversations/{}/messages", conv.id))
+        .authorization_bearer(&bob_token)
+        .await;
+    resp.assert_status_ok();
+    let messages: serde_json::Value = resp.json();
+    let arr = messages.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0]["group_encrypted_envelope"].is_object());
+    assert_eq!(arr[0]["group_encrypted_envelope"]["sender_key_version"], 1);
+    assert_eq!(arr[0]["group_encrypted_envelope"]["iteration"], 0);
+}
+
+#[tokio::test]
+async fn group_encrypted_dm_rejected_for_dm_conversation() {
+    let server = setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let alice_token = authenticate(&server, &alice).await;
+    authenticate(&server, &bob).await;
+
+    // 1:1 DM
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+
+    // Sending a group-encrypted envelope to a 1:1 DM must be rejected
+    let envelope = make_group_envelope(&alice, &conv.id, 1, 0);
+    let resp = server
+        .post(&format!("/conversations/{}/messages", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "group_encrypted_envelope": envelope }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn group_encrypted_dm_rejected_for_invalid_signature() {
+    let server = setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let charlie = Identity::generate();
+    let alice_token = authenticate(&server, &alice).await;
+    authenticate(&server, &bob).await;
+    authenticate(&server, &charlie).await;
+
+    // Create a group conversation
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex(), charlie.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+
+    // Build an envelope then corrupt the signature
+    let mut envelope = make_group_envelope(&alice, &conv.id, 1, 0);
+    envelope["signature_hex"] = json!("0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000");
+
+    let resp = server
+        .post(&format!("/conversations/{}/messages", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "group_encrypted_envelope": envelope }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn sender_key_upsert_replaces_old_entry() {
+    let server = setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let charlie = Identity::generate();
+    let alice_token = authenticate(&server, &alice).await;
+    authenticate(&server, &bob).await;
+    authenticate(&server, &charlie).await;
+
+    // Create a group conversation
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex(), charlie.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+
+    // Push version 1
+    let req1 = make_push_sender_key_request(
+        &alice,
+        &conv.id,
+        1,
+        &[(&bob, "aabbccdd", "112233445566778899aabbccddeeff00")],
+    );
+    server
+        .put(&format!("/conversations/{}/sender-keys", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&req1)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // Push version 1 again with different wrapped key (upsert)
+    let req2 = make_push_sender_key_request(
+        &alice,
+        &conv.id,
+        1,
+        &[(&bob, "11223344", "112233445566778899aabbccddeeff00")],
+    );
+    server
+        .put(&format!("/conversations/{}/sender-keys", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&req2)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // Bob should see the updated wrapped_key_hex, not the old one
+    let bob_token = authenticate(&server, &bob).await;
+    let resp = server
+        .get(&format!("/conversations/{}/sender-keys", conv.id))
+        .authorization_bearer(&bob_token)
+        .await;
+    resp.assert_status_ok();
+    let entries: serde_json::Value = resp.json();
+    let arr = entries.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["wrapped_key_hex"], "11223344", "upsert should replace old wrapped_key_hex");
+}
+
