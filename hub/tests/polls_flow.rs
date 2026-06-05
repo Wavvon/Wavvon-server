@@ -50,7 +50,7 @@ async fn setup() -> TestServer {
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        rate_limiters: Default::default(),
     });
     TestServer::new(server::create_router(state))
 }

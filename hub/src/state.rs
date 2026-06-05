@@ -161,6 +161,22 @@ pub struct WhisperTargetDef {
     pub id: String,
 }
 
+pub struct RateLimiters {
+    /// Per-IP fixed-window rate limiter for auth endpoints (10 attempts/60 s).
+    pub auth: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
+    pub messages: Mutex<HashMap<String, (u32, Instant)>>,
+}
+
+impl Default for RateLimiters {
+    fn default() -> Self {
+        Self {
+            auth: Mutex::new(HashMap::new()),
+            messages: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
 pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
@@ -236,9 +252,8 @@ pub struct AppState {
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
 
-    /// Per-IP fixed-window rate limiter for auth endpoints.
-    /// key = IP string, value = (attempt_count, window_start).
-    pub auth_rate_limit: Mutex<HashMap<String, (u32, std::time::Instant)>>,
+    /// Grouped rate limiters (auth per-IP, messages per-user).
+    pub rate_limiters: RateLimiters,
 }
 
 pub struct PendingChallenge {

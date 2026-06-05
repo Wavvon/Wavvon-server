@@ -140,6 +140,20 @@ pub async fn send_dm(
         return Err((StatusCode::FORBIDDEN, "Not a member of this conversation".to_string()));
     }
 
+    // 30 messages per 60 seconds per user
+    {
+        let mut map = state.rate_limiters.messages.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        if now.duration_since(entry.1) > std::time::Duration::from_secs(60) {
+            *entry = (0, now);
+        }
+        if entry.0 >= 30 {
+            return Err((StatusCode::TOO_MANY_REQUESTS, "rate_limited".to_string()));
+        }
+        entry.0 += 1;
+    }
+
     // Block check: if any recipient has blocked the sender, return a success-shaped
     // response (200 OK with a placeholder) so the sender cannot detect the block.
     for m in &members {

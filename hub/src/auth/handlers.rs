@@ -19,7 +19,8 @@ pub fn check_rate_limit(
     ip: &str,
 ) -> Result<(), (StatusCode, String)> {
     let mut map = state
-        .auth_rate_limit
+        .rate_limiters
+        .auth
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();

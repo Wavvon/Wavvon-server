@@ -1,11 +1,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use axum_test::TestServer;
 use serde_json::json;
 use sqlx::sqlite::SqlitePoolOptions;
 use tokio::sync::{broadcast, RwLock};
+use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::db;
 use voxply_hub::federation::client::FederationClient;
+use voxply_hub::routes::chat_models::ChannelResponse;
 use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
@@ -48,7 +51,7 @@ async fn start_real_hub() -> String {
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        rate_limiters: Default::default(),
         });
 
     let app = server::create_router(state);
@@ -64,6 +67,147 @@ async fn start_real_hub() -> String {
         .unwrap();
     });
     url
+}
+
+async fn setup_server() -> TestServer {
+    let db = SqlitePoolOptions::new()
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::migrations::run(&db).await.unwrap();
+    let (chat_tx, _) = broadcast::channel(256);
+    let (voice_event_tx, _) = broadcast::channel(16);
+
+    let state = Arc::new(AppState {
+        hub_name: "rate-test".to_string(),
+        hub_identity: Identity::generate(),
+        db,
+        pending_challenges: RwLock::new(HashMap::new()),
+        chat_tx,
+        federation_client: FederationClient::new(),
+        peer_tokens: RwLock::new(HashMap::new()),
+        voice_channels: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
+        voice_sender_ids: RwLock::new(HashMap::new()),
+        voice_next_sender_id: RwLock::new(HashMap::new()),
+        voice_zones: RwLock::new(HashMap::new()),
+        voice_udp_port: 0,
+        voice_event_tx,
+        dm_tx: broadcast::channel(16).0,
+        online_users: RwLock::new(std::collections::HashSet::new()),
+        screen_shares: RwLock::new(HashMap::new()),
+        screen_share_tx: broadcast::channel(16).0,
+        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        http_client: reqwest::Client::new(),
+        farm_url: None,
+        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        started_at: std::time::Instant::now(),
+        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        rate_limiters: Default::default(),
+    });
+
+    let app = server::create_router(state);
+    TestServer::new(app)
+}
+
+async fn authenticate_server(server: &TestServer, identity: &Identity) -> String {
+    let pub_key = identity.public_key_hex();
+
+    let resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await;
+    let challenge: ChallengeResponse = resp.json();
+
+    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+    let signature = identity.sign(&challenge_bytes);
+
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .await;
+    let verify: VerifyResponse = resp.json();
+    verify.token
+}
+
+#[tokio::test]
+async fn message_rate_limit_allows_30() {
+    let server = setup_server().await;
+    let identity = Identity::generate();
+    let token = authenticate_server(&server, &identity).await;
+
+    // Create a channel
+    let resp = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "general" }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let channel: ChannelResponse = resp.json();
+
+    // Send exactly 30 messages — all should succeed
+    for i in 0..30 {
+        let resp = server
+            .post(&format!("/channels/{}/messages", channel.id))
+            .authorization_bearer(&token)
+            .json(&json!({ "content": format!("msg {i}"), "attachments": [] }))
+            .await;
+        assert!(
+            resp.status_code().is_success(),
+            "message {i} should succeed, got {}",
+            resp.status_code()
+        );
+    }
+}
+
+#[tokio::test]
+async fn message_rate_limit_blocks_31st() {
+    let server = setup_server().await;
+    let identity = Identity::generate();
+    let token = authenticate_server(&server, &identity).await;
+
+    // Create a channel
+    let resp = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "spam" }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let channel: ChannelResponse = resp.json();
+
+    // Send 30 messages — all succeed
+    for i in 0..30 {
+        let resp = server
+            .post(&format!("/channels/{}/messages", channel.id))
+            .authorization_bearer(&token)
+            .json(&json!({ "content": format!("msg {i}"), "attachments": [] }))
+            .await;
+        assert!(
+            resp.status_code().is_success(),
+            "message {i} should succeed, got {}",
+            resp.status_code()
+        );
+    }
+
+    // 31st message must be rejected with 429
+    let resp = server
+        .post(&format!("/channels/{}/messages", channel.id))
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "over the limit", "attachments": [] }))
+        .await;
+    assert_eq!(
+        resp.status_code(),
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        "31st message should be rate-limited"
+    );
 }
 
 #[tokio::test]

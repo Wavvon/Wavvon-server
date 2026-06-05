@@ -52,7 +52,7 @@ async fn setup() -> (TestServer, Identity) {
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        rate_limiters: Default::default(),
         });
     let app = server::create_router(state);
     let server = TestServer::new(app);
