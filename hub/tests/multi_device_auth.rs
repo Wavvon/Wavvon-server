@@ -49,7 +49,9 @@ async fn setup() -> (TestServer, SqlitePool) {
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),    });
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
 
     let server = TestServer::new(server::create_router(state));
     (server, db)

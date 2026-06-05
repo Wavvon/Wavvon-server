@@ -50,6 +50,7 @@ async fn setup() -> TestServer {
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
     let app = server::create_router(state);
     TestServer::new(app)
@@ -279,9 +280,9 @@ async fn auth_rejected_with_fake_nonce() {
 
     let newcomer = Identity::generate();
 
-    // Claim level 5 with a clearly bogus nonce (nonce=0 will not achieve level 5
-    // for an arbitrary key — astronomically unlikely).
-    let resp = do_auth_with_pow(&server, &newcomer, Some(0), Some(5)).await;
+    // Claim level 32 with nonce=0. SHA256(pubkey||0) having ≥32 leading zero
+    // bits is a 1-in-4-billion chance per key, so this is deterministically rejected.
+    let resp = do_auth_with_pow(&server, &newcomer, Some(0), Some(32)).await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
     assert_eq!(resp.text(), "pow_required");
 }

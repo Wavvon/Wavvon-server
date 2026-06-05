@@ -59,7 +59,9 @@ async fn setup_with_pool() -> (TestServer, sqlx::SqlitePool) {
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),    });
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
     let app = server::create_router(state);
     (TestServer::new(app), pool_handle)
 }
@@ -271,7 +273,9 @@ async fn start_real_hub(name: &str) -> String {
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),    });
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -358,7 +362,9 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),    });
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -524,7 +530,9 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),    });
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        auth_rate_limit: std::sync::Mutex::new(std::collections::HashMap::new()),
+        });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))
         .await
