@@ -637,3 +637,87 @@ async fn read_max_depth(db: &sqlx::SqlitePool) -> u32 {
     .and_then(|v| v.parse().ok())
     .unwrap_or(0)
 }
+
+// ---------------------------------------------------------------------------
+// Unread counts (Feature 2)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct UnreadCount {
+    pub channel_id: String,
+    pub unread_count: i64,
+}
+
+/// GET /channels/unread — returns [{channel_id, unread_count}] for every
+/// non-category channel the authenticated user can see.
+pub async fn get_unread_counts(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<UnreadCount>>, (StatusCode, String)> {
+    // All non-category channels (no per-channel ACL in the base model)
+    let channel_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM channels WHERE is_category = 0",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let mut result = Vec::with_capacity(channel_ids.len());
+    for channel_id in channel_ids {
+        // Look up last_read_at for this user/channel; default to 0 (never read).
+        let last_read_at: i64 = sqlx::query_scalar(
+            "SELECT last_read_at FROM channel_last_read WHERE user_pubkey = ? AND channel_id = ?",
+        )
+        .bind(&user.public_key)
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .unwrap_or(0);
+
+        let unread_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE channel_id = ? AND created_at > ?",
+        )
+        .bind(&channel_id)
+        .bind(last_read_at)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        result.push(UnreadCount { channel_id, unread_count });
+    }
+
+    Ok(Json(result))
+}
+
+/// POST /channels/:id/read — upsert last_read_at for the authenticated user.
+pub async fn mark_channel_read(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(channel_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // Verify the channel exists
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
+    }
+
+    let now = crate::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO channel_last_read (user_pubkey, channel_id, last_read_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(user_pubkey, channel_id) DO UPDATE SET last_read_at = excluded.last_read_at",
+    )
+    .bind(&user.public_key)
+    .bind(&channel_id)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}

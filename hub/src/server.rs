@@ -156,6 +156,12 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/users/{public_key}/roles/{role_id}", put(routes::roles::assign_role).delete(routes::roles::remove_role))
         .route("/invites", get(routes::invites::list_invites).post(routes::invites::create_invite))
         .route("/invites/{code}", axum::routing::delete(routes::invites::revoke_invite))
+        // ---- Join links (Feature 5) ----
+        .route("/join/{code}", get(routes::invites::get_join_info).post(routes::invites::join_with_invite))
+        // ---- Unread counts (Feature 2) ----
+        // Must be registered before /channels/{channel_id} to avoid "unread" being matched as a path param.
+        .route("/channels/unread", get(routes::channels::get_unread_counts))
+        .route("/channels/{channel_id}/read", post(routes::channels::mark_channel_read))
         .route("/moderation/bans", get(routes::moderation::list_bans).post(routes::moderation::ban_user))
         .route("/moderation/bans/{target_key}", axum::routing::delete(routes::moderation::unban_user))
         .route("/moderation/mutes", get(routes::moderation::list_mutes).post(routes::moderation::mute_user))

@@ -1745,6 +1745,19 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // ---- Feature: Unread counts ----
+    // Tracks the last-read timestamp per (user, channel) pair.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS channel_last_read (
+            user_pubkey TEXT NOT NULL,
+            channel_id  TEXT NOT NULL,
+            last_read_at INTEGER NOT NULL,
+            PRIMARY KEY (user_pubkey, channel_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations complete");
 
     // Generate web admin token on first run
