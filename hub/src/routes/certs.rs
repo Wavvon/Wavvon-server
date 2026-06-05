@@ -6,6 +6,7 @@
 //!   POST   /admin/certs/:pubkey/revoke       — revoke (re-issue as standing=revoked)
 //!   GET    /admin/certs                      — list all issued certs
 //!   GET    /identity/:pubkey/certs           — public: non-revoked certs for a user
+//!   GET    /admin/settings/certs            — read cert settings (admin)
 //!   PATCH  /admin/settings/certs            — update cert settings
 //!
 //! The periodic sweep lives in cert_worker.rs (spawned from main.rs).
@@ -218,6 +219,64 @@ pub async fn get_revocations(
         .collect();
 
     Ok(Json(entries))
+}
+
+// ---------------------------------------------------------------------------
+// Admin: GET /admin/settings/certs
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct CertSettingsResponse {
+    pub cert_mode: String,
+    pub cert_auto_issue: bool,
+    pub cert_min_age_days: i64,
+    pub cert_validity_days: i64,
+    pub cert_trusted_issuers: Vec<String>,
+}
+
+pub async fn get_cert_settings(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<CertSettingsResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ADMIN)?;
+
+    let cert_mode: String = sqlx::query_scalar(
+        "SELECT value FROM hub_settings WHERE key = 'cert_mode'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?
+    .unwrap_or_else(|| "none".to_string());
+
+    let cert_auto_issue: bool = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'cert_auto_issue'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?
+    .map(|v| v == "true")
+    .unwrap_or(true);
+
+    let cert_min_age_days = setting_i64(&state, "cert_standing_days", 30).await;
+    let cert_validity_days = setting_i64(&state, "cert_validity_days", 90).await;
+
+    let cert_trusted_issuers: Vec<String> = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'cert_trusted_issuers'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?
+    .and_then(|v| serde_json::from_str(&v).ok())
+    .unwrap_or_default();
+
+    Ok(Json(CertSettingsResponse {
+        cert_mode,
+        cert_auto_issue,
+        cert_min_age_days,
+        cert_validity_days,
+        cert_trusted_issuers,
+    }))
 }
 
 // ---------------------------------------------------------------------------

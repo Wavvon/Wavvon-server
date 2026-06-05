@@ -20,11 +20,14 @@ const MAX_TAGS: usize = 12;
 #[derive(Serialize)]
 pub struct TagsResponse {
     pub tags: Vec<String>,
+    pub nsfw: bool,
 }
 
 #[derive(Deserialize)]
 pub struct PatchTagsRequest {
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub nsfw: Option<bool>,
 }
 
 /// Normalise a single tag: lowercase + trim. Returns an error string
@@ -62,7 +65,8 @@ pub async fn get_tags(
     perms.require(ADMIN)?;
 
     let tags = load_tags(&state).await?;
-    Ok(Json(TagsResponse { tags }))
+    let nsfw = load_nsfw(&state).await;
+    Ok(Json(TagsResponse { tags, nsfw }))
 }
 
 /// PATCH /admin/settings/tags
@@ -104,7 +108,19 @@ pub async fn patch_tags(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok(Json(TagsResponse { tags: normalised }))
+    if let Some(nsfw_val) = req.nsfw {
+        sqlx::query(
+            "INSERT INTO hub_settings (key, value) VALUES ('hub_nsfw', ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(if nsfw_val { "true" } else { "false" })
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    let nsfw = req.nsfw.unwrap_or_else(|| false);
+    Ok(Json(TagsResponse { tags: normalised, nsfw }))
 }
 
 /// Load the current self-tags from hub_settings. Returns an empty vec if

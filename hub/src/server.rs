@@ -216,7 +216,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/admin/certs", get(routes::certs::admin_list))
         .route("/admin/certs/{pubkey}", post(routes::certs::admin_issue))
         .route("/admin/certs/{pubkey}/revoke", post(routes::certs::admin_revoke))
-        .route("/admin/settings/certs", patch(routes::certs::patch_cert_settings))
+        .route("/admin/settings/certs", get(routes::certs::get_cert_settings).patch(routes::certs::patch_cert_settings))
         .route("/identity/{pubkey}/certs", get(routes::certs::list_user_certs))
         .route("/certs/revocations", get(routes::certs::get_revocations))
         // ---- Badge admin routes ----
