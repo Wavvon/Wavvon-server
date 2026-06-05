@@ -331,21 +331,27 @@ async fn late_joiner_receives_init_chunk() {
     }
 }
 
-/// Rejection: a second user trying to share in a channel where someone else is active.
+/// Co-op multi-stream: multiple users can share simultaneously in the same channel.
+/// Each gets their own slot keyed by (channel_id, pubkey); a viewer sees both.
 #[tokio::test]
-async fn second_sharer_rejected() {
+async fn multiple_concurrent_sharers_allowed() {
     let (base, _state) = start_hub().await;
 
     let alice = Identity::generate();
     let bob = Identity::generate();
+    let viewer_id = Identity::generate();
 
     let alice_token = authenticate_http(&base, &alice).await;
     let bob_token = authenticate_http(&base, &bob).await;
+    let viewer_token = authenticate_http(&base, &viewer_id).await;
 
     let ch = create_channel(&base, &alice_token, "general").await;
 
     let (mut alice_tx, _alice_rx) = connect_ws(&base, &alice_token).await;
-    let (mut bob_tx, mut bob_rx) = connect_ws(&base, &bob_token).await;
+    let (mut bob_tx, _bob_rx) = connect_ws(&base, &bob_token).await;
+    let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
+
+    send_text(&mut viewer_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
 
     // Alice starts sharing
     send_text(&mut alice_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
@@ -358,10 +364,12 @@ async fn second_sharer_rejected() {
         "has_audio": false,
     })).await;
 
-    // Give hub time to register Alice's share
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Viewer sees Alice start
+    let alice_start = next_text(&mut viewer_rx).await;
+    assert_eq!(alice_start["type"], "screen_share_started");
+    assert_eq!(alice_start["stream_id"], "alice-stream");
 
-    // Bob tries to share in the same channel
+    // Bob subscribes and starts sharing in the same channel — must succeed
     send_text(&mut bob_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
     send_text(&mut bob_tx, json!({
         "type": "screen_share_start",
@@ -372,14 +380,26 @@ async fn second_sharer_rejected() {
         "has_audio": false,
     })).await;
 
-    // Bob should receive an error message (may follow screen_share_started for Alice)
-    let mut got_error = false;
-    for _ in 0..5 {
-        let msg = next_text(&mut bob_rx).await;
-        if msg["type"] == "error" && msg["context"] == "screen_share" {
-            got_error = true;
-            break;
-        }
-    }
-    assert!(got_error, "Bob should receive a screen_share error");
+    // Viewer sees Bob start — no error expected
+    let bob_start = next_text(&mut viewer_rx).await;
+    assert_eq!(bob_start["type"], "screen_share_started", "Bob should be allowed to share alongside Alice");
+    assert_eq!(bob_start["stream_id"], "bob-stream");
+
+    // Bob's own WS should NOT have received an error
+    // (send a benign chunk to provoke a response and check it isn't an error)
+    send_text(&mut bob_tx, json!({
+        "type": "screen_share_chunk",
+        "channel_id": ch.id,
+        "stream_id": "bob-stream",
+        "seq": 0,
+        "is_init": true,
+    })).await;
+    bob_tx
+        .send(TsMessage::Binary(b"BOB_INIT".to_vec().into()))
+        .await
+        .unwrap();
+
+    let chunk_env = next_text(&mut viewer_rx).await;
+    assert_eq!(chunk_env["type"], "screen_share_chunk");
+    assert_ne!(chunk_env["type"], "error", "No error from Bob's share");
 }

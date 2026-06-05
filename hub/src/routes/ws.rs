@@ -956,25 +956,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                             }
 
                             Ok(WsClientMessage::ScreenShareStart { channel_id, stream_id, kind, mime, has_audio, .. }) => {
-                                // Enforce max_sharers_per_channel = 1 (design default).
-                                // A second distinct sharer is rejected; the same user may
-                                // add more streams to their own existing share.
-                                {
-                                    let shares = state.screen_shares.read().await;
-                                    let already_sharing = shares.keys().any(|(ch, pk)| {
-                                        ch == &channel_id && pk != &public_key
-                                    });
-                                    if already_sharing {
-                                        let err = WsServerMessage::Error {
-                                            context: "screen_share".to_string(),
-                                            message: "Another user is already sharing in this channel.".to_string(),
-                                        };
-                                        let _ = ws_tx
-                                            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                                            .await;
-                                        continue;
-                                    }
-                                }
+                                // Multiple concurrent sharers per channel are allowed
+                                // (multi-stream overlay, co-op gaming). The data model is
+                                // keyed by (channel_id, sharer_pubkey) so each user has
+                                // their own independent share slot.
                                 {
                                     let mut shares = state.screen_shares.write().await;
                                     let active = shares
