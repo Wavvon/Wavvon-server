@@ -1,3 +1,8 @@
+// NOTE: Game capability grants (list_channel_users, post_message, read_channel_history)
+// are stored in hub_games but are NOT YET ENFORCED. The set_game_permissions Tauri
+// command and any capability toggles in the admin UI have no effect until enforcement
+// is implemented in a future update.
+
 //! Tier 2 party-multiplayer game session routes.
 //!
 //! Session lifecycle: create → join → (state patches) → end/delete.
@@ -110,8 +115,11 @@ fn broadcast_game_event(state: &AppState, channel_id: &str, msg: WsServerMessage
     let event = ChatEvent::Game {
         channel_id: channel_id.to_string(),
     };
-    let json: std::sync::Arc<str> =
-        std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
+    let serialized = serde_json::to_string(&msg).unwrap_or_else(|e| {
+        tracing::error!("game serialize: {e}");
+        String::from("{}")
+    });
+    let json: std::sync::Arc<str> = std::sync::Arc::from(serialized.as_str());
     let _ = state.chat_tx.send((event, json));
 }
 
@@ -245,7 +253,7 @@ pub async fn create_session(
 
     // Insert into in-memory map.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap();
+        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.insert(
             session_id.clone(),
             GameSessionState {
@@ -314,7 +322,7 @@ pub async fn join_session(
 
     // Add player in-memory.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap();
+        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = sessions.get_mut(&session_id) {
             s.players.insert(user.public_key.clone());
         }
@@ -391,7 +399,8 @@ pub async fn patch_state(
         current = req.patch.clone();
     }
 
-    let new_json = serde_json::to_string(&current).unwrap();
+    let new_json = serde_json::to_string(&current)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("JSON error: {e}")))?;
     sqlx::query("UPDATE game_sessions SET state_json = ? WHERE id = ?")
         .bind(&new_json)
         .bind(&session_id)
@@ -401,7 +410,7 @@ pub async fn patch_state(
 
     // Update in-memory state too.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap();
+        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(s) = sessions.get_mut(&session_id) {
             s.in_memory_state = current;
         }
@@ -503,7 +512,7 @@ pub async fn end_session(
 
     // Remove from in-memory map.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap();
+        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.remove(&session_id);
     }
 
@@ -566,7 +575,7 @@ async fn fetch_open_session(
 
 fn session_row_to_response(row: SessionRow, state: &AppState, session_id: &str) -> SessionResponse {
     let players: Vec<String> = {
-        let sessions = state.active_game_sessions.lock().unwrap();
+        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions
             .get(session_id)
             .map(|s| s.players.iter().cloned().collect())
@@ -591,7 +600,7 @@ fn chrono_now() -> String {
     // TEXT timestamp columns.
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs();
     secs.to_string()
 }
@@ -599,7 +608,7 @@ fn chrono_now() -> String {
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64
 }
 
@@ -704,7 +713,7 @@ pub async fn create_session_v2(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap();
+        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.insert(
             session_id.clone(),
             GameSessionState {
@@ -773,7 +782,7 @@ pub async fn list_sessions(
     Query(q): Query<ListSessionsQuery>,
 ) -> Result<Json<ListSessionsResponse>, (StatusCode, String)> {
     let sessions: Vec<SessionV2Response> = {
-        let sessions_guard = state.active_game_sessions.lock().unwrap();
+        let sessions_guard = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions_guard
             .values()
             .filter(|s| {
@@ -797,7 +806,7 @@ pub async fn join_session_v2(
     Path(session_id): Path<String>,
 ) -> Result<(StatusCode, Json<SessionV2Response>), (StatusCode, String)> {
     let (channel_id, max_players, current_count, already_in) = {
-        let sessions = state.active_game_sessions.lock().unwrap();
+        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         let s = sessions
             .get(&session_id)
             .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
@@ -827,7 +836,7 @@ pub async fn join_session_v2(
     let now = now_secs();
 
     let resp = {
-        let mut sessions = state.active_game_sessions.lock().unwrap();
+        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         let s = sessions
             .get_mut(&session_id)
             .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
@@ -866,7 +875,7 @@ pub async fn leave_session(
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let (channel_id, was_host, remaining, new_host) = {
-        let mut sessions = state.active_game_sessions.lock().unwrap();
+        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         let s = sessions
             .get_mut(&session_id)
             .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
@@ -923,7 +932,7 @@ pub async fn leave_session(
                 result: None,
             },
         );
-        state.active_game_sessions.lock().unwrap().remove(&session_id);
+        state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
     } else if was_host {
         if let Some(ref nh) = new_host {
             broadcast_game_event(
@@ -958,7 +967,7 @@ pub async fn get_session_v2(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionV2Response>, (StatusCode, String)> {
     let resp = {
-        let sessions = state.active_game_sessions.lock().unwrap();
+        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         match sessions.get(&session_id) {
             None => return Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
             Some(s) if s.status == "ended" || s.status == "abandoned" => {
@@ -978,7 +987,7 @@ pub async fn force_end_session(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Extract all needed data under the lock, then drop the lock before any await.
     let (channel_id, is_host) = {
-        let sessions = state.active_game_sessions.lock().unwrap();
+        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
         match sessions.get(&session_id) {
             None => return Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
             Some(s) => (s.channel_id.clone(), s.host_pubkey == user.public_key),
@@ -1002,7 +1011,7 @@ pub async fn force_end_session(
     .execute(&state.db)
     .await;
 
-    state.active_game_sessions.lock().unwrap().remove(&session_id);
+    state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
 
     broadcast_game_event(
         &state,

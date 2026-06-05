@@ -235,6 +235,10 @@ pub struct AppState {
     pub whisper_targets: RwLock<HashMap<String, HashSet<SocketAddr>>>,
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
+
+    /// Per-IP fixed-window rate limiter for auth endpoints.
+    /// key = IP string, value = (attempt_count, window_start).
+    pub auth_rate_limit: Mutex<HashMap<String, (u32, std::time::Instant)>>,
 }
 
 pub struct PendingChallenge {

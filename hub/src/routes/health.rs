@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -8,10 +10,34 @@ use crate::routes::badges::BadgeEnvelope;
 use crate::routes::certs::CertRequirement;
 use crate::state::AppState;
 
-pub async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-    })
+#[derive(Serialize)]
+pub struct GetHealthResponse {
+    pub status: String,
+    pub version: String,
+    pub uptime_seconds: u64,
+    pub db_status: String,
+}
+
+pub async fn get_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let uptime_seconds = state.started_at.elapsed().as_secs();
+
+    let db_status = match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("error: {e}"),
+    };
+
+    (
+        StatusCode::OK,
+        Json(GetHealthResponse {
+            status: "ok".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            uptime_seconds,
+            db_status,
+        }),
+    )
 }
 
 pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {

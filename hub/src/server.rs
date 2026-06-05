@@ -50,7 +50,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         }));
 
     Router::new()
-        .route("/health", get(routes::health::health))
+        .route("/health", get(routes::health::get_health))
         .route("/info", get(routes::health::info))
         .route("/key-rotation", get(routes::key_rotation::get_key_rotation))
         .route("/metrics", get(routes::metrics::metrics))
