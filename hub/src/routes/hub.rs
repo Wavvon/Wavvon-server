@@ -228,7 +228,7 @@ struct PendingUserRow {
     first_seen_at: i64,
 }
 
-async fn upsert_setting(
+pub async fn upsert_setting(
     db: &sqlx::SqlitePool,
     key: &str,
     value: &str,
