@@ -382,6 +382,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // ---- Web admin panel ----
         .route("/admin/panel", get(routes::admin_panel::serve_panel))
         .route("/admin/stats", get(routes::admin_panel::get_stats))
+        .route("/admin/owner", get(routes::admin_panel::get_owner).post(routes::admin_panel::set_owner))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(attach_request_id))
         .with_state(state)

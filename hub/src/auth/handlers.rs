@@ -521,25 +521,6 @@ pub async fn verify(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if has_roles == 0 {
-        // Check if anyone already has the Owner role
-        let owner_exists: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-owner'",
-        )
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-        if owner_exists == 0 {
-            sqlx::query(
-                "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)",
-            )
-            .bind(&canonical_pubkey)
-            .bind(&now)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        }
-
         sqlx::query(
             "INSERT OR IGNORE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-everyone', ?)",
         )

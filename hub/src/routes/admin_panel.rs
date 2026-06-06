@@ -3,8 +3,18 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use crate::state::AppState;
+
+#[derive(Serialize)]
+pub struct OwnerResponse {
+    pub owner: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct SetOwnerRequest {
+    pub public_key: String,
+}
 
 #[derive(Deserialize)]
 pub struct PanelQuery { pub token: Option<String> }
@@ -78,6 +88,66 @@ pub async fn get_stats(
     })))
 }
 
+/// GET /admin/owner — returns the current hub owner public key
+pub async fn get_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<OwnerResponse>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+    let owner: Option<String> = sqlx::query_scalar(
+        "SELECT user_public_key FROM user_roles WHERE role_id = 'builtin-owner' LIMIT 1",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(OwnerResponse { owner }))
+}
+
+/// POST /admin/owner — sets the hub owner to the given public key
+pub async fn set_owner(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<SetOwnerRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+
+    let pk = req.public_key.to_lowercase();
+    if pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err((StatusCode::BAD_REQUEST, "Invalid public key: must be 64 hex characters".into()));
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    sqlx::query("DELETE FROM user_roles WHERE role_id = 'builtin-owner'")
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Ensure a minimal user record exists so the FK constraint is satisfied.
+    sqlx::query(
+        "INSERT OR IGNORE INTO users (public_key, first_seen_at) VALUES (?, ?)",
+    )
+    .bind(&pk)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    sqlx::query(
+        "INSERT OR REPLACE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)",
+    )
+    .bind(&pk)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({ "ok": true, "owner": pk })))
+}
+
 async fn check_admin_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let expected: Option<String> = sqlx::query_scalar(
         "SELECT value FROM hub_settings WHERE key = 'web_admin_token'"
@@ -129,6 +199,7 @@ button.action{padding:4px 10px;border-radius:4px;border:none;background:#ed4245;
 <nav>
 <strong style="font-size:15px;padding:8px 12px;display:block;margin-bottom:8px;">Admin</strong>
 <a href="#" onclick="loadSection('overview',event)" class="active">Overview</a>
+<a href="#" onclick="loadSection('ownership',event)">Ownership</a>
 <a href="#" onclick="loadSection('users',event)">Users</a>
 <a href="#" onclick="loadSection('channels',event)">Channels</a>
 <a href="#" onclick="loadSection('reports',event)">Reports</a>
@@ -158,6 +229,20 @@ async function loadSection(s, evt) {
     el.innerHTML='<div class="stats-grid" id="stats"></div>';
     loadStats();
   }
+  else if(s==='ownership'){
+    document.querySelector('h1').textContent='Hub Ownership';
+    const d = await api('/admin/owner');
+    const cur = d.owner ? d.owner : null;
+    el.innerHTML=`<div class="section">
+      <p style="margin:0 0 12px">Current owner: <code style="background:#1e1f22;padding:2px 6px;border-radius:3px;">${cur ? cur.slice(0,20)+'…' : '<em>None set</em>'}</code></p>
+      <p style="margin:0 0 12px;color:#96989d;font-size:13px;">Paste the owner's Ed25519 public key (64 hex characters). The owner has full admin access to this hub.</p>
+      <div style="display:flex;gap:8px;">
+        <input id="owner-pk" type="text" placeholder="64-character hex public key" style="flex:1;padding:8px;border-radius:4px;border:1px solid #3a3d44;background:#1e1f22;color:#dbdee1;font-family:monospace;font-size:13px;">
+        <button onclick="setOwner()" style="padding:8px 16px;border-radius:4px;border:none;background:#5865f2;color:#fff;cursor:pointer;">Set Owner</button>
+      </div>
+      <p id="owner-result" style="margin-top:10px;font-size:13px;"></p>
+    </div>`;
+  }
   else if(s==='users'){
     document.querySelector('h1').textContent='Users';
     const d = await api('/users?limit=50');
@@ -185,6 +270,15 @@ async function loadSection(s, evt) {
     const rows=(d&&d.entries||[]).map(e=>`<tr><td>${e.event_type}</td><td>${e.actor_pubkey||''}</td><td>${new Date(e.at*1000).toLocaleString()}</td></tr>`).join('');
     el.innerHTML=`<div class="section"><table><thead><tr><th>Event</th><th>Actor</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
+}
+
+async function setOwner() {
+  const pk = (document.getElementById('owner-pk').value||'').trim().toLowerCase();
+  const res = document.getElementById('owner-result');
+  if(pk.length!==64||!/^[0-9a-f]+$/.test(pk)){res.style.color='#ed4245';res.textContent='Invalid public key: must be 64 hex characters.';return;}
+  const r=await fetch('/admin/owner',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({public_key:pk})});
+  if(r.ok){res.style.color='#3ba55c';res.textContent='Owner updated. The new owner can now log in with that identity.';}
+  else{res.style.color='#ed4245';res.textContent=await r.text();}
 }
 
 async function banUser(pk) {

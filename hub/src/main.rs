@@ -251,8 +251,55 @@ async fn main() -> Result<()> {
                             .await?;
                         println!("Unbanned {pubkey}");
                     }
+                    "set-owner" => {
+                        let pubkey = std::env::args()
+                            .nth(4)
+                            .context("Usage: admin users set-owner <pubkey>")?;
+                        let pubkey = pubkey.to_lowercase();
+                        if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+                            anyhow::bail!("Invalid pubkey: expected 64 hex characters");
+                        }
+                        let db_rw = SqlitePoolOptions::new()
+                            .max_connections(1)
+                            .connect("sqlite:hub.db?mode=rwc")
+                            .await
+                            .context("Cannot open DB for write")?;
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        // Revoke any existing owner first
+                        let prev: Option<String> = sqlx::query_scalar(
+                            "SELECT user_public_key FROM user_roles WHERE role_id = 'builtin-owner' LIMIT 1",
+                        )
+                        .fetch_optional(&db_rw)
+                        .await
+                        .unwrap_or(None);
+                        sqlx::query("DELETE FROM user_roles WHERE role_id = 'builtin-owner'")
+                            .execute(&db_rw)
+                            .await?;
+                        if let Some(p) = prev {
+                            println!("Revoked owner from {}…", &p[..16.min(p.len())]);
+                        }
+                        // Ensure a minimal user record exists
+                        sqlx::query(
+                            "INSERT OR IGNORE INTO users (public_key, first_seen_at) VALUES (?, ?)",
+                        )
+                        .bind(&pubkey)
+                        .bind(now)
+                        .execute(&db_rw)
+                        .await?;
+                        sqlx::query(
+                            "INSERT OR REPLACE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)",
+                        )
+                        .bind(&pubkey)
+                        .bind(now)
+                        .execute(&db_rw)
+                        .await?;
+                        println!("Owner set to {pubkey}");
+                    }
                     _ => println!(
-                        "Usage: voxply-hub admin users [list|ban|unban] [pubkey]"
+                        "Usage: voxply-hub admin users [list|ban|unban|set-owner] [pubkey]"
                     ),
                 }
             }
