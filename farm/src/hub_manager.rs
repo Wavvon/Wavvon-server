@@ -61,14 +61,20 @@ impl HubManager {
     ///
     /// The hub binary is resolved from `VOXPLY_HUB_BIN` env var, falling back to
     /// the path stored in `self.hub_bin`.
-    pub async fn spawn_hub(&self, hub_id: &str, db_path: &str, port: u16) -> Result<()> {
+    ///
+    /// `owner_pubkey` is passed as `VOXPLY_OWNER_PUBKEY` so the hub seeds that key
+    /// as the builtin-owner role on first boot.
+    pub async fn spawn_hub(&self, hub_id: &str, db_path: &str, port: u16, owner_pubkey: Option<&str>) -> Result<()> {
         let bin = std::env::var("VOXPLY_HUB_BIN").unwrap_or_else(|_| self.hub_bin.clone());
 
-        let child = tokio::process::Command::new(&bin)
-            .env("VOXPLY_HUB_DB", db_path)
+        let mut cmd = tokio::process::Command::new(&bin);
+        cmd.env("VOXPLY_HUB_DB", db_path)
             .env("VOXPLY_HUB_HTTP_PORT", port.to_string())
-            .env("VOXPLY_FARM_URL", &self.farm_url)
-            .spawn()
+            .env("VOXPLY_FARM_URL", &self.farm_url);
+        if let Some(pk) = owner_pubkey {
+            cmd.env("VOXPLY_OWNER_PUBKEY", pk);
+        }
+        let child = cmd.spawn()
             .with_context(|| {
                 format!(
                     "Failed to spawn hub process for {hub_id} (binary: {bin:?})"
@@ -96,7 +102,7 @@ impl HubManager {
     /// Restart a hub process: stop it then re-spawn with the same db_path and port.
     pub async fn restart_hub(&self, hub_id: &str, db_path: &str, port: u16) -> Result<()> {
         self.stop_hub(hub_id).await?;
-        self.spawn_hub(hub_id, db_path, port).await
+        self.spawn_hub(hub_id, db_path, port, None).await
     }
 
     /// Whether a hub process is currently tracked as running.
@@ -112,17 +118,17 @@ impl HubManager {
     /// Re-spawn all non-suspended, non-deleted hubs from the DB.
     /// Called once at farm startup.
     pub async fn spawn_all_from_db(&self, db: &SqlitePool) -> Result<()> {
-        let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT id, db_path, process_port FROM hubs
+        let rows: Vec<(String, String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT id, db_path, process_port, owner_pubkey FROM hubs
              WHERE suspended_at IS NULL AND deleted_at IS NULL AND process_port IS NOT NULL",
         )
         .fetch_all(db)
         .await
         .context("Failed to query hubs for startup spawn")?;
 
-        for (hub_id, db_path, port) in rows {
+        for (hub_id, db_path, port, owner_pubkey) in rows {
             let port = port as u16;
-            if let Err(e) = self.spawn_hub(&hub_id, &db_path, port).await {
+            if let Err(e) = self.spawn_hub(&hub_id, &db_path, port, owner_pubkey.as_deref()).await {
                 tracing::warn!(hub_id, error = %e, "Failed to spawn hub on startup (skipping)");
             }
         }
@@ -137,6 +143,7 @@ impl HubManager {
         db: &SqlitePool,
         hub_id: &str,
         db_path: &str,
+        owner_pubkey: Option<&str>,
     ) -> Result<u16> {
         let port = self.allocate_port().await;
 
@@ -148,7 +155,7 @@ impl HubManager {
             .await
             .context("Failed to persist hub port")?;
 
-        self.spawn_hub(hub_id, db_path, port).await?;
+        self.spawn_hub(hub_id, db_path, port, owner_pubkey).await?;
         Ok(port)
     }
 }

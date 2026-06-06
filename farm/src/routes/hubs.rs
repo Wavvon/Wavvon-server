@@ -362,10 +362,10 @@ pub async fn create_hub(
         )
     })?;
 
-    // Spawn the hub child process.
+    // Spawn the hub child process, passing the creator as owner.
     match state
         .hub_manager
-        .allocate_and_spawn(&state.db, &hub_id, &db_path)
+        .allocate_and_spawn(&state.db, &hub_id, &db_path, Some(payload.sub.as_str()))
         .await
     {
         Ok(port) => tracing::info!(hub_id, port, "Hub spawned for new hub"),

@@ -407,6 +407,54 @@ async fn main() -> Result<()> {
 
     db::migrations::run(&db).await?;
 
+    // If VOXPLY_OWNER_PUBKEY is set, seed that key as the hub owner before
+    // serving any traffic. Idempotent: skipped if the key is already owner.
+    // The farm sets this when spawning a hub created by a specific user.
+    if let Ok(owner_pk) = std::env::var("VOXPLY_OWNER_PUBKEY") {
+        let owner_pk = owner_pk.trim().to_lowercase();
+        if owner_pk.len() == 64 && owner_pk.chars().all(|c| c.is_ascii_hexdigit()) {
+            let current: Option<String> = sqlx::query_scalar(
+                "SELECT user_public_key FROM user_roles WHERE role_id = 'builtin-owner' LIMIT 1",
+            )
+            .fetch_optional(&db)
+            .await
+            .unwrap_or(None);
+
+            if current.as_deref() != Some(&owner_pk) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                sqlx::query(
+                    "INSERT OR IGNORE INTO users (public_key, first_seen_at) VALUES (?, ?)",
+                )
+                .bind(&owner_pk)
+                .bind(now)
+                .execute(&db)
+                .await
+                .ok();
+                sqlx::query("DELETE FROM user_roles WHERE role_id = 'builtin-owner'")
+                    .execute(&db)
+                    .await
+                    .ok();
+                sqlx::query(
+                    "INSERT OR REPLACE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)",
+                )
+                .bind(&owner_pk)
+                .bind(now)
+                .execute(&db)
+                .await
+                .ok();
+                tracing::info!(
+                    "Hub owner seeded from VOXPLY_OWNER_PUBKEY: {}…",
+                    &owner_pk[..16.min(owner_pk.len())]
+                );
+            }
+        } else {
+            tracing::warn!("VOXPLY_OWNER_PUBKEY is set but not a valid 64-char hex key; ignoring");
+        }
+    }
+
     // First-run bootstrap: applies a template from VOXPLY_TEMPLATE_URL or
     // redeems VOXPLY_BOOTSTRAP_TOKEN when the channels table is empty.
     // Non-fatal — a bad template or unreachable URL never blocks startup.
