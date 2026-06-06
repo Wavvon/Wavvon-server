@@ -16,55 +16,31 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-const DEFAULT_HTTP_PORT: u16 = 3000;
-const DEFAULT_VOICE_UDP_PORT: u16 = 3001;
-
-/// Read a u16 port from `var`, falling back to `default` if unset, and
-/// erroring out if it's set but unparseable. We'd rather fail loudly on a
-/// typo than silently bind to the default.
-fn port_from_env(var: &str, default: u16) -> Result<u16> {
-    match std::env::var(var) {
-        Ok(s) => s
-            .parse::<u16>()
-            .with_context(|| format!("{var}={s:?} is not a valid port (1..=65535)")),
-        Err(_) => Ok(default),
-    }
-}
-
-/// TLS configuration read from the environment.
-/// Both VOXPLY_TLS_CERT and VOXPLY_TLS_KEY must be set to enable HTTPS.
-struct TlsConfig {
-    cert: PathBuf,
-    key: PathBuf,
-}
-
-fn tls_config_from_env() -> Option<TlsConfig> {
-    let cert = std::env::var("VOXPLY_TLS_CERT").ok()?;
-    let key = std::env::var("VOXPLY_TLS_KEY").ok()?;
-    Some(TlsConfig {
-        cert: PathBuf::from(cert),
-        key: PathBuf::from(key),
-    })
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let json_logs = std::env::var("VOXPLY_LOG_FORMAT")
-        .map(|v| v.to_lowercase() == "json")
-        .unwrap_or(false);
+    let settings = match voxply_hub::settings::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let json_logs = settings.log_format.to_lowercase() == "json";
 
     // Optional OpenTelemetry OTLP trace export.
-    // Set VOXPLY_OTLP_ENDPOINT to any OTLP-compatible collector
-    // (Grafana Tempo, Jaeger, Honeycomb, Datadog, etc.).
-    // No-op when the variable is unset or empty.
-    let otlp_provider = std::env::var("VOXPLY_OTLP_ENDPOINT")
-        .ok()
+    // Set VOXPLY_OTLP_ENDPOINT or otlp_endpoint in hub.toml to any
+    // OTLP-compatible collector (Grafana Tempo, Jaeger, Honeycomb, Datadog, etc.).
+    // No-op when unset or empty.
+    let otlp_provider = settings
+        .otlp_endpoint
+        .as_deref()
         .filter(|s| !s.is_empty())
         .and_then(|endpoint| {
             use opentelemetry_otlp::WithExportConfig;
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
-                .with_endpoint(&endpoint)
+                .with_endpoint(endpoint)
                 .build()
                 .ok()?;
             let provider = opentelemetry_sdk::trace::TracerProvider::builder()
@@ -99,6 +75,8 @@ async fn main() -> Result<()> {
             .with(tracing_subscriber::fmt::layer())
             .init();
     }
+
+    tracing::info!("Configuration loaded");
 
     if otlp_provider.is_some() {
         tracing::info!("OpenTelemetry OTLP trace export enabled");
@@ -390,8 +368,8 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let http_port = port_from_env("VOXPLY_HTTP_PORT", DEFAULT_HTTP_PORT)?;
-    let voice_udp_port = port_from_env("VOXPLY_VOICE_UDP_PORT", DEFAULT_VOICE_UDP_PORT)?;
+    let http_port = settings.http_port;
+    let voice_udp_port = settings.voice_udp_port;
 
     let (hub_identity, is_new) = Identity::load_or_create(Path::new("hub_identity.json"))?;
     if is_new {
@@ -407,10 +385,10 @@ async fn main() -> Result<()> {
 
     db::migrations::run(&db).await?;
 
-    // If VOXPLY_OWNER_PUBKEY is set, seed that key as the hub owner before
+    // If owner_pubkey is configured, seed that key as the hub owner before
     // serving any traffic. Idempotent: skipped if the key is already owner.
     // The farm sets this when spawning a hub created by a specific user.
-    if let Ok(owner_pk) = std::env::var("VOXPLY_OWNER_PUBKEY") {
+    if let Some(owner_pk) = settings.owner_pubkey.as_deref() {
         let owner_pk = owner_pk.trim().to_lowercase();
         if owner_pk.len() == 64 && owner_pk.chars().all(|c| c.is_ascii_hexdigit()) {
             let current: Option<String> = sqlx::query_scalar(
@@ -446,23 +424,31 @@ async fn main() -> Result<()> {
                 .await
                 .ok();
                 tracing::info!(
-                    "Hub owner seeded from VOXPLY_OWNER_PUBKEY: {}…",
+                    "Hub owner seeded from owner_pubkey: {}…",
                     &owner_pk[..16.min(owner_pk.len())]
                 );
             }
         } else {
-            tracing::warn!("VOXPLY_OWNER_PUBKEY is set but not a valid 64-char hex key; ignoring");
+            tracing::warn!("owner_pubkey is set but not a valid 64-char hex key; ignoring");
         }
     }
 
-    // First-run bootstrap: applies a template from VOXPLY_TEMPLATE_URL or
-    // redeems VOXPLY_BOOTSTRAP_TOKEN when the channels table is empty.
+    // First-run bootstrap: applies a template from template_url or redeems
+    // bootstrap_token when the channels table is empty.
     // Non-fatal — a bad template or unreachable URL never blocks startup.
     {
         let bootstrap_client = reqwest::Client::new();
-        voxply_hub::bootstrap::maybe_bootstrap(&db, &bootstrap_client)
-            .await
-            .unwrap_or_else(|e| tracing::warn!("Bootstrap failed (non-fatal): {e}"));
+        voxply_hub::bootstrap::maybe_bootstrap(
+            &db,
+            &bootstrap_client,
+            &voxply_hub::bootstrap::BootstrapConfig {
+                template_url: settings.template_url.clone(),
+                bootstrap_token: settings.bootstrap_token.clone(),
+                discovery_url: settings.discovery_url.clone(),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| tracing::warn!("Bootstrap failed (non-fatal): {e}"));
     }
 
     let (chat_tx, _) = broadcast::channel::<(voxply_hub::routes::chat_models::ChatEvent, std::sync::Arc<str>)>(256);
@@ -470,8 +456,8 @@ async fn main() -> Result<()> {
     let (dm_tx, _) = broadcast::channel(256);
     let (screen_share_tx, _) = broadcast::channel(256);
 
-    // Farm integration: fetch the farm pubkey from VOXPLY_FARM_URL if set.
-    let farm_url = std::env::var("VOXPLY_FARM_URL").ok();
+    // Farm integration: fetch the farm pubkey from farm_url if set.
+    let farm_url = settings.farm_url.clone();
     let http_client = reqwest::Client::new();
     let cached_farm_pubkey: Arc<tokio::sync::RwLock<Option<String>>> =
         Arc::new(tokio::sync::RwLock::new(None));
@@ -713,10 +699,12 @@ async fn main() -> Result<()> {
     let app = server::create_router(state);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
-    if let Some(tls) = tls_config_from_env() {
-        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
+    if let (Some(cert), Some(key)) = (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {
+        let cert_path = PathBuf::from(cert);
+        let key_path = PathBuf::from(key);
+        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
             .await
-            .with_context(|| format!("Failed to load TLS cert/key from {:?} / {:?}", tls.cert, tls.key))?;
+            .with_context(|| format!("Failed to load TLS cert/key from {cert:?} / {key:?}"))?;
         tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
         axum_server::bind_rustls(addr, rustls_config)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())

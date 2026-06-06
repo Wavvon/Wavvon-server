@@ -11,4 +11,5 @@ pub mod rate_limit;
 pub mod retention_worker;
 pub mod routes;
 pub mod server;
+pub mod settings;
 pub mod state;

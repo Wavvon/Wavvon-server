@@ -1,0 +1,47 @@
+# Voxply Hub — example configuration file
+# Copy to hub.toml and edit. Environment variables (VOXPLY_*) override any value here.
+
+# ── Network ──────────────────────────────────────────────────────────────────
+
+# HTTP port the hub listens on.
+http_port = 3000
+
+# UDP port for voice traffic.
+voice_udp_port = 3001
+
+# ── TLS (leave commented out for plain HTTP) ──────────────────────────────────
+
+# tls_cert = "/etc/voxply/hub.crt"
+# tls_key  = "/etc/voxply/hub.key"
+
+# ── Ownership ────────────────────────────────────────────────────────────────
+
+# Hub owner's Ed25519 public key (64 hex characters).
+# Set this before first boot so the owner role is predictable.
+# You can also set it later with: voxply-hub admin users set-owner <pubkey>
+# owner_pubkey = "0000000000000000000000000000000000000000000000000000000000000000"
+
+# ── Farm integration ─────────────────────────────────────────────────────────
+
+# External URL of the farm that manages this hub.
+# Only set when this hub is spawned by voxply-farm.
+# farm_url = "https://farm.example.com"
+
+# ── Discovery ────────────────────────────────────────────────────────────────
+
+# Discovery service base URL (hub directory).
+discovery_url = "https://discovery.voxply.io"
+
+# ── First-boot bootstrap ─────────────────────────────────────────────────────
+
+# Apply a channel/role template on first boot (when channels table is empty).
+# template_url  = "https://example.com/my-template.json"
+# bootstrap_token = ""
+
+# ── Observability ────────────────────────────────────────────────────────────
+
+# Log format: "text" (human-readable, default) or "json" (for log aggregators).
+log_format = "text"
+
+# OpenTelemetry OTLP collector endpoint. Leave commented out to disable.
+# otlp_endpoint = "http://localhost:4317"

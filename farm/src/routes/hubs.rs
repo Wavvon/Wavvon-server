@@ -330,8 +330,8 @@ pub async fn create_hub(
 
     let now = unix_now();
 
-    // Determine the DB path: use `VOXPLY_HUBS_DIR` env var or fall back to CWD/hubs/<id>.
-    let hubs_dir = std::env::var("VOXPLY_HUBS_DIR").unwrap_or_else(|_| "hubs".to_string());
+    // Determine the DB path from the hubs_dir configured in FarmState.
+    let hubs_dir = &state.hubs_dir;
     let db_path = format!("{}/{}.db", hubs_dir.trim_end_matches('/'), hub_id);
 
     // Ensure the hubs directory exists.

@@ -1,9 +1,19 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
-/// Runs on first launch if VOXPLY_TEMPLATE_URL or VOXPLY_BOOTSTRAP_TOKEN
-/// is set and the hub has no channels yet (blank DB).
-pub async fn maybe_bootstrap(db: &SqlitePool, http: &reqwest::Client) -> Result<()> {
+pub struct BootstrapConfig {
+    pub template_url: Option<String>,
+    pub bootstrap_token: Option<String>,
+    pub discovery_url: String,
+}
+
+/// Runs on first launch if template_url or bootstrap_token is set and the hub
+/// has no channels yet (blank DB).
+pub async fn maybe_bootstrap(
+    db: &SqlitePool,
+    http: &reqwest::Client,
+    cfg: &BootstrapConfig,
+) -> Result<()> {
     // Check if already bootstrapped
     let bootstrapped: Option<String> = sqlx::query_scalar(
         "SELECT value FROM hub_settings WHERE key = 'bootstrapped_at' AND value != ''",
@@ -25,14 +35,9 @@ pub async fn maybe_bootstrap(db: &SqlitePool, http: &reqwest::Client) -> Result<
         return Ok(());
     }
 
-    // Check for template source
-    let template_url = std::env::var("VOXPLY_TEMPLATE_URL").ok();
-    let bootstrap_token = std::env::var("VOXPLY_BOOTSTRAP_TOKEN").ok();
-
-    let template_json = if let Some(token) = &bootstrap_token {
+    let template_json = if let Some(token) = &cfg.bootstrap_token {
         // Redeem bootstrap token from discovery
-        let discovery_url = std::env::var("VOXPLY_DISCOVERY_URL")
-            .unwrap_or_else(|_| "https://discovery.voxply.app".to_string());
+        let discovery_url = &cfg.discovery_url;
         match http
             .post(format!("{discovery_url}/api/bootstrap/redeem"))
             .json(&serde_json::json!({ "token": token }))
@@ -42,13 +47,13 @@ pub async fn maybe_bootstrap(db: &SqlitePool, http: &reqwest::Client) -> Result<
             Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await.ok(),
             _ => {
                 tracing::warn!(
-                    "Failed to redeem bootstrap token; falling through to VOXPLY_TEMPLATE_URL"
+                    "Failed to redeem bootstrap token; falling through to template_url"
                 );
-                fetch_template(&template_url, http).await
+                fetch_template(&cfg.template_url, http).await
             }
         }
     } else {
-        fetch_template(&template_url, http).await
+        fetch_template(&cfg.template_url, http).await
     };
 
     if let Some(template) = template_json {

@@ -22,6 +22,8 @@ pub struct FarmState {
     pub hub_manager: Arc<HubManager>,
     /// Shared HTTP client for outbound requests (proxying, health checks).
     pub http_client: reqwest::Client,
+    /// Directory where per-hub SQLite databases are stored.
+    pub hubs_dir: String,
 }
 
 impl FarmState {
@@ -30,6 +32,7 @@ impl FarmState {
         keypair: SigningKey,
         farm_url: String,
         hub_manager: Arc<HubManager>,
+        hubs_dir: String,
     ) -> Self {
         Self {
             db,
@@ -38,6 +41,7 @@ impl FarmState {
             last_pubkey_refresh: RwLock::new(0),
             hub_manager,
             http_client: reqwest::Client::new(),
+            hubs_dir,
         }
     }
 

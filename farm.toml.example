@@ -1,0 +1,29 @@
+# Voxply Farm — example configuration file
+# Copy to farm.toml and edit. Environment variables (VOXPLY_*) override any value here.
+
+# ── Network ──────────────────────────────────────────────────────────────────
+
+# HTTP port the farm listens on.
+http_port = 4000
+
+# Externally reachable farm URL. Must be set if clients connect from outside localhost.
+# farm_url = "https://farm.example.com"
+
+# ── Hub process management ────────────────────────────────────────────────────
+
+# Path to the voxply-hub binary. Defaults to a sibling of this binary.
+# hub_bin = "/usr/local/bin/voxply-hub"
+
+# Base port for hub child processes. Hub 1 gets this port, hub 2 gets port+1, etc.
+hub_base_port = 9100
+
+# Directory where per-hub SQLite databases are stored.
+hubs_dir = "hubs"
+
+# ── Observability ────────────────────────────────────────────────────────────
+
+# Log format: "text" (human-readable, default) or "json" (for log aggregators).
+log_format = "text"
+
+# OpenTelemetry OTLP collector endpoint. Leave commented out to disable.
+# otlp_endpoint = "http://localhost:4317"

@@ -9,18 +9,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use voxply_farm::db;
 use voxply_farm::hub_manager::HubManager;
 use voxply_farm::server;
+use voxply_farm::settings;
 use voxply_farm::state::FarmState;
-
-const DEFAULT_HTTP_PORT: u16 = 4000;
-
-fn port_from_env(var: &str, default: u16) -> Result<u16> {
-    match std::env::var(var) {
-        Ok(s) => s
-            .parse::<u16>()
-            .with_context(|| format!("{var}={s:?} is not a valid port (1..=65535)")),
-        Err(_) => Ok(default),
-    }
-}
 
 /// Persisted farm identity — same shape as hub_identity.json.
 #[derive(Serialize, Deserialize)]
@@ -52,45 +42,32 @@ fn load_or_create_keypair(path: &Path) -> Result<(SigningKey, bool)> {
     }
 }
 
-/// Resolve the path to the voxply-hub binary.
-/// Check for `VOXPLY_HUB_BIN` env var first; fall back to a sibling of the
-/// current executable named `voxply-hub` (or `voxply-hub.exe` on Windows).
-fn resolve_hub_bin() -> String {
-    if let Ok(v) = std::env::var("VOXPLY_HUB_BIN") {
-        return v;
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        let dir = exe.parent().unwrap_or(Path::new("."));
-        let candidate = dir.join(if cfg!(windows) {
-            "voxply-hub.exe"
-        } else {
-            "voxply-hub"
-        });
-        if candidate.exists() {
-            return candidate.to_string_lossy().into_owned();
-        }
-    }
-    "voxply-hub".to_string()
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
-    let json_logs = std::env::var("VOXPLY_LOG_FORMAT")
-        .map(|v| v.to_lowercase() == "json")
-        .unwrap_or(false);
+    // Load configuration first — before logging setup so we can use log_format.
+    let cfg = match settings::load() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let json_logs = cfg.log_format.to_lowercase() == "json";
 
     // Optional OpenTelemetry OTLP trace export.
     // Set VOXPLY_OTLP_ENDPOINT to any OTLP-compatible collector
     // (Grafana Tempo, Jaeger, Honeycomb, Datadog, etc.).
     // No-op when the variable is unset or empty.
-    let otlp_provider = std::env::var("VOXPLY_OTLP_ENDPOINT")
-        .ok()
+    let otlp_provider = cfg
+        .otlp_endpoint
+        .as_deref()
         .filter(|s| !s.is_empty())
         .and_then(|endpoint| {
             use opentelemetry_otlp::WithExportConfig;
             let exporter = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
-                .with_endpoint(&endpoint)
+                .with_endpoint(endpoint)
                 .build()
                 .ok()?;
             let provider = opentelemetry_sdk::trace::TracerProvider::builder()
@@ -126,6 +103,8 @@ async fn main() -> Result<()> {
             .init();
     }
 
+    tracing::info!("Configuration loaded");
+
     if otlp_provider.is_some() {
         tracing::info!("OpenTelemetry OTLP trace export enabled");
     }
@@ -142,11 +121,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let http_port = port_from_env("VOXPLY_FARM_HTTP_PORT", DEFAULT_HTTP_PORT)?;
+    let http_port = cfg.http_port;
 
     // Farm URL — required for embedding in tokens. Must be the externally reachable URL.
-    let farm_url = std::env::var("VOXPLY_FARM_URL")
-        .unwrap_or_else(|_| format!("http://127.0.0.1:{http_port}"));
+    let farm_url = cfg
+        .farm_url
+        .unwrap_or_else(|| format!("http://127.0.0.1:{http_port}"));
 
     let (keypair, is_new) = load_or_create_keypair(Path::new("farm_identity.json"))?;
     let pubkey_hex = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
@@ -177,13 +157,33 @@ async fn main() -> Result<()> {
     .execute(&db)
     .await?;
 
-    // Construct the hub manager and re-spawn any existing hubs.
-    let hub_bin = resolve_hub_bin();
+    // Resolve the hub binary path: use settings value if provided, else fall back
+    // to a sibling of the current executable.
+    let hub_bin = if let Some(path) = cfg.hub_bin {
+        path
+    } else {
+        if let Ok(exe) = std::env::current_exe() {
+            let dir = exe.parent().unwrap_or(Path::new("."));
+            let candidate = dir.join(if cfg!(windows) {
+                "voxply-hub.exe"
+            } else {
+                "voxply-hub"
+            });
+            if candidate.exists() {
+                candidate.to_string_lossy().into_owned()
+            } else {
+                "voxply-hub".to_string()
+            }
+        } else {
+            "voxply-hub".to_string()
+        }
+    };
+
     tracing::info!("Hub binary path: {hub_bin}");
-    let hub_manager = Arc::new(HubManager::new(hub_bin, farm_url.clone()));
+    let hub_manager = Arc::new(HubManager::new(hub_bin, farm_url.clone(), cfg.hub_base_port));
     hub_manager.spawn_all_from_db(&db).await?;
 
-    let state = Arc::new(FarmState::new(db, keypair, farm_url, hub_manager));
+    let state = Arc::new(FarmState::new(db, keypair, farm_url, hub_manager, cfg.hubs_dir));
 
     let app = server::create_router(state);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;

@@ -11,8 +11,6 @@ use sqlx::SqlitePool;
 use tokio::process::Child;
 use tokio::sync::RwLock;
 
-/// Default base port for hub child processes (overridden by `VOXPLY_HUB_BASE_PORT`).
-const DEFAULT_BASE_PORT: u16 = 9100;
 
 struct HubProcess {
     port: u16,
@@ -30,12 +28,7 @@ pub struct HubManager {
 }
 
 impl HubManager {
-    pub fn new(hub_bin: String, farm_url: String) -> Self {
-        let base_port = std::env::var("VOXPLY_HUB_BASE_PORT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_BASE_PORT);
-
+    pub fn new(hub_bin: String, farm_url: String, base_port: u16) -> Self {
         Self {
             hubs: RwLock::new(HashMap::new()),
             hub_bin,
