@@ -26,7 +26,7 @@ rand = "0.8"
 sha2 = "0.10"
 base64 = { workspace = true }
 voxply-identity = { path = "../identity" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sqlx = { workspace = true }
 futures-util = "0.3"
 uuid = { workspace = true }

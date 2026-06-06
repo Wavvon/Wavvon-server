@@ -1,79 +1,10 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
+use voxply_hub::auth::models::ChallengeResponse;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-
-    let (chat_tx, _) = broadcast::channel(256);
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await;
-    let verify: VerifyResponse = resp.json();
-    verify.token
-}
+#[path = "common.rs"] mod common;
 
 async fn admin_set_challenge_mode(server: &TestServer, token: &str, mode: &str) {
     server
@@ -86,7 +17,7 @@ async fn admin_set_challenge_mode(server: &TestServer, token: &str, mode: &str) 
 
 #[tokio::test]
 async fn challenge_new_returns_404_when_off() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
 
     // challenge_mode defaults to 'off' — /challenge/new should 404
@@ -99,9 +30,9 @@ async fn challenge_new_returns_404_when_off() {
 
 #[tokio::test]
 async fn click_challenge_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
     admin_set_challenge_mode(&server, &owner_token, "click").await;
 
     let pubkey = owner.public_key_hex();
@@ -131,9 +62,9 @@ async fn click_challenge_happy_path() {
 
 #[tokio::test]
 async fn click_challenge_cannot_be_consumed_twice() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
     admin_set_challenge_mode(&server, &owner_token, "click").await;
 
     let pubkey = owner.public_key_hex();
@@ -162,9 +93,9 @@ async fn click_challenge_cannot_be_consumed_twice() {
 
 #[tokio::test]
 async fn puzzle_challenge_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
     admin_set_challenge_mode(&server, &owner_token, "puzzle").await;
 
     let pubkey = owner.public_key_hex();
@@ -194,9 +125,9 @@ async fn puzzle_challenge_happy_path() {
 
 #[tokio::test]
 async fn challenge_pubkey_mismatch_rejected() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
     admin_set_challenge_mode(&server, &owner_token, "click").await;
 
     let attacker = Identity::generate();
@@ -220,9 +151,9 @@ async fn challenge_pubkey_mismatch_rejected() {
 
 #[tokio::test]
 async fn admin_can_update_challenge_settings() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
 
     let resp = server
         .put("/hub/settings/challenge")
@@ -238,13 +169,13 @@ async fn admin_can_update_challenge_settings() {
 
 #[tokio::test]
 async fn non_admin_cannot_update_challenge_settings() {
-    let server = setup().await;
+    let server = common::setup().await;
     // First user becomes owner
     let owner = Identity::generate();
-    let _owner_token = authenticate(&server, &owner).await;
+    let _owner_token = common::authenticate(&server, &owner).await;
     // Second user is just @everyone
     let user = Identity::generate();
-    let user_token = authenticate(&server, &user).await;
+    let user_token = common::authenticate(&server, &user).await;
 
     let resp = server
         .put("/hub/settings/challenge")
@@ -256,7 +187,7 @@ async fn non_admin_cannot_update_challenge_settings() {
 
 #[tokio::test]
 async fn info_includes_challenge_mode() {
-    let server = setup().await;
+    let server = common::setup().await;
     let info: Value = server.get("/info").await.json();
     // Default is "off"
     assert_eq!(info["challenge_mode"], "off");
@@ -264,9 +195,9 @@ async fn info_includes_challenge_mode() {
 
 #[tokio::test]
 async fn auth_verify_requires_challenge_token_when_mode_is_not_off() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
 
     // Enable click challenges
     admin_set_challenge_mode(&server, &owner_token, "click").await;
@@ -295,9 +226,9 @@ async fn auth_verify_requires_challenge_token_when_mode_is_not_off() {
 
 #[tokio::test]
 async fn auth_verify_succeeds_with_valid_challenge_token() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
 
     // Enable click challenges
     admin_set_challenge_mode(&server, &owner_token, "click").await;

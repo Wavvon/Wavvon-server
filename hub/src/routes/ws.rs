@@ -1250,10 +1250,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     let entry = shares.iter_mut().find(|((ch, _), active)| {
                                         ch == &source_channel_id && active.streams.contains_key(&stream_id)
                                     });
-                                    entry.map(|((_, sharer), active)| {
+                                    entry.and_then(|((_, sharer), active)| {
                                         active.cross_channel_subscribers.insert(public_key.clone());
-                                        let meta = active.streams.get(&stream_id).unwrap();
-                                        (sharer.clone(), meta.kind.clone(), meta.mime.clone(), meta.has_audio)
+                                        let meta = active.streams.get(&stream_id)?;
+                                        Some((sharer.clone(), meta.kind.clone(), meta.mime.clone(), meta.has_audio))
                                     })
                                 };
 

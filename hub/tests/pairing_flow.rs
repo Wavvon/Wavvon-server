@@ -1,61 +1,12 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::StatusCode;
-use axum_test::TestServer;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::{
     DeviceSubkey, Identity, MasterIdentity, PairingClaim, PairingComplete, PairingOffer,
     PairingStatus, SubkeyCert,
 };
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx: broadcast::channel(16).0,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-
-    TestServer::new(server::create_router(state))
-}
+#[path = "common.rs"] mod common;
 
 fn now() -> u64 {
     SystemTime::now()
@@ -130,7 +81,7 @@ fn make_cert(master: &MasterIdentity, subkey_pubkey: &str, label: &str) -> Subke
 
 #[tokio::test]
 async fn full_pairing_handshake() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let token = random_token();
 
@@ -210,7 +161,7 @@ async fn full_pairing_handshake() {
 
 #[tokio::test]
 async fn offer_rejects_bad_signature() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let token = random_token();
 
@@ -223,7 +174,7 @@ async fn offer_rejects_bad_signature() {
 
 #[tokio::test]
 async fn offer_rejects_lifetime_over_5_minutes() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let token = random_token();
 
@@ -234,7 +185,7 @@ async fn offer_rejects_lifetime_over_5_minutes() {
 
 #[tokio::test]
 async fn claim_rejects_unknown_token() {
-    let server = setup().await;
+    let server = common::setup().await;
     let phone = DeviceSubkey::generate("phone".into());
     let claim = make_claim(&phone, &random_token(), "phone");
     let resp = server.post("/identity/pairing/claim").json(&claim).await;
@@ -243,7 +194,7 @@ async fn claim_rejects_unknown_token() {
 
 #[tokio::test]
 async fn claim_rejects_bad_proof() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let token = random_token();
     server
@@ -262,7 +213,7 @@ async fn claim_rejects_bad_proof() {
 
 #[tokio::test]
 async fn double_claim_is_rejected() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let token = random_token();
     server
@@ -288,7 +239,7 @@ async fn double_claim_is_rejected() {
 
 #[tokio::test]
 async fn complete_before_claim_is_rejected() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let token = random_token();
     server
@@ -311,7 +262,7 @@ async fn complete_before_claim_is_rejected() {
 
 #[tokio::test]
 async fn complete_rejects_subkey_mismatch() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let token = random_token();
     server
@@ -342,7 +293,7 @@ async fn complete_rejects_subkey_mismatch() {
 
 #[tokio::test]
 async fn complete_rejects_master_mismatch() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let other_master = Identity::generate().master().unwrap();
     let token = random_token();

@@ -1,85 +1,15 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
+use voxply_hub::auth::models::ChallengeResponse;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-
-    let (chat_tx, _) = broadcast::channel(256);
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await;
-    let verify: VerifyResponse = resp.json();
-    verify.token
-}
+#[path = "common.rs"] mod common;
 
 #[tokio::test]
 async fn lobby_status_returns_member_when_no_min_level() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // min_security_level defaults to 0 ? status should be "member"
     let resp = server
@@ -95,16 +25,16 @@ async fn lobby_status_returns_member_when_no_min_level() {
 
 #[tokio::test]
 async fn lobby_status_requires_auth() {
-    let server = setup().await;
+    let server = common::setup().await;
     let resp = server.get("/lobby/status").await;
     resp.assert_status_unauthorized();
 }
 
 #[tokio::test]
 async fn lobby_welcome_returns_hub_name() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     let resp = server
         .get("/lobby/welcome")
@@ -118,9 +48,9 @@ async fn lobby_welcome_returns_hub_name() {
 
 #[tokio::test]
 async fn admin_can_update_lobby_settings() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Update welcome_md
     let resp = server
@@ -142,14 +72,14 @@ async fn admin_can_update_lobby_settings() {
 
 #[tokio::test]
 async fn non_admin_cannot_update_lobby_settings() {
-    let server = setup().await;
+    let server = common::setup().await;
     // First user is owner
     let owner = Identity::generate();
-    let _owner_token = authenticate(&server, &owner).await;
+    let _owner_token = common::authenticate(&server, &owner).await;
 
     // Second user is just @everyone
     let user = Identity::generate();
-    let user_token = authenticate(&server, &user).await;
+    let user_token = common::authenticate(&server, &user).await;
 
     let resp = server
         .put("/hub/settings/lobby")
@@ -161,9 +91,9 @@ async fn non_admin_cannot_update_lobby_settings() {
 
 #[tokio::test]
 async fn submit_pow_invalid_format_returns_bad_request() {
-    let server = setup().await;
+    let server = common::setup().await;
     let user = Identity::generate();
-    let token = authenticate(&server, &user).await;
+    let token = common::authenticate(&server, &user).await;
 
     let resp = server
         .post("/lobby/submit-pow")
@@ -175,7 +105,7 @@ async fn submit_pow_invalid_format_returns_bad_request() {
 
 #[tokio::test]
 async fn verify_response_includes_scope_field() {
-    let server = setup().await;
+    let server = common::setup().await;
     let user = Identity::generate();
     let pub_key = user.public_key_hex();
 

@@ -235,7 +235,8 @@ pub async fn send_dm(
     }
 
     if is_encrypted {
-        let env = req.encrypted_envelope.as_ref().unwrap();
+        let env = req.encrypted_envelope.as_ref()
+            .ok_or((StatusCode::BAD_REQUEST, "encrypted_envelope missing".to_string()))?;
         // Verify the Ed25519 signature over the envelope fields.
         let msg = envelope_signing_bytes(env);
         let sig_bytes = hex::decode(&env.signature_hex)
@@ -245,7 +246,8 @@ pub async fn send_dm(
     }
 
     if is_group_encrypted {
-        let env = req.group_encrypted_envelope.as_ref().unwrap();
+        let env = req.group_encrypted_envelope.as_ref()
+            .ok_or((StatusCode::BAD_REQUEST, "group_encrypted_envelope missing".to_string()))?;
         let msg = group_envelope_signing_bytes(
             &env.conv_id,
             env.sender_key_version,
@@ -272,7 +274,8 @@ pub async fn send_dm(
     let now = crate::auth::handlers::unix_timestamp();
 
     if is_encrypted {
-        let env = req.encrypted_envelope.as_ref().unwrap();
+        let env = req.encrypted_envelope.as_ref()
+            .ok_or((StatusCode::BAD_REQUEST, "encrypted_envelope missing".to_string()))?;
         let ciphertext_json = serde_json::to_string(env)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode envelope: {e}")))?;
         sqlx::query(
@@ -289,7 +292,8 @@ pub async fn send_dm(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     } else if is_group_encrypted {
-        let env = req.group_encrypted_envelope.as_ref().unwrap();
+        let env = req.group_encrypted_envelope.as_ref()
+            .ok_or((StatusCode::BAD_REQUEST, "group_encrypted_envelope missing".to_string()))?;
         let ciphertext_json = serde_json::to_string(env)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode group envelope: {e}")))?;
         sqlx::query(
@@ -674,7 +678,8 @@ pub async fn receive_federated_dm(
     let is_group_encrypted = req.group_encrypted_envelope.is_some();
 
     if is_encrypted {
-        let env = req.encrypted_envelope.as_ref().unwrap();
+        let env = req.encrypted_envelope.as_ref()
+            .ok_or((StatusCode::BAD_REQUEST, "encrypted_envelope missing".to_string()))?;
         // Verify the signature before storing.
         let msg = envelope_signing_bytes(env);
         let sig_bytes = hex::decode(&env.signature_hex)
@@ -699,7 +704,8 @@ pub async fn receive_federated_dm(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     } else if is_group_encrypted {
-        let env = req.group_encrypted_envelope.as_ref().unwrap();
+        let env = req.group_encrypted_envelope.as_ref()
+            .ok_or((StatusCode::BAD_REQUEST, "group_encrypted_envelope missing".to_string()))?;
         let msg = group_envelope_signing_bytes(
             &env.conv_id,
             env.sender_key_version,

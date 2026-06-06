@@ -57,6 +57,7 @@ async fn make_state() -> Arc<AppState> {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
     })
 }
 

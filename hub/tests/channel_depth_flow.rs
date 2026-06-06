@@ -1,91 +1,16 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
-
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-    });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let challenge: ChallengeResponse = resp.json();
-
-    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await;
-    let verify: VerifyResponse = resp.json();
-    verify.token
-}
+#[path = "common.rs"] mod common;
 
 // ---- Admin settings endpoints ----
 
 #[tokio::test]
 async fn get_channel_depth_defaults_to_zero() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     let resp = server
         .get("/admin/settings/channel-depth")
@@ -98,9 +23,9 @@ async fn get_channel_depth_defaults_to_zero() {
 
 #[tokio::test]
 async fn patch_and_get_channel_depth() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     server
         .patch("/admin/settings/channel-depth")
@@ -120,14 +45,14 @@ async fn patch_and_get_channel_depth() {
 
 #[tokio::test]
 async fn channel_depth_admin_routes_reject_non_admin() {
-    let server = setup().await;
+    let server = common::setup().await;
     let non_admin = Identity::generate();
-    let token = authenticate(&server, &non_admin).await;
+    let token = common::authenticate(&server, &non_admin).await;
 
     // The first user is auto-promoted to owner, so we need a second user who is
     // not the owner/admin.
     let second = Identity::generate();
-    let second_token = authenticate(&server, &second).await;
+    let second_token = common::authenticate(&server, &second).await;
 
     // second user should get 403
     server
@@ -151,9 +76,9 @@ async fn channel_depth_admin_routes_reject_non_admin() {
 
 #[tokio::test]
 async fn depth_enforcement_create_channel() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Build a two-level category chain while depth is unlimited (default 0).
     // root-cat (depth 0) -> mid-cat (depth 1) -> mid-cat is a category at depth 1.
@@ -201,9 +126,9 @@ async fn depth_enforcement_create_channel() {
 
 #[tokio::test]
 async fn depth_enforcement_category_at_max_depth() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // max_depth = 2: categories may only go to depth 0 (i.e. depth <= max-1 = 1,
     // but a category at depth 1 would leave no room for children at depth 2
@@ -240,9 +165,9 @@ async fn depth_enforcement_category_at_max_depth() {
 
 #[tokio::test]
 async fn depth_enforcement_disabled_when_zero() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Default is 0 = unlimited — deeply nested creates must succeed
     let mut parent_id: Option<String> = None;
@@ -271,9 +196,9 @@ async fn depth_enforcement_disabled_when_zero() {
 
 #[tokio::test]
 async fn depth_enforcement_move_channel() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Build a two-level category chain while depth is unlimited.
     // root-cat (depth 0) -> mid-cat (depth 1, category)

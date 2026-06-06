@@ -1,78 +1,10 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
 use voxply_hub::routes::post_models::{PostDetail, PostListResponse, PostSearchResponse};
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-    });
-    TestServer::new(server::create_router(state))
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let ch: ChallengeResponse = resp.json();
-    let sig = identity.sign(&hex::decode(&ch.challenge).unwrap());
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": ch.challenge,
-            "signature": hex::encode(sig.to_bytes()),
-        }))
-        .await;
-    let v: VerifyResponse = resp.json();
-    v.token
-}
+#[path = "common.rs"] mod common;
 
 /// Create a forum channel and return its id.
 async fn create_forum_channel(server: &TestServer, token: &str) -> String {
@@ -102,9 +34,9 @@ async fn create_text_channel(server: &TestServer, token: &str) -> String {
 
 #[tokio::test]
 async fn forum_create_list_get_post() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     // Create a post.
@@ -142,9 +74,9 @@ async fn forum_create_list_get_post() {
 
 #[tokio::test]
 async fn forum_edit_post() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     let resp = server
@@ -169,9 +101,9 @@ async fn forum_edit_post() {
 
 #[tokio::test]
 async fn forum_delete_post_soft() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     let resp = server
@@ -200,9 +132,9 @@ async fn forum_delete_post_soft() {
 
 #[tokio::test]
 async fn forum_reply_create_edit_delete() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     let resp = server
@@ -264,9 +196,9 @@ async fn forum_reply_create_edit_delete() {
 
 #[tokio::test]
 async fn forum_pin_and_lock() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     let resp = server
@@ -322,9 +254,9 @@ async fn forum_pin_and_lock() {
 
 #[tokio::test]
 async fn forum_search_returns_hits() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     server
@@ -352,9 +284,9 @@ async fn forum_search_returns_hits() {
 
 #[tokio::test]
 async fn forum_routes_return_not_a_forum_on_text_channel() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_text_channel(&server, &token).await;
 
     let resp = server
@@ -374,11 +306,11 @@ async fn forum_routes_return_not_a_forum_on_text_channel() {
 
 #[tokio::test]
 async fn forum_locked_post_rejects_new_reply_from_non_moderator() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     // Owner creates forum channel and a post.
     let owner_id = Identity::generate();
-    let owner_token = authenticate(&server, &owner_id).await;
+    let owner_token = common::authenticate(&server, &owner_id).await;
     let channel_id = create_forum_channel(&server, &owner_token).await;
 
     let resp = server
@@ -398,7 +330,7 @@ async fn forum_locked_post_rejects_new_reply_from_non_moderator() {
 
     // A second user tries to reply — should be forbidden.
     let user2 = Identity::generate();
-    let token2 = authenticate(&server, &user2).await;
+    let token2 = common::authenticate(&server, &user2).await;
     let resp = server
         .post(&format!("/channels/{channel_id}/posts/{post_id}/replies"))
         .add_header("Authorization", format!("Bearer {token2}"))
@@ -410,10 +342,10 @@ async fn forum_locked_post_rejects_new_reply_from_non_moderator() {
 
 #[tokio::test]
 async fn forum_non_author_cannot_edit_or_delete_post() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     let owner_id = Identity::generate();
-    let owner_token = authenticate(&server, &owner_id).await;
+    let owner_token = common::authenticate(&server, &owner_id).await;
     let channel_id = create_forum_channel(&server, &owner_token).await;
 
     let resp = server
@@ -426,7 +358,7 @@ async fn forum_non_author_cannot_edit_or_delete_post() {
 
     // Second user without manage_posts.
     let user2 = Identity::generate();
-    let token2 = authenticate(&server, &user2).await;
+    let token2 = common::authenticate(&server, &user2).await;
 
     let resp = server
         .patch(&format!("/channels/{channel_id}/posts/{post_id}"))
@@ -444,9 +376,9 @@ async fn forum_non_author_cannot_edit_or_delete_post() {
 
 #[tokio::test]
 async fn forum_search_requires_non_empty_query() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     let resp = server
@@ -459,9 +391,9 @@ async fn forum_search_requires_non_empty_query() {
 
 #[tokio::test]
 async fn forum_get_post_not_found_returns_404() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
     let channel_id = create_forum_channel(&server, &token).await;
 
     let resp = server

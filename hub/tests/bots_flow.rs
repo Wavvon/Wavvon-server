@@ -1,76 +1,8 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx: broadcast::channel(256).0,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-    TestServer::new(server::create_router(state))
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-    let challenge: ChallengeResponse = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await
-        .json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
-    let verify: VerifyResponse = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await
-        .json();
-    verify.token
-}
+#[path = "common.rs"] mod common;
 
 // ---------------------------------------------------------------------------
 // Happy-path tests
@@ -78,9 +10,9 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
 
 #[tokio::test]
 async fn any_member_can_create_list_and_delete_bot() {
-    let server = setup().await;
+    let server = common::setup().await;
     let member = Identity::generate();
-    let member_token = authenticate(&server, &member).await;
+    let member_token = common::authenticate(&server, &member).await;
 
     // Create a bot — any authenticated user can create
     let resp = server
@@ -138,13 +70,13 @@ async fn any_member_can_create_list_and_delete_bot() {
 
 #[tokio::test]
 async fn non_creator_cannot_delete_without_admin() {
-    let server = setup().await;
+    let server = common::setup().await;
     // First authenticator becomes the owner (gets Owner role).
-    let _owner_token = authenticate(&server, &Identity::generate()).await;
+    let _owner_token = common::authenticate(&server, &Identity::generate()).await;
     let creator = Identity::generate();
-    let creator_token = authenticate(&server, &creator).await;
+    let creator_token = common::authenticate(&server, &creator).await;
     let rando = Identity::generate();
-    let rando_token = authenticate(&server, &rando).await;
+    let rando_token = common::authenticate(&server, &rando).await;
 
     let resp: serde_json::Value = server
         .post("/admin/bots")
@@ -164,8 +96,8 @@ async fn non_creator_cannot_delete_without_admin() {
 
 #[tokio::test]
 async fn creator_can_set_and_clear_webhook() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp: serde_json::Value = server
         .post("/admin/bots")
@@ -208,8 +140,8 @@ async fn creator_can_set_and_clear_webhook() {
 
 #[tokio::test]
 async fn bot_token_can_set_commands_and_poll() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp: serde_json::Value = server
         .post("/admin/bots")
@@ -256,9 +188,9 @@ async fn bot_token_can_set_commands_and_poll() {
 
 #[tokio::test]
 async fn bot_can_send_message() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
 
     // Create a channel first
     let chan: serde_json::Value = server
@@ -293,8 +225,8 @@ async fn bot_can_send_message() {
 
 #[tokio::test]
 async fn create_bot_rejects_empty_display_name() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp = server
         .post("/admin/bots")
@@ -306,8 +238,8 @@ async fn create_bot_rejects_empty_display_name() {
 
 #[tokio::test]
 async fn delete_bot_returns_404_for_unknown_key() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp = server
         .delete("/admin/bots/bot_does_not_exist")
@@ -318,8 +250,8 @@ async fn delete_bot_returns_404_for_unknown_key() {
 
 #[tokio::test]
 async fn get_bot_returns_404_for_unknown_key() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp = server
         .get("/admin/bots/bot_does_not_exist")
@@ -330,7 +262,7 @@ async fn get_bot_returns_404_for_unknown_key() {
 
 #[tokio::test]
 async fn invalid_bot_token_returns_unauthorized_on_poll() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     let resp = server
         .get("/bot/poll")
@@ -341,7 +273,7 @@ async fn invalid_bot_token_returns_unauthorized_on_poll() {
 
 #[tokio::test]
 async fn missing_auth_returns_unauthorized_on_bot_send() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     let resp = server
         .post("/bot/send")

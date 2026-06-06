@@ -1,84 +1,16 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx: broadcast::channel(256).0,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-    TestServer::new(server::create_router(state))
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-    let challenge: ChallengeResponse = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await
-        .json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
-    let verify: VerifyResponse = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await
-        .json();
-    verify.token
-}
+#[path = "common.rs"] mod common;
 
 const SAMPLE_SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></svg>"#;
 
 #[tokio::test]
 async fn owner_can_create_list_rename_and_delete_icon() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Create an icon
     let resp = server
@@ -137,10 +69,10 @@ async fn owner_can_create_list_rename_and_delete_icon() {
 
 #[tokio::test]
 async fn non_admin_cannot_create_icon() {
-    let server = setup().await;
+    let server = common::setup().await;
     // First user gets Owner role; second gets @everyone only.
-    let _owner_token = authenticate(&server, &Identity::generate()).await;
-    let rando_token = authenticate(&server, &Identity::generate()).await;
+    let _owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let rando_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp = server
         .post("/hub/icons")
@@ -152,8 +84,8 @@ async fn non_admin_cannot_create_icon() {
 
 #[tokio::test]
 async fn create_icon_rejects_empty_name() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp = server
         .post("/hub/icons")
@@ -165,8 +97,8 @@ async fn create_icon_rejects_empty_name() {
 
 #[tokio::test]
 async fn rename_icon_returns_404_for_unknown_id() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp = server
         .patch("/hub/icons/nonexistent-id")
@@ -178,8 +110,8 @@ async fn rename_icon_returns_404_for_unknown_id() {
 
 #[tokio::test]
 async fn delete_icon_returns_404_for_unknown_id() {
-    let server = setup().await;
-    let owner_token = authenticate(&server, &Identity::generate()).await;
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
 
     let resp = server
         .delete("/hub/icons/nonexistent-id")
@@ -190,10 +122,10 @@ async fn delete_icon_returns_404_for_unknown_id() {
 
 #[tokio::test]
 async fn any_authenticated_user_can_list_icons() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
-    let rando_token = authenticate(&server, &Identity::generate()).await;
+    let owner_token = common::authenticate(&server, &owner).await;
+    let rando_token = common::authenticate(&server, &Identity::generate()).await;
 
     // Owner creates one
     server

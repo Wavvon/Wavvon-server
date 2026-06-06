@@ -1,66 +1,13 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
 use voxply_hub::routes::invite_models::InviteResponse;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
+#[path = "common.rs"] mod common;
 
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    authenticate_with_invite(server, identity, None).await
-}
-
+#[allow(dead_code)]
 async fn authenticate_with_invite(
     server: &TestServer,
     identity: &Identity,
@@ -94,9 +41,9 @@ async fn authenticate_with_invite(
 
 #[tokio::test]
 async fn create_and_list_invites() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     let resp = server
         .post("/invites")
@@ -118,11 +65,11 @@ async fn create_and_list_invites() {
 
 #[tokio::test]
 async fn invite_only_blocks_without_code() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     // First user (owner) joins freely
     let owner = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
 
     let resp = server
         .post("/invites")
@@ -156,9 +103,9 @@ async fn invite_only_blocks_without_code() {
 
 #[tokio::test]
 async fn revoke_invite() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     let resp = server
         .post("/invites")

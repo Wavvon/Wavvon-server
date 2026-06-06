@@ -51,6 +51,7 @@ async fn setup(startup_name: &str) -> TestServer {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
     let app = server::create_router(state);
     TestServer::new(app)

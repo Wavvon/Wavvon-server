@@ -13,12 +13,9 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let (server, _pool) = setup_with_pool().await;
-    server
-}
+#[path = "common.rs"] mod common;
 
-/// Same as setup() but also returns the SqlitePool so tests can poke the
+/// Same as common::setup() but also returns the SqlitePool so tests can poke the
 /// database directly (e.g. to mark a dm_outbox row as bounced for a test
 /// that exercises the delivery_failed reporting path).
 async fn setup_with_pool() -> (TestServer, sqlx::SqlitePool) {
@@ -61,42 +58,19 @@ async fn setup_with_pool() -> (TestServer, sqlx::SqlitePool) {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
     let app = server::create_router(state);
     (TestServer::new(app), pool_handle)
 }
 
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let challenge: ChallengeResponse = resp.json();
-
-    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await;
-    let verify: VerifyResponse = resp.json();
-    verify.token
-}
-
 #[tokio::test]
 async fn create_dm_conversation() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
-    authenticate(&server, &bob).await;
+    common::authenticate(&server, &bob).await;
 
     let resp = server
         .post("/conversations")
@@ -111,11 +85,11 @@ async fn create_dm_conversation() {
 
 #[tokio::test]
 async fn dm_conversation_dedup() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
-    authenticate(&server, &bob).await;
+    common::authenticate(&server, &bob).await;
 
     // First DM creation
     let resp = server
@@ -138,13 +112,13 @@ async fn dm_conversation_dedup() {
 
 #[tokio::test]
 async fn create_group_dm() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
     let charlie = Identity::generate();
-    authenticate(&server, &bob).await;
-    authenticate(&server, &charlie).await;
+    common::authenticate(&server, &bob).await;
+    common::authenticate(&server, &charlie).await;
 
     let resp = server
         .post("/conversations")
@@ -159,11 +133,11 @@ async fn create_group_dm() {
 
 #[tokio::test]
 async fn list_my_conversations() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
-    authenticate(&server, &bob).await;
+    common::authenticate(&server, &bob).await;
 
     server
         .post("/conversations")
@@ -179,13 +153,13 @@ async fn list_my_conversations() {
 
 #[tokio::test]
 async fn cannot_send_to_conversation_youre_not_in() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
-    let bob_token = authenticate(&server, &bob).await;
+    let bob_token = common::authenticate(&server, &bob).await;
     let charlie = Identity::generate();
-    let charlie_token = authenticate(&server, &charlie).await;
+    let charlie_token = common::authenticate(&server, &charlie).await;
 
     // Alice + Bob create a DM
     let resp = server
@@ -222,9 +196,9 @@ async fn cannot_send_to_conversation_youre_not_in() {
 
 #[tokio::test]
 async fn cannot_create_empty_conversation() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
 
     let resp = server
         .post("/conversations")
@@ -275,6 +249,7 @@ async fn start_real_hub(name: &str) -> String {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -364,6 +339,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -532,6 +508,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))
@@ -583,7 +560,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
 async fn list_dm_messages_marks_bounced_as_delivery_failed() {
     let (server, pool) = setup_with_pool().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
 
     // Alice creates a DM to Bob with a remote hub URL — Bob isn't on this
@@ -637,11 +614,11 @@ async fn list_dm_messages_marks_bounced_as_delivery_failed() {
 
 #[tokio::test]
 async fn list_dm_messages_returns_delivery_failed_false_for_local_conversation() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
-    authenticate(&server, &bob).await;
+    common::authenticate(&server, &bob).await;
 
     let resp = server
         .post("/conversations")
@@ -890,13 +867,13 @@ fn make_push_sender_key_request(
 
 #[tokio::test]
 async fn push_and_get_sender_keys_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
     let charlie = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
-    authenticate(&server, &bob).await;
-    authenticate(&server, &charlie).await;
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
+    common::authenticate(&server, &charlie).await;
 
     // Create a group conversation
     let resp = server
@@ -925,7 +902,7 @@ async fn push_and_get_sender_keys_happy_path() {
     resp.assert_status(axum::http::StatusCode::NO_CONTENT);
 
     // Bob retrieves his sender-key entry from Alice
-    let bob_token = authenticate(&server, &bob).await;
+    let bob_token = common::authenticate(&server, &bob).await;
     let resp = server
         .get(&format!("/conversations/{}/sender-keys", conv.id))
         .authorization_bearer(&bob_token)
@@ -941,13 +918,13 @@ async fn push_and_get_sender_keys_happy_path() {
 
 #[tokio::test]
 async fn push_sender_keys_rejected_for_non_member() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
     let eve = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
-    authenticate(&server, &bob).await;
-    let eve_token = authenticate(&server, &eve).await;
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
+    let eve_token = common::authenticate(&server, &eve).await;
 
     // Alice creates a group with Bob
     let resp = server
@@ -975,11 +952,11 @@ async fn push_sender_keys_rejected_for_non_member() {
 
 #[tokio::test]
 async fn push_sender_keys_rejected_for_dm_conversation() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
-    authenticate(&server, &bob).await;
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
 
     // Create a 1:1 DM
     let resp = server
@@ -1008,13 +985,13 @@ async fn push_sender_keys_rejected_for_dm_conversation() {
 
 #[tokio::test]
 async fn send_group_encrypted_dm_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
     let charlie = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
-    authenticate(&server, &bob).await;
-    authenticate(&server, &charlie).await;
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
+    common::authenticate(&server, &charlie).await;
 
     // Create a group conversation
     let resp = server
@@ -1038,7 +1015,7 @@ async fn send_group_encrypted_dm_happy_path() {
     assert!(msg["encrypted_envelope"].is_null(), "1:1 envelope must be absent");
 
     // Bob reads the conversation
-    let bob_token = authenticate(&server, &bob).await;
+    let bob_token = common::authenticate(&server, &bob).await;
     let resp = server
         .get(&format!("/conversations/{}/messages", conv.id))
         .authorization_bearer(&bob_token)
@@ -1054,11 +1031,11 @@ async fn send_group_encrypted_dm_happy_path() {
 
 #[tokio::test]
 async fn group_encrypted_dm_rejected_for_dm_conversation() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
-    authenticate(&server, &bob).await;
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
 
     // 1:1 DM
     let resp = server
@@ -1081,13 +1058,13 @@ async fn group_encrypted_dm_rejected_for_dm_conversation() {
 
 #[tokio::test]
 async fn group_encrypted_dm_rejected_for_invalid_signature() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
     let charlie = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
-    authenticate(&server, &bob).await;
-    authenticate(&server, &charlie).await;
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
+    common::authenticate(&server, &charlie).await;
 
     // Create a group conversation
     let resp = server
@@ -1112,13 +1089,13 @@ async fn group_encrypted_dm_rejected_for_invalid_signature() {
 
 #[tokio::test]
 async fn sender_key_upsert_replaces_old_entry() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
     let charlie = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
-    authenticate(&server, &bob).await;
-    authenticate(&server, &charlie).await;
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
+    common::authenticate(&server, &charlie).await;
 
     // Create a group conversation
     let resp = server
@@ -1158,7 +1135,7 @@ async fn sender_key_upsert_replaces_old_entry() {
         .assert_status(axum::http::StatusCode::NO_CONTENT);
 
     // Bob should see the updated wrapped_key_hex, not the old one
-    let bob_token = authenticate(&server, &bob).await;
+    let bob_token = common::authenticate(&server, &bob).await;
     let resp = server
         .get(&format!("/conversations/{}/sender-keys", conv.id))
         .authorization_bearer(&bob_token)

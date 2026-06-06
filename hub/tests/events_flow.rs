@@ -1,79 +1,9 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-    });
-    TestServer::new(server::create_router(state))
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let ch: ChallengeResponse = resp.json();
-    let sig = identity.sign(&hex::decode(&ch.challenge).unwrap());
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": ch.challenge,
-            "signature": hex::encode(sig.to_bytes()),
-        }))
-        .await;
-    let v: VerifyResponse = resp.json();
-    v.token
-}
+#[path = "common.rs"] mod common;
 
 async fn create_channel(server: &TestServer, token: &str) -> String {
     let resp = server
@@ -93,9 +23,9 @@ async fn create_channel(server: &TestServer, token: &str) -> String {
 /// Happy-path: create an event, list it, get by id, RSVP, list RSVPs.
 #[tokio::test]
 async fn event_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let id = Identity::generate();
-    let token = authenticate(&server, &id).await;
+    let token = common::authenticate(&server, &id).await;
     let channel_id = create_channel(&server, &token).await;
 
     // POST /events
@@ -182,11 +112,11 @@ async fn event_happy_path() {
 /// Non-creator without admin cannot delete another user's event.
 #[tokio::test]
 async fn event_delete_rejected_for_non_creator() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
     let other = Identity::generate();
-    let token_owner = authenticate(&server, &owner).await;
-    let token_other = authenticate(&server, &other).await;
+    let token_owner = common::authenticate(&server, &owner).await;
+    let token_other = common::authenticate(&server, &other).await;
     let channel_id = create_channel(&server, &token_owner).await;
 
     let resp = server
@@ -214,9 +144,9 @@ async fn event_delete_rejected_for_non_creator() {
 /// Invalid RSVP status is rejected.
 #[tokio::test]
 async fn event_rsvp_rejects_invalid_status() {
-    let server = setup().await;
+    let server = common::setup().await;
     let id = Identity::generate();
-    let token = authenticate(&server, &id).await;
+    let token = common::authenticate(&server, &id).await;
     let channel_id = create_channel(&server, &token).await;
 
     let resp = server

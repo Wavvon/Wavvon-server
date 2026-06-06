@@ -377,6 +377,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             get(routes::polls::get_poll).delete(routes::polls::delete_poll),
         )
         .route("/polls/{poll_id}/vote", post(routes::polls::vote_poll))
+        // ---- Link preview ----
+        .route("/preview", get(routes::preview::get_preview))
         // ---- Web admin panel ----
         .route("/admin/panel", get(routes::admin_panel::serve_panel))
         .route("/admin/stats", get(routes::admin_panel::get_stats))

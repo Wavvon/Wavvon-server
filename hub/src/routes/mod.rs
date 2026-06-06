@@ -47,3 +47,4 @@ pub mod admin_panel;
 pub mod listing;
 pub mod uploads;
 pub mod pins;
+pub mod preview;

@@ -1,89 +1,14 @@
 //! Integration tests for Tier 2 game session routes.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
+
+#[path = "common.rs"] mod common;
 
 // ---------------------------------------------------------------------------
 // Setup helpers
 // ---------------------------------------------------------------------------
-
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: Arc::new(RwLock::new(None)),
-        last_farm_pubkey_fetch: Arc::new(RwLock::new(0)),
-        active_game_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-    });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let challenge: ChallengeResponse = resp.json();
-
-    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await;
-    let verify: VerifyResponse = resp.json();
-    verify.token
-}
 
 /// Install a minimal game and return its id.
 async fn install_game(server: &TestServer, token: &str) -> String {
@@ -118,9 +43,9 @@ async fn create_channel(server: &TestServer, token: &str) -> String {
 
 #[tokio::test]
 async fn create_session_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -141,9 +66,9 @@ async fn create_session_happy_path() {
 
 #[tokio::test]
 async fn get_session_after_create() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -168,11 +93,11 @@ async fn get_session_after_create() {
 
 #[tokio::test]
 async fn join_session_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let host = Identity::generate();
-    let host_token = authenticate(&server, &host).await;
+    let host_token = common::authenticate(&server, &host).await;
     let player = Identity::generate();
-    let player_token = authenticate(&server, &player).await;
+    let player_token = common::authenticate(&server, &player).await;
 
     let game_id = install_game(&server, &host_token).await;
     let channel_id = create_channel(&server, &host_token).await;
@@ -203,9 +128,9 @@ async fn join_session_happy_path() {
 
 #[tokio::test]
 async fn patch_state_by_host() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -227,9 +152,9 @@ async fn patch_state_by_host() {
 
 #[tokio::test]
 async fn shared_kv_set_and_get() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -262,9 +187,9 @@ async fn shared_kv_set_and_get() {
 
 #[tokio::test]
 async fn end_session_by_host() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -296,9 +221,9 @@ async fn end_session_by_host() {
 
 #[tokio::test]
 async fn create_session_rejects_unknown_game() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let channel_id = create_channel(&server, &token).await;
 
@@ -312,11 +237,11 @@ async fn create_session_rejects_unknown_game() {
 
 #[tokio::test]
 async fn patch_state_rejected_for_non_host() {
-    let server = setup().await;
+    let server = common::setup().await;
     let host = Identity::generate();
-    let host_token = authenticate(&server, &host).await;
+    let host_token = common::authenticate(&server, &host).await;
     let other = Identity::generate();
-    let other_token = authenticate(&server, &other).await;
+    let other_token = common::authenticate(&server, &other).await;
 
     let game_id = install_game(&server, &host_token).await;
     let channel_id = create_channel(&server, &host_token).await;
@@ -339,11 +264,11 @@ async fn patch_state_rejected_for_non_host() {
 
 #[tokio::test]
 async fn end_session_rejected_for_non_host() {
-    let server = setup().await;
+    let server = common::setup().await;
     let host = Identity::generate();
-    let host_token = authenticate(&server, &host).await;
+    let host_token = common::authenticate(&server, &host).await;
     let other = Identity::generate();
-    let other_token = authenticate(&server, &other).await;
+    let other_token = common::authenticate(&server, &other).await;
 
     let game_id = install_game(&server, &host_token).await;
     let channel_id = create_channel(&server, &host_token).await;
@@ -368,9 +293,9 @@ async fn end_session_rejected_for_non_host() {
 
 #[tokio::test]
 async fn create_session_v2_happy_path() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -392,9 +317,9 @@ async fn create_session_v2_happy_path() {
 
 #[tokio::test]
 async fn list_sessions_returns_created() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -419,11 +344,11 @@ async fn list_sessions_returns_created() {
 
 #[tokio::test]
 async fn join_and_get_session_v2() {
-    let server = setup().await;
+    let server = common::setup().await;
     let host = Identity::generate();
-    let host_token = authenticate(&server, &host).await;
+    let host_token = common::authenticate(&server, &host).await;
     let player = Identity::generate();
-    let player_token = authenticate(&server, &player).await;
+    let player_token = common::authenticate(&server, &player).await;
 
     let game_id = install_game(&server, &host_token).await;
     let channel_id = create_channel(&server, &host_token).await;
@@ -467,11 +392,11 @@ async fn join_and_get_session_v2() {
 
 #[tokio::test]
 async fn leave_session_removes_player() {
-    let server = setup().await;
+    let server = common::setup().await;
     let host = Identity::generate();
-    let host_token = authenticate(&server, &host).await;
+    let host_token = common::authenticate(&server, &host).await;
     let player = Identity::generate();
-    let player_token = authenticate(&server, &player).await;
+    let player_token = common::authenticate(&server, &player).await;
 
     let game_id = install_game(&server, &host_token).await;
     let channel_id = create_channel(&server, &host_token).await;
@@ -516,9 +441,9 @@ async fn leave_session_removes_player() {
 
 #[tokio::test]
 async fn force_end_session_by_host_v2() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let game_id = install_game(&server, &token).await;
     let channel_id = create_channel(&server, &token).await;
@@ -549,11 +474,11 @@ async fn force_end_session_by_host_v2() {
 
 #[tokio::test]
 async fn force_end_session_rejected_for_non_host_v2() {
-    let server = setup().await;
+    let server = common::setup().await;
     let host = Identity::generate();
-    let host_token = authenticate(&server, &host).await;
+    let host_token = common::authenticate(&server, &host).await;
     let other = Identity::generate();
-    let other_token = authenticate(&server, &other).await;
+    let other_token = common::authenticate(&server, &other).await;
 
     let game_id = install_game(&server, &host_token).await;
     let channel_id = create_channel(&server, &host_token).await;
@@ -577,9 +502,9 @@ async fn force_end_session_rejected_for_non_host_v2() {
 
 #[tokio::test]
 async fn create_session_v2_rejects_unknown_game() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let channel_id = create_channel(&server, &token).await;
 

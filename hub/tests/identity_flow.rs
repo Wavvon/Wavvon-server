@@ -1,59 +1,10 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum::http::StatusCode;
-use axum_test::TestServer;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::{
     DeviceSubkey, HomeHubList, Identity, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx: broadcast::channel(16).0,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-
-    TestServer::new(server::create_router(state))
-}
+#[path = "common.rs"] mod common;
 
 fn signed_designation(
     master: &voxply_identity::MasterIdentity,
@@ -121,7 +72,7 @@ fn signed_prefs(
 
 #[tokio::test]
 async fn designation_roundtrip() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let master_pubkey = master.public_key_hex();
 
@@ -150,7 +101,7 @@ async fn designation_roundtrip() {
 
 #[tokio::test]
 async fn designation_rejects_stale_sequence() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let master_pubkey = master.public_key_hex();
 
@@ -172,7 +123,7 @@ async fn designation_rejects_stale_sequence() {
 
 #[tokio::test]
 async fn designation_rejects_url_body_mismatch() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let other = Identity::generate().master().unwrap();
 
@@ -186,7 +137,7 @@ async fn designation_rejects_url_body_mismatch() {
 
 #[tokio::test]
 async fn designation_rejects_bad_signature() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let master_pubkey = master.public_key_hex();
 
@@ -201,7 +152,7 @@ async fn designation_rejects_bad_signature() {
 
 #[tokio::test]
 async fn devices_post_and_list() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
     let master = identity.master().unwrap();
     let master_pubkey = master.public_key_hex();
@@ -233,7 +184,7 @@ async fn devices_post_and_list() {
 
 #[tokio::test]
 async fn revocation_post_and_list() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let master_pubkey = master.public_key_hex();
 
@@ -264,7 +215,7 @@ async fn revocation_post_and_list() {
 
 #[tokio::test]
 async fn prefs_blob_roundtrip_with_version_check() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let master_pubkey = master.public_key_hex();
 
@@ -304,7 +255,7 @@ async fn prefs_blob_roundtrip_with_version_check() {
 
 #[tokio::test]
 async fn empty_resources_return_404_or_empty() {
-    let server = setup().await;
+    let server = common::setup().await;
     let master = Identity::generate().master().unwrap();
     let master_pubkey = master.public_key_hex();
 

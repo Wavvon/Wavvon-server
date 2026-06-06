@@ -254,6 +254,10 @@ pub struct AppState {
 
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
+
+    /// In-memory link preview cache: url → (result, inserted_at).
+    /// Entries expire after 30 minutes.
+    pub preview_cache: std::sync::Mutex<std::collections::HashMap<String, (crate::routes::preview::LinkPreview, std::time::Instant)>>,
 }
 
 pub struct PendingChallenge {

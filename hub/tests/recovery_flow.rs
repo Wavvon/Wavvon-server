@@ -1,86 +1,8 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
-
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-    });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let challenge: ChallengeResponse = resp.json();
-
-    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await;
-    let verify: VerifyResponse = resp.json();
-    verify.token
-}
+#[path = "common.rs"] mod common;
 
 // ---------------------------------------------------------------------------
 // Happy path: put contacts, read them back, delete one
@@ -88,11 +10,11 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
 
 #[tokio::test]
 async fn put_and_get_contacts() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
     let contact_a = Identity::generate();
     let contact_b = Identity::generate();
-    let owner_token = authenticate(&server, &owner).await;
+    let owner_token = common::authenticate(&server, &owner).await;
 
     // Set contacts with threshold 1.
     let resp = server
@@ -119,12 +41,12 @@ async fn put_and_get_contacts() {
 
 #[tokio::test]
 async fn put_replaces_existing_contacts() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
     let c1 = Identity::generate();
     let c2 = Identity::generate();
     let c3 = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     server
         .put("/recovery/contacts")
@@ -151,9 +73,9 @@ async fn put_replaces_existing_contacts() {
 
 #[tokio::test]
 async fn cannot_set_more_than_5_contacts() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     let six: Vec<String> = (0..6).map(|_| Identity::generate().public_key_hex()).collect();
     let resp = server
@@ -166,11 +88,11 @@ async fn cannot_set_more_than_5_contacts() {
 
 #[tokio::test]
 async fn delete_one_contact() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
     let c1 = Identity::generate();
     let c2 = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     server
         .put("/recovery/contacts")
@@ -199,7 +121,7 @@ async fn delete_one_contact() {
 
 #[tokio::test]
 async fn rotate_key_rejected_when_no_contacts_configured() {
-    let server = setup().await;
+    let server = common::setup().await;
     let new_key = Identity::generate();
 
     // Nobody configured contacts for old_pubkey.
@@ -217,15 +139,15 @@ async fn rotate_key_rejected_when_no_contacts_configured() {
 
 #[tokio::test]
 async fn rotate_key_happy_path_and_admin_approve() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     let owner = Identity::generate();
     let contact = Identity::generate();
     let new_key = Identity::generate();
 
     // Owner must be registered to auth and set contacts.
-    let owner_token = authenticate(&server, &owner).await;
-    let _contact_token = authenticate(&server, &contact).await;
+    let owner_token = common::authenticate(&server, &owner).await;
+    let _contact_token = common::authenticate(&server, &contact).await;
 
     server
         .put("/recovery/contacts")
@@ -277,14 +199,14 @@ async fn rotate_key_happy_path_and_admin_approve() {
 
 #[tokio::test]
 async fn admin_list_pending_recovery_requests() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     let owner = Identity::generate();
     let contact = Identity::generate();
     let new_key = Identity::generate();
 
-    let owner_token = authenticate(&server, &owner).await;
-    authenticate(&server, &contact).await;
+    let owner_token = common::authenticate(&server, &owner).await;
+    common::authenticate(&server, &contact).await;
 
     server
         .put("/recovery/contacts")
@@ -322,14 +244,14 @@ async fn admin_list_pending_recovery_requests() {
 
 #[tokio::test]
 async fn admin_deny_recovery_request() {
-    let server = setup().await;
+    let server = common::setup().await;
 
     let owner = Identity::generate();
     let contact = Identity::generate();
     let new_key = Identity::generate();
 
-    let owner_token = authenticate(&server, &owner).await;
-    authenticate(&server, &contact).await;
+    let owner_token = common::authenticate(&server, &owner).await;
+    common::authenticate(&server, &contact).await;
 
     server
         .put("/recovery/contacts")

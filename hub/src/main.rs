@@ -445,6 +445,7 @@ async fn main() -> Result<()> {
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
     });
 
     // Bind voice UDP socket and start forwarding task

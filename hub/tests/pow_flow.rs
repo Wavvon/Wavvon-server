@@ -1,60 +1,10 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
+use voxply_hub::auth::models::ChallengeResponse;
 use voxply_identity::{compute_security_level, Identity};
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
-
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-    });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
+#[path = "common.rs"] mod common;
 
 async fn do_auth_with_pow(
     server: &TestServer,
@@ -87,19 +37,13 @@ async fn do_auth_with_pow(
     server.post("/auth/verify").json(&body).await
 }
 
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let resp = do_auth_with_pow(server, identity, None, None).await;
-    resp.assert_status_ok();
-    resp.json::<VerifyResponse>().token
-}
-
 // ---- /admin/settings/pow ----
 
 #[tokio::test]
 async fn get_pow_settings_defaults_to_zero() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     let resp = server
         .get("/admin/settings/pow")
@@ -112,9 +56,9 @@ async fn get_pow_settings_defaults_to_zero() {
 
 #[tokio::test]
 async fn patch_and_get_pow_settings() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     server
         .patch("/admin/settings/pow")
@@ -134,14 +78,14 @@ async fn patch_and_get_pow_settings() {
 
 #[tokio::test]
 async fn pow_settings_routes_reject_non_admin() {
-    let server = setup().await;
+    let server = common::setup().await;
     // First user becomes owner
     let owner = Identity::generate();
-    let _owner_token = authenticate(&server, &owner).await;
+    let _owner_token = common::authenticate(&server, &owner).await;
 
     // Second user is plain member
     let member = Identity::generate();
-    let member_token = authenticate(&server, &member).await;
+    let member_token = common::authenticate(&server, &member).await;
 
     server
         .get("/admin/settings/pow")
@@ -161,9 +105,9 @@ async fn pow_settings_routes_reject_non_admin() {
 
 #[tokio::test]
 async fn info_includes_min_pow_level() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Default: 0
     let resp = server.get("/info").await;
@@ -188,7 +132,7 @@ async fn info_includes_min_pow_level() {
 
 #[tokio::test]
 async fn auth_succeeds_without_pow_when_min_is_zero() {
-    let server = setup().await;
+    let server = common::setup().await;
     let user = Identity::generate();
     // min_pow_level defaults to 0 — no proof needed
     let resp = do_auth_with_pow(&server, &user, None, None).await;
@@ -197,9 +141,9 @@ async fn auth_succeeds_without_pow_when_min_is_zero() {
 
 #[tokio::test]
 async fn auth_rejected_when_pow_missing_and_min_level_set() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Raise the minimum
     server
@@ -218,9 +162,9 @@ async fn auth_rejected_when_pow_missing_and_min_level_set() {
 
 #[tokio::test]
 async fn auth_rejected_when_pow_level_below_minimum() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     server
         .patch("/admin/settings/pow")
@@ -244,9 +188,9 @@ async fn auth_rejected_when_pow_level_below_minimum() {
 
 #[tokio::test]
 async fn auth_succeeds_with_valid_pow_proof() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     // Use a very low level so the test runs fast
     server
@@ -267,9 +211,9 @@ async fn auth_succeeds_with_valid_pow_proof() {
 
 #[tokio::test]
 async fn auth_rejected_with_fake_nonce() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     server
         .patch("/admin/settings/pow")

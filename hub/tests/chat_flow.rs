@@ -1,91 +1,16 @@
-use std::collections::HashMap;
-use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
-use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
 use voxply_hub::routes::chat_models::{ChannelResponse, MessageResponse};
 use voxply_hub::routes::me::MeResponse;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-async fn setup() -> TestServer {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let (chat_tx, _) = broadcast::channel(256);
-
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        });
-    let app = server::create_router(state);
-    TestServer::new(app)
-}
-
-async fn authenticate(server: &TestServer, identity: &Identity) -> String {
-    let pub_key = identity.public_key_hex();
-
-    let resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pub_key }))
-        .await;
-    let challenge: ChallengeResponse = resp.json();
-
-    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pub_key,
-            "challenge": challenge.challenge,
-            "signature": hex::encode(signature.to_bytes()),
-        }))
-        .await;
-    let verify: VerifyResponse = resp.json();
-    verify.token
-}
+#[path = "common.rs"] mod common;
 
 #[tokio::test]
 async fn create_and_list_channels() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     // Create a channel
     let resp = server
@@ -120,9 +45,9 @@ async fn create_and_list_channels() {
 
 #[tokio::test]
 async fn duplicate_channel_name_returns_conflict() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     server
         .post("/channels")
@@ -140,16 +65,16 @@ async fn duplicate_channel_name_returns_conflict() {
 
 #[tokio::test]
 async fn channels_require_auth() {
-    let server = setup().await;
+    let server = common::setup().await;
     let resp = server.get("/channels").await;
     resp.assert_status_unauthorized();
 }
 
 #[tokio::test]
 async fn send_and_get_messages() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     // Create a channel
     let resp = server
@@ -205,9 +130,9 @@ async fn send_and_get_messages() {
 
 #[tokio::test]
 async fn set_and_get_display_name() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     // Initially no display name
     let resp = server.get("/me").authorization_bearer(&token).await;
@@ -234,9 +159,9 @@ async fn set_and_get_display_name() {
 
 #[tokio::test]
 async fn message_to_nonexistent_channel_returns_404() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let resp = server
         .post("/channels/nonexistent/messages")
@@ -248,9 +173,9 @@ async fn message_to_nonexistent_channel_returns_404() {
 
 #[tokio::test]
 async fn create_category_and_nested_channel() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     // Create a category
     let resp = server
@@ -282,9 +207,9 @@ async fn create_category_and_nested_channel() {
 
 #[tokio::test]
 async fn cannot_nest_under_non_category() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     // Create a regular channel
     let resp = server
@@ -305,9 +230,9 @@ async fn cannot_nest_under_non_category() {
 
 #[tokio::test]
 async fn delete_channel() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let resp = server
         .post("/channels")
@@ -330,9 +255,9 @@ async fn delete_channel() {
 
 #[tokio::test]
 async fn cannot_delete_non_empty_category() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     // Category with a child
     let resp = server
@@ -358,9 +283,9 @@ async fn cannot_delete_non_empty_category() {
 
 #[tokio::test]
 async fn reorder_channels() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     let mut ids = Vec::new();
     for name in ["alpha", "beta", "gamma"] {
@@ -391,9 +316,9 @@ async fn reorder_channels() {
 
 #[tokio::test]
 async fn delete_channel_nonexistent_returns_404() {
-    let server = setup().await;
+    let server = common::setup().await;
     let identity = Identity::generate();
-    let token = authenticate(&server, &identity).await;
+    let token = common::authenticate(&server, &identity).await;
 
     server
         .delete("/channels/nonexistent-id")
@@ -404,9 +329,9 @@ async fn delete_channel_nonexistent_returns_404() {
 
 #[tokio::test]
 async fn author_can_edit_and_delete_their_message() {
-    let server = setup().await;
+    let server = common::setup().await;
     let owner = Identity::generate();
-    let token = authenticate(&server, &owner).await;
+    let token = common::authenticate(&server, &owner).await;
 
     let ch: ChannelResponse = server
         .post("/channels")
@@ -451,11 +376,11 @@ async fn author_can_edit_and_delete_their_message() {
 
 #[tokio::test]
 async fn non_author_cannot_edit_other_peoples_messages() {
-    let server = setup().await;
+    let server = common::setup().await;
     let alice = Identity::generate();
-    let alice_token = authenticate(&server, &alice).await;
+    let alice_token = common::authenticate(&server, &alice).await;
     let bob = Identity::generate();
-    let bob_token = authenticate(&server, &bob).await;
+    let bob_token = common::authenticate(&server, &bob).await;
 
     let ch: ChannelResponse = server
         .post("/channels")
