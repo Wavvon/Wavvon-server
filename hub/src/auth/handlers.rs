@@ -233,15 +233,15 @@ pub async fn verify(
     // legacy single-key users) so a new subkey cert can't bypass the ban.
     {
         let check_pubkey = master_pubkey.as_deref().unwrap_or(&canonical_pubkey);
-        let is_fed_banned: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM federated_bans WHERE target_master_pubkey = ?",
+        let fed_ban_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = ?",
         )
         .bind(check_pubkey)
         .fetch_one(&state.db)
         .await
-        .unwrap_or(false);
+        .unwrap_or(0);
 
-        if is_fed_banned {
+        if fed_ban_count > 0 {
             return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
         }
     }
@@ -480,6 +480,27 @@ pub async fn verify(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if has_roles == 0 {
+        // First user to connect on a fresh hub becomes the owner.
+        let owner_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-owner'",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(1); // conservative: assume owner exists on error
+
+        if owner_count == 0 {
+            sqlx::query(
+                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+                 VALUES (?, 'builtin-owner', ?)
+                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
+            )
+            .bind(&canonical_pubkey)
+            .bind(&now)
+            .execute(&state.db)
+            .await
+            .ok();
+        }
+
         sqlx::query(
             "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-everyone', ?) ON CONFLICT (user_public_key, role_id) DO NOTHING",
         )

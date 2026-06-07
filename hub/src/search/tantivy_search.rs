@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tantivy::collector::TopDocs;
 use tantivy::doc;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
-use tantivy::schema::{Field, IndexRecordOption, Schema, Value, FAST, STORED, TEXT};
+use tantivy::schema::{Field, IndexRecordOption, Schema, Value, FAST, STORED, STRING, TEXT};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
 use crate::search::{IndexedMessage, MessageSearch, SearchHit, SearchParams};
@@ -22,7 +22,7 @@ pub struct TantivySearch {
 impl TantivySearch {
     pub fn open(index_path: &std::path::Path) -> anyhow::Result<Self> {
         let (index, id_field, channel_field, author_field, content_field, ts_field) =
-            if index_path.exists() {
+            if index_path.join("meta.json").exists() {
                 let index = Index::open_in_dir(index_path)?;
                 let schema = index.schema();
                 let id_field = schema.get_field("id").unwrap();
@@ -34,9 +34,9 @@ impl TantivySearch {
             } else {
                 std::fs::create_dir_all(index_path)?;
                 let mut builder = Schema::builder();
-                let id_field = builder.add_text_field("id", STORED);
-                let channel_field = builder.add_text_field("channel_id", STORED | FAST);
-                let author_field = builder.add_text_field("author", STORED);
+                let id_field = builder.add_text_field("id", STRING | STORED);
+                let channel_field = builder.add_text_field("channel_id", STRING | STORED);
+                let author_field = builder.add_text_field("author", STRING | STORED);
                 let content_field = builder.add_text_field("content", TEXT | STORED);
                 let ts_field = builder.add_i64_field("ts", FAST | STORED);
                 let schema = builder.build();
@@ -69,6 +69,7 @@ impl MessageSearch for TantivySearch {
         msg: &'a IndexedMessage,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
         let writer = self.writer.clone();
+        let reader = self.reader.clone();
         let id_field = self.id_field;
         let channel_field = self.channel_field;
         let author_field = self.author_field;
@@ -94,6 +95,8 @@ impl MessageSearch for TantivySearch {
                 let mut w = writer.lock().unwrap();
                 w.add_document(doc)?;
                 w.commit()?;
+                drop(w);
+                reader.reload()?;
                 Ok::<_, tantivy::TantivyError>(())
             })
             .await

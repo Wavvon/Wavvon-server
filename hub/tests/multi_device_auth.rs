@@ -15,7 +15,7 @@ use voxply_identity::{DeviceSubkey, Identity, MasterIdentity, SubkeyCert};
 
 async fn setup() -> (TestServer, AnyPool) {
     sqlx::any::install_default_drivers();
-    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
 
     let state = Arc::new(AppState {
@@ -326,9 +326,10 @@ async fn master_hijack_attempt_is_blocked_by_coalesce() {
 /// lives in the identity route that accepts the POST.
 async fn insert_revocation(db: &AnyPool, subkey_pubkey: &str) {
     sqlx::query(
-        "INSERT OR IGNORE INTO subkey_revocations
+        "INSERT INTO subkey_revocations
          (master_pubkey, subkey_pubkey, revoked_at, signature, registered_at)
-         VALUES ('test-master', ?, 1, 'test-sig', 1)",
+         VALUES ('test-master', ?, 1, 'test-sig', 1)
+         ON CONFLICT (master_pubkey, subkey_pubkey) DO NOTHING",
     )
     .bind(subkey_pubkey)
     .execute(db)

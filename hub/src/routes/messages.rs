@@ -245,7 +245,6 @@ pub async fn send_message(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     {
-        let search = state.search.clone();
         let indexed = crate::search::IndexedMessage {
             id: id.clone(),
             channel_id: channel_id.clone(),
@@ -253,11 +252,9 @@ pub async fn send_message(
             content: req.content.clone(),
             timestamp: now,
         };
-        tokio::spawn(async move {
-            if let Err(e) = search.index(&indexed).await {
-                tracing::warn!("search index error: {e}");
-            }
-        });
+        if let Err(e) = state.search.index(&indexed).await {
+            tracing::warn!("search index error: {e}");
+        }
     }
 
     // Increment reply_count on the parent message when this is a reply.

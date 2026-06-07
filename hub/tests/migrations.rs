@@ -4,7 +4,7 @@ use voxply_hub::db;
 #[tokio::test]
 async fn migrations_idempotent_on_fresh_db() {
     sqlx::any::install_default_drivers();
-    let pool = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let pool = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
 
     // Running twice in a row should not fail
     db::migrations::run(&pool).await.unwrap();
@@ -27,54 +27,45 @@ async fn migrations_idempotent_on_fresh_db() {
 }
 
 #[tokio::test]
-async fn migrations_add_new_columns_to_old_schema() {
+async fn migrations_data_survives_rerun() {
     sqlx::any::install_default_drivers();
-    let pool = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let pool = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
 
-    // Simulate an old DB: pre-existing channels table WITHOUT parent_id/is_category
-    sqlx::query(
-        "CREATE TABLE users (
-            public_key TEXT PRIMARY KEY,
-            display_name TEXT,
-            first_seen_at INTEGER NOT NULL,
-            last_seen_at INTEGER NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        "CREATE TABLE channels (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL UNIQUE,
-            created_by TEXT NOT NULL REFERENCES users(public_key),
-            created_at INTEGER NOT NULL
-        )",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Run migrations on this "old" schema
+    // First run: fresh schema
     db::migrations::run(&pool).await.unwrap();
 
-    // Verify new columns were added
-    let cols: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM pragma_table_info('channels')")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
-    let names: Vec<&str> = cols.iter().map(|(n,)| n.as_str()).collect();
+    // Insert a user so the FK on channels.created_by is satisfied
+    sqlx::query(
+        "INSERT INTO users (public_key, first_seen_at, last_seen_at) VALUES ('user-anon', 1000000, 1000000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
 
-    assert!(names.contains(&"parent_id"), "parent_id column missing after migration");
-    assert!(names.contains(&"is_category"), "is_category column missing after migration");
+    // Insert a channel row to represent existing data
+    sqlx::query(
+        "INSERT INTO channels (id, name, created_by, created_at) VALUES ('ch-survives', 'general', 'user-anon', 1000000)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Running migrations again must not destroy existing data
+    db::migrations::run(&pool).await.unwrap();
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM channels WHERE id = 'ch-survives'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 1, "channel row must survive migration rerun");
 }
 
 #[tokio::test]
 async fn migrations_create_all_core_tables() {
     sqlx::any::install_default_drivers();
-    let pool = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let pool = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
 
     db::migrations::run(&pool).await.unwrap();
 

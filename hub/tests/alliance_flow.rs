@@ -15,7 +15,7 @@ use voxply_identity::Identity;
 
 async fn start_hub(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);

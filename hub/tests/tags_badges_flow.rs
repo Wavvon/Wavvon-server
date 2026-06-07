@@ -18,7 +18,7 @@ use voxply_identity::Identity;
 
 async fn setup() -> (TestServer, Identity) {
     sqlx::any::install_default_drivers();
-    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
 
     let (chat_tx, _) = broadcast::channel(256);

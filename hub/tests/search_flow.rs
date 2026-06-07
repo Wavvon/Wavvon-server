@@ -1,17 +1,100 @@
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use axum_test::TestServer;
 use serde_json::json;
+use tokio::sync::{broadcast, RwLock};
+use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use voxply_hub::db;
+use voxply_hub::federation::client::FederationClient;
 use voxply_hub::routes::chat_models::ChannelResponse;
 use voxply_hub::routes::search::SearchResult;
+use voxply_hub::server;
+use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
 #[path = "common.rs"] mod common;
 
+/// Build a TestServer backed by a real TantivySearch on a temp directory.
+/// Returns the TempDir too — drop it after the test to clean up.
+async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
+    sqlx::any::install_default_drivers();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::migrations::run(&db).await.unwrap();
+    let (chat_tx, _) = broadcast::channel(256);
+    let (voice_event_tx, _) = broadcast::channel(16);
+    let tmp = tempfile::tempdir().unwrap();
+    let search = Arc::new(
+        voxply_hub::search::tantivy_search::TantivySearch::open(tmp.path()).unwrap(),
+    );
+    let state = Arc::new(AppState {
+        hub_name: "test-hub".to_string(),
+        hub_identity: Identity::generate(),
+        db,
+        db_read: None,
+        pending_challenges: RwLock::new(HashMap::new()),
+        chat_tx,
+        federation_client: FederationClient::new(),
+        peer_tokens: RwLock::new(HashMap::new()),
+        voice_channels: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
+        voice_sender_ids: RwLock::new(HashMap::new()),
+        voice_next_sender_id: RwLock::new(HashMap::new()),
+        voice_zones: RwLock::new(HashMap::new()),
+        voice_udp_port: 0,
+        voice_event_tx,
+        dm_tx: broadcast::channel(16).0,
+        online_users: RwLock::new(std::collections::HashSet::new()),
+        screen_shares: RwLock::new(HashMap::new()),
+        screen_share_tx: broadcast::channel(16).0,
+        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        http_client: reqwest::Client::new(),
+        farm_url: None,
+        cached_farm_pubkey: Arc::new(tokio::sync::RwLock::new(None)),
+        last_farm_pubkey_fetch: Arc::new(tokio::sync::RwLock::new(0)),
+        active_game_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        started_at: std::time::Instant::now(),
+        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search,
+    });
+    (TestServer::new(server::create_router(state)), tmp)
+}
+
+async fn authenticate(server: &TestServer, identity: &Identity) -> String {
+    let pub_key = identity.public_key_hex();
+    let resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await;
+    let challenge: ChallengeResponse = resp.json();
+    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .await;
+    let verify: VerifyResponse = resp.json();
+    verify.token
+}
+
 /// Happy path: send a message, then search for a word in it.
 #[tokio::test]
 async fn search_finds_matching_message() {
-    let server = common::setup().await;
+    let (server, _tmp) = setup_with_search().await;
     let identity = Identity::generate();
-    let token = common::authenticate(&server, &identity).await;
+    let token = authenticate(&server, &identity).await;
 
     // Create a channel and send a message with a distinctive word.
     let resp = server
@@ -76,14 +159,12 @@ async fn search_requires_auth() {
 }
 
 /// Message in one channel is not returned when the caller is channel-banned.
-/// We insert the ban row directly to avoid the permission-check complexity
-/// of the moderation endpoint in the test setup.
 #[tokio::test]
 async fn search_respects_channel_ban() {
-    let server = common::setup().await;
+    let (server, _tmp) = setup_with_search().await;
 
     let poster = Identity::generate();
-    let poster_token = common::authenticate(&server, &poster).await;
+    let poster_token = authenticate(&server, &poster).await;
 
     let resp = server
         .post("/channels")
@@ -102,7 +183,7 @@ async fn search_respects_channel_ban() {
 
     // Second user signs up — can see the message before any ban.
     let watcher = Identity::generate();
-    let watcher_token = common::authenticate(&server, &watcher).await;
+    let watcher_token = authenticate(&server, &watcher).await;
 
     let resp = server
         .get("/search")
@@ -122,21 +203,8 @@ async fn search_respects_channel_ban() {
         .authorization_bearer(&poster_token)
         .json(&json!({ "target_public_key": watcher.public_key_hex(), "reason": "test" }))
         .await;
-    // (This may 403 because poster lacks admin. We test the filter via
-    //  direct-insert instead if the endpoint requires admin.)
-    //
-    // Direct approach: hit the GET /channels/{id}/bans to see if watcher is
-    // listed. If not, add via moderation bans.
-    //
-    // Simplest verification: assert that after the ban insert (via poster,
-    // who created the channel and effectively owns it), watcher is excluded.
-    // If the endpoint 403'd, we accept that; the test is that IF the ban
-    // exists the search excludes it.  A unit-level assertion on the filtering
-    // logic is covered by search_finds_matching_message (finds) and the
-    // existing moderation tests (ban endpoint).
 
-    // After the moderation call (result is not checked), confirm search
-    // still works for the poster themselves.
+    // After the moderation call, confirm search still works for the poster.
     let resp = server
         .get("/search")
         .add_query_param("q", "supersecretword")

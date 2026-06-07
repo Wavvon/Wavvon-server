@@ -20,7 +20,7 @@ use voxply_identity::Identity;
 /// that exercises the delivery_failed reporting path).
 async fn setup_with_pool() -> (TestServer, AnyPool) {
     sqlx::any::install_default_drivers();
-    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let pool_handle = db.clone();
     let (chat_tx, _) = broadcast::channel(256);
@@ -212,7 +212,7 @@ async fn cannot_create_empty_conversation() {
 
 async fn start_real_hub(name: &str) -> String {
     sqlx::any::install_default_drivers();
-    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -302,7 +302,7 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -472,7 +472,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
 
     // Bring Hub B up on the previously-chosen port.
     sqlx::any::install_default_drivers();
-    let hub_b_db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let hub_b_db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&hub_b_db).await.unwrap();
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);

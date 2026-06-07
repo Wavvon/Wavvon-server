@@ -265,7 +265,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 /// Spin up a real listener so we can connect a WebSocket client to it.
 async fn spawn_real_hub() -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),

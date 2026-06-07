@@ -41,15 +41,15 @@ pub async fn ws_handler(
     let public_key = public_key
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
 
-    let is_revoked: bool = sqlx::query_scalar(
-        "SELECT COUNT(*) > 0 FROM subkey_revocations WHERE subkey_pubkey = ?",
+    let revoked_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = ?",
     )
     .bind(&public_key)
     .fetch_one(&state.db)
     .await
-    .unwrap_or(false);
+    .unwrap_or(0);
 
-    if is_revoked {
+    if revoked_count > 0 {
         return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
     }
 
