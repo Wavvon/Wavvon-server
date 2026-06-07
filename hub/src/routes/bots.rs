@@ -60,7 +60,7 @@ fn generate_token() -> String {
 /// Authenticate a bot request via `Authorization: Bearer <token>` and return
 /// the matching bot row.
 async fn authenticate_bot(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     headers: &HeaderMap,
 ) -> Result<BotRow, (StatusCode, String)> {
     let raw = headers
@@ -693,10 +693,10 @@ pub async fn ext_invite_bot(
 
     let now = crate::auth::handlers::unix_timestamp();
 
-    // Create the pending users row (INSERT OR IGNORE so re-inviting is safe).
+    // Create the pending users row (idempotent so re-inviting is safe).
     sqlx::query(
-        "INSERT OR IGNORE INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
-         VALUES (?, ?, ?, 'bot_pending', 1)",
+        "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
+         VALUES (?, ?, ?, 'bot_pending', 1) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&req.pubkey)
     .bind(now)
@@ -1102,8 +1102,8 @@ pub async fn ext_update_bot_subscriptions(
             Some(channels) if !channels.is_empty() => {
                 for channel_id in channels {
                     sqlx::query(
-                        "INSERT OR IGNORE INTO bot_subscriptions(bot_pubkey, event_type, channel_id)
-                         VALUES(?,?,?)",
+                        "INSERT INTO bot_subscriptions(bot_pubkey, event_type, channel_id)
+                         VALUES(?,?,?) ON CONFLICT (bot_pubkey, event_type, channel_id) DO NOTHING",
                     )
                     .bind(&user.public_key)
                     .bind(&sub.event)
@@ -1117,8 +1117,8 @@ pub async fn ext_update_bot_subscriptions(
             _ => {
                 // Hub-scoped subscription: use '' as sentinel for "no channel filter".
                 sqlx::query(
-                    "INSERT OR IGNORE INTO bot_subscriptions(bot_pubkey, event_type, channel_id)
-                     VALUES(?,?,'')",
+                    "INSERT INTO bot_subscriptions(bot_pubkey, event_type, channel_id)
+                     VALUES(?,?,'') ON CONFLICT (bot_pubkey, event_type, channel_id) DO NOTHING",
                 )
                 .bind(&user.public_key)
                 .bind(&sub.event)

@@ -204,8 +204,8 @@ pub async fn federated_messages(
     for msg in &messages {
         let local_id = Uuid::new_v4().to_string();
         let _ = sqlx::query(
-            "INSERT OR IGNORE INTO federated_messages (id, fed_channel_id, remote_id, sender, content, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO federated_messages (id, fed_channel_id, remote_id, sender, content, created_at)
+             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
         )
         .bind(&local_id)
         .bind(&fed_channel_id)

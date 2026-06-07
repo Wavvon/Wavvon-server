@@ -233,7 +233,8 @@ pub async fn assign_role(
 
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT OR IGNORE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, ?, ?)",
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, ?, ?)
+         ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(&public_key)
     .bind(&role_id)
@@ -335,7 +336,7 @@ fn require_not_builtin(role_id: &str) -> Result<(), (StatusCode, String)> {
     }
 }
 
-async fn get_role(db: &sqlx::SqlitePool, role_id: &str) -> Result<RoleRow, (StatusCode, String)> {
+async fn get_role(db: &sqlx::AnyPool, role_id: &str) -> Result<RoleRow, (StatusCode, String)> {
     sqlx::query_as::<_, RoleRow>(
         "SELECT id, name, priority, display_separately, created_at FROM roles WHERE id = ?",
     )
@@ -347,7 +348,7 @@ async fn get_role(db: &sqlx::SqlitePool, role_id: &str) -> Result<RoleRow, (Stat
 }
 
 async fn role_permissions(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     role_id: &str,
 ) -> Result<Vec<String>, (StatusCode, String)> {
     sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = ?")
@@ -358,7 +359,7 @@ async fn role_permissions(
 }
 
 async fn fetch_user_roles_response(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     public_key: &str,
 ) -> Result<Vec<RoleResponse>, (StatusCode, String)> {
     let roles = sqlx::query_as::<_, RoleRow>(

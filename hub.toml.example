@@ -38,6 +38,12 @@ discovery_url = "https://discovery.voxply.io"
 # template_url  = "https://example.com/my-template.json"
 # bootstrap_token = ""
 
+# ── Database ─────────────────────────────────────────────────────────────────
+# Leave unset to use SQLite at hub.db (default).
+# database_url = "sqlite://hub.db"
+# database_url = "postgresql://voxply:secret@localhost/hub_prod"
+# database_read_url = "postgresql://voxply:secret@replica/hub_prod"
+
 # ── Search ───────────────────────────────────────────────────────────────────
 
 # Full-text search backend. Omit or set to "tantivy" to use Tantivy (default).

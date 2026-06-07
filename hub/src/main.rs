@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::any::AnyPoolOptions;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use voxply_hub::cert_worker;
@@ -87,7 +87,8 @@ async fn main() -> Result<()> {
     // one-off schema upgrades, or running against a prod DB over SSH.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
-        let db = SqlitePoolOptions::new()
+        sqlx::any::install_default_drivers();
+        let db = AnyPoolOptions::new()
             .max_connections(1)
             .connect("sqlite:hub.db?mode=rwc")
             .await?;
@@ -131,9 +132,10 @@ async fn main() -> Result<()> {
 
     if subcommand.as_deref() == Some("admin") {
         let admin_cmd = std::env::args().nth(2).unwrap_or_default();
+        sqlx::any::install_default_drivers();
         let db_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "sqlite:hub.db?mode=ro".to_string());
-        let db = SqlitePoolOptions::new()
+        let db = AnyPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
             .await
@@ -200,13 +202,13 @@ async fn main() -> Result<()> {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs() as i64;
-                        let db_rw = SqlitePoolOptions::new()
+                        let db_rw = AnyPoolOptions::new()
                             .max_connections(1)
                             .connect("sqlite:hub.db?mode=rwc")
                             .await
                             .context("Cannot open DB for write")?;
                         sqlx::query(
-                            "INSERT OR IGNORE INTO bans(target_public_key, banned_by, reason, created_at) VALUES(?,'cli','CLI ban',?)",
+                            "INSERT INTO bans(target_public_key, banned_by, reason, created_at) VALUES(?,'cli','CLI ban',?) ON CONFLICT (target_public_key) DO NOTHING",
                         )
                         .bind(&pubkey)
                         .bind(now)
@@ -218,7 +220,7 @@ async fn main() -> Result<()> {
                         let pubkey = std::env::args()
                             .nth(4)
                             .context("Usage: admin users unban <pubkey>")?;
-                        let db_rw = SqlitePoolOptions::new()
+                        let db_rw = AnyPoolOptions::new()
                             .max_connections(1)
                             .connect("sqlite:hub.db?mode=rwc")
                             .await
@@ -237,7 +239,7 @@ async fn main() -> Result<()> {
                         if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
                             anyhow::bail!("Invalid pubkey: expected 64 hex characters");
                         }
-                        let db_rw = SqlitePoolOptions::new()
+                        let db_rw = AnyPoolOptions::new()
                             .max_connections(1)
                             .connect("sqlite:hub.db?mode=rwc")
                             .await
@@ -261,14 +263,15 @@ async fn main() -> Result<()> {
                         }
                         // Ensure a minimal user record exists
                         sqlx::query(
-                            "INSERT OR IGNORE INTO users (public_key, first_seen_at) VALUES (?, ?)",
+                            "INSERT INTO users (public_key, first_seen_at) VALUES (?, ?) ON CONFLICT (public_key) DO NOTHING",
                         )
                         .bind(&pubkey)
                         .bind(now)
                         .execute(&db_rw)
                         .await?;
                         sqlx::query(
-                            "INSERT OR REPLACE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)",
+                            "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)
+                             ON CONFLICT (user_public_key, role_id) DO UPDATE SET assigned_at = excluded.assigned_at",
                         )
                         .bind(&pubkey)
                         .bind(now)
@@ -363,10 +366,32 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded hub identity: {}", hub_identity);
     }
 
-    let db = SqlitePoolOptions::new()
+    // Install AnyPool drivers (required before connecting with AnyPool).
+    sqlx::any::install_default_drivers();
+
+    let db_url = settings.database_url.as_deref()
+        .unwrap_or("sqlite:hub.db?mode=rwc");
+
+    let write_pool = AnyPoolOptions::new()
         .max_connections(5)
-        .connect("sqlite:hub.db?mode=rwc")
-        .await?;
+        .connect(db_url)
+        .await
+        .expect("Failed to connect to database");
+
+    let read_pool = if let Some(read_url) = settings.database_read_url.as_deref() {
+        Some(
+            AnyPoolOptions::new()
+                .max_connections(5)
+                .connect(read_url)
+                .await
+                .expect("Failed to connect to read-replica database"),
+        )
+    } else {
+        None
+    };
+
+    let db = write_pool;
+    let db_read = read_pool;
 
     db::migrations::run(&db).await?;
 
@@ -389,7 +414,7 @@ async fn main() -> Result<()> {
                     .unwrap_or_default()
                     .as_secs() as i64;
                 sqlx::query(
-                    "INSERT OR IGNORE INTO users (public_key, first_seen_at) VALUES (?, ?)",
+                    "INSERT INTO users (public_key, first_seen_at) VALUES (?, ?) ON CONFLICT (public_key) DO NOTHING",
                 )
                 .bind(&owner_pk)
                 .bind(now)
@@ -401,7 +426,8 @@ async fn main() -> Result<()> {
                     .await
                     .ok();
                 sqlx::query(
-                    "INSERT OR REPLACE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)",
+                    "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)
+                     ON CONFLICT (user_public_key, role_id) DO UPDATE SET assigned_at = excluded.assigned_at",
                 )
                 .bind(&owner_pk)
                 .bind(now)
@@ -496,6 +522,7 @@ async fn main() -> Result<()> {
         hub_name: "my-hub".to_string(),
         hub_identity,
         db,
+        db_read,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

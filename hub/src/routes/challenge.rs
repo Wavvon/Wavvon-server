@@ -57,7 +57,7 @@ pub struct UpdateChallengeSettingsRequest {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn read_setting(db: &sqlx::SqlitePool, key: &str) -> Option<String> {
+async fn read_setting(db: &sqlx::AnyPool, key: &str) -> Option<String> {
     sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
         .bind(key)
         .fetch_optional(db)
@@ -67,7 +67,7 @@ async fn read_setting(db: &sqlx::SqlitePool, key: &str) -> Option<String> {
 }
 
 async fn upsert_setting(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     key: &str,
     value: &str,
 ) -> Result<(), (StatusCode, String)> {
@@ -121,7 +121,7 @@ fn make_puzzle_svg(difficulty: &str) -> (String, String) {
 
 /// Issue a challenge_token row and return the token string.
 async fn issue_challenge_token(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     pubkey: &str,
     now: i64,
 ) -> Result<(String, i64), (StatusCode, String)> {

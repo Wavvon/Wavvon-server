@@ -42,7 +42,8 @@ pub async fn ban_user(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR REPLACE INTO bans (target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO bans (target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
     .bind(&user.public_key)
@@ -145,7 +146,8 @@ pub async fn mute_user(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR REPLACE INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES (?, ?, ?, NULL, ?)",
+        "INSERT INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES (?, ?, ?, NULL, ?)
+         ON CONFLICT (target_public_key) DO UPDATE SET muted_by = excluded.muted_by, reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
     .bind(&user.public_key)
@@ -227,7 +229,8 @@ pub async fn timeout_user(
     let expires_at = now + req.duration_seconds as i64;
 
     sqlx::query(
-        "INSERT OR REPLACE INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (target_public_key) DO UPDATE SET muted_by = excluded.muted_by, reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
     .bind(&user.public_key)
@@ -307,7 +310,8 @@ pub async fn channel_ban(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR REPLACE INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (channel_id, target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&channel_id)
     .bind(&req.target_public_key)
@@ -390,7 +394,8 @@ pub async fn voice_mute(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR REPLACE INTO voice_mutes (target_public_key, muted_by, reason, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO voice_mutes (target_public_key, muted_by, reason, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (target_public_key) DO UPDATE SET muted_by = excluded.muted_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
     .bind(&user.public_key)
@@ -550,7 +555,8 @@ pub async fn channel_ban_v2(
     let now = crate::auth::handlers::unix_timestamp().to_string();
 
     sqlx::query(
-        "INSERT OR REPLACE INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, NULL, ?)",
+        "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, NULL, ?)
+         ON CONFLICT (channel_id, target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&channel_id)
     .bind(&req.pubkey)
@@ -631,7 +637,8 @@ pub async fn channel_voice_mute(
     let now = crate::auth::handlers::unix_timestamp().to_string();
 
     sqlx::query(
-        "INSERT OR REPLACE INTO channel_voice_mutes (channel_id, pubkey, muted_by, muted_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO channel_voice_mutes (channel_id, pubkey, muted_by, muted_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (channel_id, pubkey) DO UPDATE SET muted_by = excluded.muted_by, muted_at = excluded.muted_at",
     )
     .bind(&channel_id)
     .bind(&req.pubkey)
@@ -719,7 +726,8 @@ pub async fn raise_hand(
     let now = crate::auth::handlers::unix_timestamp().to_string();
 
     sqlx::query(
-        "INSERT OR REPLACE INTO raise_hand_requests (id, channel_id, pubkey, requested_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO raise_hand_requests (id, channel_id, pubkey, requested_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (channel_id, pubkey) DO UPDATE SET id = excluded.id, requested_at = excluded.requested_at",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -799,7 +807,7 @@ pub async fn list_raise_hands(
 // --- Enforcement helpers ---
 
 pub async fn is_channel_voice_muted(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     channel_id: &str,
     pubkey: &str,
 ) -> Result<bool, (StatusCode, String)> {
@@ -815,7 +823,7 @@ pub async fn is_channel_voice_muted(
 }
 
 pub async fn has_raised_hand(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     channel_id: &str,
     pubkey: &str,
 ) -> bool {
@@ -830,7 +838,7 @@ pub async fn has_raised_hand(
         > 0
 }
 
-pub async fn is_banned(db: &sqlx::SqlitePool, public_key: &str) -> Result<bool, (StatusCode, String)> {
+pub async fn is_banned(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM bans WHERE target_public_key = ?",
     )
@@ -842,7 +850,7 @@ pub async fn is_banned(db: &sqlx::SqlitePool, public_key: &str) -> Result<bool, 
     Ok(count > 0)
 }
 
-pub async fn is_muted(db: &sqlx::SqlitePool, public_key: &str) -> Result<bool, (StatusCode, String)> {
+pub async fn is_muted(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
     let now = crate::auth::handlers::unix_timestamp();
 
     // Check for permanent mute (no expires_at) or active timeout (expires_at > now)
@@ -859,7 +867,7 @@ pub async fn is_muted(db: &sqlx::SqlitePool, public_key: &str) -> Result<bool, (
 }
 
 pub async fn is_channel_banned(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     channel_id: &str,
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
@@ -876,7 +884,7 @@ pub async fn is_channel_banned(
 }
 
 pub async fn is_voice_muted(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let count: i64 = sqlx::query_scalar(

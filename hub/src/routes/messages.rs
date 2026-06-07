@@ -630,7 +630,7 @@ struct MessageRow {
 /// Load a small preview of a parent message for the reply chip. Returns
 /// None if the parent has been deleted.
 async fn load_reply_context(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     parent_id: &str,
 ) -> Result<Option<ReplyContext>, (StatusCode, String)> {
     let row: Option<(String, Option<String>, String)> = sqlx::query_as(
@@ -658,7 +658,7 @@ async fn load_reply_context(
 /// Load aggregated reaction counts for one message, with `me` flagged for
 /// rows the viewer reacted to.
 pub(crate) async fn load_reactions(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     message_id: &str,
     viewer: &str,
 ) -> Result<Vec<ReactionSummary>, (StatusCode, String)> {
@@ -688,7 +688,7 @@ pub(crate) async fn load_reactions(
 /// Same as load_reactions but for broadcast: `me` is false because we
 /// don't know who the recipient will be.
 async fn load_reactions_anon(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     message_id: &str,
 ) -> Result<Vec<ReactionSummary>, (StatusCode, String)> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
@@ -747,8 +747,8 @@ pub async fn add_reaction(
 
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT OR IGNORE INTO message_reactions (message_id, emoji, user_key, created_at)
-         VALUES (?, ?, ?, ?)",
+        "INSERT INTO message_reactions (message_id, emoji, user_key, created_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT (message_id, emoji, user_key) DO NOTHING",
     )
     .bind(&message_id)
     .bind(emoji)

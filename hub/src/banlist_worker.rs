@@ -87,9 +87,11 @@ async fn sync_banlists(state: &AppState) {
 
                                 if !pubkey.is_empty() {
                                     let result = sqlx::query(
-                                        "INSERT OR REPLACE INTO federated_bans \
+                                        "INSERT INTO federated_bans \
                                          (source_hub_pubkey, target_master_pubkey, reason, added_at, synced_at) \
-                                         VALUES(?,?,?,?,?)",
+                                         VALUES(?,?,?,?,?) \
+                                         ON CONFLICT (source_hub_pubkey, target_master_pubkey) \
+                                         DO UPDATE SET reason = excluded.reason, added_at = excluded.added_at, synced_at = excluded.synced_at",
                                     )
                                     .bind(&issuer)
                                     .bind(pubkey)

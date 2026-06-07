@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bytes::Bytes;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use voxply_identity::Identity;
 
@@ -177,7 +177,10 @@ impl Default for RateLimiters {
 pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
-    pub db: SqlitePool,
+    pub db: AnyPool,
+    /// Read-replica pool, if configured. Route handlers that do only reads
+    /// may use this via `state.db_read.as_ref().unwrap_or(&state.db)`.
+    pub db_read: Option<AnyPool>,
     pub pending_challenges: RwLock<HashMap<String, PendingChallenge>>,
     pub chat_tx: broadcast::Sender<(ChatEvent, Arc<str>)>,
     pub federation_client: FederationClient,

@@ -38,8 +38,8 @@ pub async fn report_message(
         .as_secs() as i64;
     let id = uuid::Uuid::new_v4().to_string();
     let result = sqlx::query(
-        "INSERT OR IGNORE INTO message_reports(id, message_id, reporter_pubkey, reason, reported_at, status)
-         VALUES(?,?,?,?,?,'pending')",
+        "INSERT INTO message_reports(id, message_id, reporter_pubkey, reason, reported_at, status)
+         VALUES(?,?,?,?,?,'pending') ON CONFLICT (message_id, reporter_pubkey) DO NOTHING",
     )
     .bind(&id)
     .bind(&message_id)
@@ -140,8 +140,8 @@ pub async fn review_report(
                     .unwrap_or_default()
                     .as_secs() as i64;
                 sqlx::query(
-                    "INSERT OR IGNORE INTO bans(target_public_key, banned_by, reason, created_at)
-                     VALUES(?,?,?,?)",
+                    "INSERT INTO bans(target_public_key, banned_by, reason, created_at)
+                     VALUES(?,?,?,?) ON CONFLICT (target_public_key) DO NOTHING",
                 )
                 .bind(&pk)
                 .bind(&user.public_key)

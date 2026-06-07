@@ -20,7 +20,7 @@ use crate::state::AppState;
 /// Load a channel row and verify it is a forum channel.
 /// Returns `(channel_type,)` on success or a typed error.
 async fn require_forum_channel(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     channel_id: &str,
 ) -> Result<(), (StatusCode, String)> {
     let row: Option<(i64, String)> = sqlx::query_as(
@@ -43,7 +43,7 @@ async fn require_forum_channel(
 
 /// Load a post by id, verifying it belongs to the given channel.
 async fn require_post(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     channel_id: &str,
     post_id: &str,
 ) -> Result<PostRow, (StatusCode, String)> {
@@ -67,7 +67,7 @@ async fn require_post(
 
 /// Load a reply by id, verifying it belongs to the given post.
 async fn require_reply(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     post_id: &str,
     reply_id: &str,
 ) -> Result<ReplyRow, (StatusCode, String)> {

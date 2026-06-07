@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 use voxply_identity::SubkeyCert;
 
 use crate::auth::middleware::AuthUser;
@@ -28,7 +28,7 @@ use crate::state::{AppState, PendingChallenge};
 /// - Cert + neither: brand-new paired device. Canonical = the
 ///   master pubkey.
 pub async fn resolve_canonical_identity(
-    db: &SqlitePool,
+    db: &AnyPool,
     auth_pubkey: &str,
     cert: Option<&SubkeyCert>,
 ) -> Result<(String, Option<String>), (StatusCode, String)> {
@@ -481,7 +481,7 @@ pub async fn verify(
 
     if has_roles == 0 {
         sqlx::query(
-            "INSERT OR IGNORE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-everyone', ?)",
+            "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-everyone', ?) ON CONFLICT (user_public_key, role_id) DO NOTHING",
         )
         .bind(&canonical_pubkey)
         .bind(&now)

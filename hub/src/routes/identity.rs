@@ -340,7 +340,8 @@ pub async fn put_dm_blocks(
 
     for pk in &req.pubkeys {
         sqlx::query(
-            "INSERT OR IGNORE INTO dm_blocks (owner_pubkey, blocked_pubkey) VALUES (?, ?)",
+            "INSERT INTO dm_blocks (owner_pubkey, blocked_pubkey) VALUES (?, ?)
+             ON CONFLICT (owner_pubkey, blocked_pubkey) DO NOTHING",
         )
         .bind(&user.public_key)
         .bind(pk)
@@ -369,7 +370,7 @@ pub async fn get_dm_blocks(
 
 /// Helper: check whether `sender` is in `recipient`'s DM-block set.
 /// Returns false on any DB error so the caller degrades safely.
-pub async fn is_dm_blocked(db: &sqlx::SqlitePool, recipient: &str, sender: &str) -> bool {
+pub async fn is_dm_blocked(db: &sqlx::AnyPool, recipient: &str, sender: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM dm_blocks WHERE owner_pubkey = ? AND blocked_pubkey = ?",
     )

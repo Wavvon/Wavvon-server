@@ -1,7 +1,17 @@
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
-pub async fn run(pool: &SqlitePool) -> Result<()> {
+pub async fn run(pool: &AnyPool) -> Result<()> {
+    // SQLite-only PRAGMAs — skip for PostgreSQL.
+    // Detect SQLite by inspecting the pool's connect options URL.
+    let connect_str = format!("{:?}", pool.connect_options());
+    let is_sqlite = connect_str.to_lowercase().contains("sqlite");
+    if is_sqlite {
+        sqlx::query("PRAGMA journal_mode=WAL").execute(pool).await?;
+        sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
+        sqlx::query("PRAGMA synchronous=NORMAL").execute(pool).await?;
+    }
+
     // ---- Core user / session tables ----
 
     sqlx::query(
@@ -184,39 +194,41 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     // Seed built-in roles
     sqlx::query(
-        "INSERT OR IGNORE INTO roles (id, name, priority, created_at) VALUES ('builtin-everyone', '@everyone', 0, 0)",
+        "INSERT INTO roles (id, name, priority, created_at) VALUES ('builtin-everyone', '@everyone', 0, 0)
+         ON CONFLICT (id) DO NOTHING",
     )
     .execute(pool)
     .await?;
 
     sqlx::query(
-        "INSERT OR IGNORE INTO roles (id, name, priority, created_at) VALUES ('builtin-owner', 'Owner', 999999, 0)",
+        "INSERT INTO roles (id, name, priority, created_at) VALUES ('builtin-owner', 'Owner', 999999, 0)
+         ON CONFLICT (id) DO NOTHING",
     )
     .execute(pool)
     .await?;
 
     // Seed built-in permissions
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'send_messages')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'send_messages') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'read_messages')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'read_messages') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_posts')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_posts') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'start_game')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'start_game') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_events')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_events') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'admin') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_posts')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_posts') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_games')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_games') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_voice')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_voice') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'use_video')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'use_video') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_messages')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_messages') ON CONFLICT (role_id, permission) DO NOTHING")
         .execute(pool).await?;
 
     // ---- Moderation ----
@@ -347,49 +359,49 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('invite_only', 'false')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('invite_only', 'false') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('min_security_level', '0')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('min_security_level', '0') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('require_approval', 'false')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('require_approval', 'false') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('max_channel_depth', '0')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('max_channel_depth', '0') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('lobby_enabled', '1')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('lobby_enabled', '1') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('lobby_welcome_md', '')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('lobby_welcome_md', '') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('challenge_mode', 'off')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('challenge_mode', 'off') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('challenge_difficulty', 'easy')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('challenge_difficulty', 'easy') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('min_pow_level', '0')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('min_pow_level', '0') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_auto_issue', 'true')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('cert_auto_issue', 'true') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_standing_days', '30')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('cert_standing_days', '30') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_validity_days', '90')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('cert_validity_days', '90') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_min_pow_level', '0')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('cert_min_pow_level', '0') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_mode', 'none')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('cert_mode', 'none') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_trusted_issuers', '[]')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('cert_trusted_issuers', '[]') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_require', '{}')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('cert_require', '{}') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('hub_tags', '[]')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('hub_tags', '[]') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('hub_nsfw', 'false')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('hub_nsfw', 'false') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('moderation_webhook_url', '')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('moderation_webhook_url', '') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('moderation_webhook_secret', '')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('moderation_webhook_secret', '') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('banlist_sources', '[]')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('banlist_sources', '[]') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('bootstrapped_at', '')")
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('bootstrapped_at', '') ON CONFLICT (key) DO NOTHING")
         .execute(pool).await?;
 
     // ---- Channel settings ----
@@ -932,7 +944,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query("INSERT OR IGNORE INTO hub_audit_seq VALUES(1, 0)")
+    sqlx::query("INSERT INTO hub_audit_seq VALUES(1, 0) ON CONFLICT (id) DO NOTHING")
         .execute(pool)
         .await?;
 
@@ -1251,78 +1263,81 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5(
-            title, body, post_id UNINDEXED, channel_id UNINDEXED
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // FTS5 virtual tables and triggers are SQLite-only.
+    if is_sqlite {
+        sqlx::query(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5(
+                title, body, post_id UNINDEXED, channel_id UNINDEXED
+            )",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS posts_fts_ai
-         AFTER INSERT ON posts
-         WHEN new.deleted_at IS NULL BEGIN
-           INSERT INTO posts_fts(post_id, channel_id, title, body)
-           VALUES (new.id, new.channel_id, new.title, new.body);
-         END",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS posts_fts_ai
+             AFTER INSERT ON posts
+             WHEN new.deleted_at IS NULL BEGIN
+               INSERT INTO posts_fts(post_id, channel_id, title, body)
+               VALUES (new.id, new.channel_id, new.title, new.body);
+             END",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS posts_fts_au
-         AFTER UPDATE ON posts BEGIN
-           DELETE FROM posts_fts WHERE post_id = old.id;
-           INSERT INTO posts_fts(post_id, channel_id, title, body)
-           SELECT new.id, new.channel_id, new.title, new.body
-           WHERE new.deleted_at IS NULL;
-         END",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS posts_fts_au
+             AFTER UPDATE ON posts BEGIN
+               DELETE FROM posts_fts WHERE post_id = old.id;
+               INSERT INTO posts_fts(post_id, channel_id, title, body)
+               SELECT new.id, new.channel_id, new.title, new.body
+               WHERE new.deleted_at IS NULL;
+             END",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS posts_fts_ad
-         AFTER DELETE ON posts BEGIN
-           DELETE FROM posts_fts WHERE post_id = old.id;
-         END",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS posts_fts_ad
+             AFTER DELETE ON posts BEGIN
+               DELETE FROM posts_fts WHERE post_id = old.id;
+             END",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS post_replies_fts_ai
-         AFTER INSERT ON post_replies
-         WHEN new.deleted_at IS NULL BEGIN
-           INSERT INTO posts_fts(post_id, channel_id, title, body)
-           SELECT new.post_id, p.channel_id, '', new.body
-           FROM posts p WHERE p.id = new.post_id;
-         END",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS post_replies_fts_ai
+             AFTER INSERT ON post_replies
+             WHEN new.deleted_at IS NULL BEGIN
+               INSERT INTO posts_fts(post_id, channel_id, title, body)
+               SELECT new.post_id, p.channel_id, '', new.body
+               FROM posts p WHERE p.id = new.post_id;
+             END",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS post_replies_fts_au
-         AFTER UPDATE ON post_replies BEGIN
-           DELETE FROM posts_fts WHERE post_id = old.post_id AND body = old.body AND title = '';
-           INSERT INTO posts_fts(post_id, channel_id, title, body)
-           SELECT new.post_id, p.channel_id, '', new.body
-           FROM posts p WHERE p.id = new.post_id AND new.deleted_at IS NULL;
-         END",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS post_replies_fts_au
+             AFTER UPDATE ON post_replies BEGIN
+               DELETE FROM posts_fts WHERE post_id = old.post_id AND body = old.body AND title = '';
+               INSERT INTO posts_fts(post_id, channel_id, title, body)
+               SELECT new.post_id, p.channel_id, '', new.body
+               FROM posts p WHERE p.id = new.post_id AND new.deleted_at IS NULL;
+             END",
+        )
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS post_replies_fts_ad
-         AFTER DELETE ON post_replies BEGIN
-           DELETE FROM posts_fts WHERE post_id = old.post_id AND body = old.body AND title = '';
-         END",
-    )
-    .execute(pool)
-    .await?;
+        sqlx::query(
+            "CREATE TRIGGER IF NOT EXISTS post_replies_fts_ad
+             AFTER DELETE ON post_replies BEGIN
+               DELETE FROM posts_fts WHERE post_id = old.post_id AND body = old.body AND title = '';
+             END",
+        )
+        .execute(pool)
+        .await?;
+    }
 
     // ---- Events / calendar ----
 

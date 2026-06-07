@@ -125,8 +125,8 @@ pub async fn put_contacts(
 
     for contact in &req.contacts {
         sqlx::query(
-            "INSERT OR IGNORE INTO recovery_contacts (owner_pubkey, contact_pubkey, created_at)
-             VALUES (?, ?, ?)",
+            "INSERT INTO recovery_contacts (owner_pubkey, contact_pubkey, created_at)
+             VALUES (?, ?, ?) ON CONFLICT (owner_pubkey, contact_pubkey) DO NOTHING",
         )
         .bind(&user.public_key)
         .bind(contact)
@@ -271,9 +271,9 @@ pub async fn post_rotate_key(
         }
 
         sqlx::query(
-            "INSERT OR IGNORE INTO rotation_attestations
+            "INSERT INTO rotation_attestations
                 (id, request_id, attester_pubkey, signature, attested_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT (request_id, attester_pubkey) DO NOTHING",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&request_id)
@@ -433,8 +433,8 @@ pub async fn admin_approve(
 
     // Insert new user row if it doesn't exist yet (new key may not have authed before).
     sqlx::query(
-        "INSERT OR IGNORE INTO users (public_key, display_name, first_seen_at, last_seen_at)
-         VALUES (?, NULL, ?, ?)",
+        "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at)
+         VALUES (?, NULL, ?, ?) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&row.new_pubkey)
     .bind(now)
@@ -445,9 +445,10 @@ pub async fn admin_approve(
 
     // Transfer roles from old key to new key.
     sqlx::query(
-        "INSERT OR IGNORE INTO user_roles (user_public_key, role_id, assigned_at)
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
          SELECT ?, role_id, ?
-         FROM user_roles WHERE user_public_key = ?",
+         FROM user_roles WHERE user_public_key = ?
+         ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(&row.new_pubkey)
     .bind(now)

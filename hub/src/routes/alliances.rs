@@ -159,7 +159,8 @@ pub async fn share_channel(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR IGNORE INTO alliance_shared_channels (alliance_id, channel_id, shared_at) VALUES (?, ?, ?)",
+        "INSERT INTO alliance_shared_channels (alliance_id, channel_id, shared_at) VALUES (?, ?, ?)
+         ON CONFLICT (alliance_id, channel_id) DO NOTHING",
     )
     .bind(&alliance_id)
     .bind(&req.channel_id)
@@ -692,7 +693,8 @@ async fn do_join_alliance(
     // Mirror locally
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT OR IGNORE INTO alliances (id, name, created_by, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO alliances (id, name, created_by, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (id) DO NOTHING",
     )
     .bind(&detail.id)
     .bind(&detail.name)
@@ -704,7 +706,8 @@ async fn do_join_alliance(
 
     for m in &detail.members {
         sqlx::query(
-            "INSERT OR IGNORE INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (alliance_id, hub_public_key) DO NOTHING",
         )
         .bind(&detail.id)
         .bind(&m.hub_public_key)
@@ -743,7 +746,8 @@ async fn do_join_alliance(
             for m in &detail.members {
                 if m.hub_url != "self" && m.hub_url == inviter_url {
                     let _ = sqlx::query(
-                        "INSERT OR IGNORE INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)
+                         ON CONFLICT (public_key) DO NOTHING",
                     )
                     .bind(&m.hub_public_key)
                     .bind(&m.hub_name)
@@ -835,9 +839,9 @@ pub async fn receive_federation_alliance_invite(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR IGNORE INTO pending_alliance_invites
+        "INSERT INTO pending_alliance_invites
          (id, alliance_id, alliance_name, from_hub_url, from_hub_name, from_hub_public_key, invite_token, created_at, message)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
     )
     .bind(&payload.id)
     .bind(&payload.alliance_id)
@@ -986,7 +990,8 @@ pub async fn join_alliance(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR IGNORE INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT (alliance_id, hub_public_key) DO NOTHING",
     )
     .bind(&alliance_id)
     .bind(&hub_info.public_key)

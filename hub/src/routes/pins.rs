@@ -57,8 +57,8 @@ pub async fn pin_message(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT OR IGNORE INTO channel_pins (channel_id, message_id, pinned_by, pinned_at)
-         VALUES (?, ?, ?, ?)",
+        "INSERT INTO channel_pins (channel_id, message_id, pinned_by, pinned_at)
+         VALUES (?, ?, ?, ?) ON CONFLICT (channel_id, message_id) DO NOTHING",
     )
     .bind(&channel_id)
     .bind(&message_id)

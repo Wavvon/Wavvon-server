@@ -34,6 +34,14 @@ pub struct Settings {
     /// Set to "none" to disable search entirely (NullSearch).
     /// Env: VOXPLY_SEARCH_BACKEND
     pub search_backend: Option<String>,
+    /// Full database URL. Leave unset to use SQLite at hub.db (default).
+    /// Examples:
+    ///   sqlite://hub.db          (explicit SQLite)
+    ///   postgresql://user:pass@host/dbname
+    pub database_url: Option<String>,
+    /// Read-replica URL. Only used when database_url is PostgreSQL.
+    /// If unset, all queries go to the primary.
+    pub database_read_url: Option<String>,
 }
 
 /// Load hub settings from (in priority order, highest last):

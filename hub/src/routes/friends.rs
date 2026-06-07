@@ -25,8 +25,8 @@ pub async fn send_friend_request(
     let status = if req.hub_url.is_some() { "accepted" } else { "pending" };
 
     sqlx::query(
-        "INSERT OR IGNORE INTO friends (user_a, user_b, status, created_at, hub_url, display_name)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO friends (user_a, user_b, status, created_at, hub_url, display_name)
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user_a, user_b) DO NOTHING",
     )
     .bind(&user.public_key)
     .bind(&req.target_public_key)

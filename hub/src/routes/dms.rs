@@ -415,9 +415,9 @@ pub async fn send_dm(
 
         for hub_url in &delivery_urls {
             sqlx::query(
-                "INSERT OR IGNORE INTO dm_outbox
+                "INSERT INTO dm_outbox
                  (message_id, recipient_hub_url, attempts, next_attempt_at)
-                 VALUES (?, ?, 0, ?)",
+                 VALUES (?, ?, 0, ?) ON CONFLICT (message_id, recipient_hub_url) DO NOTHING",
             )
             .bind(&message_id)
             .bind(hub_url)
@@ -654,8 +654,9 @@ pub async fn receive_federated_dm(
         for member in &req.members {
             ensure_user_stub(&state.db, member, req.created_at).await?;
             sqlx::query(
-                "INSERT OR IGNORE INTO conversation_members
-                 (conversation_id, public_key, joined_at, hub_url) VALUES (?, ?, ?, NULL)",
+                "INSERT INTO conversation_members
+                 (conversation_id, public_key, joined_at, hub_url) VALUES (?, ?, ?, NULL)
+                 ON CONFLICT (conversation_id, public_key) DO NOTHING",
             )
             .bind(&req.conversation_id)
             .bind(member)
@@ -914,13 +915,13 @@ struct SenderKeyRow {
 /// Ensure a user row exists for `public_key` so FKs into the users table hold.
 /// For remote users we only know their key; the stub is created with no display name.
 async fn ensure_user_stub(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     public_key: &str,
     now: i64,
 ) -> Result<(), (StatusCode, String)> {
     sqlx::query(
-        "INSERT OR IGNORE INTO users (public_key, display_name, first_seen_at, last_seen_at)
-         VALUES (?, NULL, ?, ?)",
+        "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at)
+         VALUES (?, NULL, ?, ?) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(public_key)
     .bind(now)

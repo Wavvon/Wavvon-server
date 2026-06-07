@@ -124,7 +124,7 @@ fn system_message_sender() -> &'static str {
 }
 
 async fn load_rsvp_counts(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     event_id: &str,
 ) -> Result<RsvpCounts, (StatusCode, String)> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
@@ -164,7 +164,8 @@ async fn post_event_card(
 
     // Ensure the system-message sender exists so the FK is satisfied.
     sqlx::query(
-        "INSERT OR IGNORE INTO users (public_key, first_seen_at, last_seen_at) VALUES (?, ?, ?)",
+        "INSERT INTO users (public_key, first_seen_at, last_seen_at) VALUES (?, ?, ?)
+         ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(sender)
     .bind(now)

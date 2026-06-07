@@ -70,7 +70,7 @@ fn system_message_sender() -> &'static str {
 
 /// Aggregate vote counts across all voters for a poll.
 async fn load_poll_totals(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     poll_id: &str,
 ) -> Result<HashMap<String, i64>, (StatusCode, String)> {
     let rows: Vec<String> = sqlx::query_scalar(
@@ -103,7 +103,8 @@ async fn post_poll_card(
     let sender = system_message_sender();
 
     sqlx::query(
-        "INSERT OR IGNORE INTO users (public_key, first_seen_at, last_seen_at) VALUES (?, ?, ?)",
+        "INSERT INTO users (public_key, first_seen_at, last_seen_at) VALUES (?, ?, ?)
+         ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(sender)
     .bind(now)

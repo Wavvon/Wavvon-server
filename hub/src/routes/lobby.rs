@@ -55,7 +55,7 @@ pub struct UpdateLobbySettingsRequest {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn read_setting(db: &sqlx::SqlitePool, key: &str) -> Option<String> {
+async fn read_setting(db: &sqlx::AnyPool, key: &str) -> Option<String> {
     sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
         .bind(key)
         .fetch_optional(db)
@@ -65,7 +65,7 @@ async fn read_setting(db: &sqlx::SqlitePool, key: &str) -> Option<String> {
 }
 
 async fn upsert_setting(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     key: &str,
     value: &str,
 ) -> Result<(), (StatusCode, String)> {

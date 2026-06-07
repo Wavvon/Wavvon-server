@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 
 pub struct BootstrapConfig {
     pub template_url: Option<String>,
@@ -10,7 +10,7 @@ pub struct BootstrapConfig {
 /// Runs on first launch if template_url or bootstrap_token is set and the hub
 /// has no channels yet (blank DB).
 pub async fn maybe_bootstrap(
-    db: &SqlitePool,
+    db: &AnyPool,
     http: &reqwest::Client,
     cfg: &BootstrapConfig,
 ) -> Result<()> {
@@ -88,7 +88,7 @@ async fn fetch_template(
     }
 }
 
-async fn apply_template(db: &SqlitePool, template: &serde_json::Value) -> anyhow::Result<()> {
+async fn apply_template(db: &AnyPool, template: &serde_json::Value) -> anyhow::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -116,8 +116,8 @@ async fn apply_template(db: &SqlitePool, template: &serde_json::Value) -> anyhow
                 .unwrap_or(false);
             let id = uuid::Uuid::new_v4().to_string();
             sqlx::query(
-                "INSERT OR IGNORE INTO channels(id, name, created_by, is_category, display_order, created_at)
-                 VALUES(?, ?, 'system', ?, 0, ?)",
+                "INSERT INTO channels(id, name, created_by, is_category, display_order, created_at)
+                 VALUES(?, ?, 'system', ?, 0, ?) ON CONFLICT (id) DO NOTHING",
             )
             .bind(&id)
             .bind(name)
@@ -138,7 +138,7 @@ async fn apply_template(db: &SqlitePool, template: &serde_json::Value) -> anyhow
                 .unwrap_or("Member");
             let id = uuid::Uuid::new_v4().to_string();
             sqlx::query(
-                "INSERT OR IGNORE INTO roles(id, name, priority, created_at) VALUES(?,?,0,?)",
+                "INSERT INTO roles(id, name, priority, created_at) VALUES(?,?,0,?) ON CONFLICT (id) DO NOTHING",
             )
             .bind(&id)
             .bind(name)
@@ -150,7 +150,7 @@ async fn apply_template(db: &SqlitePool, template: &serde_json::Value) -> anyhow
                 for p in perms {
                     if let Some(perm) = p.as_str() {
                         sqlx::query(
-                            "INSERT OR IGNORE INTO role_permissions(role_id, permission) VALUES(?,?)",
+                            "INSERT INTO role_permissions(role_id, permission) VALUES(?,?) ON CONFLICT (role_id, permission) DO NOTHING",
                         )
                         .bind(&id)
                         .bind(perm)

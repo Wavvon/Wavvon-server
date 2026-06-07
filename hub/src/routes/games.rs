@@ -1352,7 +1352,7 @@ pub async fn set_game_channels(
 
     for channel_id in &req.channel_ids {
         sqlx::query(
-            "INSERT OR IGNORE INTO channel_games (channel_id, game_id) VALUES (?, ?)",
+            "INSERT INTO channel_games (channel_id, game_id) VALUES (?, ?) ON CONFLICT (channel_id, game_id) DO NOTHING",
         )
         .bind(channel_id)
         .bind(&game_id)

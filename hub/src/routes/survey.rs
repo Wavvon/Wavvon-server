@@ -183,7 +183,7 @@ struct AnswerRow {
 /// Load the active survey (enabled=1) with all questions and choices,
 /// without role mappings.
 async fn load_active_survey_public(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
 ) -> Result<Option<SurveyPublic>, (StatusCode, String)> {
     let survey: Option<SurveyRow> =
         sqlx::query_as("SELECT id, enabled FROM surveys WHERE enabled = 1 LIMIT 1")
@@ -246,7 +246,7 @@ async fn load_active_survey_public(
 
 /// Load a survey with full admin data (role mappings).
 async fn load_survey_admin(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     survey_id: &str,
 ) -> Result<Option<SurveyAdmin>, (StatusCode, String)> {
     let survey: Option<SurveyRow> =
@@ -416,7 +416,8 @@ pub async fn submit_survey(
 
             for role_id in role_ids {
                 sqlx::query(
-                    "INSERT OR IGNORE INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, ?, ?)",
+                    "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, ?, ?)
+                     ON CONFLICT (user_public_key, role_id) DO NOTHING",
                 )
                 .bind(&user.public_key)
                 .bind(&role_id)
@@ -546,7 +547,8 @@ pub async fn admin_put_survey(
 
                 for role_id in &c.role_ids {
                     sqlx::query(
-                        "INSERT OR IGNORE INTO survey_choice_roles (choice_id, role_id) VALUES (?, ?)",
+                        "INSERT INTO survey_choice_roles (choice_id, role_id) VALUES (?, ?)
+                         ON CONFLICT (choice_id, role_id) DO NOTHING",
                     )
                     .bind(&c.id)
                     .bind(role_id)
@@ -651,7 +653,7 @@ pub async fn admin_get_response_for_pubkey(
 }
 
 async fn load_response_answers(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::AnyPool,
     response_id: &str,
 ) -> Result<Vec<SurveyAnswerView>, (StatusCode, String)> {
     let rows: Vec<AnswerRow> = sqlx::query_as(

@@ -124,8 +124,8 @@ pub async fn create_webhook(
     // Using the webhook id as "public_key" — a known hack but avoids a
     // parallel auth path (documented in bots.md §9).
     sqlx::query(
-        "INSERT OR IGNORE INTO users(public_key, display_name, first_seen_at, last_seen_at, approval_status, is_bot, is_webhook)
-         VALUES(?,?,?,?,'approved',1,1)",
+        "INSERT INTO users(public_key, display_name, first_seen_at, last_seen_at, approval_status, is_bot, is_webhook)
+         VALUES(?,?,?,?,'approved',1,1) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&id)
     .bind(&req.display_name)

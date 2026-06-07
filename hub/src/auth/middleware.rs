@@ -320,8 +320,8 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 }
 
                 let _ = sqlx::query(
-                    "INSERT OR IGNORE INTO user_roles (user_public_key, role_id, assigned_at)
-                     VALUES (?, 'builtin-everyone', ?)",
+                    "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+                     VALUES (?, 'builtin-everyone', ?) ON CONFLICT (user_public_key, role_id) DO NOTHING",
                 )
                 .bind(&public_key)
                 .bind(now)
