@@ -10,6 +10,7 @@ pub mod permissions;
 pub mod rate_limit;
 pub mod retention_worker;
 pub mod routes;
+pub mod search;
 pub mod server;
 pub mod settings;
 pub mod state;

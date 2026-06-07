@@ -30,6 +30,10 @@ pub struct Settings {
     /// OpenTelemetry OTLP collector endpoint. Leave empty to disable.
     /// Env: VOXPLY_OTLP_ENDPOINT
     pub otlp_endpoint: Option<String>,
+    /// Full-text search backend. None or "tantivy" = Tantivy (default).
+    /// Set to "none" to disable search entirely (NullSearch).
+    /// Env: VOXPLY_SEARCH_BACKEND
+    pub search_backend: Option<String>,
 }
 
 /// Load hub settings from (in priority order, highest last):

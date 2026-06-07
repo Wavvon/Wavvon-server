@@ -59,6 +59,7 @@ async fn setup_with_pool() -> (TestServer, sqlx::SqlitePool) {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         });
     let app = server::create_router(state);
     (TestServer::new(app), pool_handle)
@@ -250,6 +251,7 @@ async fn start_real_hub(name: &str) -> String {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -340,6 +342,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -509,6 +512,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))

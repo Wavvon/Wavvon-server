@@ -244,6 +244,22 @@ pub async fn send_message(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    {
+        let search = state.search.clone();
+        let indexed = crate::search::IndexedMessage {
+            id: id.clone(),
+            channel_id: channel_id.clone(),
+            author_pubkey: user.public_key.clone(),
+            content: req.content.clone(),
+            timestamp: now,
+        };
+        tokio::spawn(async move {
+            if let Err(e) = search.index(&indexed).await {
+                tracing::warn!("search index error: {e}");
+            }
+        });
+    }
+
     // Increment reply_count on the parent message when this is a reply.
     if let Some(parent_id) = &req.reply_to {
         let _ = sqlx::query(
@@ -400,6 +416,16 @@ pub async fn delete_message(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    {
+        let search = state.search.clone();
+        let id = message_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = search.delete(&id).await {
+                tracing::warn!("search delete error: {e}");
+            }
+        });
+    }
+
     // Decrement reply_count on the parent when a reply is removed.
     if let Some(parent_id) = reply_to {
         let _ = sqlx::query(
@@ -498,21 +524,38 @@ pub async fn get_messages(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     } else {
         match (search, &params.before) {
-            // Search mode: ignores `before` for now — search returns the most
-            // recent N matches across the whole channel. Good enough for v1.
+            // Search mode: uses Tantivy for full-text, scoped to the single channel.
             (Some(q), _) => {
-                sqlx::query_as::<_, MessageRow>(
+                let search_params = crate::search::SearchParams {
+                    q: q.to_string(),
+                    channel_ids: vec![channel_id.clone()],
+                    limit: limit as usize,
+                };
+                let hit_ids: Vec<String> = state
+                    .search
+                    .query(&search_params)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|h| h.message_id)
+                    .collect();
+
+                if hit_ids.is_empty() {
+                    return Ok(Json(vec![]));
+                }
+
+                let placeholders = hit_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let sql = format!(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                     WHERE m.channel_id = ?
-                       AND m.rowid IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)
-                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
-                )
-                .bind(&channel_id)
-                .bind(q)
-                .bind(limit)
-                .fetch_all(&state.db)
-                .await
+                     WHERE m.id IN ({placeholders})
+                     ORDER BY m.created_at DESC, m.rowid DESC"
+                );
+                let mut q_builder = sqlx::query_as::<_, MessageRow>(&sql);
+                for id in &hit_ids {
+                    q_builder = q_builder.bind(id);
+                }
+                q_builder.fetch_all(&state.db).await
             }
             (None, Some(before_id)) => {
                 sqlx::query_as::<_, MessageRow>(

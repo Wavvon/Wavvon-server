@@ -38,6 +38,12 @@ discovery_url = "https://discovery.voxply.io"
 # template_url  = "https://example.com/my-template.json"
 # bootstrap_token = ""
 
+# ── Search ───────────────────────────────────────────────────────────────────
+
+# Full-text search backend. Omit or set to "tantivy" to use Tantivy (default).
+# Set to "none" to disable full-text search entirely (e.g. for read-only replicas).
+# search_backend = "none"
+
 # ── Observability ────────────────────────────────────────────────────────────
 
 # Log format: "text" (human-readable, default) or "json" (for log aggregators).

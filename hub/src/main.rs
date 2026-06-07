@@ -436,6 +436,17 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|e| tracing::warn!("Bootstrap failed (non-fatal): {e}"));
     }
 
+    let search_path = std::path::Path::new("hub.search");
+    let search: Arc<dyn voxply_hub::search::MessageSearch> =
+        if settings.search_backend.as_deref() == Some("none") {
+            Arc::new(voxply_hub::search::null_search::NullSearch)
+        } else {
+            Arc::new(
+                voxply_hub::search::tantivy_search::TantivySearch::open(search_path)
+                    .expect("Failed to open Tantivy search index"),
+            )
+        };
+
     let (chat_tx, _) = broadcast::channel::<(voxply_hub::routes::chat_models::ChatEvent, std::sync::Arc<str>)>(256);
     let (voice_event_tx, _) = broadcast::channel(256);
     let (dm_tx, _) = broadcast::channel(256);
@@ -512,6 +523,7 @@ async fn main() -> Result<()> {
         whisper_target_defs: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search,
     });
 
     // Bind voice UDP socket and start forwarding task

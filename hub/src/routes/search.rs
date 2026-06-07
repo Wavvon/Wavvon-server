@@ -59,63 +59,60 @@ pub async fn search_messages(
         return Ok(Json(vec![]));
     }
 
-    // Build the IN-clause placeholder list. sqlx does not support dynamic IN
-    // binding, so we build the SQL string manually and bind positionally.
-    let placeholders = visible_channels
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
+    // Query Tantivy with visibility filter.
+    let search_params = crate::search::SearchParams {
+        q: params.q.trim().to_string(),
+        channel_ids: visible_channels,
+        limit: limit as usize,
+    };
+    let hits = state
+        .search
+        .query(&search_params)
+        .await
+        .unwrap_or_default();
 
+    if hits.is_empty() {
+        return Ok(Json(vec![]));
+    }
+
+    // Fetch channel name and sender display name for each hit from the DB.
+    let ids: Vec<String> = hits.iter().map(|h| h.message_id.clone()).collect();
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT m.id, m.channel_id, c.name, m.sender, u.display_name, m.content, m.created_at
-         FROM messages_fts fts
-         JOIN messages m ON fts.rowid = m.rowid
+        "SELECT m.id, c.name, u.display_name
+         FROM messages m
          JOIN channels c ON c.id = m.channel_id
          LEFT JOIN users u ON u.public_key = m.sender
-         WHERE messages_fts MATCH ?
-           AND m.channel_id IN ({placeholders})
-         ORDER BY m.created_at DESC
-         LIMIT ?"
+         WHERE m.id IN ({placeholders})"
     );
 
-    let mut query =
-        sqlx::query_as::<_, (String, String, String, String, Option<String>, String, i64)>(&sql);
-    query = query.bind(&params.q);
-    for ch in &visible_channels {
-        query = query.bind(ch);
+    let mut q_builder =
+        sqlx::query_as::<_, (String, String, Option<String>)>(&sql);
+    for id in &ids {
+        q_builder = q_builder.bind(id);
     }
-    query = query.bind(limit);
+    let meta_rows = q_builder.fetch_all(&state.db).await.unwrap_or_default();
 
-    let rows = query.fetch_all(&state.db).await.unwrap_or_default();
-
-    let results = rows
+    // Build a lookup map id -> (channel_name, sender_name)
+    let meta_map: std::collections::HashMap<String, (String, Option<String>)> = meta_rows
         .into_iter()
-        .map(
-            |(id, channel_id, channel_name, sender, sender_name, content, created_at)| {
-                // Truncate at a char boundary to avoid panics on multi-byte text.
-                let preview = if content.len() > 200 {
-                    let boundary = content
-                        .char_indices()
-                        .map(|(i, _)| i)
-                        .take_while(|&i| i <= 197)
-                        .last()
-                        .unwrap_or(0);
-                    format!("{}\u{2026}", &content[..boundary])
-                } else {
-                    content
-                };
-                SearchResult {
-                    message_id: id,
-                    channel_id,
-                    channel_name,
-                    sender,
-                    sender_name,
-                    content_preview: preview,
-                    created_at,
-                }
-            },
-        )
+        .map(|(id, channel_name, sender_name)| (id, (channel_name, sender_name)))
+        .collect();
+
+    let results: Vec<SearchResult> = hits
+        .into_iter()
+        .filter_map(|hit| {
+            let (channel_name, sender_name) = meta_map.get(&hit.message_id)?.clone();
+            Some(SearchResult {
+                message_id: hit.message_id,
+                channel_id: hit.channel_id,
+                channel_name,
+                sender: hit.author_pubkey,
+                sender_name,
+                content_preview: hit.content_preview,
+                created_at: hit.timestamp,
+            })
+        })
         .collect();
 
     Ok(Json(results))
