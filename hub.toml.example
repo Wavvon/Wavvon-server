@@ -21,11 +21,6 @@ voice_udp_port = 3001
 # you as owner the moment you connect from the desktop client.
 # owner_pubkey = "0000000000000000000000000000000000000000000000000000000000000000"
 
-# Token required to access the web admin panel at /admin/panel.
-# Pick any secret string. Applied on every boot from this file so you never
-# need to touch the database manually.
-# web_admin_token = "change-me"
-
 # ── Farm integration ─────────────────────────────────────────────────────────
 
 # External URL of the farm that manages this hub.

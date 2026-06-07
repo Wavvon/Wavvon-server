@@ -25,3 +25,4 @@ opentelemetry_sdk   = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp  = { version = "0.27", features = ["http-proto", "reqwest-rustls"] }
 tracing-opentelemetry = "0.28"
 config = { version = "0.14", features = ["toml"] }
+totp-rs = { version = "5", features = ["gen_secret"] }

@@ -30,10 +30,6 @@ pub struct Settings {
     /// OpenTelemetry OTLP collector endpoint. Leave empty to disable.
     /// Env: VOXPLY_OTLP_ENDPOINT
     pub otlp_endpoint: Option<String>,
-    /// Token required to access the web admin panel at /admin/panel.
-    /// Set once here; the hub writes it to the DB on every boot.
-    /// Env: VOXPLY_WEB_ADMIN_TOKEN
-    pub web_admin_token: Option<String>,
 }
 
 /// Load hub settings from (in priority order, highest last):

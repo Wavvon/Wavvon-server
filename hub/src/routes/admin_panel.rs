@@ -5,6 +5,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use crate::state::AppState;
+use crate::routes::admin_auth::extract_admin_session;
 
 #[derive(Deserialize)]
 pub struct PanelUsersQuery {
@@ -26,7 +27,8 @@ pub async fn panel_list_users(
     headers: HeaderMap,
     Query(q): Query<PanelUsersQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
     let rows = if let Some(search) = q.q {
         let like = format!("%{search}%");
         sqlx::query_as::<_, (String, Option<String>, i64)>(
@@ -67,7 +69,8 @@ pub async fn panel_list_channels(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
     let rows = sqlx::query_as::<_, (String, String, bool)>(
         "SELECT id, name, is_category FROM channels ORDER BY sort_order, name LIMIT 200",
     )
@@ -87,7 +90,8 @@ pub async fn panel_list_reports(
     headers: HeaderMap,
     Query(q): Query<PanelReportsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
     let status = q.status.unwrap_or_else(|| "pending".into());
     let rows = sqlx::query(
         "SELECT r.id, r.message_id, m.content as message_content,
@@ -126,7 +130,8 @@ pub async fn panel_review_report(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
     let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("dismiss");
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -163,7 +168,8 @@ pub async fn panel_audit_log(
     headers: HeaderMap,
     Query(q): Query<PanelAuditQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
     let limit = q.limit.unwrap_or(50).min(200).max(1);
     let rows = sqlx::query(
         "SELECT event_type, actor_pubkey, target_pubkey, at
@@ -200,47 +206,24 @@ pub struct SetOwnerRequest {
     pub public_key: String,
 }
 
-#[derive(Deserialize)]
-pub struct PanelQuery { pub token: Option<String> }
-
-/// GET /admin/panel — serves the admin panel HTML page
-/// Auth: ?token=<web_admin_token> query param or Authorization: Bearer header
+/// GET /admin/panel — serves the admin panel HTML page.
+/// Valid session cookie → authenticated panel; no session → login page.
 pub async fn serve_panel(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<PanelQuery>,
     headers: HeaderMap,
-) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
-    let expected_token: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM hub_settings WHERE key = 'web_admin_token'"
-    )
-    .fetch_optional(&state.db).await.ok().flatten();
-
-    let expected = expected_token.unwrap_or_default();
-    if expected.is_empty() {
-        return Err((StatusCode::SERVICE_UNAVAILABLE, "Admin panel not configured"));
+) -> impl IntoResponse {
+    let authenticated = extract_admin_session(&headers, &state).await.is_ok();
+    if authenticated {
+        axum::response::Response::builder()
+            .header("content-type", "text/html; charset=utf-8")
+            .body(axum::body::Body::from(PANEL_HTML))
+            .unwrap()
+    } else {
+        axum::response::Response::builder()
+            .header("content-type", "text/html; charset=utf-8")
+            .body(axum::body::Body::from(LOGIN_HTML))
+            .unwrap()
     }
-
-    let provided = q.token.clone().or_else(|| {
-        headers.get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()))
-    });
-
-    if provided.as_deref() != Some(&expected) {
-        // Return login form when no token provided at all
-        if provided.is_none() {
-            return Ok(axum::response::Response::builder()
-                .header("content-type", "text/html; charset=utf-8")
-                .body(axum::body::Body::from(LOGIN_HTML))
-                .unwrap());
-        }
-        return Err((StatusCode::UNAUTHORIZED, "Invalid token"));
-    }
-
-    Ok(axum::response::Response::builder()
-        .header("content-type", "text/html; charset=utf-8")
-        .body(axum::body::Body::from(PANEL_HTML))
-        .unwrap())
 }
 
 /// GET /admin/stats — returns quick hub stats for the panel dashboard
@@ -248,7 +231,8 @@ pub async fn get_stats(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
 
     let online_users = state.online_users.read().await.len();
     let voice_sessions = state.voice_channels.read().await.len();
@@ -277,7 +261,8 @@ pub async fn get_owner(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<OwnerResponse>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
     let owner: Option<String> = sqlx::query_scalar(
         "SELECT user_public_key FROM user_roles WHERE role_id = 'builtin-owner' LIMIT 1",
     )
@@ -293,7 +278,8 @@ pub async fn set_owner(
     headers: HeaderMap,
     Json(req): Json<SetOwnerRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
 
     let pk = req.public_key.to_lowercase();
     if pk.len() != 64 || !pk.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -337,7 +323,8 @@ pub async fn panel_ban_user(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    check_admin_token(&state, &headers).await?;
+    extract_admin_session(&headers, &state).await
+        .map_err(|(s, m)| (s, m.to_string()))?;
     let pk = body.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
     if pk.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "public_key required".into()));
@@ -357,36 +344,216 @@ pub async fn panel_ban_user(
     Ok(Json(serde_json::json!({"ok": true})))
 }
 
-async fn check_admin_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
-    let expected: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM hub_settings WHERE key = 'web_admin_token'"
-    )
-    .fetch_optional(&state.db).await.ok().flatten();
-    let expected = expected.unwrap_or_default();
-    let provided = headers.get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer ").map(|s| s.to_string()));
-    if provided.as_deref() != Some(&expected) {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid token".into()));
-    }
-    Ok(())
-}
+// ─────────────────────────── HTML ────────────────────────────────────────────
 
 const LOGIN_HTML: &str = r##"<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Voxply Admin</title>
-<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1e1f22;color:#dbdee1;}
-form{background:#2b2d31;padding:32px;border-radius:8px;display:flex;flex-direction:column;gap:12px;min-width:320px;}
-input{padding:8px;border-radius:4px;border:1px solid #3a3d44;background:#1e1f22;color:#dbdee1;font-size:14px;}
-button{padding:10px;border-radius:4px;border:none;background:#5865f2;color:#fff;cursor:pointer;font-size:14px;}
-h2{margin:0;text-align:center;}</style></head>
-<body><form onsubmit="location.href='/admin/panel?token='+document.getElementById('t').value;return false;">
-<h2>Voxply Admin</h2>
-<input id="t" type="password" placeholder="Admin token" autofocus>
-<button type="submit">Sign in</button>
-</form></body></html>"##;
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Voxply Admin</title>
+<style>
+*{box-sizing:border-box;}
+body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1e1f22;color:#dbdee1;}
+.card{background:#2b2d31;padding:36px;border-radius:10px;min-width:340px;max-width:420px;width:100%;border:1px solid #3a3d44;}
+h2{margin:0 0 6px;font-size:20px;text-align:center;}
+.sub{color:#96989d;font-size:13px;text-align:center;margin-bottom:24px;}
+.btn{display:block;width:100%;padding:11px;border-radius:5px;border:none;background:#5865f2;color:#fff;cursor:pointer;font-size:14px;font-weight:600;text-align:center;transition:background .15s;}
+.btn:hover{background:#4752c4;}
+.btn.secondary{background:#3a3d44;color:#dbdee1;margin-top:8px;}
+.btn.secondary:hover{background:#4a4d54;}
+.spinner{width:36px;height:36px;border:3px solid #3a3d44;border-top-color:#5865f2;border-radius:50%;animation:spin 0.8s linear infinite;margin:0 auto 16px;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.hint{font-size:12px;color:#96989d;text-align:center;margin-top:12px;}
+.hint a{color:#5865f2;cursor:pointer;text-decoration:none;}
+label{font-size:13px;color:#96989d;display:block;margin-bottom:4px;}
+input[type=number],textarea{width:100%;padding:9px;border-radius:4px;border:1px solid #3a3d44;background:#1e1f22;color:#dbdee1;font-size:14px;margin-bottom:12px;}
+input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;}
+input[type=number]{-moz-appearance:textfield;}
+.error{color:#ed4245;font-size:12px;margin-top:-8px;margin-bottom:8px;}
+code{background:#1e1f22;padding:4px 8px;border-radius:4px;font-size:13px;word-break:break-all;}
+.secret-row{display:flex;gap:8px;align-items:center;margin-bottom:12px;}
+.copy-btn{padding:4px 10px;border-radius:4px;border:none;background:#3a3d44;color:#dbdee1;cursor:pointer;font-size:12px;white-space:nowrap;}
+a.otpauth{display:block;color:#5865f2;font-size:13px;margin-bottom:12px;word-break:break-all;text-decoration:none;}
+a.otpauth:hover{text-decoration:underline;}
+#state-all>div{display:none;}
+#state-all>div.active{display:block;}
+</style></head>
+<body>
+<div class="card">
+  <div id="state-all">
+    <!-- State 0: start -->
+    <div id="s0" class="active">
+      <h2>Voxply Admin</h2>
+      <p class="sub">Sign in with your desktop app and authenticator.</p>
+      <button class="btn" id="sign-btn">Sign with Desktop App</button>
+      <div class="hint"><a onclick="showState(4)">Use a remote access token instead</a></div>
+    </div>
+    <!-- State 1: waiting -->
+    <div id="s1">
+      <div class="spinner"></div>
+      <p style="text-align:center;margin:0 0 8px;">Approve the request in your desktop app.</p>
+      <div class="hint">Didn't get a prompt? <a onclick="showState(4)">Use a remote access token</a> or <a onclick="cancelFlow()">cancel</a>.</div>
+    </div>
+    <!-- State 2: totp -->
+    <div id="s2">
+      <h2 style="margin-bottom:16px;">Two-Factor Auth</h2>
+      <label for="totp-code">Authenticator code</label>
+      <input type="number" id="totp-code" maxlength="6" placeholder="000000" autocomplete="one-time-code">
+      <div class="error" id="totp-err" style="display:none;"></div>
+      <button class="btn" id="totp-verify-btn">Verify</button>
+    </div>
+    <!-- State 3: enrollment -->
+    <div id="s3">
+      <h2 style="margin-bottom:8px;">Set up two-factor auth</h2>
+      <p style="font-size:13px;color:#96989d;margin-bottom:12px;">Scan the link below with your authenticator app, then enter the 6-digit code to confirm.</p>
+      <a class="otpauth" id="otpauth-link" href="#" target="_blank">Open in authenticator app</a>
+      <label>Manual entry secret</label>
+      <div class="secret-row">
+        <code id="secret-display" style="flex:1;"></code>
+        <button class="copy-btn" onclick="copySecret()">Copy</button>
+      </div>
+      <label for="enroll-code">Confirm code from app</label>
+      <input type="number" id="enroll-code" maxlength="6" placeholder="000000" autocomplete="one-time-code">
+      <div class="error" id="enroll-err" style="display:none;"></div>
+      <button class="btn" id="enroll-confirm-btn">Confirm</button>
+    </div>
+    <!-- State 4: remote token -->
+    <div id="s4">
+      <h2 style="margin-bottom:8px;">Remote Access Token</h2>
+      <p style="font-size:13px;color:#96989d;margin-bottom:12px;">Generate a token in the desktop app and paste it below.</p>
+      <textarea id="token-input" rows="4" placeholder="Paste token from desktop app" style="resize:vertical;"></textarea>
+      <button class="btn" id="token-continue-btn">Continue</button>
+      <button class="btn secondary" onclick="showState(0)">Back</button>
+    </div>
+    <!-- State 5: error -->
+    <div id="s5">
+      <h2 style="margin-bottom:8px;color:#ed4245;">Error</h2>
+      <p id="err-text" style="color:#96989d;font-size:13px;text-align:center;"></p>
+      <button class="btn" onclick="showState(0)">Try again</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentChallengeId = null;
+let pollTimer = null;
+let pollStarted = null;
+
+function showState(n) {
+  document.querySelectorAll('#state-all > div').forEach(d => d.classList.remove('active'));
+  document.getElementById('s' + n).classList.add('active');
+}
+
+function cancelFlow() {
+  clearInterval(pollTimer);
+  pollTimer = null;
+  currentChallengeId = null;
+  showState(0);
+}
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  return {ok: r.ok, status: r.status, data: await r.json().catch(() => ({}))};
+}
+
+document.getElementById('sign-btn').addEventListener('click', async () => {
+  const res = await api('/admin/auth/challenge', {});
+  if (!res.ok) { showState(5); document.getElementById('err-text').textContent = 'Failed to start login. Try again.'; return; }
+  currentChallengeId = res.data.challenge_id;
+  window.location.href = res.data.deep_link;
+  showState(1);
+  startPolling(currentChallengeId);
+});
+
+function startPolling(challengeId) {
+  pollStarted = Date.now();
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    if (Date.now() - pollStarted > 90000) {
+      clearInterval(pollTimer);
+      showState(5);
+      document.getElementById('err-text').textContent = 'Timed out waiting for desktop app.';
+      return;
+    }
+    const res = await api('/admin/auth/poll', {challenge_id: challengeId});
+    if (!res.ok) return;
+    const state = res.data.state;
+    if (state === 'awaiting_totp') {
+      clearInterval(pollTimer);
+      showState(2);
+    } else if (state === 'awaiting_enrollment') {
+      clearInterval(pollTimer);
+      const eb = await api('/admin/auth/totp/enroll-begin', {challenge_id: challengeId});
+      if (!eb.ok) { showState(5); document.getElementById('err-text').textContent = 'Enrollment failed.'; return; }
+      document.getElementById('otpauth-link').href = eb.data.otpauth_uri;
+      document.getElementById('otpauth-link').textContent = eb.data.otpauth_uri;
+      document.getElementById('secret-display').textContent = eb.data.secret_base32;
+      showState(3);
+    } else if (state === 'done') {
+      clearInterval(pollTimer);
+      location.reload();
+    } else if (state === 'expired') {
+      clearInterval(pollTimer);
+      showState(5);
+      document.getElementById('err-text').textContent = 'Login session expired. Try again.';
+    }
+  }, 1000);
+}
+
+document.getElementById('totp-verify-btn').addEventListener('click', async () => {
+  const code = document.getElementById('totp-code').value.trim();
+  const errEl = document.getElementById('totp-err');
+  errEl.style.display = 'none';
+  const res = await api('/admin/auth/totp', {challenge_id: currentChallengeId, code});
+  if (res.ok) {
+    location.reload();
+  } else {
+    errEl.textContent = res.data.message || 'Invalid code. Try again.';
+    errEl.style.display = 'block';
+  }
+});
+
+document.getElementById('enroll-confirm-btn').addEventListener('click', async () => {
+  const code = document.getElementById('enroll-code').value.trim();
+  const errEl = document.getElementById('enroll-err');
+  errEl.style.display = 'none';
+  const res = await api('/admin/auth/totp', {challenge_id: currentChallengeId, code});
+  if (res.ok) {
+    location.reload();
+  } else {
+    errEl.textContent = res.data.message || 'Invalid code. Try again.';
+    errEl.style.display = 'block';
+  }
+});
+
+document.getElementById('token-continue-btn').addEventListener('click', async () => {
+  const token = document.getElementById('token-input').value.trim();
+  if (!token) return;
+  const res = await api('/admin/auth/token-login', {token});
+  if (res.ok && res.data.challenge_id) {
+    currentChallengeId = res.data.challenge_id;
+    startPolling(currentChallengeId);
+    showState(1);
+  } else if (res.status === 503) {
+    showState(5);
+    document.getElementById('err-text').textContent = 'Farm not configured on this hub.';
+  } else {
+    showState(5);
+    document.getElementById('err-text').textContent = 'Token login failed.';
+  }
+});
+
+function copySecret() {
+  const t = document.getElementById('secret-display').textContent;
+  navigator.clipboard.writeText(t).catch(() => {});
+}
+</script>
+</body></html>"##;
 
 const PANEL_HTML: &str = r##"<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>Voxply Admin Panel</title>
+<html lang="en"><head><meta charset="UTF-8"><title>Voxply Admin Panel</title>
 <style>
 *{box-sizing:border-box;} body{font-family:sans-serif;margin:0;background:#1e1f22;color:#dbdee1;display:flex;min-height:100vh;}
 nav{width:200px;background:#2b2d31;padding:16px;display:flex;flex-direction:column;gap:4px;border-right:1px solid #3a3d44;}
@@ -413,12 +580,15 @@ button.action{padding:4px 10px;border-radius:4px;border:none;background:#ed4245;
 <a href="#" onclick="loadSection('channels',event)">Channels</a>
 <a href="#" onclick="loadSection('reports',event)">Reports</a>
 <a href="#" onclick="loadSection('audit',event)">Audit Log</a>
+<a href="#" onclick="doLogout(event)" style="margin-top:auto;color:#ed4245;">Sign out</a>
 </nav>
 <main id="main"><h1>Overview</h1><div id="content"><div class="stats-grid" id="stats"></div></div></main>
 <script>
-const TOKEN = new URLSearchParams(location.search).get('token') || localStorage.getItem('vxadm') || '';
-if(TOKEN) localStorage.setItem('vxadm', TOKEN);
-const api = (path, opts={}) => fetch(path, {headers:{'Authorization':'Bearer '+TOKEN,...(opts.headers||{})}, ...opts}).then(r=>r.json());
+// Cookie-based auth — no token in localStorage, no Authorization header needed.
+const api = (path, opts={}) => fetch(path, opts).then(r => {
+  if (r.status === 401) { location.reload(); throw new Error('session expired'); }
+  return r.json();
+});
 
 async function loadStats() {
   const d = await api('/admin/stats');
@@ -443,7 +613,7 @@ async function loadSection(s, evt) {
     const d = await api('/admin/owner');
     const cur = d.owner ? d.owner : null;
     el.innerHTML=`<div class="section">
-      <p style="margin:0 0 12px">Current owner: <code style="background:#1e1f22;padding:2px 6px;border-radius:3px;">${cur ? cur.slice(0,20)+'…' : '<em>None set</em>'}</code></p>
+      <p style="margin:0 0 12px">Current owner: <code style="background:#1e1f22;padding:2px 6px;border-radius:3px;">${cur ? cur.slice(0,20)+'&hellip;' : '<em>None set</em>'}</code></p>
       <p style="margin:0 0 12px;color:#96989d;font-size:13px;">Paste the owner's Ed25519 public key (64 hex characters). The owner has full admin access to this hub.</p>
       <div style="display:flex;gap:8px;">
         <input id="owner-pk" type="text" placeholder="64-character hex public key" style="flex:1;padding:8px;border-radius:4px;border:1px solid #3a3d44;background:#1e1f22;color:#dbdee1;font-family:monospace;font-size:13px;">
@@ -455,13 +625,13 @@ async function loadSection(s, evt) {
   else if(s==='users'){
     document.querySelector('h1').textContent='Users';
     const d = await api('/admin/panel/users');
-    const rows = (Array.isArray(d)?d:[]).map(u=>`<tr><td style="font-family:monospace;font-size:12px;">${(u.public_key||'').slice(0,16)}…</td><td>${u.display_name||''}</td><td>${u.online?'🟢':''}</td><td><button class="action" onclick="banUser('${u.public_key}')">Ban</button></td></tr>`).join('');
+    const rows = (Array.isArray(d)?d:[]).map(u=>`<tr><td style="font-family:monospace;font-size:12px;">${(u.public_key||'').slice(0,16)}&hellip;</td><td>${u.display_name||''}</td><td>${u.online?'&#x1f7e2;':''}</td><td><button class="action" onclick="banUser('${u.public_key}')">Ban</button></td></tr>`).join('');
     el.innerHTML=`<div class="section"><table><thead><tr><th>Pubkey</th><th>Name</th><th>Online</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan=4>No users</td></tr>'}</tbody></table></div>`;
   }
   else if(s==='channels'){
     document.querySelector('h1').textContent='Channels';
     const d = await api('/admin/panel/channels');
-    const rows=(Array.isArray(d)?d:[]).filter(c=>!c.is_category).map(c=>`<tr><td>#${c.name}</td><td style="font-family:monospace;font-size:12px;">${(c.id||'').slice(0,8)}…</td></tr>`).join('');
+    const rows=(Array.isArray(d)?d:[]).filter(c=>!c.is_category).map(c=>`<tr><td>#${c.name}</td><td style="font-family:monospace;font-size:12px;">${(c.id||'').slice(0,8)}&hellip;</td></tr>`).join('');
     el.innerHTML=`<div class="section"><table><thead><tr><th>Name</th><th>ID</th></tr></thead><tbody>${rows||'<tr><td colspan=2>No channels</td></tr>'}</tbody></table></div>`;
   }
   else if(s==='reports'){
@@ -485,20 +655,26 @@ async function setOwner() {
   const pk = (document.getElementById('owner-pk').value||'').trim().toLowerCase();
   const res = document.getElementById('owner-result');
   if(pk.length!==64||!/^[0-9a-f]+$/.test(pk)){res.style.color='#ed4245';res.textContent='Invalid public key: must be 64 hex characters.';return;}
-  const r=await fetch('/admin/owner',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({public_key:pk})});
+  const r=await fetch('/admin/owner',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({public_key:pk})});
   if(r.ok){res.style.color='#3ba55c';res.textContent='Owner updated. The new owner can now log in with that identity.';}
   else{res.style.color='#ed4245';res.textContent=await r.text();}
 }
 
 async function banUser(pk) {
   if(!confirm('Ban '+pk.slice(0,16)+'?')) return;
-  await fetch('/admin/panel/ban', {method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({public_key:pk})});
+  await fetch('/admin/panel/ban', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({public_key:pk})});
   loadSection('users', null);
 }
 
 async function reviewReport(id, action) {
-  await fetch(`/admin/panel/reports/${id}/review`, {method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({action})});
+  await fetch(`/admin/panel/reports/${id}/review`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action})});
   loadSection('reports', null);
+}
+
+async function doLogout(evt) {
+  evt.preventDefault();
+  await fetch('/admin/auth/logout', {method:'POST'});
+  location.reload();
 }
 
 loadStats();

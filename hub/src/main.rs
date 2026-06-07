@@ -344,24 +344,9 @@ async fn main() -> Result<()> {
                 restore(&src)?;
                 println!("Restore complete. Restart the hub.");
             }
-            "rotate-admin-token" => {
-                let new_token = hex::encode(rand::random::<[u8; 32]>());
-                let db_rw = SqlitePoolOptions::new()
-                    .max_connections(1)
-                    .connect("sqlite:hub.db?mode=rwc")
-                    .await
-                    .context("Cannot open DB for write")?;
-                sqlx::query(
-                    "INSERT OR REPLACE INTO hub_settings(key, value) VALUES('web_admin_token', ?)",
-                )
-                .bind(&new_token)
-                .execute(&db_rw)
-                .await?;
-                println!("New admin token: {new_token}");
-            }
             _ => {
                 println!(
-                    "Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore|rotate-admin-token]"
+                    "Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore]"
                 );
             }
         }
@@ -430,22 +415,6 @@ async fn main() -> Result<()> {
             }
         } else {
             tracing::warn!("owner_pubkey is set but not a valid 64-char hex key; ignoring");
-        }
-    }
-
-    // Sync web_admin_token from config to DB on every boot so operators
-    // never need to touch the database manually.
-    if let Some(token) = settings.web_admin_token.as_deref() {
-        let token = token.trim();
-        if !token.is_empty() {
-            sqlx::query(
-                "INSERT OR REPLACE INTO hub_settings (key, value) VALUES ('web_admin_token', ?)",
-            )
-            .bind(token)
-            .execute(&db)
-            .await
-            .ok();
-            tracing::info!("Web admin token set from config");
         }
     }
 
