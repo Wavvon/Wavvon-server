@@ -8,3 +8,5 @@ hub_identity.json
 *.pem
 *.key
 .env
+# Tantivy search index (runtime artifact)
+**/*.search/
