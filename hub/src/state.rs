@@ -162,8 +162,6 @@ pub struct WhisperTargetDef {
 }
 
 pub struct RateLimiters {
-    /// Per-IP fixed-window rate limiter for auth endpoints (10 attempts/60 s).
-    pub auth: Mutex<HashMap<String, (u32, Instant)>>,
     /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
     pub messages: Mutex<HashMap<String, (u32, Instant)>>,
 }
@@ -171,7 +169,6 @@ pub struct RateLimiters {
 impl Default for RateLimiters {
     fn default() -> Self {
         Self {
-            auth: Mutex::new(HashMap::new()),
             messages: Mutex::new(HashMap::new()),
         }
     }

@@ -6,6 +6,190 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use crate::state::AppState;
 
+#[derive(Deserialize)]
+pub struct PanelUsersQuery {
+    pub q: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PanelReportsQuery {
+    pub status: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct PanelAuditQuery {
+    pub limit: Option<i64>,
+}
+
+pub async fn panel_list_users(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<PanelUsersQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+    let rows = if let Some(search) = q.q {
+        let like = format!("%{search}%");
+        sqlx::query_as::<_, (String, Option<String>, i64)>(
+            "SELECT public_key, display_name, first_seen_at FROM users
+             WHERE display_name LIKE ? OR public_key LIKE ?
+             ORDER BY first_seen_at DESC LIMIT 100",
+        )
+        .bind(&like)
+        .bind(&like)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        sqlx::query_as::<_, (String, Option<String>, i64)>(
+            "SELECT public_key, display_name, first_seen_at FROM users
+             ORDER BY first_seen_at DESC LIMIT 100",
+        )
+        .fetch_all(&state.db)
+        .await
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let online = state.online_users.read().await;
+    let users: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(pk, name, seen)| {
+            serde_json::json!({
+                "public_key": pk,
+                "display_name": name,
+                "first_seen_at": seen,
+                "online": online.contains(&pk),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!(users)))
+}
+
+pub async fn panel_list_channels(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+    let rows = sqlx::query_as::<_, (String, String, bool)>(
+        "SELECT id, name, is_category FROM channels ORDER BY sort_order, name LIMIT 200",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let channels: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(id, name, is_cat)| serde_json::json!({"id": id, "name": name, "is_category": is_cat}))
+        .collect();
+    Ok(Json(serde_json::json!(channels)))
+}
+
+pub async fn panel_list_reports(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<PanelReportsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+    let status = q.status.unwrap_or_else(|| "pending".into());
+    let rows = sqlx::query(
+        "SELECT r.id, r.message_id, m.content as message_content,
+                r.reporter_pubkey, r.reason, r.reported_at, r.status
+         FROM message_reports r
+         JOIN messages m ON m.id = r.message_id
+         WHERE r.status = ?
+         ORDER BY r.reported_at DESC LIMIT 50",
+    )
+    .bind(&status)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let reports: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            use sqlx::Row;
+            serde_json::json!({
+                "id": r.try_get::<String, _>("id").unwrap_or_default(),
+                "message_id": r.try_get::<String, _>("message_id").unwrap_or_default(),
+                "message_content": r.try_get::<String, _>("message_content").unwrap_or_default(),
+                "reporter_pubkey": r.try_get::<Option<String>, _>("reporter_pubkey").unwrap_or_default(),
+                "reason": r.try_get::<Option<String>, _>("reason").unwrap_or_default(),
+                "reported_at": r.try_get::<i64, _>("reported_at").unwrap_or_default(),
+                "status": r.try_get::<String, _>("status").unwrap_or_default(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!(reports)))
+}
+
+pub async fn panel_review_report(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+    let action = body.get("action").and_then(|v| v.as_str()).unwrap_or("dismiss");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    if action == "delete_message" {
+        let msg_id: Option<String> = sqlx::query_scalar("SELECT message_id FROM message_reports WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        if let Some(mid) = msg_id {
+            sqlx::query("DELETE FROM messages WHERE id = ?")
+                .bind(&mid)
+                .execute(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+    }
+
+    sqlx::query("UPDATE message_reports SET status = 'reviewed', reviewed_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
+pub async fn panel_audit_log(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(q): Query<PanelAuditQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+    let limit = q.limit.unwrap_or(50).min(200).max(1);
+    let rows = sqlx::query(
+        "SELECT event_type, actor_pubkey, target_pubkey, at
+         FROM hub_audit_log
+         ORDER BY at DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let entries: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            use sqlx::Row;
+            serde_json::json!({
+                "event_type": r.try_get::<String, _>("event_type").unwrap_or_default(),
+                "actor_pubkey": r.try_get::<Option<String>, _>("actor_pubkey").unwrap_or_default(),
+                "target_pubkey": r.try_get::<Option<String>, _>("target_pubkey").unwrap_or_default(),
+                "at": r.try_get::<i64, _>("at").unwrap_or_default(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({"entries": entries})))
+}
+
 #[derive(Serialize)]
 pub struct OwnerResponse {
     pub owner: Option<String>,
@@ -148,6 +332,31 @@ pub async fn set_owner(
     Ok(Json(serde_json::json!({ "ok": true, "owner": pk })))
 }
 
+pub async fn panel_ban_user(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_admin_token(&state, &headers).await?;
+    let pk = body.get("public_key").and_then(|v| v.as_str()).unwrap_or("");
+    if pk.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "public_key required".into()));
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    sqlx::query(
+        "INSERT OR IGNORE INTO bans (target_public_key, reason, banned_at) VALUES (?, 'Admin panel ban', ?)",
+    )
+    .bind(pk)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 async fn check_admin_token(state: &AppState, headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let expected: Option<String> = sqlx::query_scalar(
         "SELECT value FROM hub_settings WHERE key = 'web_admin_token'"
@@ -245,20 +454,20 @@ async function loadSection(s, evt) {
   }
   else if(s==='users'){
     document.querySelector('h1').textContent='Users';
-    const d = await api('/users?limit=50');
-    const rows = (d||[]).map(u=>`<tr><td>${(u.public_key||'').slice(0,16)}…</td><td>${u.display_name||''}</td><td><button class="action" onclick="banUser('${u.public_key}')">Ban</button></td></tr>`).join('');
-    el.innerHTML=`<div class="section"><table><thead><tr><th>Pubkey</th><th>Name</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const d = await api('/admin/panel/users');
+    const rows = (Array.isArray(d)?d:[]).map(u=>`<tr><td style="font-family:monospace;font-size:12px;">${(u.public_key||'').slice(0,16)}…</td><td>${u.display_name||''}</td><td>${u.online?'🟢':''}</td><td><button class="action" onclick="banUser('${u.public_key}')">Ban</button></td></tr>`).join('');
+    el.innerHTML=`<div class="section"><table><thead><tr><th>Pubkey</th><th>Name</th><th>Online</th><th></th></tr></thead><tbody>${rows||'<tr><td colspan=4>No users</td></tr>'}</tbody></table></div>`;
   }
   else if(s==='channels'){
     document.querySelector('h1').textContent='Channels';
-    const d = await api('/channels');
-    const rows=(d||[]).filter(c=>!c.is_category).map(c=>`<tr><td>#${c.name}</td><td>${(c.id||'').slice(0,8)}…</td></tr>`).join('');
-    el.innerHTML=`<div class="section"><table><thead><tr><th>Name</th><th>ID</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const d = await api('/admin/panel/channels');
+    const rows=(Array.isArray(d)?d:[]).filter(c=>!c.is_category).map(c=>`<tr><td>#${c.name}</td><td style="font-family:monospace;font-size:12px;">${(c.id||'').slice(0,8)}…</td></tr>`).join('');
+    el.innerHTML=`<div class="section"><table><thead><tr><th>Name</th><th>ID</th></tr></thead><tbody>${rows||'<tr><td colspan=2>No channels</td></tr>'}</tbody></table></div>`;
   }
   else if(s==='reports'){
     document.querySelector('h1').textContent='Pending Reports';
-    const d = await api('/admin/reports?status=pending');
-    const rows=(d||[]).map(r=>`<tr><td>${r.reason||'(no reason)'}</td><td>${(r.message_content||'').slice(0,60)}</td><td>
+    const d = await api('/admin/panel/reports?status=pending');
+    const rows=(Array.isArray(d)?d:[]).map(r=>`<tr><td>${r.reason||'(no reason)'}</td><td>${(r.message_content||'').slice(0,60)}</td><td>
       <button class="action" onclick="reviewReport('${r.id}','dismiss')">Dismiss</button>
       <button class="action" onclick="reviewReport('${r.id}','delete_message')">Delete</button>
     </td></tr>`).join('');
@@ -266,9 +475,9 @@ async function loadSection(s, evt) {
   }
   else if(s==='audit'){
     document.querySelector('h1').textContent='Audit Log';
-    const d = await api('/admin/audit-log?limit=50');
-    const rows=(d&&d.entries||[]).map(e=>`<tr><td>${e.event_type}</td><td>${e.actor_pubkey||''}</td><td>${new Date(e.at*1000).toLocaleString()}</td></tr>`).join('');
-    el.innerHTML=`<div class="section"><table><thead><tr><th>Event</th><th>Actor</th><th>Time</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    const d = await api('/admin/panel/audit');
+    const rows=(d&&Array.isArray(d.entries)?d.entries:[]).map(e=>`<tr><td>${e.event_type}</td><td style="font-family:monospace;font-size:12px;">${(e.actor_pubkey||'').slice(0,16)}</td><td>${new Date(e.at*1000).toLocaleString()}</td></tr>`).join('');
+    el.innerHTML=`<div class="section"><table><thead><tr><th>Event</th><th>Actor</th><th>Time</th></tr></thead><tbody>${rows||'<tr><td colspan=3>No log entries</td></tr>'}</tbody></table></div>`;
   }
 }
 
@@ -283,12 +492,12 @@ async function setOwner() {
 
 async function banUser(pk) {
   if(!confirm('Ban '+pk.slice(0,16)+'?')) return;
-  await fetch('/moderation/bans', {method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({target_public_key:pk,reason:'Admin panel ban'})});
+  await fetch('/admin/panel/ban', {method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({public_key:pk})});
   loadSection('users', null);
 }
 
 async function reviewReport(id, action) {
-  await fetch(`/admin/reports/${id}/review`, {method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({action})});
+  await fetch(`/admin/panel/reports/${id}/review`, {method:'POST',headers:{'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'},body:JSON.stringify({action})});
   loadSection('reports', null);
 }
 

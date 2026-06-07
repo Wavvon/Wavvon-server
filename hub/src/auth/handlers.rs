@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
 use sqlx::SqlitePool;
@@ -12,41 +12,6 @@ use crate::auth::middleware::AuthUser;
 use crate::auth::models::{ChallengeRequest, ChallengeResponse, RenewResponse, VerifyRequest, VerifyResponse};
 use crate::state::{AppState, PendingChallenge};
 
-/// Fixed-window IP rate limiter for auth endpoints.
-/// Window = 60 s, limit = 10 attempts per IP per window.
-pub fn check_rate_limit(
-    state: &AppState,
-    ip: &str,
-) -> Result<(), (StatusCode, String)> {
-    let mut map = state
-        .rate_limiters
-        .auth
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let now = Instant::now();
-    let entry = map.entry(ip.to_string()).or_insert((0, now));
-    if now.duration_since(entry.1) > Duration::from_secs(60) {
-        // Reset window.
-        *entry = (0, now);
-    }
-    if entry.0 >= 10 {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "Rate limit exceeded. Try again later.".to_string(),
-        ));
-    }
-    entry.0 += 1;
-    Ok(())
-}
-
-fn extract_ip(headers: &HeaderMap) -> String {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
-}
 
 /// Map an authenticating (subkey, optional cert) pair to a stable
 /// canonical user identity. Returns (canonical_pubkey, master_pubkey).
@@ -112,11 +77,8 @@ pub async fn resolve_canonical_identity(
 
 pub async fn challenge(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<(StatusCode, Json<ChallengeResponse>), (StatusCode, String)> {
-    let ip = extract_ip(&headers);
-    check_rate_limit(&state, &ip)?;
 
     let mut challenge_bytes = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut challenge_bytes);
@@ -142,11 +104,8 @@ pub async fn challenge(
 
 pub async fn verify(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, (StatusCode, String)> {
-    let ip = extract_ip(&headers);
-    check_rate_limit(&state, &ip)?;
 
     let pending = state
         .pending_challenges
