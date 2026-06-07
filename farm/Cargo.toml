@@ -24,6 +24,7 @@ sqlx = { workspace = true }
 hex = "0.4"
 rand = "0.8"
 sha2 = "0.10"
+totp-rs = { version = "5", features = ["qr"] }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 voxply-identity = { path = "../identity" }

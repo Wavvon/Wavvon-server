@@ -5,6 +5,7 @@ members = [
     "seed",
     "identity",
     "farm",
+    "server",
 ]
 
 [workspace.dependencies]
