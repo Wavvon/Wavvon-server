@@ -433,6 +433,22 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Sync web_admin_token from config to DB on every boot so operators
+    // never need to touch the database manually.
+    if let Some(token) = settings.web_admin_token.as_deref() {
+        let token = token.trim();
+        if !token.is_empty() {
+            sqlx::query(
+                "INSERT OR REPLACE INTO hub_settings (key, value) VALUES ('web_admin_token', ?)",
+            )
+            .bind(token)
+            .execute(&db)
+            .await
+            .ok();
+            tracing::info!("Web admin token set from config");
+        }
+    }
+
     // First-run bootstrap: applies a template from template_url or redeems
     // bootstrap_token when the channels table is empty.
     // Non-fatal — a bad template or unreachable URL never blocks startup.
