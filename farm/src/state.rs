@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
@@ -24,6 +25,9 @@ pub struct FarmState {
     pub http_client: reqwest::Client,
     /// Directory where per-hub SQLite databases are stored.
     pub hubs_dir: String,
+    /// Map server_id → unbounded sender for the agent's WebSocket write half.
+    /// Only present while the agent is connected.
+    pub agent_senders: Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
 }
 
 impl FarmState {
@@ -42,6 +46,7 @@ impl FarmState {
             hub_manager,
             http_client: reqwest::Client::new(),
             hubs_dir,
+            agent_senders: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 

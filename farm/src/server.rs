@@ -28,6 +28,14 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
             patch(routes::hubs::suspend_hub),
         )
         .route("/farm/hubs/{hub_id}", delete(routes::hubs::delete_hub))
+        // Server agent management routes.
+        .route("/farm/admin/server-token", post(routes::servers::generate_server_token))
+        .route("/farm/admin/servers", get(routes::servers::list_servers))
+        .route("/ws/agent", get(routes::servers::ws_agent_handler))
+        // TOTP 2FA routes for admin account.
+        .route("/farm/admin/totp/setup", post(routes::admin_auth::totp_setup))
+        .route("/farm/admin/totp/confirm", post(routes::admin_auth::totp_confirm))
+        .route("/farm/admin/totp/disable", post(routes::admin_auth::totp_disable))
         // Phase 3 — farm settings (admin).
         .route(
             "/farm/settings",

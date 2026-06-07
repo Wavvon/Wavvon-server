@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use axum::Json;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::state::FarmState;
 use crate::token::{sign_token, verify_token, FarmTokenPayload};
@@ -37,6 +38,8 @@ pub struct VerifyRequest {
     /// farm will honour `"member"` or `"lobby"` (anything else defaults to
     /// `"member"`).
     pub scope: Option<String>,
+    /// TOTP code — required when the admin account has TOTP enabled.
+    pub totp_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -130,6 +133,46 @@ pub async fn verify(
 
     voxply_identity::verify_signature(&req.public_key, &challenge_bytes, &sig_bytes)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
+
+    // TOTP check — only applies when the verified pubkey is the admin key.
+    {
+        let admin_row: Option<(Option<String>, i64)> =
+            sqlx::query_as("SELECT totp_secret, totp_enabled FROM farms WHERE id = 1")
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        let admin_pubkey: Option<String> =
+            sqlx::query_scalar("SELECT admin_pubkey FROM farms WHERE id = 1")
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
+
+        if admin_pubkey.as_deref() == Some(req.public_key.as_str()) {
+            if let Some((totp_secret, totp_enabled)) = admin_row {
+                if totp_enabled != 0 {
+                    let secret = totp_secret.ok_or_else(|| {
+                        (StatusCode::INTERNAL_SERVER_ERROR, "totp_secret_missing".to_string())
+                    })?;
+                    let code = req.totp_code.as_deref().ok_or_else(|| {
+                        (StatusCode::UNAUTHORIZED, "totp_required".to_string())
+                    })?;
+                    let valid = (|| -> Option<bool> {
+                        let bytes = Secret::Encoded(secret.clone()).to_bytes().ok()?;
+                        let totp = TOTP::new(
+                            Algorithm::SHA1, 6, 1, 30, bytes,
+                            None, "voxply-farm".to_string(),
+                        ).ok()?;
+                        totp.check_current(code).ok()
+                    })()
+                    .unwrap_or(false);
+                    if !valid {
+                        return Err((StatusCode::UNAUTHORIZED, "invalid_totp".to_string()));
+                    }
+                }
+            }
+        }
+    }
 
     // Delete the used challenge.
     sqlx::query("DELETE FROM pending_challenges WHERE public_key = ?")

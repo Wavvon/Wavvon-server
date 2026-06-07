@@ -135,5 +135,37 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // TOTP columns on the farms singleton row.
+    // SQLite does not support ADD COLUMN IF NOT EXISTS — ignore the "duplicate
+    // column name" error (SQLite error code 1) that fires on re-runs.
+    let _ = sqlx::query("ALTER TABLE farms ADD COLUMN totp_secret TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE farms ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0",
+    )
+    .execute(pool)
+    .await;
+
+    // server_id foreign-key column on the hubs table (NULL = local process).
+    let _ = sqlx::query("ALTER TABLE hubs ADD COLUMN server_id TEXT REFERENCES servers(id)")
+        .execute(pool)
+        .await;
+
+    // Registered server agents — one row per remote machine.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS servers (
+            id            TEXT PRIMARY KEY,
+            token_hash    TEXT NOT NULL,
+            name          TEXT NOT NULL,
+            region        TEXT,
+            registered_at INTEGER NOT NULL,
+            last_seen_at  INTEGER,
+            deleted_at    INTEGER
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }

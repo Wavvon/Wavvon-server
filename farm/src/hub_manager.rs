@@ -39,7 +39,7 @@ impl HubManager {
 
     /// Allocate the next free port for a new hub process.
     /// Scans occupied ports and returns `base_port + N` where N is the first gap.
-    async fn allocate_port(&self) -> u16 {
+    pub async fn allocate_port(&self) -> u16 {
         let hubs = self.hubs.read().await;
         let mut port = self.base_port;
         let occupied: std::collections::HashSet<u16> =

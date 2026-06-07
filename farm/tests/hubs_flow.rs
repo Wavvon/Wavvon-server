@@ -58,12 +58,14 @@ async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>) {
     let hub_manager = Arc::new(HubManager::new(
         "voxply-hub".to_string(),
         farm_url.to_string(),
+        9100,
     ));
     let state = Arc::new(FarmState::new(
         db,
         keypair,
         farm_url.to_string(),
         hub_manager,
+        "/tmp/hubs-test".to_string(),
     ));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state)

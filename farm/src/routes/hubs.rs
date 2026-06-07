@@ -362,14 +362,36 @@ pub async fn create_hub(
         )
     })?;
 
-    // Spawn the hub child process, passing the creator as owner.
-    match state
-        .hub_manager
-        .allocate_and_spawn(&state.db, &hub_id, &db_path, Some(payload.sub.as_str()))
-        .await
-    {
-        Ok(port) => tracing::info!(hub_id, port, "Hub spawned for new hub"),
-        Err(e) => tracing::warn!(hub_id, error = %e, "Hub spawn failed (row created, process not running)"),
+    // Try to delegate to a connected server agent; fall back to local spawn.
+    let launched = if let Some((server_id, sender)) = pick_agent(&state.agent_senders).await {
+        let port = state.hub_manager.allocate_port().await;
+        let cmd = serde_json::json!({
+            "type": "spawn_hub",
+            "hub_id": hub_id,
+            "db_path": db_path,
+            "port": port,
+            "owner_pubkey": payload.sub,
+            "farm_url": state.farm_url,
+        });
+        let _ = sqlx::query("UPDATE hubs SET server_id = ? WHERE id = ?")
+            .bind(&server_id)
+            .bind(&hub_id)
+            .execute(&state.db)
+            .await;
+        sender.send(cmd.to_string()).is_ok()
+    } else {
+        false
+    };
+
+    if !launched {
+        match state
+            .hub_manager
+            .allocate_and_spawn(&state.db, &hub_id, &db_path, Some(payload.sub.as_str()))
+            .await
+        {
+            Ok(port) => tracing::info!(hub_id, port, "Hub spawned locally"),
+            Err(e) => tracing::warn!(hub_id, error = %e, "Hub spawn failed"),
+        }
     }
 
     let url = hub_url(&state.farm_url, &hub_id);
@@ -552,4 +574,15 @@ pub async fn delete_hub(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Helper: pick any connected server agent sender
+// ---------------------------------------------------------------------------
+
+async fn pick_agent(
+    senders: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
+) -> Option<(String, tokio::sync::mpsc::UnboundedSender<String>)> {
+    let map = senders.read().await;
+    map.iter().next().map(|(id, s)| (id.clone(), s.clone()))
 }
