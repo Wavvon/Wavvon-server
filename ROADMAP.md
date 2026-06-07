@@ -1,7 +1,10 @@
 # Voxply Hub Workspace — Roadmap
 
 ## Next up
-_Nothing scheduled yet._
+- **Unified screen share modal** — replace the two-step flow (ScreenSharePicker + OS native
+  picker) with a single Voxply-native modal that enumerates screens and windows with thumbnails
+  and folds in audio/webcam settings. Requires a new `list_capture_sources` Tauri command.
+  Design doc: `docs/screen-share-modal.md`.
 
 ## Wishlist
 _Ideas not yet designed._
