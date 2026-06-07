@@ -39,3 +39,4 @@ config = { workspace = true }
 [dev-dependencies]
 axum-test = "19"
 tokio = { workspace = true }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
