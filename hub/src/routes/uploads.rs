@@ -12,6 +12,7 @@ use crate::state::AppState;
 
 // Max upload size: 25 MB in raw bytes
 const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+const BANNER_MAX_UPLOAD_BYTES: usize = 512 * 1024;
 
 /// Allowed mime types for uploads.
 fn is_allowed_mime(mime: &str) -> bool {
@@ -40,16 +41,18 @@ pub async fn upload_file(
     Path(channel_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<UploadResponse>), (StatusCode, String)> {
-    // Verify channel exists.
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    // Verify channel exists and fetch its type.
+    let channel_type: Option<String> =
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = ?")
             .bind(&channel_id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
-    }
+    let channel_type = channel_type
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
+
+    let is_banner = channel_type == "banner";
+    let effective_max = if is_banner { BANNER_MAX_UPLOAD_BYTES } else { MAX_UPLOAD_BYTES };
 
     // Extract the "file" field from the multipart body.
     let mut file_bytes: Option<Vec<u8>> = None;
@@ -78,7 +81,13 @@ pub async fn upload_file(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Read error: {e}")))?;
 
-        if data.len() > MAX_UPLOAD_BYTES {
+        if data.len() > effective_max {
+            if is_banner {
+                return Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "Banner image exceeds 512 KB limit".to_string(),
+                ));
+            }
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
                 format!("File exceeds {}MB limit", MAX_UPLOAD_BYTES / 1024 / 1024),
@@ -93,7 +102,18 @@ pub async fn upload_file(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "No 'file' field in upload".to_string()))?;
 
     // Mime type validation.
-    if !is_allowed_mime(&content_type) {
+    if is_banner {
+        let allowed_banner_mime = matches!(
+            content_type.as_str(),
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        );
+        if !allowed_banner_mime {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Banner images must be PNG, JPEG, GIF, or WebP; got '{}'", content_type),
+            ));
+        }
+    } else if !is_allowed_mime(&content_type) {
         return Err((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             format!("Mime type '{}' is not allowed", content_type),

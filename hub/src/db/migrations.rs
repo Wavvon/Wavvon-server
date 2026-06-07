@@ -1442,5 +1442,12 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
 
     tracing::info!("Database migrations complete");
 
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN banner_url TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN banner_file_id TEXT REFERENCES upload_files(id)")
+        .execute(pool)
+        .await;
+
     Ok(())
 }

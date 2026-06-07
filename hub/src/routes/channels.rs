@@ -149,18 +149,34 @@ pub async fn create_channel(
     let now = crate::auth::handlers::unix_timestamp();
     let is_category_int = if req.is_category { 1i64 } else { 0 };
 
-    // Validate channel_type: only "text" and "forum" are legal on leaf channels.
+    // Validate channel_type: "text", "forum", or "banner" on leaf channels.
     let channel_type = if req.is_category {
         "text".to_string()
     } else {
         match req.channel_type.as_deref() {
             None | Some("text") => "text".to_string(),
             Some("forum") => "forum".to_string(),
+            Some("banner") => "banner".to_string(),
             Some(other) => {
                 return Err((StatusCode::BAD_REQUEST, format!("unknown channel_type: {other}")))
             }
         }
     };
+
+    if channel_type == "banner" {
+        if req.banner_url.is_some() && req.banner_file_id.is_some() {
+            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are mutually exclusive".to_string()));
+        }
+        if let Some(ref url) = req.banner_url {
+            if !url.starts_with("https://") {
+                return Err((StatusCode::BAD_REQUEST, "banner_url must be an https:// URL".to_string()));
+            }
+        }
+    } else {
+        if req.banner_url.is_some() || req.banner_file_id.is_some() {
+            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are only valid for banner channels".to_string()));
+        }
+    }
 
     // Append at the end of the current order
     let next_order: i64 = sqlx::query_scalar(
@@ -171,8 +187,8 @@ pub async fn create_channel(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, channel_type, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, channel_type, created_at, banner_url, banner_file_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(&req.name)
@@ -183,6 +199,8 @@ pub async fn create_channel(
     .bind(&req.description)
     .bind(&channel_type)
     .bind(now)
+    .bind(&req.banner_url)
+    .bind(&req.banner_file_id)
     .execute(&state.db)
     .await
     .map_err(|e| {
@@ -206,6 +224,8 @@ pub async fn create_channel(
         custom_icon_svg: None,
         created_at: now,
         channel_type,
+        banner_url: req.banner_url.clone(),
+        banner_file_id: req.banner_file_id.clone(),
     };
 
     // Publish channel.created audit event.
@@ -237,16 +257,17 @@ pub async fn update_channel(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
 
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-        .bind(&channel_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
-    }
+    let existing_type: Option<String> =
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = ?")
+            .bind(&channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let existing_type = existing_type
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
 
-    let changing_structure = req.name.is_some() || req.description.is_some() || req.parent_id.is_some();
+    let changing_structure = req.name.is_some() || req.description.is_some() || req.parent_id.is_some()
+        || req.banner_url.is_some() || req.banner_file_id.is_some();
     let changing_appearance = req.icon.is_some() || req.color.is_some() || req.custom_icon_svg.is_some();
     let changing_talk_power = req.min_talk_power.is_some();
     let changing_retention = req.retention_days.is_some();
@@ -318,13 +339,43 @@ pub async fn update_channel(
         }
     }
 
+    // Banner field validation
+    if req.banner_url.is_some() || req.banner_file_id.is_some() {
+        if existing_type != "banner" {
+            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are only valid for banner channels".to_string()));
+        }
+        if let Some(ref url) = req.banner_url {
+            if !url.starts_with("https://") {
+                return Err((StatusCode::BAD_REQUEST, "banner_url must be an https:// URL".to_string()));
+            }
+        }
+        if let Some(ref fid) = req.banner_file_id {
+            let valid: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM upload_files WHERE id = ? AND channel_id = ? AND mime_type IN ('image/png','image/jpeg','image/gif','image/webp')",
+            )
+            .bind(fid)
+            .bind(&channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if valid.is_none() {
+                return Err((StatusCode::BAD_REQUEST, "banner_file_id must reference an image uploaded to this channel".to_string()));
+            }
+        }
+        if req.banner_url.is_some() && req.banner_file_id.is_some() {
+            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are mutually exclusive".to_string()));
+        }
+    }
+
     let needs_update = req.description.is_some()
         || req.icon.is_some()
         || req.color.is_some()
         || req.custom_icon_svg.is_some()
         || req.parent_id.is_some()
         || req.min_talk_power.is_some()
-        || req.retention_days.is_some();
+        || req.retention_days.is_some()
+        || req.banner_url.is_some()
+        || req.banner_file_id.is_some();
 
     if needs_update {
         let mut qb = sqlx::QueryBuilder::new("UPDATE channels SET ");
@@ -356,6 +407,14 @@ pub async fn update_channel(
         if let Some(rd_opt) = &req.retention_days {
             sep.push("retention_days = ");
             sep.push_bind_unseparated(*rd_opt);
+        }
+        if req.banner_url.is_some() {
+            sep.push("banner_url = ");
+            sep.push_bind_unseparated(req.banner_url.as_deref());
+        }
+        if req.banner_file_id.is_some() {
+            sep.push("banner_file_id = ");
+            sep.push_bind_unseparated(req.banner_file_id.as_deref());
         }
         qb.push(" WHERE id = ");
         qb.push_bind(&channel_id);
@@ -406,7 +465,7 @@ pub async fn list_channels(
     _user: AuthUser,
 ) -> Result<Json<Vec<ChannelResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type
+        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id
          FROM channels
          ORDER BY display_order, created_at",
     )
@@ -429,6 +488,8 @@ pub async fn list_channels(
             custom_icon_svg: r.custom_icon_svg,
             created_at: r.created_at,
             channel_type: r.channel_type,
+            banner_url: r.banner_url,
+            banner_file_id: r.banner_file_id,
         })
         .collect();
 
@@ -564,6 +625,8 @@ struct ChannelRow {
     custom_icon_svg: Option<String>,
     created_at: i64,
     channel_type: String,
+    banner_url: Option<String>,
+    banner_file_id: Option<String>,
 }
 
 /// Returns the code-depth a new item would sit at if placed under `parent_id`
