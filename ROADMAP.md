@@ -12,6 +12,10 @@ _Ideas not yet designed._
   `last_seen_at`. The farm has no runtime record that the hub is actually listening.
   Fix needed if we ever want the farm to proxy connections, show a "running" badge,
   or route clients to the real port.
+- **Banner `banner_file_id` upload flow is manual.** The three-step flow (create banner
+  channel → upload image → PATCH with file id) is exposed as separate API calls. The
+  desktop creation modal defers the upload step to channel settings. A future polish
+  pass could make this seamless in the creation modal itself.
 
 ## Won't do
 _Decisions not to implement something._
