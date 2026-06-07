@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::AnyPool;
 use tokio::sync::{broadcast, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::db;
@@ -17,10 +17,8 @@ use voxply_identity::Identity;
 // ---------------------------------------------------------------------------
 
 async fn setup() -> (TestServer, Identity) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
 
     let (chat_tx, _) = broadcast::channel(256);
@@ -31,6 +29,7 @@ async fn setup() -> (TestServer, Identity) {
         hub_name: "Test Hub".to_string(),
         hub_identity,
         db,
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::AnyPool;
 use tokio::sync::{broadcast, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::db;
@@ -264,15 +264,14 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Spin up a real listener so we can connect a WebSocket client to it.
 async fn spawn_real_hub() -> (String, Arc<AppState>) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx: broadcast::channel(256).0,
         federation_client: FederationClient::new(),

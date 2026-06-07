@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::AnyPool;
 use tokio::sync::{broadcast, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::db;
@@ -15,14 +15,12 @@ use voxply_identity::Identity;
 
 #[path = "common.rs"] mod common;
 
-/// Same as common::setup() but also returns the SqlitePool so tests can poke the
+/// Same as common::setup() but also returns the AnyPool so tests can poke the
 /// database directly (e.g. to mark a dm_outbox row as bounced for a test
 /// that exercises the delivery_failed reporting path).
-async fn setup_with_pool() -> (TestServer, sqlx::SqlitePool) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+async fn setup_with_pool() -> (TestServer, AnyPool) {
+    sqlx::any::install_default_drivers();
+    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let pool_handle = db.clone();
     let (chat_tx, _) = broadcast::channel(256);
@@ -32,6 +30,7 @@ async fn setup_with_pool() -> (TestServer, sqlx::SqlitePool) {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -212,10 +211,8 @@ async fn cannot_create_empty_conversation() {
 // --- Cross-hub federated DM tests ---
 
 async fn start_real_hub(name: &str) -> String {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -224,6 +221,7 @@ async fn start_real_hub(name: &str) -> String {
         hub_name: name.to_string(),
         hub_identity: Identity::generate(),
         db,
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -303,10 +301,8 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
 
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -315,6 +311,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         hub_name: name.to_string(),
         hub_identity: Identity::generate(),
         db,
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -474,10 +471,8 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     assert_eq!(queued, 1, "message should be queued while recipient is offline");
 
     // Bring Hub B up on the previously-chosen port.
-    let hub_b_db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let hub_b_db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&hub_b_db).await.unwrap();
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);
@@ -485,6 +480,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         hub_name: "hub-b".to_string(),
         hub_identity: Identity::generate(),
         db: hub_b_db,
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx: chat_tx_b,
         federation_client: FederationClient::new(),

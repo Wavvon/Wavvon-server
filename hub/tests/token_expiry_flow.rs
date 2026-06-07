@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::AnyPool;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, RenewResponse, VerifyResponse};
 use voxply_hub::bots::token_expiry;
@@ -21,15 +21,14 @@ use voxply_identity::Identity;
 // ---------------------------------------------------------------------------
 
 async fn make_state() -> Arc<AppState> {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx: broadcast::channel(256).0,
         federation_client: FederationClient::new(),
@@ -90,7 +89,7 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
 
 /// Insert a minimal bot `users` row directly into the DB (bypassing the
 /// invite flow) so we can test expiry without standing up a full bot.
-async fn insert_bot_user(db: &sqlx::SqlitePool, pubkey: &str) {
+async fn insert_bot_user(db: &AnyPool, pubkey: &str) {
     let now = voxply_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
@@ -116,7 +115,7 @@ async fn insert_bot_user(db: &sqlx::SqlitePool, pubkey: &str) {
 
 /// Insert a session row directly with the given `expires_at`.
 async fn insert_session(
-    db: &sqlx::SqlitePool,
+    db: &AnyPool,
     token: &str,
     pubkey: &str,
     expires_at: Option<i64>,

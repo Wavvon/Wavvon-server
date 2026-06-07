@@ -1,12 +1,10 @@
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::AnyPool;
 use voxply_hub::db;
 
 #[tokio::test]
 async fn migrations_idempotent_on_fresh_db() {
-    let pool = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let pool = AnyPool::connect("sqlite::memory:").await.unwrap();
 
     // Running twice in a row should not fail
     db::migrations::run(&pool).await.unwrap();
@@ -30,10 +28,8 @@ async fn migrations_idempotent_on_fresh_db() {
 
 #[tokio::test]
 async fn migrations_add_new_columns_to_old_schema() {
-    let pool = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let pool = AnyPool::connect("sqlite::memory:").await.unwrap();
 
     // Simulate an old DB: pre-existing channels table WITHOUT parent_id/is_category
     sqlx::query(
@@ -77,10 +73,8 @@ async fn migrations_add_new_columns_to_old_schema() {
 
 #[tokio::test]
 async fn migrations_create_all_core_tables() {
-    let pool = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    sqlx::any::install_default_drivers();
+    let pool = AnyPool::connect("sqlite::memory:").await.unwrap();
 
     db::migrations::run(&pool).await.unwrap();
 

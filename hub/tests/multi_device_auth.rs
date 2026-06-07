@@ -3,8 +3,7 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::SqlitePool;
+use sqlx::AnyPool;
 use tokio::sync::{broadcast, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::db;
@@ -14,17 +13,16 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::{DeviceSubkey, Identity, MasterIdentity, SubkeyCert};
 
-async fn setup() -> (TestServer, SqlitePool) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+async fn setup() -> (TestServer, AnyPool) {
+    sqlx::any::install_default_drivers();
+    let db = AnyPool::connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
 
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db: db.clone(),
+        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx: broadcast::channel(16).0,
         federation_client: FederationClient::new(),
@@ -326,7 +324,7 @@ async fn master_hijack_attempt_is_blocked_by_coalesce() {
 /// Insert a revocation row directly into the DB, bypassing signature checks.
 /// The middleware only checks the presence of the row; signature verification
 /// lives in the identity route that accepts the POST.
-async fn insert_revocation(db: &SqlitePool, subkey_pubkey: &str) {
+async fn insert_revocation(db: &AnyPool, subkey_pubkey: &str) {
     sqlx::query(
         "INSERT OR IGNORE INTO subkey_revocations
          (master_pubkey, subkey_pubkey, revoked_at, signature, registered_at)
