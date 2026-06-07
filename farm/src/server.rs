@@ -43,6 +43,14 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         )
         // Phase 3 — public discovery probe (unauthenticated).
         .route("/farm/public-info", get(routes::admin::public_info))
+        // Farm admin panel auth endpoints.
+        .route("/farm/admin/auth/challenge", post(routes::admin_auth::challenge))
+        .route("/farm/admin/auth/signed", post(routes::admin_auth::signed))
+        .route("/farm/admin/auth/poll", post(routes::admin_auth::poll))
+        .route("/farm/admin/auth/totp/enroll-begin", post(routes::admin_auth::enroll_begin))
+        .route("/farm/admin/auth/totp", post(routes::admin_auth::totp_verify))
+        .route("/farm/admin/auth/logout", post(routes::admin_auth::logout))
+        .route("/farm/admin/auth/me", get(routes::admin_auth::me))
         // Hub heartbeat — pushed by each hub every 60 s.
         .route("/farm/heartbeat", post(routes::heartbeat::receive_heartbeat))
         // Farm admin fleet view — requires farm admin auth.

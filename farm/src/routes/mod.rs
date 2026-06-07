@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admin_auth;
 pub mod auth;
 pub mod games;
 pub mod health;
