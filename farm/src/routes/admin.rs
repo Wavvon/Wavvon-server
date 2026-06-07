@@ -13,7 +13,6 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::routes::admin_auth::extract_admin_session;
 use crate::state::FarmState;
 use crate::token::verify_token;
 
@@ -52,8 +51,17 @@ fn require_auth(
     })
 }
 
-/// Require a valid farm admin session cookie.
-/// Used by interactive admin UI endpoints (settings, user list, etc.).
+/// Load the admin pubkey from the farms singleton row.
+async fn get_admin_pubkey(db: &sqlx::SqlitePool) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>("SELECT admin_pubkey FROM farms WHERE id = 1")
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+}
+
+/// Require a valid farm session whose `sub` matches `farms.admin_pubkey`.
 /// Public alias used by other route modules (e.g. heartbeat).
 pub async fn require_admin_pub(
     headers: &HeaderMap,
@@ -66,12 +74,17 @@ async fn require_admin(
     headers: &HeaderMap,
     state: &FarmState,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    extract_admin_session(headers, state)
-        .await
-        .map(|(_id, pubkey)| pubkey)
-        .map_err(|(status, msg)| {
-            (status, Json(serde_json::json!({"error": msg})))
-        })
+    let farm_pubkey = state.public_key_hex();
+    let payload = require_auth(headers, &farm_pubkey)?;
+
+    let admin_pubkey = get_admin_pubkey(&state.db).await;
+    if admin_pubkey.as_deref() != Some(payload.sub.as_str()) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "farm_admin_only"})),
+        ));
+    }
+    Ok(payload.sub)
 }
 
 // ---------------------------------------------------------------------------

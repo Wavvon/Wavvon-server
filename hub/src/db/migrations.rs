@@ -1791,53 +1791,6 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_messages')")
         .execute(pool).await?;
 
-    // ---- Admin panel auth (desktop-signing + TOTP) ----
-    // TOTP secrets, keyed by canonical (master) pubkey.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS admin_totp (
-            pubkey         TEXT PRIMARY KEY,
-            secret_base32  TEXT NOT NULL,
-            created_at     INTEGER NOT NULL,
-            confirmed_at   INTEGER,
-            last_used_step INTEGER
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Server-side web admin sessions (opaque cookie reference).
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS admin_panel_sessions (
-            id          TEXT PRIMARY KEY,
-            pubkey      TEXT NOT NULL,
-            created_at  INTEGER NOT NULL,
-            expires_at  INTEGER NOT NULL,
-            revoked_at  INTEGER,
-            user_agent  TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Short-lived login state (challenge → signed → awaiting_totp / enrollment → done).
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS admin_pending_challenge (
-            challenge_id  TEXT PRIMARY KEY,
-            challenge_hex TEXT NOT NULL,
-            state         TEXT NOT NULL DEFAULT 'pending',
-            pubkey        TEXT,
-            created_at    INTEGER NOT NULL,
-            expires_at    INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Remove the legacy bearer token — superseded by the TOTP+signing flow.
-    let _ = sqlx::query("DELETE FROM hub_settings WHERE key = 'web_admin_token'")
-        .execute(pool)
-        .await;
-
     tracing::info!("Database migrations complete");
 
     Ok(())

@@ -34,7 +34,6 @@ opentelemetry_sdk    = { workspace = true }
 opentelemetry-otlp   = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 config = { workspace = true }
-totp-rs = { workspace = true }
 
 [dev-dependencies]
 axum-test = "19"

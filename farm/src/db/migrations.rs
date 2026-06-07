@@ -181,46 +181,5 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
         .execute(pool)
         .await;
 
-    // Admin panel auth: TOTP secrets keyed by canonical pubkey.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS farm_admin_totp (
-            pubkey          TEXT PRIMARY KEY,
-            secret_base32   TEXT NOT NULL,
-            created_at      INTEGER NOT NULL,
-            confirmed_at    INTEGER,
-            last_used_step  INTEGER
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Admin panel auth: server-side web admin sessions.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS farm_admin_sessions (
-            id          TEXT PRIMARY KEY,
-            pubkey      TEXT NOT NULL,
-            created_at  INTEGER NOT NULL,
-            expires_at  INTEGER NOT NULL,
-            revoked_at  INTEGER,
-            user_agent  TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Admin panel auth: short-lived pending challenge state for the login flow.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS farm_admin_pending_challenge (
-            challenge_id    TEXT PRIMARY KEY,
-            challenge_hex   TEXT NOT NULL,
-            state           TEXT NOT NULL DEFAULT 'pending',
-            pubkey          TEXT,
-            created_at      INTEGER NOT NULL,
-            expires_at      INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
     Ok(())
 }
