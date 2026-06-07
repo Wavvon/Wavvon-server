@@ -2,94 +2,137 @@ use anyhow::Result;
 use sqlx::SqlitePool;
 
 pub async fn run(pool: &SqlitePool) -> Result<()> {
+    // ---- Core user / session tables ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS users (
-            public_key    TEXT PRIMARY KEY,
-            display_name  TEXT,
-            first_seen_at INTEGER NOT NULL,
-            last_seen_at  INTEGER NOT NULL
+            public_key        TEXT PRIMARY KEY,
+            display_name      TEXT,
+            first_seen_at     INTEGER NOT NULL,
+            last_seen_at      INTEGER NOT NULL,
+            approval_status   TEXT NOT NULL DEFAULT 'approved',
+            avatar            TEXT,
+            master_pubkey     TEXT,
+            is_bot            INTEGER NOT NULL DEFAULT 0,
+            is_bot_removed    INTEGER NOT NULL DEFAULT 0,
+            bot_invite_token  TEXT,
+            bot_invite_expires INTEGER,
+            is_webhook        INTEGER NOT NULL DEFAULT 0,
+            lobby_status      TEXT NOT NULL DEFAULT 'none',
+            lobby_entered_at  INTEGER,
+            pow_level         INTEGER NOT NULL DEFAULT 0
         )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)",
     )
     .execute(pool)
     .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sessions (
-            token      TEXT PRIMARY KEY,
-            public_key TEXT NOT NULL REFERENCES users(public_key),
-            created_at INTEGER NOT NULL
+            token             TEXT PRIMARY KEY,
+            public_key        TEXT NOT NULL REFERENCES users(public_key),
+            created_at        INTEGER NOT NULL,
+            expires_at        INTEGER,
+            expiry_warned_at  INTEGER
         )",
     )
     .execute(pool)
     .await?;
+
+    // ---- Channels ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS channels (
-            id            TEXT PRIMARY KEY,
-            name          TEXT NOT NULL UNIQUE,
-            created_by    TEXT NOT NULL REFERENCES users(public_key),
-            parent_id     TEXT REFERENCES channels(id),
-            is_category   INTEGER NOT NULL DEFAULT 0,
-            display_order INTEGER NOT NULL DEFAULT 0,
-            description   TEXT,
-            created_at    INTEGER NOT NULL
+            id               TEXT PRIMARY KEY,
+            name             TEXT NOT NULL UNIQUE,
+            created_by       TEXT NOT NULL REFERENCES users(public_key),
+            parent_id        TEXT REFERENCES channels(id),
+            is_category      INTEGER NOT NULL DEFAULT 0,
+            display_order    INTEGER NOT NULL DEFAULT 0,
+            description      TEXT,
+            created_at       INTEGER NOT NULL,
+            icon             TEXT,
+            color            TEXT,
+            custom_icon_svg  TEXT,
+            min_talk_power   INTEGER NOT NULL DEFAULT 0,
+            channel_type     TEXT NOT NULL DEFAULT 'text',
+            retention_days   INTEGER
         )",
     )
     .execute(pool)
     .await?;
 
-    // Additive migrations for pre-existing databases (ignore errors — columns may already exist)
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN parent_id TEXT REFERENCES channels(id)")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN is_category INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN description TEXT")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN icon TEXT")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN color TEXT")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN custom_icon_svg TEXT")
-        .execute(pool)
-        .await;
+    // ---- Messages ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS messages (
-            id         TEXT PRIMARY KEY,
-            channel_id TEXT NOT NULL REFERENCES channels(id),
-            sender     TEXT NOT NULL REFERENCES users(public_key),
-            content    TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            edited_at  INTEGER
+            id                TEXT PRIMARY KEY,
+            channel_id        TEXT NOT NULL REFERENCES channels(id),
+            sender            TEXT NOT NULL REFERENCES users(public_key),
+            content           TEXT NOT NULL,
+            created_at        INTEGER NOT NULL,
+            edited_at         INTEGER,
+            attachments       TEXT,
+            reply_to          TEXT,
+            visible_to_pubkey TEXT,
+            embeds            TEXT,
+            reply_count       INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await?;
 
-    // Attachments JSON column: a serialized Vec<Attachment>. NULL/empty for
-    // legacy rows. We store inline base64 here rather than a side table since
-    // the size cap (~3 MB) keeps this manageable.
-    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN attachments TEXT")
-        .execute(pool)
-        .await;
+    sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+         USING fts5(content, content='messages', content_rowid='rowid')",
+    )
+    .execute(pool)
+    .await?;
 
-    // Optional parent message id for threaded replies. We don't FK to
-    // messages.id because the parent might get deleted later -- the reply
-    // simply renders without a preview when the parent is gone.
-    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN reply_to TEXT")
-        .execute(pool)
-        .await;
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS messages_ai
+         AFTER INSERT ON messages BEGIN
+           INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+         END",
+    )
+    .execute(pool)
+    .await?;
 
-    // One row per (message, emoji, user). PRIMARY KEY collapses re-reacts
-    // into idempotent inserts.
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS messages_ad
+         AFTER DELETE ON messages BEGIN
+           INSERT INTO messages_fts(messages_fts, rowid, content)
+           VALUES ('delete', old.rowid, old.content);
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TRIGGER IF NOT EXISTS messages_au
+         AFTER UPDATE ON messages BEGIN
+           INSERT INTO messages_fts(messages_fts, rowid, content)
+           VALUES ('delete', old.rowid, old.content);
+           INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+         END",
+    )
+    .execute(pool)
+    .await?;
+
+    // Back-fill existing messages into the FTS5 index (safe to run repeatedly).
+    sqlx::query(
+        "INSERT OR IGNORE INTO messages_fts(rowid, content)
+         SELECT rowid, content FROM messages
+         WHERE rowid NOT IN (SELECT rowid FROM messages_fts)",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS message_reactions (
             message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
@@ -108,10 +151,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Additive migration for older DBs
-    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN edited_at INTEGER")
-        .execute(pool)
-        .await;
+    // ---- Federation ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS peers (
@@ -152,23 +192,20 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Roles and permissions ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS roles (
             id                 TEXT PRIMARY KEY,
             name               TEXT NOT NULL UNIQUE,
             priority           INTEGER NOT NULL DEFAULT 0,
             display_separately INTEGER NOT NULL DEFAULT 0,
-            created_at         INTEGER NOT NULL
+            created_at         INTEGER NOT NULL,
+            talk_power         INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await?;
-
-    let _ = sqlx::query(
-        "ALTER TABLE roles ADD COLUMN display_separately INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS role_permissions (
@@ -204,19 +241,38 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Seed built-in permissions
     sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'send_messages')")
         .execute(pool).await?;
     sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'read_messages')")
         .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_posts')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'start_game')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_events')")
+        .execute(pool).await?;
     sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'admin')")
         .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_posts')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_games')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_voice')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'use_video')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_messages')")
+        .execute(pool).await?;
+
+    // ---- Moderation ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bans (
             target_public_key TEXT PRIMARY KEY REFERENCES users(public_key),
-            banned_by  TEXT NOT NULL,
-            reason     TEXT,
-            created_at INTEGER NOT NULL
+            banned_by         TEXT NOT NULL,
+            reason            TEXT,
+            created_at        INTEGER NOT NULL
         )",
     )
     .execute(pool)
@@ -225,14 +281,93 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS mutes (
             target_public_key TEXT PRIMARY KEY REFERENCES users(public_key),
-            muted_by   TEXT NOT NULL,
-            reason     TEXT,
-            expires_at INTEGER,
-            created_at INTEGER NOT NULL
+            muted_by          TEXT NOT NULL,
+            reason            TEXT,
+            expires_at        INTEGER,
+            created_at        INTEGER NOT NULL
         )",
     )
     .execute(pool)
     .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS channel_bans (
+            channel_id        TEXT NOT NULL REFERENCES channels(id),
+            target_public_key TEXT NOT NULL REFERENCES users(public_key),
+            banned_by         TEXT NOT NULL,
+            reason            TEXT,
+            created_at        INTEGER NOT NULL,
+            PRIMARY KEY (channel_id, target_public_key)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS voice_mutes (
+            target_public_key TEXT PRIMARY KEY REFERENCES users(public_key),
+            muted_by          TEXT NOT NULL,
+            reason            TEXT,
+            created_at        INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS channel_voice_mutes (
+            channel_id TEXT NOT NULL,
+            pubkey     TEXT NOT NULL,
+            muted_by   TEXT NOT NULL,
+            muted_at   TEXT NOT NULL,
+            PRIMARY KEY (channel_id, pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS raise_hand_requests (
+            id           TEXT PRIMARY KEY,
+            channel_id   TEXT NOT NULL,
+            pubkey       TEXT NOT NULL,
+            requested_at TEXT NOT NULL,
+            UNIQUE (channel_id, pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS message_reports (
+            id              TEXT PRIMARY KEY,
+            message_id      TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            reporter_pubkey TEXT NOT NULL REFERENCES users(public_key),
+            reason          TEXT NOT NULL DEFAULT '',
+            reported_at     INTEGER NOT NULL,
+            status          TEXT NOT NULL DEFAULT 'pending',
+            reviewed_by     TEXT,
+            review_note     TEXT,
+            UNIQUE(message_id, reporter_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS federated_bans (
+            source_hub_pubkey    TEXT NOT NULL,
+            target_master_pubkey TEXT NOT NULL,
+            reason               TEXT,
+            added_at             INTEGER NOT NULL,
+            synced_at            INTEGER NOT NULL,
+            PRIMARY KEY(source_hub_pubkey, target_master_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Invites ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS invites (
@@ -247,7 +382,8 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Hub settings (key-value store for simple config)
+    // ---- Hub settings (key-value store for simple config) ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS hub_settings (
             key   TEXT PRIMARY KEY,
@@ -257,57 +393,64 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Default: hub is open (no invite required)
     sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('invite_only', 'false')")
-        .execute(pool)
-        .await?;
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('min_security_level', '0')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('require_approval', 'false')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('max_channel_depth', '0')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('lobby_enabled', '1')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('lobby_welcome_md', '')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('challenge_mode', 'off')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('challenge_difficulty', 'easy')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('min_pow_level', '0')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_auto_issue', 'true')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_standing_days', '30')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_validity_days', '90')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_min_pow_level', '0')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_mode', 'none')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_trusted_issuers', '[]')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_require', '{}')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('hub_tags', '[]')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('hub_nsfw', 'false')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('moderation_webhook_url', '')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('moderation_webhook_secret', '')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('banlist_sources', '[]')")
+        .execute(pool).await?;
+    sqlx::query("INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('bootstrapped_at', '')")
+        .execute(pool).await?;
+
+    // ---- Channel settings ----
 
     sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('min_security_level', '0')",
+        "CREATE TABLE IF NOT EXISTS channel_settings (
+            channel_id     TEXT PRIMARY KEY REFERENCES channels(id),
+            min_talk_power INTEGER NOT NULL DEFAULT 0
+        )",
     )
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('require_approval', 'false')",
-    )
-    .execute(pool)
-    .await?;
+    // ---- Games (hub-installed) ----
 
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('max_channel_depth', '0')",
-    )
-    .execute(pool)
-    .await?;
-
-    // Approval state per user. 'approved' for existing users (default), 'pending'
-    // for new sign-ups when require_approval is on.
-    let _ = sqlx::query(
-        "ALTER TABLE users ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'",
-    )
-    .execute(pool)
-    .await;
-
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN avatar TEXT")
-        .execute(pool)
-        .await;
-
-    // Multi-device: NULL for legacy single-key users, set for users
-    // who have authenticated at least once with a master-signed
-    // SubkeyCert. The canonical user identity is `users.public_key`
-    // for everyone — this column just records which master "owns"
-    // the row, so a second paired device authenticating with the
-    // same master finds the existing row.
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN master_pubkey TEXT")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)",
-    )
-    .execute(pool)
-    .await;
-
-    // Games installed per hub (admin installs a manifest; all members can play).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS hub_games (
             id             TEXT PRIMARY KEY,
@@ -326,6 +469,72 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // Farm-side game enable/disable per hub
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS enabled_games (
+            game_id    TEXT PRIMARY KEY,
+            enabled_at TEXT NOT NULL,
+            enabled_by TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS channel_games (
+            channel_id TEXT NOT NULL,
+            game_id    TEXT NOT NULL,
+            PRIMARY KEY (channel_id, game_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Game sessions and shared KV
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS game_sessions (
+            id          TEXT PRIMARY KEY,
+            channel_id  TEXT NOT NULL,
+            game_id     TEXT NOT NULL,
+            host_pubkey TEXT NOT NULL,
+            state_json  TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL,
+            ended_at    TEXT,
+            status      TEXT NOT NULL DEFAULT 'lobby',
+            snapshot    BLOB,
+            updated_at  INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS game_shared_kv (
+            session_id TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, key)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS game_channel_kv (
+            game_id    TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            key        TEXT NOT NULL,
+            value      TEXT NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (game_id, channel_id, key)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Alliances ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS alliances (
@@ -363,41 +572,23 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS channel_bans (
-            channel_id TEXT NOT NULL REFERENCES channels(id),
-            target_public_key TEXT NOT NULL REFERENCES users(public_key),
-            banned_by TEXT NOT NULL,
-            reason TEXT,
-            created_at INTEGER NOT NULL,
-            PRIMARY KEY (channel_id, target_public_key)
+        "CREATE TABLE IF NOT EXISTS pending_alliance_invites (
+            id                   TEXT PRIMARY KEY,
+            alliance_id          TEXT NOT NULL,
+            alliance_name        TEXT NOT NULL,
+            from_hub_url         TEXT NOT NULL,
+            from_hub_name        TEXT NOT NULL,
+            from_hub_public_key  TEXT NOT NULL,
+            invite_token         TEXT NOT NULL,
+            created_at           INTEGER NOT NULL,
+            message              TEXT
         )",
     )
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS voice_mutes (
-            target_public_key TEXT PRIMARY KEY REFERENCES users(public_key),
-            muted_by TEXT NOT NULL,
-            reason TEXT,
-            created_at INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // ---- DM / conversations ----
 
-    // Add min_talk_power column to channels (0 = anyone can talk)
-    // Using a separate table since ALTER TABLE IF NOT EXISTS isn't clean in SQLite
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS channel_settings (
-            channel_id      TEXT PRIMARY KEY REFERENCES channels(id),
-            min_talk_power  INTEGER NOT NULL DEFAULT 0
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Conversations (DM / group DM) — only tracks members, NOT message content
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS conversations (
             id         TEXT PRIMARY KEY,
@@ -413,6 +604,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
             conversation_id TEXT NOT NULL REFERENCES conversations(id),
             public_key      TEXT NOT NULL REFERENCES users(public_key),
             joined_at       INTEGER NOT NULL,
+            hub_url         TEXT,
             PRIMARY KEY (conversation_id, public_key)
         )",
     )
@@ -421,11 +613,11 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS friends (
-            user_a TEXT NOT NULL REFERENCES users(public_key),
-            user_b TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at INTEGER NOT NULL,
-            hub_url TEXT,
+            user_a       TEXT NOT NULL REFERENCES users(public_key),
+            user_b       TEXT NOT NULL,
+            status       TEXT NOT NULL DEFAULT 'pending',
+            created_at   INTEGER NOT NULL,
+            hub_url      TEXT,
             display_name TEXT,
             PRIMARY KEY (user_a, user_b)
         )",
@@ -433,73 +625,59 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Cross-hub friends: hub_url is where the friend is reachable; display_name
-    // is a cached snapshot (their hub may rename them later, we'll resync). Both
-    // are NULL for same-hub friends, where we look up the local users table.
-    let _ = sqlx::query("ALTER TABLE friends ADD COLUMN hub_url TEXT")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE friends ADD COLUMN display_name TEXT")
-        .execute(pool)
-        .await;
-
-    // Persisted DM messages (both local and federated deliveries land here).
-    // content is nullable: encrypted messages (is_encrypted=1 or is_group_encrypted=1)
-    // set content to NULL and store the ciphertext in ciphertext_json instead.
+    // content is nullable: encrypted messages store NULL here and use ciphertext_json.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dm_messages (
-            id              TEXT PRIMARY KEY,
-            conversation_id TEXT NOT NULL,
-            sender          TEXT NOT NULL,
-            content         TEXT,
-            signature       TEXT,
-            created_at      INTEGER NOT NULL
+            id                  TEXT PRIMARY KEY,
+            conversation_id     TEXT NOT NULL,
+            sender              TEXT NOT NULL,
+            content             TEXT,
+            signature           TEXT,
+            created_at          INTEGER NOT NULL,
+            attachments         TEXT,
+            is_encrypted        INTEGER NOT NULL DEFAULT 0,
+            ciphertext_json     TEXT,
+            is_group_encrypted  INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await?;
 
-    // Attachments JSON for DMs, mirroring the channel-message pattern.
-    let _ = sqlx::query("ALTER TABLE dm_messages ADD COLUMN attachments TEXT")
-        .execute(pool)
-        .await;
-
-    // Per-member delivery hub for cross-hub DM routing.
-    // Nullable: NULL means the member lives on this hub.
-    let _ = sqlx::query("ALTER TABLE conversation_members ADD COLUMN hub_url TEXT")
-        .execute(pool)
-        .await;
-
-    // DM delivery queue — one row per (message, recipient hub) awaiting delivery.
-    // Rows are deleted on successful delivery; rows where attempts >= max are
-    // kept with bounced_at set so senders can see failures (if we add UI for it).
+    // DM delivery queue
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dm_outbox (
-            message_id         TEXT NOT NULL REFERENCES dm_messages(id),
-            recipient_hub_url  TEXT NOT NULL,
-            attempts           INTEGER NOT NULL DEFAULT 0,
-            next_attempt_at    INTEGER NOT NULL,
-            last_error         TEXT,
-            bounced_at         INTEGER,
+            message_id        TEXT NOT NULL REFERENCES dm_messages(id),
+            recipient_hub_url TEXT NOT NULL,
+            attempts          INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at   INTEGER NOT NULL,
+            last_error        TEXT,
+            bounced_at        INTEGER,
             PRIMARY KEY (message_id, recipient_hub_url)
         )",
     )
     .execute(pool)
     .await?;
 
-    // ---- Multi-device / home-hub state (Phase 2) ----
-    // These tables store master-signed personal-axis state. The hub
-    // does not authenticate writes via session tokens; the master
-    // signature inside each row is the authorization.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dm_blocks (
+            owner_pubkey   TEXT NOT NULL,
+            blocked_pubkey TEXT NOT NULL,
+            PRIMARY KEY (owner_pubkey, blocked_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Multi-device / home-hub state ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS home_hub_designations (
-            master_pubkey  TEXT PRIMARY KEY,
-            hubs_json      TEXT NOT NULL,
-            issued_at      INTEGER NOT NULL,
-            sequence       INTEGER NOT NULL,
-            signature      TEXT NOT NULL,
-            updated_at     INTEGER NOT NULL
+            master_pubkey TEXT PRIMARY KEY,
+            hubs_json     TEXT NOT NULL,
+            issued_at     INTEGER NOT NULL,
+            sequence      INTEGER NOT NULL,
+            signature     TEXT NOT NULL,
+            updated_at    INTEGER NOT NULL
         )",
     )
     .execute(pool)
@@ -507,14 +685,14 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS subkey_certs (
-            master_pubkey       TEXT NOT NULL,
-            subkey_pubkey       TEXT NOT NULL,
-            device_label        TEXT NOT NULL,
-            issued_at           INTEGER NOT NULL,
-            not_after           INTEGER,
-            fallback_hubs_json  TEXT NOT NULL,
-            signature           TEXT NOT NULL,
-            registered_at       INTEGER NOT NULL,
+            master_pubkey      TEXT NOT NULL,
+            subkey_pubkey      TEXT NOT NULL,
+            device_label       TEXT NOT NULL,
+            issued_at          INTEGER NOT NULL,
+            not_after          INTEGER,
+            fallback_hubs_json TEXT NOT NULL,
+            signature          TEXT NOT NULL,
+            registered_at      INTEGER NOT NULL,
             PRIMARY KEY (master_pubkey, subkey_pubkey)
         )",
     )
@@ -523,11 +701,11 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS subkey_revocations (
-            master_pubkey  TEXT NOT NULL,
-            subkey_pubkey  TEXT NOT NULL,
-            revoked_at     INTEGER NOT NULL,
-            signature      TEXT NOT NULL,
-            registered_at  INTEGER NOT NULL,
+            master_pubkey TEXT NOT NULL,
+            subkey_pubkey TEXT NOT NULL,
+            revoked_at    INTEGER NOT NULL,
+            signature     TEXT NOT NULL,
+            registered_at INTEGER NOT NULL,
             PRIMARY KEY (master_pubkey, subkey_pubkey)
         )",
     )
@@ -546,25 +724,22 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Short-lived pairing state. State machine: pending → claimed →
-    // complete. Rows are pruned when expires_at passes; cleanup runs
-    // lazily on each access to avoid a background task for now.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS pairing_offers (
-            pairing_token    TEXT PRIMARY KEY,
-            master_pubkey    TEXT NOT NULL,
-            home_hubs_json   TEXT NOT NULL,
-            issued_at        INTEGER NOT NULL,
-            expires_at       INTEGER NOT NULL,
-            offer_signature  TEXT NOT NULL,
-            state            TEXT NOT NULL DEFAULT 'pending',
-            subkey_pubkey    TEXT,
-            device_label     TEXT,
-            claim_proof      TEXT,
-            cert_json        TEXT,
-            wrapped_key_hex  TEXT,
-            created_at       INTEGER NOT NULL,
-            updated_at       INTEGER NOT NULL
+            pairing_token   TEXT PRIMARY KEY,
+            master_pubkey   TEXT NOT NULL,
+            home_hubs_json  TEXT NOT NULL,
+            issued_at       INTEGER NOT NULL,
+            expires_at      INTEGER NOT NULL,
+            offer_signature TEXT NOT NULL,
+            state           TEXT NOT NULL DEFAULT 'pending',
+            subkey_pubkey   TEXT,
+            device_label    TEXT,
+            claim_proof     TEXT,
+            cert_json       TEXT,
+            wrapped_key_hex TEXT,
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
         )",
     )
     .execute(pool)
@@ -580,30 +755,37 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // E2E encryption: DH key store
+    // ---- E2E encryption ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dh_keys (
-            pubkey         TEXT PRIMARY KEY REFERENCES users(public_key),
-            dh_pubkey_hex  TEXT NOT NULL,
-            signature_hex  TEXT NOT NULL,
-            published_at   INTEGER NOT NULL
+            pubkey        TEXT PRIMARY KEY REFERENCES users(public_key),
+            dh_pubkey_hex TEXT NOT NULL,
+            signature_hex TEXT NOT NULL,
+            published_at  INTEGER NOT NULL
         )",
     )
     .execute(pool)
     .await?;
 
-    // E2E encryption: encrypted DM storage
-    // is_encrypted=1 → content is NULL, ciphertext_json holds the envelope
-    let _ = sqlx::query("ALTER TABLE dm_messages ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE dm_messages ADD COLUMN ciphertext_json TEXT")
-        .execute(pool)
-        .await;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS group_sender_key_distributions (
+            id                 TEXT PRIMARY KEY,
+            conv_id            TEXT NOT NULL,
+            sender_pubkey      TEXT NOT NULL,
+            recipient_pubkey   TEXT NOT NULL,
+            sender_key_version INTEGER NOT NULL,
+            iteration          INTEGER NOT NULL,
+            wrapped_key_hex    TEXT NOT NULL,
+            wrap_nonce_hex     TEXT NOT NULL,
+            created_at         INTEGER NOT NULL,
+            UNIQUE(conv_id, sender_pubkey, recipient_pubkey, sender_key_version)
+        )",
+    )
+    .execute(pool)
+    .await?;
 
-    // content column in dm_messages must be nullable for encrypted messages.
-    // SQLite does not support ALTER COLUMN, so new rows are inserted with NULL content
-    // when is_encrypted=1. Existing rows already have content so no data is lost.
+    // ---- Hub icons and emojis ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS hub_icons (
@@ -617,10 +799,20 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Bot support
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hub_emojis (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL UNIQUE,
+            uploader   TEXT NOT NULL REFERENCES users(public_key),
+            mime       TEXT NOT NULL,
+            data_b64   TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Bots ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bot_tokens (
@@ -634,65 +826,108 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS pending_alliance_invites (
-            id                  TEXT PRIMARY KEY,
-            alliance_id         TEXT NOT NULL,
-            alliance_name       TEXT NOT NULL,
-            from_hub_url        TEXT NOT NULL,
-            from_hub_name       TEXT NOT NULL,
-            from_hub_public_key TEXT NOT NULL,
-            invite_token        TEXT NOT NULL,
-            created_at          INTEGER NOT NULL,
-            message             TEXT
+        "CREATE TABLE IF NOT EXISTS bot_profiles (
+            pubkey       TEXT PRIMARY KEY,
+            name         TEXT NOT NULL,
+            avatar_url   TEXT,
+            description  TEXT,
+            webhook_url  TEXT,
+            homepage_url TEXT,
+            capabilities TEXT NOT NULL DEFAULT '[]',
+            updated_at   INTEGER NOT NULL
         )",
     )
     .execute(pool)
     .await?;
 
-    let _ = sqlx::query(
-        "ALTER TABLE pending_alliance_invites ADD COLUMN message TEXT",
-    )
-    .execute(pool)
-    .await;
-
-    // ---- Feature: Security Level Lobby ----
-    // Additive columns on users
-    let _ = sqlx::query(
-        "ALTER TABLE users ADD COLUMN lobby_status TEXT NOT NULL DEFAULT 'none'",
-    )
-    .execute(pool)
-    .await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN lobby_entered_at INTEGER")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query(
-        "ALTER TABLE users ADD COLUMN pow_level INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    // Lobby settings
     sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('lobby_enabled', '1')",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('lobby_welcome_md', '')",
+        "CREATE TABLE IF NOT EXISTS bot_commands (
+            pubkey           TEXT NOT NULL,
+            name             TEXT NOT NULL,
+            description      TEXT NOT NULL,
+            args             TEXT,
+            scope            TEXT NOT NULL DEFAULT 'channel',
+            privileged       INTEGER NOT NULL DEFAULT 0,
+            cooldown_seconds INTEGER NOT NULL DEFAULT 3,
+            PRIMARY KEY (pubkey, name)
+        )",
     )
     .execute(pool)
     .await?;
 
-    // ---- Feature: Bot Challenge ----
+    // channel_id = '' (empty string) = hub-scope subscription
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_subscriptions (
+            bot_pubkey TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            channel_id TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (bot_pubkey, event_type, channel_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_channel_scope (
+            bot_pubkey TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            PRIMARY KEY (bot_pubkey, channel_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Self-service bots (token-authenticated, webhook delivery)
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bots (
+            public_key   TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            created_by   TEXT NOT NULL,
+            token_hash   TEXT NOT NULL,
+            webhook_url  TEXT,
+            created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_slash_commands (
+            id          TEXT PRIMARY KEY,
+            bot_pubkey  TEXT NOT NULL REFERENCES bots(public_key) ON DELETE CASCADE,
+            command     TEXT NOT NULL,
+            description TEXT NOT NULL,
+            created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            UNIQUE(bot_pubkey, command)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_event_queue (
+            id         TEXT PRIMARY KEY,
+            bot_pubkey TEXT NOT NULL REFERENCES bots(public_key) ON DELETE CASCADE,
+            event_type TEXT NOT NULL,
+            payload    TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            delivered  INTEGER NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Bot challenges (anti-spam) ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bot_challenges (
-            id           TEXT PRIMARY KEY,
-            pubkey       TEXT NOT NULL,
-            kind         TEXT NOT NULL,
+            id              TEXT PRIMARY KEY,
+            pubkey          TEXT NOT NULL,
+            kind            TEXT NOT NULL,
             expected_answer TEXT,
-            created_at   INTEGER NOT NULL,
-            expires_at   INTEGER NOT NULL,
-            consumed_at  INTEGER
+            created_at      INTEGER NOT NULL,
+            expires_at      INTEGER NOT NULL,
+            consumed_at     INTEGER
         )",
     )
     .execute(pool)
@@ -716,28 +951,84 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Challenge settings
+    // ---- Message components (interactive bot UI) ----
+
     sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('challenge_mode', 'off')",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('challenge_difficulty', 'easy')",
+        "CREATE TABLE IF NOT EXISTS message_components (
+            id            TEXT PRIMARY KEY,
+            message_id    TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            row_idx       INTEGER NOT NULL,
+            component_idx INTEGER NOT NULL,
+            type          TEXT NOT NULL,
+            config_json   TEXT NOT NULL,
+            expires_at    INTEGER
+        )",
     )
     .execute(pool)
     .await?;
 
-    // ---- Feature: PoW minimum level on auth ----
-    // 0 = off (no PoW required). Clients read this from GET /info and submit
-    // pow_proof in /auth/verify when the level is > 0.
+    // ---- Audit log ----
+
     sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('min_pow_level', '0')",
+        "CREATE TABLE IF NOT EXISTS hub_audit_seq (
+            id  INTEGER PRIMARY KEY,
+            seq INTEGER NOT NULL DEFAULT 0
+        )",
     )
     .execute(pool)
     .await?;
 
-    // ---- Feature: Role Questionnaire / Onboarding Survey ----
+    sqlx::query("INSERT OR IGNORE INTO hub_audit_seq VALUES(1, 0)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS hub_audit_log (
+            id            TEXT PRIMARY KEY,
+            seq           INTEGER NOT NULL,
+            event_type    TEXT NOT NULL,
+            at            INTEGER NOT NULL,
+            actor_pubkey  TEXT,
+            target_pubkey TEXT,
+            channel_id    TEXT,
+            payload_json  TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_audit_seq ON hub_audit_log(seq)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_audit_event_type ON hub_audit_log(event_type)",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Incoming webhooks ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS webhooks (
+            id                TEXT PRIMARY KEY,
+            channel_id        TEXT NOT NULL REFERENCES channels(id),
+            secret_token_hash TEXT NOT NULL,
+            display_name      TEXT NOT NULL,
+            avatar_url        TEXT,
+            created_by_pubkey TEXT NOT NULL,
+            rate_limit        INTEGER NOT NULL DEFAULT 5,
+            active            INTEGER NOT NULL DEFAULT 1,
+            created_at        INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Surveys / onboarding ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS surveys (
             id         TEXT PRIMARY KEY,
@@ -806,311 +1097,152 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // ---- External bot system: new users columns ----
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN is_bot_removed INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN bot_invite_token TEXT")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN bot_invite_expires INTEGER")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE users ADD COLUMN is_webhook INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
+    // ---- Certifications ----
 
-    // Ephemeral messages: only visible to a specific user. NULL = normal broadcast.
-    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN visible_to_pubkey TEXT")
-        .execute(pool)
-        .await;
-    // Rich embeds: JSON array of Embed objects. NULL = no embeds.
-    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN embeds TEXT")
-        .execute(pool)
-        .await;
-
-    // Bot profile metadata (operator-supplied, per-hub).
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_profiles (
-            pubkey       TEXT PRIMARY KEY,
-            name         TEXT NOT NULL,
-            avatar_url   TEXT,
-            description  TEXT,
-            webhook_url  TEXT,
-            homepage_url TEXT,
-            capabilities TEXT NOT NULL DEFAULT '[]',
-            updated_at   INTEGER NOT NULL
+        "CREATE TABLE IF NOT EXISTS cert_issuances (
+            id             TEXT PRIMARY KEY,
+            subject_pubkey TEXT NOT NULL,
+            pow_level      INTEGER,
+            member_since   INTEGER NOT NULL,
+            issued_at      INTEGER NOT NULL,
+            expires_at     INTEGER NOT NULL,
+            revoked_at     INTEGER,
+            standing       TEXT NOT NULL DEFAULT 'good',
+            payload_json   TEXT NOT NULL,
+            signature      TEXT NOT NULL
         )",
     )
     .execute(pool)
     .await?;
 
-    // Per-bot slash command registry (one row per bot × command name).
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_commands (
-            pubkey           TEXT NOT NULL,
-            name             TEXT NOT NULL,
-            description      TEXT NOT NULL,
-            args             TEXT,
-            scope            TEXT NOT NULL DEFAULT 'channel',
-            privileged       INTEGER NOT NULL DEFAULT 0,
-            cooldown_seconds INTEGER NOT NULL DEFAULT 3,
-            PRIMARY KEY (pubkey, name)
-        )",
+        "CREATE INDEX IF NOT EXISTS idx_cert_issuances_subject
+         ON cert_issuances(subject_pubkey, issued_at DESC)",
     )
     .execute(pool)
     .await?;
 
-    // Event subscriptions per bot: channel_id uses '' (empty string) as sentinel
-    // for hub-scope subscriptions (i.e. not channel-scoped). SQLite PRIMARY KEY
-    // constraints cannot use expressions like COALESCE, so we store '' instead of NULL
-    // and treat '' as "no channel filter" in the application layer.
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_subscriptions (
-            bot_pubkey  TEXT NOT NULL,
-            event_type  TEXT NOT NULL,
-            channel_id  TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (bot_pubkey, event_type, channel_id)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Per-bot channel scope restriction. Empty table = hub-wide access (default).
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_channel_scope (
-            bot_pubkey TEXT NOT NULL,
-            channel_id TEXT NOT NULL,
-            PRIMARY KEY (bot_pubkey, channel_id)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Interactive message components (buttons, selects) attached to bot messages.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS message_components (
+        "CREATE TABLE IF NOT EXISTS user_certs (
             id            TEXT PRIMARY KEY,
-            message_id    TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            row_idx       INTEGER NOT NULL,
-            component_idx INTEGER NOT NULL,
-            type          TEXT NOT NULL,
-            config_json   TEXT NOT NULL,
-            expires_at    INTEGER
+            master_pubkey TEXT NOT NULL,
+            issuer_pubkey TEXT NOT NULL,
+            issuer_url    TEXT NOT NULL,
+            payload_json  TEXT NOT NULL,
+            signature     TEXT NOT NULL,
+            expires_at    INTEGER NOT NULL
         )",
     )
     .execute(pool)
     .await?;
 
-    // Native audit log. Separate sequence counter table because SQLite
-    // AUTOINCREMENT is only clean on INTEGER PRIMARY KEY tables.
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS hub_audit_seq (
-            id  INTEGER PRIMARY KEY,
-            seq INTEGER NOT NULL DEFAULT 0
+        "CREATE INDEX IF NOT EXISTS idx_user_certs_master ON user_certs(master_pubkey)",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Badge federation ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS badge_offers (
+            id              TEXT PRIMARY KEY,
+            from_hub_pubkey TEXT NOT NULL,
+            from_hub_url    TEXT NOT NULL,
+            label           TEXT NOT NULL,
+            note            TEXT,
+            payload         TEXT NOT NULL,
+            signature       TEXT NOT NULL,
+            created_at      TEXT NOT NULL
         )",
     )
     .execute(pool)
     .await?;
-    sqlx::query("INSERT OR IGNORE INTO hub_audit_seq VALUES(1, 0)")
-        .execute(pool)
-        .await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS hub_audit_log (
+        "CREATE TABLE IF NOT EXISTS hub_badges (
             id            TEXT PRIMARY KEY,
-            seq           INTEGER NOT NULL,
-            event_type    TEXT NOT NULL,
-            at            INTEGER NOT NULL,
-            actor_pubkey  TEXT,
-            target_pubkey TEXT,
-            channel_id    TEXT,
-            payload_json  TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Incoming webhooks: a secret URL that external services POST messages to.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS webhooks (
-            id                TEXT PRIMARY KEY,
-            channel_id        TEXT NOT NULL REFERENCES channels(id),
-            secret_token_hash TEXT NOT NULL,
-            display_name      TEXT NOT NULL,
-            avatar_url        TEXT,
-            created_by_pubkey TEXT NOT NULL,
-            rate_limit        INTEGER NOT NULL DEFAULT 5,
-            active            INTEGER NOT NULL DEFAULT 1,
-            created_at        INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Self-service bot system ----
-    // Standalone bots table with webhook and hashed token support.
-    // The bot's public_key is also inserted into users (is_bot=1) so that
-    // message FK constraints and the member listing continue to work.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bots (
-            public_key   TEXT PRIMARY KEY,
-            display_name TEXT NOT NULL,
-            created_by   TEXT NOT NULL,
-            token_hash   TEXT NOT NULL,
-            webhook_url  TEXT,
-            created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            issuer_pubkey TEXT NOT NULL,
+            issuer_url    TEXT NOT NULL,
+            label         TEXT NOT NULL,
+            payload       TEXT NOT NULL,
+            signature     TEXT NOT NULL,
+            accepted_at   TEXT NOT NULL
         )",
     )
     .execute(pool)
     .await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_slash_commands (
-            id          TEXT PRIMARY KEY,
-            bot_pubkey  TEXT NOT NULL REFERENCES bots(public_key) ON DELETE CASCADE,
-            command     TEXT NOT NULL,
-            description TEXT NOT NULL,
-            created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            UNIQUE(bot_pubkey, command)
+        "CREATE TABLE IF NOT EXISTS issued_badges (
+            id                   TEXT PRIMARY KEY,
+            recipient_hub_url    TEXT NOT NULL,
+            recipient_hub_pubkey TEXT NOT NULL,
+            label                TEXT NOT NULL,
+            payload              TEXT NOT NULL,
+            signature            TEXT NOT NULL,
+            issued_at            TEXT NOT NULL,
+            expires_at           TEXT,
+            revoked_at           TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Recovery contacts ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS recovery_settings (
+            owner_pubkey TEXT PRIMARY KEY,
+            threshold    INTEGER NOT NULL DEFAULT 1,
+            created_at   INTEGER NOT NULL
         )",
     )
     .execute(pool)
     .await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_event_queue (
-            id          TEXT PRIMARY KEY,
-            bot_pubkey  TEXT NOT NULL REFERENCES bots(public_key) ON DELETE CASCADE,
-            event_type  TEXT NOT NULL,
-            payload     TEXT NOT NULL,
-            created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-            delivered   INTEGER NOT NULL DEFAULT 0
+        "CREATE TABLE IF NOT EXISTS recovery_contacts (
+            owner_pubkey   TEXT NOT NULL,
+            contact_pubkey TEXT NOT NULL,
+            created_at     INTEGER NOT NULL,
+            PRIMARY KEY (owner_pubkey, contact_pubkey)
         )",
     )
     .execute(pool)
     .await?;
 
-    // Add expires_at and expiry_warned_at to sessions for token-expiry push.
-    // These columns are optional: NULL expires_at = session never expires.
-    let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN expires_at INTEGER")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN expiry_warned_at INTEGER")
-        .execute(pool)
-        .await;
-
-    // Index on seq for hub_audit_log to speed up cursor pagination and replay.
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_audit_seq ON hub_audit_log(seq)",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_audit_event_type ON hub_audit_log(event_type)",
-    )
-    .execute(pool)
-    .await?;
-
-    // FTS5 virtual table mirroring messages.content for fast full-text search.
-    sqlx::query(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
-         USING fts5(content, content='messages', content_rowid='rowid')",
-    )
-    .execute(pool)
-    .await?;
-
-    // Keep FTS5 in sync with the messages table.
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS messages_ai
-         AFTER INSERT ON messages BEGIN
-           INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-         END",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS messages_ad
-         AFTER DELETE ON messages BEGIN
-           INSERT INTO messages_fts(messages_fts, rowid, content)
-           VALUES ('delete', old.rowid, old.content);
-         END",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TRIGGER IF NOT EXISTS messages_au
-         AFTER UPDATE ON messages BEGIN
-           INSERT INTO messages_fts(messages_fts, rowid, content)
-           VALUES ('delete', old.rowid, old.content);
-           INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
-         END",
-    )
-    .execute(pool)
-    .await?;
-
-    // Back-fill existing messages into the FTS5 index (safe to run repeatedly).
-    sqlx::query(
-        "INSERT OR IGNORE INTO messages_fts(rowid, content)
-         SELECT rowid, content FROM messages
-         WHERE rowid NOT IN (SELECT rowid FROM messages_fts)",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Feature: Moderation enhancements ----
-
-    // min_talk_power on channels (0 = anyone can talk in voice)
-    let _ = sqlx::query(
-        "ALTER TABLE channels ADD COLUMN min_talk_power INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    // talk_power on roles (0 = no elevated talk power)
-    let _ = sqlx::query(
-        "ALTER TABLE roles ADD COLUMN talk_power INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    // Per-channel voice mutes (channel_id + pubkey PK, distinct from hub-wide voice_mutes)
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS channel_voice_mutes (
-            channel_id TEXT NOT NULL,
-            pubkey     TEXT NOT NULL,
-            muted_by   TEXT NOT NULL,
-            muted_at   TEXT NOT NULL,
-            PRIMARY KEY (channel_id, pubkey)
+        "CREATE TABLE IF NOT EXISTS key_rotation_requests (
+            id         TEXT PRIMARY KEY,
+            old_pubkey TEXT NOT NULL,
+            new_pubkey TEXT NOT NULL,
+            reason     TEXT,
+            status     TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL,
+            decided_at INTEGER,
+            decided_by TEXT
         )",
     )
     .execute(pool)
     .await?;
 
-    // Raise-hand requests for users below the min_talk_power threshold
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS raise_hand_requests (
-            id           TEXT PRIMARY KEY,
-            channel_id   TEXT NOT NULL,
-            pubkey       TEXT NOT NULL,
-            requested_at TEXT NOT NULL,
-            UNIQUE (channel_id, pubkey)
+        "CREATE TABLE IF NOT EXISTS rotation_attestations (
+            id              TEXT PRIMARY KEY,
+            request_id      TEXT NOT NULL,
+            attester_pubkey TEXT NOT NULL,
+            signature       TEXT NOT NULL,
+            attested_at     INTEGER NOT NULL,
+            UNIQUE (request_id, attester_pubkey)
         )",
     )
     .execute(pool)
     .await?;
 
-    // ---- Feature: Forum channel type ----
-    // channel_type discriminant: 'text' (default) or 'forum'.
-    let _ = sqlx::query(
-        "ALTER TABLE channels ADD COLUMN channel_type TEXT NOT NULL DEFAULT 'text'",
-    )
-    .execute(pool)
-    .await;
+    // ---- Forum posts ----
 
-    // Posts table (forum content entries).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS posts (
             id               TEXT PRIMARY KEY,
@@ -1138,13 +1270,11 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .await?;
 
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_posts_author
-         ON posts (author_pubkey)",
+        "CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_pubkey)",
     )
     .execute(pool)
     .await?;
 
-    // Post replies table (threaded replies under a post).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS post_replies (
             id            TEXT PRIMARY KEY,
@@ -1167,7 +1297,6 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // FTS5 virtual table covering post titles and bodies (replies use empty title).
     sqlx::query(
         "CREATE VIRTUAL TABLE IF NOT EXISTS posts_fts USING fts5(
             title, body, post_id UNINDEXED, channel_id UNINDEXED
@@ -1176,7 +1305,6 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // FTS5 triggers: posts
     sqlx::query(
         "CREATE TRIGGER IF NOT EXISTS posts_fts_ai
          AFTER INSERT ON posts
@@ -1209,7 +1337,6 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // FTS5 triggers: post_replies (indexed with empty title)
     sqlx::query(
         "CREATE TRIGGER IF NOT EXISTS post_replies_fts_ai
          AFTER INSERT ON post_replies
@@ -1243,368 +1370,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Seed new permissions into builtin-everyone and builtin-owner roles.
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_posts')")
-        .execute(pool).await?;
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_posts')")
-        .execute(pool).await?;
-
-    // ---- Feature: Hub Certifications (#20 / #21) ----
-
-    // Issuing-hub ledger: one row per issued cert (including revoked re-issues).
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS cert_issuances (
-            id             TEXT PRIMARY KEY,
-            subject_pubkey TEXT NOT NULL,
-            pow_level      INTEGER,
-            member_since   INTEGER NOT NULL,
-            issued_at      INTEGER NOT NULL,
-            expires_at     INTEGER NOT NULL,
-            revoked_at     INTEGER,
-            standing       TEXT NOT NULL DEFAULT 'good',
-            payload_json   TEXT NOT NULL,
-            signature      TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_cert_issuances_subject
-         ON cert_issuances(subject_pubkey, issued_at DESC)",
-    )
-    .execute(pool)
-    .await?;
-
-    // Home-hub portfolio: opaque issuer-signed blobs, replicated across devices.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS user_certs (
-            id             TEXT PRIMARY KEY,
-            master_pubkey  TEXT NOT NULL,
-            issuer_pubkey  TEXT NOT NULL,
-            issuer_url     TEXT NOT NULL,
-            payload_json   TEXT NOT NULL,
-            signature      TEXT NOT NULL,
-            expires_at     INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_user_certs_master
-         ON user_certs(master_pubkey)",
-    )
-    .execute(pool)
-    .await?;
-
-    // Cert settings: issuance side
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_auto_issue', 'true')",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_standing_days', '30')",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_validity_days', '90')",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_min_pow_level', '0')",
-    )
-    .execute(pool)
-    .await?;
-
-    // Cert settings: admission side (#21)
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_mode', 'none')",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_trusted_issuers', '[]')",
-    )
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('cert_require', '{}')",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Feature: Self-tags (#12) ----
-    // Seed hub_tags and hub_nsfw into hub_settings. JSON array of strings.
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('hub_tags', '[]')",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings (key, value) VALUES ('hub_nsfw', 'false')",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Feature: Badge federation (#13) ----
-    // Pending badge offers received from other hubs (unauthenticated push).
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS badge_offers (
-            id               TEXT PRIMARY KEY,
-            from_hub_pubkey  TEXT NOT NULL,
-            from_hub_url     TEXT NOT NULL,
-            label            TEXT NOT NULL,
-            note             TEXT,
-            payload          TEXT NOT NULL,
-            signature        TEXT NOT NULL,
-            created_at       TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Accepted badges this hub holds and presents in /info.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS hub_badges (
-            id             TEXT PRIMARY KEY,
-            issuer_pubkey  TEXT NOT NULL,
-            issuer_url     TEXT NOT NULL,
-            label          TEXT NOT NULL,
-            payload        TEXT NOT NULL,
-            signature      TEXT NOT NULL,
-            accepted_at    TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Badges this hub has issued to other hubs.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS issued_badges (
-            id                  TEXT PRIMARY KEY,
-            recipient_hub_url   TEXT NOT NULL,
-            recipient_hub_pubkey TEXT NOT NULL,
-            label               TEXT NOT NULL,
-            payload             TEXT NOT NULL,
-            signature           TEXT NOT NULL,
-            issued_at           TEXT NOT NULL,
-            expires_at          TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Gaming Tier 2: session persistence + shared KV ----
-    // game_sessions: one row per live (or recently ended) session. The snapshot
-    // blob is written only when the game calls voxply:game:snapshot; otherwise
-    // authoritative state is purely in-memory.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS game_sessions (
-            id           TEXT PRIMARY KEY,
-            channel_id   TEXT NOT NULL,
-            game_id      TEXT NOT NULL,
-            host_pubkey  TEXT NOT NULL,
-            state_json   TEXT NOT NULL DEFAULT '{}',
-            created_at   TEXT NOT NULL,
-            ended_at     TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // game_shared_kv: community-axis leaderboard / shared world per
-    // (session_id, key). session_id scoping keeps different game instances
-    // independent; the client layer maps game_id + channel_id to session_id.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS game_shared_kv (
-            session_id TEXT NOT NULL,
-            key        TEXT NOT NULL,
-            value      TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (session_id, key)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Seed start_game permission into builtin-everyone role so all members can
-    // start sessions by default; admins can restrict via role management.
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'start_game')")
-        .execute(pool).await?;
-
-    // ---- Task #24: Recovery contacts ----
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS recovery_settings (
-            owner_pubkey  TEXT PRIMARY KEY,
-            threshold     INTEGER NOT NULL DEFAULT 1,
-            created_at    INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS recovery_contacts (
-            owner_pubkey   TEXT NOT NULL,
-            contact_pubkey TEXT NOT NULL,
-            created_at     INTEGER NOT NULL,
-            PRIMARY KEY (owner_pubkey, contact_pubkey)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS key_rotation_requests (
-            id          TEXT PRIMARY KEY,
-            old_pubkey  TEXT NOT NULL,
-            new_pubkey  TEXT NOT NULL,
-            reason      TEXT,
-            status      TEXT NOT NULL DEFAULT 'pending',
-            created_at  INTEGER NOT NULL,
-            decided_at  INTEGER,
-            decided_by  TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS rotation_attestations (
-            id              TEXT PRIMARY KEY,
-            request_id      TEXT NOT NULL,
-            attester_pubkey TEXT NOT NULL,
-            signature       TEXT NOT NULL,
-            attested_at     INTEGER NOT NULL,
-            UNIQUE (request_id, attester_pubkey)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Task #25: DM block enforcement ----
-
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS dm_blocks (
-            owner_pubkey   TEXT NOT NULL,
-            blocked_pubkey TEXT NOT NULL,
-            PRIMARY KEY (owner_pubkey, blocked_pubkey)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Task #17: Gaming — hub-side enable/disable of farm games ----
-
-    // One row per game enabled on this hub (hub admin with manage_games enables).
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS enabled_games (
-            game_id     TEXT PRIMARY KEY,
-            enabled_at  TEXT NOT NULL,
-            enabled_by  TEXT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Optional per-channel scope: empty = enabled in all channels; any rows = only those channels.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS channel_games (
-            channel_id TEXT NOT NULL,
-            game_id    TEXT NOT NULL,
-            PRIMARY KEY (channel_id, game_id)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Add manage_games permission to the builtin-owner role so hub owners can enable games.
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_games')")
-        .execute(pool).await?;
-
-    // ---- Gaming Tier 2 schema additions ----
-    // Additive columns on the existing game_sessions table.
-    let _ = sqlx::query(
-        "ALTER TABLE game_sessions ADD COLUMN status TEXT NOT NULL DEFAULT 'lobby'",
-    )
-    .execute(pool)
-    .await;
-    let _ = sqlx::query("ALTER TABLE game_sessions ADD COLUMN snapshot BLOB")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query(
-        "ALTER TABLE game_sessions ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    // game_channel_kv: spec-shape shared KV keyed by (game_id, channel_id, key).
-    // Distinct from the legacy game_shared_kv (which uses session_id as key).
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS game_channel_kv (
-            game_id    TEXT NOT NULL,
-            channel_id TEXT NOT NULL,
-            key        TEXT NOT NULL,
-            value      TEXT NOT NULL,
-            updated_at INTEGER NOT NULL,
-            PRIMARY KEY (game_id, channel_id, key)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Task #9: Proximity Voice ----
-    // Seed manage_voice permission. Hub owners can grant it to other roles
-    // to allow zone creation without full admin access.
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_voice')")
-        .execute(pool).await?;
-
-    // ---- Badge revocations ----
-    // Add revoked_at column to issued_badges so the /federation/badge-revocations
-    // endpoint can tell other hubs which badges this hub has revoked.
-    let _ = sqlx::query(
-        "ALTER TABLE issued_badges ADD COLUMN revoked_at TEXT",
-    )
-    .execute(pool)
-    .await;  // ignore error — column may already exist on older schemas
-
-    // ---- Task #17: Video signaling ----
-    // Grant use_video to builtin-owner; open to all by default in WS handler
-    // (admins can restrict via role management).
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'use_video')")
-        .execute(pool).await?;
-
-    // Data retention: nullable retention_days on channels
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN retention_days INTEGER")
-        .execute(pool)
-        .await;
-
-    // ---- Task #29: Custom emojis ----
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS hub_emojis (
-            id          TEXT PRIMARY KEY,
-            name        TEXT NOT NULL UNIQUE,
-            uploader    TEXT NOT NULL REFERENCES users(public_key),
-            mime        TEXT NOT NULL,
-            data_b64    TEXT NOT NULL,
-            created_at  INTEGER NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // ---- Task #32: Thread reply_count ----
-    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN reply_count INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-
-    // ---- Task #30: Events / calendar ----
+    // ---- Events / calendar ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS hub_events (
@@ -1633,10 +1399,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', 'create_events')")
-        .execute(pool).await?;
-
-    // ---- Task #31: Native polls ----
+    // ---- Polls ----
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS polls (
@@ -1664,93 +1427,12 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // ---- Task #33: Content reporting ----
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS message_reports (
-            id              TEXT PRIMARY KEY,
-            message_id      TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            reporter_pubkey TEXT NOT NULL REFERENCES users(public_key),
-            reason          TEXT NOT NULL DEFAULT '',
-            reported_at     INTEGER NOT NULL,
-            status          TEXT NOT NULL DEFAULT 'pending',
-            reviewed_by     TEXT,
-            review_note     TEXT,
-            UNIQUE(message_id, reporter_pubkey)
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // ---- Unread tracking ----
 
-    // ---- Task #34: Auto-moderation webhook settings ----
-    let _ = sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('moderation_webhook_url', '')",
-    )
-    .execute(pool)
-    .await;
-    let _ = sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('moderation_webhook_secret', '')",
-    )
-    .execute(pool)
-    .await;
-
-    // ---- Task #35: Federated ban lists ----
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS federated_bans (
-            source_hub_pubkey    TEXT NOT NULL,
-            target_master_pubkey TEXT NOT NULL,
-            reason               TEXT,
-            added_at             INTEGER NOT NULL,
-            synced_at            INTEGER NOT NULL,
-            PRIMARY KEY(source_hub_pubkey, target_master_pubkey)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // JSON array of hub URLs this hub pulls ban lists from.
-    let _ = sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('banlist_sources', '[]')",
-    )
-    .execute(pool)
-    .await;
-
-    // Bootstrap marker: written by bootstrap::maybe_bootstrap after first-run
-    // template application. Seeded empty so the key always exists for SELECT.
-    let _ = sqlx::query(
-        "INSERT OR IGNORE INTO hub_settings(key, value) VALUES('bootstrapped_at', '')",
-    )
-    .execute(pool)
-    .await;
-
-    // Group E2E: sender key distribution store
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS group_sender_key_distributions (
-            id                 TEXT PRIMARY KEY,
-            conv_id            TEXT NOT NULL,
-            sender_pubkey      TEXT NOT NULL,
-            recipient_pubkey   TEXT NOT NULL,
-            sender_key_version INTEGER NOT NULL,
-            iteration          INTEGER NOT NULL,
-            wrapped_key_hex    TEXT NOT NULL,
-            wrap_nonce_hex     TEXT NOT NULL,
-            created_at         INTEGER NOT NULL,
-            UNIQUE(conv_id, sender_pubkey, recipient_pubkey, sender_key_version)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Group E2E: discriminate group vs 1:1 encrypted messages in dm_messages
-    let _ = sqlx::query("ALTER TABLE dm_messages ADD COLUMN is_group_encrypted INTEGER NOT NULL DEFAULT 0")
-        .execute(pool)
-        .await;
-
-    // ---- Feature: Unread counts ----
-    // Tracks the last-read timestamp per (user, channel) pair.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS channel_last_read (
-            user_pubkey TEXT NOT NULL,
-            channel_id  TEXT NOT NULL,
+            user_pubkey  TEXT NOT NULL,
+            channel_id   TEXT NOT NULL,
             last_read_at INTEGER NOT NULL,
             PRIMARY KEY (user_pubkey, channel_id)
         )",
@@ -1758,7 +1440,8 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // ---- Feature: File / image uploads ----
+    // ---- File uploads ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS upload_files (
             id              TEXT PRIMARY KEY,
@@ -1774,22 +1457,19 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // ---- Feature: Message pinning ----
+    // ---- Message pinning ----
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS channel_pins (
-            channel_id  TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-            message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            pinned_by   TEXT NOT NULL,
-            pinned_at   INTEGER NOT NULL,
+            channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+            pinned_by  TEXT NOT NULL,
+            pinned_at  INTEGER NOT NULL,
             PRIMARY KEY (channel_id, message_id)
         )",
     )
     .execute(pool)
     .await?;
-
-    // manage_messages permission seed (pins require it)
-    sqlx::query("INSERT OR IGNORE INTO role_permissions (role_id, permission) VALUES ('builtin-owner', 'manage_messages')")
-        .execute(pool).await?;
 
     tracing::info!("Database migrations complete");
 

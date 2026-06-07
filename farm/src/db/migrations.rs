@@ -3,14 +3,26 @@ use sqlx::SqlitePool;
 
 pub async fn run(pool: &SqlitePool) -> Result<()> {
     // Farm singleton metadata — always id=1.
+    // Includes all additive columns from prior migrations (admin_pubkey,
+    // creation policy, quotas, discovery metadata).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS farms (
-            id                  INTEGER PRIMARY KEY CHECK(id = 1),
-            public_key          TEXT NOT NULL,
-            name                TEXT NOT NULL DEFAULT 'My Farm',
-            description         TEXT,
-            directory_public    INTEGER NOT NULL DEFAULT 0,
-            created_at          INTEGER NOT NULL
+            id                      INTEGER PRIMARY KEY CHECK(id = 1),
+            public_key              TEXT NOT NULL,
+            name                    TEXT NOT NULL DEFAULT 'My Farm',
+            description             TEXT,
+            directory_public        INTEGER NOT NULL DEFAULT 0,
+            created_at              INTEGER NOT NULL,
+            admin_pubkey            TEXT,
+            creation_policy         TEXT NOT NULL DEFAULT 'admin_only'
+                                        CHECK(creation_policy IN ('open', 'admin_only', 'disabled')),
+            max_hubs_per_user       INTEGER NOT NULL DEFAULT 0,
+            max_hubs_total          INTEGER NOT NULL DEFAULT 0,
+            allow_discovery_listing INTEGER NOT NULL DEFAULT 0,
+            languages               TEXT NOT NULL DEFAULT '[\"en\"]',
+            tags                    TEXT NOT NULL DEFAULT '[]',
+            country                 TEXT,
+            region                  TEXT
         )",
     )
     .execute(pool)
@@ -19,10 +31,10 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     // Canonical per-farm user identity.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS farm_users (
-            public_key      TEXT PRIMARY KEY,
-            master_pubkey   TEXT,
-            first_seen_at   INTEGER NOT NULL,
-            last_seen_at    INTEGER NOT NULL
+            public_key    TEXT PRIMARY KEY,
+            master_pubkey TEXT,
+            first_seen_at INTEGER NOT NULL,
+            last_seen_at  INTEGER NOT NULL
         )",
     )
     .execute(pool)
@@ -31,9 +43,9 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     // Short-lived challenge nonces (60s TTL, swept on read).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS pending_challenges (
-            public_key      TEXT PRIMARY KEY,
-            challenge_hex   TEXT NOT NULL,
-            expires_at      INTEGER NOT NULL
+            public_key    TEXT PRIMARY KEY,
+            challenge_hex TEXT NOT NULL,
+            expires_at    INTEGER NOT NULL
         )",
     )
     .execute(pool)
@@ -42,93 +54,40 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     // Issued session records (the token itself is the signed blob — not stored here).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS farm_sessions (
-            jti         TEXT PRIMARY KEY,
-            public_key  TEXT NOT NULL REFERENCES farm_users(public_key),
-            issued_at   INTEGER NOT NULL,
-            expires_at  INTEGER NOT NULL,
-            revoked_at  INTEGER,
-            scope       TEXT NOT NULL DEFAULT 'member'
+            jti              TEXT PRIMARY KEY,
+            public_key       TEXT NOT NULL REFERENCES farm_users(public_key),
+            issued_at        INTEGER NOT NULL,
+            expires_at       INTEGER NOT NULL,
+            revoked_at       INTEGER,
+            scope            TEXT NOT NULL DEFAULT 'member',
+            revoked_manually INTEGER NOT NULL DEFAULT 0
         )",
     )
     .execute(pool)
     .await?;
 
-    // Phase 2: per-hub process registry.
+    // Per-hub process registry.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS hubs (
-            id                  TEXT PRIMARY KEY,
-            owner_pubkey        TEXT NOT NULL,
-            name                TEXT NOT NULL,
-            description         TEXT,
-            visibility          TEXT NOT NULL DEFAULT 'private'
-                                    CHECK(visibility IN ('public', 'private')),
-            process_port        INTEGER,
-            db_path             TEXT NOT NULL,
-            created_at          INTEGER NOT NULL,
-            suspended_at        INTEGER,
-            suspension_reason   TEXT,
-            deleted_at          INTEGER
+            id                TEXT PRIMARY KEY,
+            owner_pubkey      TEXT NOT NULL,
+            name              TEXT NOT NULL,
+            description       TEXT,
+            visibility        TEXT NOT NULL DEFAULT 'private'
+                                  CHECK(visibility IN ('public', 'private')),
+            process_port      INTEGER,
+            db_path           TEXT NOT NULL,
+            created_at        INTEGER NOT NULL,
+            suspended_at      INTEGER,
+            suspension_reason TEXT,
+            deleted_at        INTEGER,
+            hub_pubkey        TEXT
         )",
     )
     .execute(pool)
     .await?;
 
-    // Phase 2: admin_pubkey on the farms singleton (first operator who sets it becomes admin).
-    let _ = sqlx::query("ALTER TABLE farms ADD COLUMN admin_pubkey TEXT")
-        .execute(pool)
-        .await;
-
-    // Phase 3A: creation policy and quota columns.
-    let _ = sqlx::query(
-        "ALTER TABLE farms ADD COLUMN creation_policy TEXT NOT NULL DEFAULT 'admin_only'
-         CHECK(creation_policy IN ('open', 'admin_only', 'disabled'))",
-    )
-    .execute(pool)
-    .await;
-
-    let _ = sqlx::query(
-        "ALTER TABLE farms ADD COLUMN max_hubs_per_user INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    let _ = sqlx::query(
-        "ALTER TABLE farms ADD COLUMN max_hubs_total INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    let _ = sqlx::query(
-        "ALTER TABLE farms ADD COLUMN allow_discovery_listing INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    // Phase 3E: locality and discovery metadata columns.
-    let _ = sqlx::query("ALTER TABLE farms ADD COLUMN languages TEXT NOT NULL DEFAULT '[\"en\"]'")
-        .execute(pool)
-        .await;
-
-    let _ = sqlx::query("ALTER TABLE farms ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
-        .execute(pool)
-        .await;
-
-    let _ = sqlx::query("ALTER TABLE farms ADD COLUMN country TEXT")
-        .execute(pool)
-        .await;
-
-    let _ = sqlx::query("ALTER TABLE farms ADD COLUMN region TEXT")
-        .execute(pool)
-        .await;
-
-    // Phase 3B: revoked_manually flag on farm_sessions for admin-initiated revocations.
-    let _ = sqlx::query(
-        "ALTER TABLE farm_sessions ADD COLUMN revoked_manually INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
-
-    // Gaming: farm-level game catalogue.
+    // Farm-level game catalogue.
     // One row per installed game; the farm admin installs, hubs enable/disable.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS games (
@@ -149,7 +108,7 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Gaming: per-user-per-game key/value store (personal-axis, follows the user).
+    // Per-user-per-game key/value store (personal-axis, follows the user).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS game_kv (
             game_id     TEXT NOT NULL,
@@ -175,11 +134,6 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-
-    // Add hub_pubkey to hubs so heartbeats can be matched back to a registered hub.
-    let _ = sqlx::query("ALTER TABLE hubs ADD COLUMN hub_pubkey TEXT")
-        .execute(pool)
-        .await;
 
     Ok(())
 }
