@@ -113,6 +113,7 @@ pub struct ServerEntry {
     pub connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
+    pub running_hub_count: i64,
 }
 
 #[derive(Serialize)]
@@ -143,11 +144,29 @@ pub async fn list_servers(
         map.keys().cloned().collect::<std::collections::HashSet<_>>()
     };
 
+    let hub_count_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT server_id, COUNT(*) as cnt
+         FROM hubs
+         WHERE server_id IS NOT NULL AND process_port IS NOT NULL AND deleted_at IS NULL
+         GROUP BY server_id",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("db_error: {e}")})),
+        )
+    })?;
+
+    let hub_counts: HashMap<String, i64> = hub_count_rows.into_iter().collect();
+
     let servers = rows
         .into_iter()
         .map(|(id, name, region, last_seen_at)| {
             let connected = connected_ids.contains(&id);
-            ServerEntry { id, name, region, connected, last_seen_at }
+            let running_hub_count = hub_counts.get(&id).copied().unwrap_or(0);
+            ServerEntry { id, name, region, connected, last_seen_at, running_hub_count }
         })
         .collect();
 
@@ -225,7 +244,7 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
     loop {
         use futures_util::StreamExt;
         match ws_receiver.next().await {
-            Some(Ok(Message::Text(_txt))) => {
+            Some(Ok(Message::Text(txt))) => {
                 // Update last_seen_at on any message received.
                 let now = unix_now();
                 let _ = sqlx::query("UPDATE servers SET last_seen_at = ? WHERE id = ?")
@@ -233,6 +252,34 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
                     .bind(&server_id)
                     .execute(&state.db)
                     .await;
+
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&txt) {
+                    let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    if msg_type == "hub_spawned" {
+                        if let (Some(hub_id), Some(port)) = (
+                            val.get("hub_id").and_then(|v| v.as_str()),
+                            val.get("port").and_then(|v| v.as_u64()),
+                        ) {
+                            let _ = sqlx::query(
+                                "UPDATE hubs SET process_port = ?, server_id = ? WHERE id = ?",
+                            )
+                            .bind(port as i32)
+                            .bind(&server_id)
+                            .bind(hub_id)
+                            .execute(&state.db)
+                            .await;
+                            tracing::info!(server_id, hub_id, port, "Hub spawned on remote server");
+                        }
+                    } else if msg_type == "hub_stopped" {
+                        if let Some(hub_id) = val.get("hub_id").and_then(|v| v.as_str()) {
+                            let _ = sqlx::query("UPDATE hubs SET process_port = NULL WHERE id = ?")
+                                .bind(hub_id)
+                                .execute(&state.db)
+                                .await;
+                            tracing::info!(server_id, hub_id, "Hub stopped on remote server");
+                        }
+                    }
+                }
             }
             Some(Ok(Message::Binary(_))) => {
                 // Binary frames not used in this protocol; update last_seen_at anyway.

@@ -28,6 +28,7 @@ fn uploads_dir() -> String {
 
 #[derive(Serialize)]
 pub struct UploadResponse {
+    pub id: String,
     pub url: String,
     pub filename: String,
     pub size_bytes: usize,
@@ -163,6 +164,7 @@ pub async fn upload_file(
     Ok((
         StatusCode::CREATED,
         Json(UploadResponse {
+            id,
             url: format!("/uploads/{}", stored_filename),
             filename: stored_filename,
             size_bytes: size,
