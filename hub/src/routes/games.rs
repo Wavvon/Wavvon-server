@@ -1323,6 +1323,45 @@ pub struct SetChannelScopeRequest {
     pub channel_ids: Vec<String>,
 }
 
+// ---------------------------------------------------------------------------
+// PUT /admin/games/:id/permissions   body: { capabilities: [String] }
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct SetPermissionsRequest {
+    pub capabilities: Vec<String>,
+}
+
+const VALID_CAPABILITIES: &[&str] = &["post_message", "read_channel_history", "list_channel_users"];
+
+pub async fn set_game_permissions(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(game_id): Path<String>,
+    Json(req): Json<SetPermissionsRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(permissions::MANAGE_GAMES)?;
+
+    // Only recognise the Tier 1 closed capability set.
+    let sanitised: Vec<&str> = req
+        .capabilities
+        .iter()
+        .filter_map(|c| VALID_CAPABILITIES.iter().find(|&&v| v == c.as_str()).copied())
+        .collect();
+    let json = serde_json::to_string(&sanitised)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
+
+    sqlx::query("UPDATE hub_games SET capabilities = ? WHERE id = ?")
+        .bind(&json)
+        .bind(&game_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn set_game_channels(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1387,6 +1426,8 @@ pub struct AdminGameEntry {
     pub enabled_at: Option<String>,
     /// Channel IDs this game is restricted to. Empty vec = all channels.
     pub channel_scope: Vec<String>,
+    /// Capability grants for this game on this hub.
+    pub capabilities: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1401,10 +1442,11 @@ pub async fn admin_list_games(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::MANAGE_GAMES)?;
 
-    let rows: Vec<(String, String, String, Option<String>, Option<String>, String, Option<String>, i64, i64, Option<String>, Option<String>)> = sqlx::query_as(
+    let rows: Vec<(String, String, String, Option<String>, Option<String>, String, Option<String>, i64, i64, Option<String>, Option<String>, String)> = sqlx::query_as(
         "SELECT g.id, g.name, g.entry_url, g.description, g.thumbnail_url, g.version, g.author,
                 g.min_players, g.max_players,
-                e.enabled_by, e.enabled_at
+                e.enabled_by, e.enabled_at,
+                g.capabilities
          FROM hub_games g
          LEFT JOIN enabled_games e ON e.game_id = g.id
          ORDER BY g.name",
@@ -1414,7 +1456,7 @@ pub async fn admin_list_games(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let mut games = Vec::with_capacity(rows.len());
-    for (id, name, entry_url, description, thumbnail_url, version, author, min_players, max_players, enabled_by, enabled_at) in rows {
+    for (id, name, entry_url, description, thumbnail_url, version, author, min_players, max_players, enabled_by, enabled_at, capabilities_json) in rows {
         let enabled = enabled_by.is_some();
         let channel_scope: Vec<String> = sqlx::query_scalar(
             "SELECT channel_id FROM channel_games WHERE game_id = ? ORDER BY channel_id",
@@ -1423,6 +1465,9 @@ pub async fn admin_list_games(
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
+
+        let capabilities: Vec<String> =
+            serde_json::from_str(&capabilities_json).unwrap_or_default();
 
         games.push(AdminGameEntry {
             id,
@@ -1438,6 +1483,7 @@ pub async fn admin_list_games(
             enabled_by,
             enabled_at,
             channel_scope,
+            capabilities,
         });
     }
 
