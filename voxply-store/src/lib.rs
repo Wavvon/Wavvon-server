@@ -26,7 +26,12 @@ pub use traits::transactional::Transactional;
 pub use traits::uploads::UploadStore;
 pub use traits::users::UserStore;
 
-/// The combined store bound.
+/// The combined store bound used for `Arc<dyn HubStore>`.
+///
+/// `Transactional` is intentionally excluded here because its generic `T`
+/// parameter makes it non-dyn-compatible (object-safe). Callers that need
+/// transactions hold a concrete `&SqliteStore` (or another concrete backend)
+/// and call `with_transaction` directly.
 ///
 /// Route handlers hold `Arc<dyn HubStore>` and call any trait method without
 /// caring which backend is active. The blanket impl below means any type
@@ -50,7 +55,6 @@ pub trait HubStore:
     + BadgeStore
     + RecoveryStore
     + UploadStore
-    + Transactional
     + Migrate
     + Send
     + Sync
@@ -76,7 +80,6 @@ impl<T> HubStore for T where
         + BadgeStore
         + RecoveryStore
         + UploadStore
-        + Transactional
         + Migrate
         + Send
         + Sync
