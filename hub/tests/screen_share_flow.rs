@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
-use sqlx::AnyPool;
 use tokio::sync::{broadcast, RwLock};
 use tokio_tungstenite::tungstenite::Message as TsMessage;
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
@@ -19,6 +18,8 @@ async fn start_hub() -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
     let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
+    let store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -27,6 +28,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
+        store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

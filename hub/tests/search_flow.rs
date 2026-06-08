@@ -26,6 +26,8 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
+    let store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
     let tmp = tempfile::tempdir().unwrap();
@@ -37,6 +39,7 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
+        store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

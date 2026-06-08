@@ -23,6 +23,8 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
     let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let pool_handle = db.clone();
+    let store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -31,6 +33,7 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
+        store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -214,6 +217,8 @@ async fn start_real_hub(name: &str) -> String {
     sqlx::any::install_default_drivers();
     let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
+    let store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -222,6 +227,7 @@ async fn start_real_hub(name: &str) -> String {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
+        store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -304,6 +310,8 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
     let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
+    let store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -312,6 +320,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
+        store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -474,6 +483,8 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     sqlx::any::install_default_drivers();
     let hub_b_db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&hub_b_db).await.unwrap();
+    let hub_b_store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(hub_b_db.clone()));
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);
     let hub_b_state = Arc::new(AppState {
@@ -481,6 +492,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         hub_identity: Identity::generate(),
         db: hub_b_db,
         db_read: None,
+        store: hub_b_store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx: chat_tx_b,
         federation_client: FederationClient::new(),

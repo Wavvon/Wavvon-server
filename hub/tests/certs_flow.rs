@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::AnyPool;
 use tokio::sync::{broadcast, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::cert_worker;
@@ -24,12 +23,15 @@ async fn make_state() -> Arc<AppState> {
     sqlx::any::install_default_drivers();
     let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
+    let store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
         db_read: None,
+        store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

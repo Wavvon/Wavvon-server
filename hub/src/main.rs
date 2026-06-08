@@ -15,6 +15,7 @@ use voxply_hub::federation::client::FederationClient;
 use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
+use voxply_store_sqlite::SqliteStore;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -518,11 +519,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    let store: Arc<dyn voxply_store::HubStore> = Arc::new(SqliteStore::new(db.clone()));
+
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),
         hub_identity,
         db,
         db_read,
+        store,
         pending_challenges: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

@@ -4547,6 +4547,8 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "voxply-identity",
+ "voxply-store",
+ "voxply-store-sqlite",
 ]
 
 [[package]]
