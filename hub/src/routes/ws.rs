@@ -1694,7 +1694,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
 
             dm_result = dm_rx.recv() => {
                 if let Ok(dm) = dm_result {
-                    if dm.sender() == public_key
+                    if (dm.suppress_echo() && dm.sender() == public_key)
                         || !my_conversations.contains(dm.conversation_id())
                     {
                         continue;
@@ -1708,6 +1708,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                         crate::state::DmEvent::Typing { conversation_id, sender, sender_name, typing } => {
                             WsServerMessage::DmTyping {
                                 conversation_id, sender, sender_name, typing,
+                            }
+                        }
+                        crate::state::DmEvent::MemberChanged { conversation_id, added, removed, .. } => {
+                            WsServerMessage::DmMemberChanged {
+                                conversation_id, added, removed,
                             }
                         }
                     };

@@ -27,19 +27,32 @@ pub enum DmEvent {
         sender_name: Option<String>,
         typing: bool,
     },
+    MemberChanged {
+        conversation_id: String,
+        actor: String,
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
 }
 
 impl DmEvent {
     pub fn conversation_id(&self) -> &str {
         match self {
             DmEvent::Message { conversation_id, .. }
-            | DmEvent::Typing { conversation_id, .. } => conversation_id,
+            | DmEvent::Typing { conversation_id, .. }
+            | DmEvent::MemberChanged { conversation_id, .. } => conversation_id,
         }
     }
     pub fn sender(&self) -> &str {
         match self {
             DmEvent::Message { sender, .. } | DmEvent::Typing { sender, .. } => sender,
+            DmEvent::MemberChanged { actor, .. } => actor,
         }
+    }
+    /// Whether this event should be suppressed for its own sender (anti-echo).
+    /// MemberChanged is delivered to everyone including the actor.
+    pub fn suppress_echo(&self) -> bool {
+        matches!(self, DmEvent::Message { .. } | DmEvent::Typing { .. })
     }
 }
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
@@ -1081,6 +1082,114 @@ async fn find_existing_dm(
     }
 
     Ok(None)
+}
+
+// ---------------------------------------------------------------------------
+// POST /conversations/:id/members  { "public_key": "..." }
+// Adds a member to a group conversation. Caller must already be a member.
+// Not permitted on 1-on-1 DMs (conv_type = 'dm').
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct AddMemberRequest {
+    pub public_key: String,
+}
+
+pub async fn add_conversation_member(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<AddMemberRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let members = load_members(&state, &conversation_id).await?;
+    if !members.iter().any(|m| m.public_key == user.public_key) {
+        return Err((StatusCode::FORBIDDEN, "Not a member of this conversation".to_string()));
+    }
+
+    // Only group conversations allow member management.
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+        .bind(&conversation_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .ok_or((StatusCode::NOT_FOUND, "Conversation not found".to_string()))?;
+    if conv_type != "group" {
+        return Err((StatusCode::BAD_REQUEST, "Cannot add members to a 1-on-1 DM".to_string()));
+    }
+
+    // No-op if already a member.
+    if members.iter().any(|m| m.public_key == req.public_key) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let now = crate::auth::handlers::unix_timestamp();
+    ensure_user_stub(&state.db, &req.public_key, now).await?;
+    sqlx::query(
+        "INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url)
+         VALUES (?, ?, ?, NULL)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&conversation_id)
+    .bind(&req.public_key)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let _ = state.dm_tx.send(crate::state::DmEvent::MemberChanged {
+        conversation_id,
+        actor: user.public_key,
+        added: vec![req.public_key],
+        removed: vec![],
+    });
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /conversations/:id/members/:pubkey
+// Removes a member from a group conversation. Callers may only remove themselves.
+// ---------------------------------------------------------------------------
+
+pub async fn remove_conversation_member(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((conversation_id, pubkey)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if pubkey != user.public_key {
+        return Err((StatusCode::FORBIDDEN, "You can only remove yourself from a conversation".to_string()));
+    }
+
+    let members = load_members(&state, &conversation_id).await?;
+    if !members.iter().any(|m| m.public_key == user.public_key) {
+        return Err((StatusCode::NOT_FOUND, "Not a member of this conversation".to_string()));
+    }
+
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+        .bind(&conversation_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .ok_or((StatusCode::NOT_FOUND, "Conversation not found".to_string()))?;
+    if conv_type != "group" {
+        return Err((StatusCode::BAD_REQUEST, "Cannot leave a 1-on-1 DM".to_string()));
+    }
+
+    sqlx::query("DELETE FROM conversation_members WHERE conversation_id = ? AND public_key = ?")
+        .bind(&conversation_id)
+        .bind(&pubkey)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let _ = state.dm_tx.send(crate::state::DmEvent::MemberChanged {
+        conversation_id,
+        actor: user.public_key,
+        added: vec![],
+        removed: vec![pubkey],
+    });
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(sqlx::FromRow)]

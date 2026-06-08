@@ -562,6 +562,12 @@ pub enum WsServerMessage {
         sender_name: Option<String>,
         typing: bool,
     },
+    #[serde(rename = "dm_member_changed")]
+    DmMemberChanged {
+        conversation_id: String,
+        added: Vec<String>,
+        removed: Vec<String>,
+    },
     #[serde(rename = "screen_share_started")]
     ScreenShareStarted {
         channel_id: String,
