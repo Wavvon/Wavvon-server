@@ -6,6 +6,8 @@ members = [
     "identity",
     "farm",
     "server",
+    "voxply-store",
+    "voxply-store-sqlite",
 ]
 
 [workspace.dependencies]
