@@ -1,8 +1,3 @@
-// NOTE: Game capability grants (list_channel_users, post_message, read_channel_history)
-// are stored in hub_games but are NOT YET ENFORCED. The set_game_permissions Tauri
-// command and any capability toggles in the admin UI have no effect until enforcement
-// is implemented in a future update.
-
 //! Tier 2 party-multiplayer game session routes.
 //!
 //! Session lifecycle: create → join → (state patches) → end/delete.
