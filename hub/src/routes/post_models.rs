@@ -47,6 +47,10 @@ pub struct PostSummary {
     pub reply_count: i64,
     pub last_activity_at: i64,
     pub is_deleted: bool,
+    /// Number of replies posted after the viewer's last read cursor for this
+    /// post. `None` when the request was made without authentication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unread_reply_count: Option<i64>,
 }
 
 /// Full post including body and first page of replies.
@@ -179,6 +183,7 @@ pub fn post_to_summary(row: &PostRow, viewer_can_moderate: bool) -> PostSummary 
         reply_count: row.reply_count,
         last_activity_at: row.last_activity_at,
         is_deleted,
+        unread_reply_count: None,
     }
 }
 

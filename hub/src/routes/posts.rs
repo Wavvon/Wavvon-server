@@ -181,7 +181,25 @@ pub async fn list_posts(
         None
     };
 
-    let posts = rows.iter().map(|r| post_to_summary(r, can_moderate)).collect();
+    // Populate unread_reply_count for each post using the caller's read cursor.
+    let mut posts: Vec<_> = rows.iter().map(|r| post_to_summary(r, can_moderate)).collect();
+    for (summary, row) in posts.iter_mut().zip(rows.iter()) {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM post_replies
+             WHERE post_id = ? AND created_at > COALESCE(
+                 (SELECT read_at FROM post_reads WHERE user_pubkey = ? AND post_id = ?),
+                 0
+             )",
+        )
+        .bind(&row.id)
+        .bind(&user.public_key)
+        .bind(&row.id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+        summary.unread_reply_count = Some(count);
+    }
+
     Ok(Json(PostListResponse { posts, cursor }))
 }
 
@@ -262,7 +280,23 @@ pub async fn get_post(
     let can_moderate = perms.has(permissions::MANAGE_POSTS);
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
-    let summary = post_to_summary(&row, can_moderate);
+    let mut summary = post_to_summary(&row, can_moderate);
+
+    // Populate unread_reply_count using the caller's read cursor.
+    let unread: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM post_replies
+         WHERE post_id = ? AND created_at > COALESCE(
+             (SELECT read_at FROM post_reads WHERE user_pubkey = ? AND post_id = ?),
+             0
+         )",
+    )
+    .bind(&post_id)
+    .bind(&user.public_key)
+    .bind(&post_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+    summary.unread_reply_count = Some(unread);
 
     let limit = params.limit.unwrap_or(50).min(100);
 
@@ -751,6 +785,31 @@ pub async fn unlock_post(
             "post_id": post_id,
         }),
     );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── POST /channels/:cid/posts/:pid/read ─────────────────────────────────────
+
+pub async fn mark_post_read(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, post_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    // Ensure the post exists and belongs to this channel.
+    let _ = require_post(&state.db, &channel_id, &post_id).await?;
+
+    let now = unix_now();
+    sqlx::query(
+        "INSERT OR REPLACE INTO post_reads (user_pubkey, post_id, read_at) VALUES (?, ?, ?)",
+    )
+    .bind(&user.public_key)
+    .bind(&post_id)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }

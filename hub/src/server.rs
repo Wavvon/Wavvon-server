@@ -299,6 +299,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/channels/{channel_id}/posts/{post_id}/lock",
             post(routes::posts::lock_post).delete(routes::posts::unlock_post),
         )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/read",
+            post(routes::posts::mark_post_read),
+        )
         // ---- Gaming: game install (Tier 1 minimal) + Tier 2 sessions ----
         .route("/admin/games", post(routes::games::install_game).get(routes::games::admin_list_games))
         .route("/admin/games/{id}/channels", put(routes::games::set_game_channels))
