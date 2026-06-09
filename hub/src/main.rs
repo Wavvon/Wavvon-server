@@ -131,6 +131,12 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if subcommand.as_deref() == Some("update") {
+        let check_only = std::env::args().any(|a| a == "--check");
+        run_self_update(check_only).await?;
+        return Ok(());
+    }
+
     if subcommand.as_deref() == Some("admin") {
         let admin_cmd = std::env::args().nth(2).unwrap_or_default();
         sqlx::any::install_default_drivers();
@@ -752,6 +758,102 @@ async fn main() -> Result<()> {
     if let Some(provider) = otlp_provider {
         let _ = provider.shutdown();
     }
+
+    Ok(())
+}
+
+fn self_update_asset_name() -> Option<&'static str> {
+    if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        Some("voxply-hub-linux-x86_64")
+    } else {
+        None
+    }
+}
+
+async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("voxply-hub/", env!("CARGO_PKG_VERSION")))
+        .build()?;
+
+    let release: serde_json::Value = client
+        .get("https://api.github.com/repos/Voxply/Voxply-server/releases/latest")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("Failed to reach GitHub API")?
+        .error_for_status()
+        .context("GitHub API returned an error")?
+        .json()
+        .await
+        .context("Failed to parse GitHub API response")?;
+
+    let tag = release["tag_name"].as_str().unwrap_or("");
+    let latest = tag.trim_start_matches('v');
+    let current = env!("CARGO_PKG_VERSION");
+
+    if latest.is_empty() {
+        anyhow::bail!("GitHub API returned no tag_name — is the repo public and are releases published?");
+    }
+
+    if latest == current {
+        println!("Already up to date (v{current}).");
+        return Ok(());
+    }
+
+    println!("Update available: v{current} → v{latest}");
+
+    if check_only {
+        println!("Run 'voxply-hub update' (without --check) to install.");
+        return Ok(());
+    }
+
+    let asset_name = self_update_asset_name()
+        .context("Self-update is only supported on Linux x86_64")?;
+
+    let assets = release["assets"]
+        .as_array()
+        .context("GitHub API response has no assets array")?;
+
+    let asset = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(asset_name))
+        .with_context(|| format!("No asset '{asset_name}' in release {tag}"))?;
+
+    let download_url = asset["browser_download_url"]
+        .as_str()
+        .context("Asset has no browser_download_url")?;
+
+    println!("Downloading {download_url} ...");
+
+    let response = client
+        .get(download_url)
+        .send()
+        .await
+        .context("Download request failed")?
+        .error_for_status()
+        .context("Download returned an error status")?;
+
+    let bytes = response.bytes().await.context("Failed to read download body")?;
+    println!("Downloaded {} bytes.", bytes.len());
+
+    let current_exe = std::env::current_exe()
+        .context("Cannot determine current executable path")?;
+
+    let tmp = current_exe.with_file_name(".voxply-hub-update.tmp");
+    std::fs::write(&tmp, &bytes)
+        .with_context(|| format!("Cannot write temp file {tmp:?}"))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("Cannot set permissions on {tmp:?}"))?;
+    }
+
+    std::fs::rename(&tmp, &current_exe)
+        .with_context(|| format!("Cannot replace {current_exe:?} with the new binary"))?;
+
+    println!("Update applied (v{latest}). Restart the server to activate the new version.");
 
     Ok(())
 }
