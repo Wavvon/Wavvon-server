@@ -210,25 +210,31 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
     };
     let token_hash = sha256_hex(&token_bytes);
 
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT id FROM servers WHERE token_hash = ? AND deleted_at IS NULL")
-            .bind(&token_hash)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None);
+    let lookup = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM servers WHERE token_hash = ? AND deleted_at IS NULL",
+    )
+    .bind(&token_hash)
+    .fetch_optional(&state.db)
+    .await;
 
-    let server_id = match row {
-        Some((id,)) => id,
-        None => {
+    let server_id = match lookup {
+        Ok(Some((id,))) => id,
+        Ok(None) => {
             tracing::warn!("Agent WebSocket: token not found or server deleted");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!("Agent WebSocket: DB error during token lookup: {e}");
             return;
         }
     };
 
     tracing::info!(server_id, "Agent connected");
 
-    // Split the socket into send/receive halves via an mpsc channel.
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Split the socket into send/receive halves via a bounded channel.
+    // 64 slots is ample for hub spawn/stop commands; if the agent falls behind
+    // we drop the oldest queued message rather than growing without bound.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
     state
         .agent_senders
         .write()
@@ -331,8 +337,8 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
 
 /// Pick any connected agent sender (round-robin is future work; first is fine now).
 pub async fn pick_agent(
-    senders: &Arc<tokio::sync::RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
-) -> Option<(String, tokio::sync::mpsc::UnboundedSender<String>)> {
+    senders: &Arc<tokio::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
+) -> Option<(String, tokio::sync::mpsc::Sender<String>)> {
     let map = senders.read().await;
     map.iter().next().map(|(id, s)| (id.clone(), s.clone()))
 }

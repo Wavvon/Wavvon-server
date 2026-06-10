@@ -109,7 +109,7 @@ pub fn verify_token(farm_pubkey_hex: &str, token_str: &str) -> Result<FarmTokenP
     // Check expiry.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64;
     if now >= payload.exp {
         return Err(anyhow!("Token has expired"));

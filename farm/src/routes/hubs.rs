@@ -387,7 +387,9 @@ pub async fn create_hub(
             .bind(&hub_id)
             .execute(&state.db)
             .await;
-        sender.send(cmd.to_string()).is_ok()
+        // try_send: channel is bounded; on a full channel (agent not consuming)
+        // we fall through to local spawn rather than blocking or silently dropping.
+        sender.try_send(cmd.to_string()).is_ok()
     } else {
         false
     };
@@ -596,11 +598,9 @@ pub async fn delete_hub(
 
 async fn pick_agent(
     senders: &Arc<
-        tokio::sync::RwLock<
-            std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>,
-        >,
+        tokio::sync::RwLock<std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>>,
     >,
-) -> Option<(String, tokio::sync::mpsc::UnboundedSender<String>)> {
+) -> Option<(String, tokio::sync::mpsc::Sender<String>)> {
     let map = senders.read().await;
     map.iter().next().map(|(id, s)| (id.clone(), s.clone()))
 }

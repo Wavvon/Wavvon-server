@@ -320,3 +320,65 @@ async fn revoke_check_returns_true_for_unknown_jti() {
     resp.assert_status_ok();
     assert_eq!(resp.json::<Value>()["revoked"], true);
 }
+
+// ---------------------------------------------------------------------------
+// POST /farm/heartbeat — auth checks
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn heartbeat_rejects_unknown_hub_pubkey() {
+    let (server, _) = setup().await;
+    // A hub_pubkey not in the hubs table should be rejected.
+    let resp = server
+        .post("/farm/heartbeat")
+        .json(&json!({
+            "hub_pubkey": "aabbccdd".repeat(8), // 64-char hex, not in hubs table
+            "online_users": 0,
+            "storage_bytes": 0,
+            "uptime_seconds": 0
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn heartbeat_accepts_known_hub_pubkey() {
+    let (server, state) = setup().await;
+    // Insert a hub with a known hub_pubkey.
+    let hub_pubkey = "ccddeeffe".repeat(7) + "c"; // 64 chars
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    sqlx::query(
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at, hub_pubkey)
+         VALUES ('hbhub', 'aa', 'Heartbeat Hub', 'private', '/tmp/x.db', ?, ?)",
+    )
+    .bind(now)
+    .bind(&hub_pubkey)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let resp = server
+        .post("/farm/heartbeat")
+        .json(&json!({
+            "hub_pubkey": hub_pubkey,
+            "online_users": 5,
+            "storage_bytes": 1024,
+            "uptime_seconds": 3600
+        }))
+        .await;
+    resp.assert_status_ok();
+}
+
+#[tokio::test]
+async fn heartbeat_rejects_missing_hub_pubkey() {
+    let (server, _) = setup().await;
+    // Omit hub_pubkey entirely — should get 400.
+    let resp = server
+        .post("/farm/heartbeat")
+        .json(&json!({ "online_users": 1 }))
+        .await;
+    resp.assert_status_bad_request();
+}

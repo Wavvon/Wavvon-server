@@ -25,9 +25,9 @@ pub struct FarmState {
     pub http_client: reqwest::Client,
     /// Directory where per-hub SQLite databases are stored.
     pub hubs_dir: String,
-    /// Map server_id → unbounded sender for the agent's WebSocket write half.
+    /// Map server_id → bounded sender for the agent's WebSocket write half.
     /// Only present while the agent is connected.
-    pub agent_senders: Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
+    pub agent_senders: Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
 }
 
 impl FarmState {

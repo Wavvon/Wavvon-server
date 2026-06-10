@@ -669,6 +669,8 @@ pub struct PublicInfoResponse {
     pub region: Option<String>,
     pub languages: serde_json::Value,
     pub tags: serde_json::Value,
+    /// Farm Ed25519 public key (hex). Required by the seed node to verify farm identity.
+    pub public_key: String,
 }
 
 pub async fn public_info(
@@ -705,5 +707,6 @@ pub async fn public_info(
         region: row.region,
         languages,
         tags,
+        public_key: state.public_key_hex(),
     }))
 }

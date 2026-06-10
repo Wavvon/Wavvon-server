@@ -19,18 +19,34 @@ pub async fn run(cfg: &Settings, manager: Arc<HubManager>) -> Result<()> {
     let hello = serde_json::json!({"type": "hello", "version": "0.1.0"});
     write.send(Message::Text(hello.to_string().into())).await?;
 
-    while let Some(msg) = read.next().await {
-        let msg = msg?;
-        match msg {
-            Message::Text(text) => {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(reply) = handle_message(&val, &manager, cfg).await {
-                        write.send(Message::Text(reply.into())).await?;
+    while let Some(raw) = read.next().await {
+        match raw {
+            Err(e) => {
+                // Transport error (not a close frame) — log and terminate so
+                // the outer reconnect loop can re-establish the connection.
+                tracing::warn!(error = %e, "Agent WS transport error");
+                break;
+            }
+            Ok(msg) => match msg {
+                Message::Text(text) => {
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(val) => {
+                            if let Some(reply) = handle_message(&val, &manager, cfg).await {
+                                if let Err(e) = write.send(Message::Text(reply.into())).await {
+                                    tracing::warn!(error = %e, "Agent WS send error");
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Malformed JSON from the farm — log and continue; do not crash.
+                            tracing::warn!(error = %e, "Agent WS: received non-JSON message, skipping");
+                        }
                     }
                 }
-            }
-            Message::Close(_) => break,
-            _ => {}
+                Message::Close(_) => break,
+                _ => {}
+            },
         }
     }
 

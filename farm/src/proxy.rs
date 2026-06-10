@@ -82,7 +82,10 @@ pub async fn proxy_handler(
         headers.insert("x-hub-id", hv);
     }
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+    // Limit forwarded request body to 32 MiB; larger payloads are rejected before
+    // they reach the upstream hub process.
+    const MAX_BODY: usize = 32 * 1024 * 1024;
+    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY).await {
         Ok(b) => b,
         Err(_) => {
             return json_error(StatusCode::BAD_REQUEST, "failed_to_read_body");
