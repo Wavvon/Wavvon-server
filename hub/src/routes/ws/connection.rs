@@ -4,47 +4,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Query, State, WebSocketUpgrade};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::routes::chat_models::{
-    HubStreamInfo, VoiceParticipantInfo, VoiceRosterEntry, WsClientMessage, WsParams,
-    WsServerMessage,
+    HubStreamInfo, VoiceParticipantInfo, WsClientMessage, WsServerMessage,
 };
 use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
 
-// `bytes` is used for game snapshot storage in the game_snapshot handler.
+use super::screen_share::send_v2_signal;
+use super::voice::{
+    get_voice_participants, get_voice_roster, re_resolve_whisper_sessions, resolve_role_addrs,
+    resolve_whisper_targets,
+};
 
-// ---------------------------------------------------------------------------
-// Component interaction rate-limit store (in-memory, no external dep).
-// Key: (user_pubkey, custom_id); Value: last interaction instant.
-// ---------------------------------------------------------------------------
-tokio::task_local! {
-    // Not used across tasks; the HashMap is held per WS connection below.
-}
-
-pub async fn ws_handler(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<WsParams>,
-    ws: WebSocketUpgrade,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Delegate to the shared session-validity helper so the WS admission
-    // checks never drift from what the HTTP AuthUser middleware enforces
-    // (session expiry, revocation, approval_status, bans).
-    let public_key = crate::auth::handlers::validate_ws_token(&state.db, &params.token).await?;
-
-    tracing::info!(
-        "WebSocket connected: {}",
-        &public_key[..16.min(public_key.len())]
-    );
-
-    Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, public_key)))
-}
-
-async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: String) {
+pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: String) {
     // Determine whether this connection belongs to a bot.
     let is_bot: bool =
         sqlx::query_scalar::<_, i64>("SELECT is_bot FROM users WHERE public_key = ?")
@@ -1829,7 +1803,7 @@ pub async fn leave_voice_for_test(state: &AppState, public_key: &str, channel_id
     leave_voice(state, public_key, channel_id).await;
 }
 
-async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
+pub(super) async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     let removed_addr = {
         let mut channels = state.voice_channels.write().await;
         let addr = channels
@@ -1933,169 +1907,4 @@ async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
             participants: roster,
         },
     ));
-}
-
-/// Broadcast a v2 signaling envelope via `chat_tx` using `ChatEvent::ScreenShareSignal`
-/// so the WS dispatch loop delivers it only to `to_pubkey`.
-fn send_v2_signal(state: &AppState, channel_id: String, to_pubkey: String, msg: WsServerMessage) {
-    let ev = crate::routes::chat_models::ChatEvent::ScreenShareSignal {
-        channel_id,
-        to_pubkey,
-    };
-    let json: std::sync::Arc<str> =
-        std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
-    let _ = state.chat_tx.send((ev, json));
-}
-
-async fn get_voice_participants(state: &AppState, channel_id: &str) -> Vec<VoiceParticipantInfo> {
-    let channels = state.voice_channels.read().await;
-    let Some(participants) = channels.get(channel_id) else {
-        return Vec::new();
-    };
-
-    let mut result = Vec::new();
-    for pk in participants.keys() {
-        let display_name: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
-                .bind(pk)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-
-        result.push(VoiceParticipantInfo {
-            public_key: pk.clone(),
-            display_name,
-        });
-    }
-    result
-}
-
-/// Resolve "user" and "channel" target defs into SocketAddrs.
-/// Role targets require a DB query and must be handled by the caller via `resolve_role_addrs`.
-async fn resolve_whisper_targets(
-    state: &AppState,
-    defs: &[crate::state::WhisperTargetDef],
-    exclude_addr: std::net::SocketAddr,
-) -> HashSet<std::net::SocketAddr> {
-    let voice_channels = state.voice_channels.read().await;
-    let mut addrs = HashSet::new();
-    for def in defs {
-        match def.target_type.as_str() {
-            "user" => {
-                // Search all channels for the target pubkey.
-                for participants in voice_channels.values() {
-                    if let Some(addr) = participants.get(&def.id) {
-                        if *addr != exclude_addr {
-                            addrs.insert(*addr);
-                        }
-                    }
-                }
-            }
-            "channel" => {
-                if let Some(participants) = voice_channels.get(&def.id) {
-                    for addr in participants.values() {
-                        if *addr != exclude_addr {
-                            addrs.insert(*addr);
-                        }
-                    }
-                }
-            }
-            _ => {} // "role" handled separately; unknown types silently ignored
-        }
-    }
-    addrs
-}
-
-/// Resolve all users with `role_id` that are currently in voice into SocketAddrs.
-async fn resolve_role_addrs(
-    state: &AppState,
-    role_id: &str,
-    exclude_addr: std::net::SocketAddr,
-) -> HashSet<std::net::SocketAddr> {
-    let role_users: Vec<String> =
-        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = ?")
-            .bind(role_id)
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
-
-    let voice_channels = state.voice_channels.read().await;
-    let mut addrs = HashSet::new();
-    for pk in &role_users {
-        for participants in voice_channels.values() {
-            if let Some(addr) = participants.get(pk.as_str()) {
-                if *addr != exclude_addr {
-                    addrs.insert(*addr);
-                }
-            }
-        }
-    }
-    addrs
-}
-
-/// Walk every active whisper session and rebuild its resolved SocketAddr set from stored defs.
-/// Called after any VoiceJoin or VoiceLeave so the live target set stays correct.
-async fn re_resolve_whisper_sessions(state: &AppState) {
-    // Snapshot the current defs outside the write lock.
-    let defs_map: Vec<(String, Vec<crate::state::WhisperTargetDef>)> = {
-        state
-            .whisper_target_defs
-            .read()
-            .await
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
-    };
-    for (sender_pk, defs) in defs_map {
-        // Find the sender's current SocketAddr (they may have just left voice).
-        let sender_addr = {
-            let vc = state.voice_channels.read().await;
-            vc.values().find_map(|p| p.get(&sender_pk)).copied()
-        };
-        let sender_addr = match sender_addr {
-            Some(a) => a,
-            None => {
-                // Sender is no longer in voice; their session will be cleaned up by leave_voice.
-                continue;
-            }
-        };
-        let mut new_addrs = resolve_whisper_targets(state, &defs, sender_addr).await;
-        for def in &defs {
-            if def.target_type == "role" {
-                new_addrs.extend(resolve_role_addrs(state, &def.id, sender_addr).await);
-            }
-        }
-        state
-            .whisper_targets
-            .write()
-            .await
-            .insert(sender_pk, new_addrs);
-    }
-}
-
-async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<VoiceRosterEntry> {
-    let sender_ids = state.voice_sender_ids.read().await;
-    let ch_map = match sender_ids.get(channel_id) {
-        Some(m) => m.clone(),
-        None => return vec![],
-    };
-    drop(sender_ids);
-
-    let mut result = Vec::new();
-    for (pk, sid) in ch_map {
-        let display_name: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
-                .bind(&pk)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-        result.push(VoiceRosterEntry {
-            sender_id: sid,
-            public_key: pk,
-            display_name,
-        });
-    }
-    result
 }
