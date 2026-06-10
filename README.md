@@ -193,3 +193,14 @@ for design rationale before proposing big changes.
 [GNU Affero General Public License v3.0](LICENSE). Network use of a
 modified version requires offering the corresponding source to users —
 deliberately chosen for a federated platform.
+
+## Built with AI assistance
+
+This project was built with substantial help from
+[Claude](https://claude.ai) (Anthropic's AI assistant). The product
+owner directs architecture, features, and tradeoffs; Claude drafts
+most of the code, tests, and documentation, which is then reviewed,
+adjusted, and accepted.
+
+Calling this out for transparency — it's not a fully hand-written
+codebase, and pretending otherwise wouldn't be honest.
