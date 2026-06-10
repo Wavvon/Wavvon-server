@@ -35,48 +35,57 @@ pub async fn list_users(
 ) -> Result<Json<Vec<UserInfo>>, (StatusCode, String)> {
     let online = state.online_users.read().await;
 
-    let rows = if let Some(q) = &params.q {
+    // Cap search queries to prevent unbounded LIKE pattern scans.
+    let q = params
+        .q
+        .as_deref()
+        .map(|s| if s.len() > 64 { &s[..64] } else { s });
+
+    // Single query with a LEFT JOIN to pick up the highest-priority
+    // display_separately role in one round-trip instead of N+1 queries.
+    let rows: Vec<UserRowWithRole> = if let Some(q) = q {
         let search = format!("%{q}%");
-        sqlx::query_as::<_, UserRow>(
-            "SELECT public_key, display_name, avatar, is_bot FROM users
-             WHERE display_name LIKE ? OR public_key LIKE ?
-             ORDER BY display_name, public_key LIMIT 50",
+        sqlx::query_as::<_, UserRowWithRole>(
+            "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                    (SELECT r.name FROM roles r
+                     INNER JOIN user_roles ur ON r.id = ur.role_id
+                     WHERE ur.user_public_key = u.public_key AND r.display_separately = 1
+                     ORDER BY r.priority DESC LIMIT 1) AS group_role
+             FROM users u
+             WHERE u.display_name LIKE ? OR u.public_key LIKE ?
+             ORDER BY u.display_name, u.public_key LIMIT 50",
         )
         .bind(&search)
         .bind(&search)
         .fetch_all(&state.db)
         .await
     } else {
-        sqlx::query_as::<_, UserRow>(
-            "SELECT public_key, display_name, avatar, is_bot FROM users ORDER BY display_name, public_key LIMIT 50",
+        sqlx::query_as::<_, UserRowWithRole>(
+            "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                    (SELECT r.name FROM roles r
+                     INNER JOIN user_roles ur ON r.id = ur.role_id
+                     WHERE ur.user_public_key = u.public_key AND r.display_separately = 1
+                     ORDER BY r.priority DESC LIMIT 1) AS group_role
+             FROM users u
+             ORDER BY u.display_name, u.public_key LIMIT 50",
         )
         .fetch_all(&state.db)
         .await
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let mut result = Vec::with_capacity(rows.len());
-    for r in rows {
-        let group_role: Option<String> = sqlx::query_scalar(
-            "SELECT r.name FROM roles r
-             INNER JOIN user_roles ur ON r.id = ur.role_id
-             WHERE ur.user_public_key = ? AND r.display_separately = 1
-             ORDER BY r.priority DESC LIMIT 1",
-        )
-        .bind(&r.public_key)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-        result.push(UserInfo {
+    let result: Vec<UserInfo> = rows
+        .into_iter()
+        .map(|r| UserInfo {
             online: online.contains(&r.public_key),
             public_key: r.public_key,
             display_name: r.display_name,
             avatar: r.avatar,
-            group_role,
+            group_role: r.group_role,
             is_bot: r.is_bot != 0,
-        });
-    }
+        })
+        .collect();
+
     Ok(Json(result))
 }
 
@@ -122,6 +131,16 @@ struct UserRow {
     display_name: Option<String>,
     avatar: Option<String>,
     is_bot: i64,
+}
+
+/// Like UserRow but includes the pre-joined group_role column.
+#[derive(sqlx::FromRow)]
+struct UserRowWithRole {
+    public_key: String,
+    display_name: Option<String>,
+    avatar: Option<String>,
+    is_bot: i64,
+    group_role: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +234,10 @@ pub async fn get_user_profile(
 
     let badge_summaries: Vec<BadgeSummary> = badges
         .into_iter()
-        .map(|b| BadgeSummary { id: b.id, label: b.label })
+        .map(|b| BadgeSummary {
+            id: b.id,
+            label: b.label,
+        })
         .collect();
 
     Ok(Json(UserProfileResponse {
@@ -227,4 +249,3 @@ pub async fn get_user_profile(
         badges: badge_summaries,
     }))
 }
-

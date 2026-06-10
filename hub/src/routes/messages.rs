@@ -8,9 +8,8 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
 use crate::routes::chat_models::{
-    Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams,
-    ReactionRequest, ReactionSummary, ReplyContext, SendMessageRequest,
-    MAX_ATTACHMENTS_BYTES,
+    Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
+    ReactionSummary, ReplyContext, SendMessageRequest, MAX_ATTACHMENTS_BYTES,
 };
 use crate::state::AppState;
 
@@ -22,14 +21,31 @@ pub async fn send_message(
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, String)> {
     // 30 messages per 60 seconds per user
     {
-        let mut map = state.rate_limiters.messages.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = state
+            .rate_limiters
+            .messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(60);
+
+        // Opportunistic eviction: when the map grows large, drop all entries
+        // whose window has fully elapsed. This mirrors the pattern in rate_limit.rs
+        // and prevents the map from growing without bound on busy hubs.
+        const EVICTION_THRESHOLD: usize = 5_000;
+        if map.len() >= EVICTION_THRESHOLD {
+            map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
+        }
+
         let entry = map.entry(user.public_key.clone()).or_insert((0, now));
-        if now.duration_since(entry.1) > std::time::Duration::from_secs(60) {
+        if now.duration_since(entry.1) > window {
             *entry = (0, now);
         }
         if entry.0 >= 30 {
-            return Err((axum::http::StatusCode::TOO_MANY_REQUESTS, "rate_limited".to_string()));
+            return Err((
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited".to_string(),
+            ));
         }
         entry.0 += 1;
     }
@@ -41,16 +57,20 @@ pub async fn send_message(
         return Err((StatusCode::FORBIDDEN, "You are muted".to_string()));
     }
 
-    if crate::routes::moderation::is_channel_banned(&state.db, &channel_id, &user.public_key).await? {
-        return Err((StatusCode::FORBIDDEN, "You are banned from this channel".to_string()));
+    if crate::routes::moderation::is_channel_banned(&state.db, &channel_id, &user.public_key)
+        .await?
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You are banned from this channel".to_string(),
+        ));
     }
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
@@ -198,8 +218,7 @@ pub async fn send_message(
             use hmac::{Hmac, Mac};
             use sha2::Sha256;
             let sig = if !secret.is_empty() {
-                let mut mac =
-                    Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+                let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
                 mac.update(payload_str.as_bytes());
                 hex::encode(mac.finalize().into_bytes())
             } else {
@@ -239,7 +258,7 @@ pub async fn send_message(
     .bind(&req.content)
     .bind(&attachments_json)
     .bind(&req.reply_to)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -301,10 +320,15 @@ pub async fn send_message(
             channel_id: channel_id.clone(),
             message: message.clone(),
         };
-        let json: std::sync::Arc<str> = std::sync::Arc::from(
-            serde_json::to_string(&ws_msg).unwrap().as_str(),
-        );
-        let _ = state.chat_tx.send((ChatEvent::New { channel_id: channel_id.clone(), message: message.clone() }, json));
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((
+            ChatEvent::New {
+                channel_id: channel_id.clone(),
+                message: message.clone(),
+            },
+            json,
+        ));
     }
 
     // Publish message.created audit event for bot subscriptions.
@@ -327,7 +351,8 @@ pub async fn send_message(
                     "created_at": msg_c.created_at,
                     "attachments": msg_c.attachments,
                 }),
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -340,33 +365,36 @@ pub async fn edit_message(
     Path((channel_id, message_id)): Path<(String, String)>,
     Json(req): Json<EditMessageRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, String)> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT sender, channel_id FROM messages WHERE id = ?",
-    )
-    .bind(&message_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT sender, channel_id FROM messages WHERE id = ?")
+            .bind(&message_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (sender, msg_channel) = row
-        .ok_or((StatusCode::NOT_FOUND, "Message not found".to_string()))?;
+    let (sender, msg_channel) =
+        row.ok_or((StatusCode::NOT_FOUND, "Message not found".to_string()))?;
     if msg_channel != channel_id {
-        return Err((StatusCode::NOT_FOUND, "Message not in this channel".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Message not in this channel".to_string(),
+        ));
     }
     if sender != user.public_key {
-        return Err((StatusCode::FORBIDDEN, "You can only edit your own messages".to_string()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You can only edit your own messages".to_string(),
+        ));
     }
 
     let now = crate::auth::handlers::unix_timestamp();
-    sqlx::query(
-        "UPDATE messages SET content = ?, edited_at = ? WHERE id = ?",
-    )
-    .bind(&req.content)
-    .bind(now)
-    .bind(&message_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?")
+        .bind(&req.content)
+        .bind(now)
+        .bind(&message_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let updated = load_message(&state, &message_id).await?;
     {
@@ -374,10 +402,15 @@ pub async fn edit_message(
             channel_id: channel_id.clone(),
             message: updated.clone(),
         };
-        let json: std::sync::Arc<str> = std::sync::Arc::from(
-            serde_json::to_string(&ws_msg).unwrap().as_str(),
-        );
-        let _ = state.chat_tx.send((ChatEvent::Edited { channel_id: channel_id.clone(), message: updated.clone() }, json));
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((
+            ChatEvent::Edited {
+                channel_id: channel_id.clone(),
+                message: updated.clone(),
+            },
+            json,
+        ));
     }
     Ok(Json(updated))
 }
@@ -387,18 +420,20 @@ pub async fn delete_message(
     user: AuthUser,
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
-        "SELECT sender, channel_id, reply_to FROM messages WHERE id = ?",
-    )
-    .bind(&message_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT sender, channel_id, reply_to FROM messages WHERE id = ?")
+            .bind(&message_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (sender, msg_channel, reply_to) = row
-        .ok_or((StatusCode::NOT_FOUND, "Message not found".to_string()))?;
+    let (sender, msg_channel, reply_to) =
+        row.ok_or((StatusCode::NOT_FOUND, "Message not found".to_string()))?;
     if msg_channel != channel_id {
-        return Err((StatusCode::NOT_FOUND, "Message not in this channel".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Message not in this channel".to_string(),
+        ));
     }
 
     // Author can always delete their own. Others need manage_messages.
@@ -438,10 +473,15 @@ pub async fn delete_message(
             channel_id: channel_id.clone(),
             message_id: message_id.clone(),
         };
-        let json: std::sync::Arc<str> = std::sync::Arc::from(
-            serde_json::to_string(&ws_msg).unwrap().as_str(),
-        );
-        let _ = state.chat_tx.send((ChatEvent::Deleted { channel_id, message_id }, json));
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((
+            ChatEvent::Deleted {
+                channel_id,
+                message_id,
+            },
+            json,
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -728,12 +768,11 @@ pub async fn add_reaction(
     }
 
     // Sanity-check the message belongs to the channel claimed in the path.
-    let row: Option<String> =
-        sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ?")
-            .bind(&message_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<String> = sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ?")
+        .bind(&message_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     match row {
         None => return Err((StatusCode::NOT_FOUND, "message not found".to_string())),
         Some(c) if c != channel_id => {
@@ -762,10 +801,16 @@ pub async fn add_reaction(
             message_id: message_id.clone(),
             reactions: summary.clone(),
         };
-        let json: std::sync::Arc<str> = std::sync::Arc::from(
-            serde_json::to_string(&ws_msg).unwrap().as_str(),
-        );
-        let _ = state.chat_tx.send((ChatEvent::ReactionsUpdated { channel_id, message_id, reactions: summary }, json));
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((
+            ChatEvent::ReactionsUpdated {
+                channel_id,
+                message_id,
+                reactions: summary,
+            },
+            json,
+        ));
     }
 
     Ok(StatusCode::CREATED)
@@ -793,10 +838,16 @@ pub async fn remove_reaction(
             message_id: message_id.clone(),
             reactions: summary.clone(),
         };
-        let json: std::sync::Arc<str> = std::sync::Arc::from(
-            serde_json::to_string(&ws_msg).unwrap().as_str(),
-        );
-        let _ = state.chat_tx.send((ChatEvent::ReactionsUpdated { channel_id, message_id, reactions: summary }, json));
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((
+            ChatEvent::ReactionsUpdated {
+                channel_id,
+                message_id,
+                reactions: summary,
+            },
+            json,
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT)
