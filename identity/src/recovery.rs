@@ -16,8 +16,8 @@ impl Identity {
 
     /// Restore an identity from a 24-word recovery phrase.
     pub fn from_recovery_phrase(phrase: &str) -> Result<Self> {
-        let mnemonic = Mnemonic::parse_in(Language::English, phrase)
-            .context("Invalid recovery phrase")?;
+        let mnemonic =
+            Mnemonic::parse_in(Language::English, phrase).context("Invalid recovery phrase")?;
 
         let entropy = mnemonic.to_entropy();
         let secret_array: [u8; 32] = entropy

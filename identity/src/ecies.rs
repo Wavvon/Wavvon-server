@@ -19,10 +19,7 @@ const ECIES_INFO: &[u8] = b"voxply/ecies/v1";
 /// Returns a 184-char hex string encoding:
 ///   eph_x25519_pub[32] || aes_gcm_nonce[12] || aes_gcm_ciphertext_and_tag[48]
 /// (total 92 bytes → 184 hex chars)
-pub fn wrap_blob_key(
-    blob_key: &[u8; 32],
-    recipient_ed25519_pubkey_hex: &str,
-) -> Result<String> {
+pub fn wrap_blob_key(blob_key: &[u8; 32], recipient_ed25519_pubkey_hex: &str) -> Result<String> {
     // 1. Decode recipient pubkey hex → 32 bytes
     let pubkey_bytes = hex::decode(recipient_ed25519_pubkey_hex)
         .map_err(|e| anyhow!("invalid pubkey hex: {e}"))?;
@@ -72,15 +69,14 @@ pub fn wrap_blob_key(
 }
 
 /// Unwrap a wrapped blob key using the recipient's Ed25519 seed (32-byte secret).
-pub fn unwrap_blob_key(
-    wrapped_hex: &str,
-    recipient_ed25519_seed: &[u8; 32],
-) -> Result<[u8; 32]> {
+pub fn unwrap_blob_key(wrapped_hex: &str, recipient_ed25519_seed: &[u8; 32]) -> Result<[u8; 32]> {
     // 1. Decode hex → 92 bytes
-    let bytes = hex::decode(wrapped_hex)
-        .map_err(|e| anyhow!("invalid wrapped_hex: {e}"))?;
+    let bytes = hex::decode(wrapped_hex).map_err(|e| anyhow!("invalid wrapped_hex: {e}"))?;
     if bytes.len() != 92 {
-        return Err(anyhow!("wrapped blob key must be 92 bytes, got {}", bytes.len()));
+        return Err(anyhow!(
+            "wrapped blob key must be 92 bytes, got {}",
+            bytes.len()
+        ));
     }
 
     // 2. Parse fields
@@ -147,14 +143,12 @@ mod tests {
         let mut blob_key = [0u8; 32];
         OsRng.fill_bytes(&mut blob_key);
 
-        let wrapped = wrap_blob_key(&blob_key, &recipient_pubkey_hex)
-            .expect("wrap should succeed");
+        let wrapped = wrap_blob_key(&blob_key, &recipient_pubkey_hex).expect("wrap should succeed");
 
         // 92 bytes → 184 hex chars
         assert_eq!(wrapped.len(), 184);
 
-        let unwrapped = unwrap_blob_key(&wrapped, &recipient_seed)
-            .expect("unwrap should succeed");
+        let unwrapped = unwrap_blob_key(&wrapped, &recipient_seed).expect("unwrap should succeed");
 
         assert_eq!(blob_key, unwrapped);
     }
@@ -168,7 +162,10 @@ mod tests {
         let zero_wrapped = hex::encode([0u8; 92]);
         // Decryption will fail — ciphertext won't authenticate.
         let result = unwrap_blob_key(&zero_wrapped, &recipient_seed);
-        assert!(result.is_err(), "all-zero wrapped blob should fail to decrypt");
+        assert!(
+            result.is_err(),
+            "all-zero wrapped blob should fail to decrypt"
+        );
     }
 
     #[test]

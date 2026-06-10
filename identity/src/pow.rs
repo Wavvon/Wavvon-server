@@ -51,11 +51,7 @@ pub fn compute_security_level(
 
 /// Verify that a given nonce achieves the claimed security level.
 /// Returns true if SHA256(public_key_hex + nonce_bytes) has >= claimed_level leading zero bits.
-pub fn verify_security_level(
-    public_key_hex: &str,
-    nonce: u64,
-    claimed_level: u32,
-) -> bool {
+pub fn verify_security_level(public_key_hex: &str, nonce: u64, claimed_level: u32) -> bool {
     if claimed_level == 0 {
         return true;
     }
@@ -66,7 +62,7 @@ pub fn verify_security_level(
 fn hash_level(public_key_hex: &str, nonce: u64) -> u32 {
     let mut hasher = Sha256::new();
     hasher.update(public_key_hex.as_bytes());
-    hasher.update(&nonce.to_le_bytes());
+    hasher.update(nonce.to_le_bytes());
     let result = hasher.finalize();
     leading_zero_bits(&result)
 }

@@ -57,11 +57,20 @@ impl HomeHubList {
     }
 
     pub fn to_signing_bytes(&self) -> Vec<u8> {
-        Self::signing_bytes(&self.master_pubkey, &self.hubs, self.issued_at, self.sequence)
+        Self::signing_bytes(
+            &self.master_pubkey,
+            &self.hubs,
+            self.issued_at,
+            self.sequence,
+        )
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -116,7 +125,11 @@ impl SubkeyCert {
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -143,7 +156,11 @@ impl RevocationEntry {
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -175,8 +192,8 @@ impl SignedPrefsBlob {
     }
 
     pub fn to_signing_bytes(&self) -> Result<Vec<u8>> {
-        let ciphertext =
-            hex::decode(&self.ciphertext_hex).map_err(|e| anyhow!("Invalid ciphertext hex: {e}"))?;
+        let ciphertext = hex::decode(&self.ciphertext_hex)
+            .map_err(|e| anyhow!("Invalid ciphertext hex: {e}"))?;
         Ok(Self::signing_bytes(
             &self.master_pubkey,
             self.blob_version,
@@ -232,7 +249,11 @@ impl PairingOffer {
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -365,4 +386,3 @@ impl PublicHubProfile {
         check_sig(&self.pubkey, &self.to_signing_bytes(), &self.signature)
     }
 }
-
