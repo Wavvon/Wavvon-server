@@ -341,6 +341,64 @@ impl DhKeyRecord {
     }
 }
 
+/// Signing bytes for a 1:1 encrypted DM envelope
+/// (`EncryptedDmEnvelope`). Signed by the sender's identity key; both
+/// the sender and the hub compute these bytes.
+pub fn dm_envelope_signing_bytes(
+    conv_id: &str,
+    ciphertext_hex: &str,
+    nonce_hex: &str,
+    dh_pubkey_hex: &str,
+) -> Vec<u8> {
+    let mut buf = b"voxply/dm-ciphertext/v1\0".to_vec();
+    write_str(&mut buf, conv_id);
+    write_str(&mut buf, ciphertext_hex);
+    write_str(&mut buf, nonce_hex);
+    write_str(&mut buf, dh_pubkey_hex);
+    buf
+}
+
+/// Signing bytes for a group encrypted DM envelope
+/// (`GroupEncryptedEnvelope`). The u32 fields are encoded as
+/// length-prefixed **decimal strings**, not raw integers.
+pub fn group_dm_envelope_signing_bytes(
+    conv_id: &str,
+    sender_key_version: u32,
+    iteration: u32,
+    ciphertext_hex: &str,
+    nonce_hex: &str,
+) -> Vec<u8> {
+    let mut buf = b"voxply/group-dm-ciphertext/v1\0".to_vec();
+    write_str(&mut buf, conv_id);
+    write_str(&mut buf, &sender_key_version.to_string());
+    write_str(&mut buf, &iteration.to_string());
+    write_str(&mut buf, ciphertext_hex);
+    write_str(&mut buf, nonce_hex);
+    buf
+}
+
+/// Signing bytes for a sender-key distribution push
+/// (`PushSenderKeyRequest`). Each recipient is a
+/// `(recipient_pubkey, wrapped_key_hex)` pair; pairs are sorted by
+/// `recipient_pubkey` before encoding so the signature is independent
+/// of submission order.
+pub fn sender_key_dist_signing_bytes(
+    conv_id: &str,
+    sender_key_version: u32,
+    recipients: &[(String, String)],
+) -> Vec<u8> {
+    let mut buf = b"voxply/group-key-dist/v1\0".to_vec();
+    write_str(&mut buf, conv_id);
+    write_str(&mut buf, &sender_key_version.to_string());
+    let mut sorted: Vec<&(String, String)> = recipients.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (pubkey, wrapped_hex) in sorted {
+        write_str(&mut buf, pubkey);
+        write_str(&mut buf, wrapped_hex);
+    }
+    buf
+}
+
 /// One entry in a user's public hub list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicHubEntry {

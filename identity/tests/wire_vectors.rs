@@ -12,8 +12,11 @@
 /// paste the output hex back here. The signing-bytes layout is authoritative;
 /// see docs/wire-format.md for the complete field-by-field specification.
 use ed25519_dalek::{Signer, SigningKey};
+use sha2::{Digest, Sha512};
 use voxply_identity::{
-    HomeHubList, PairingClaim, PairingOffer, RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    dm_envelope_signing_bytes, group_dm_envelope_signing_bytes, sender_key_dist_signing_bytes,
+    DhKeyRecord, HomeHubList, PairingClaim, PairingOffer, RevocationEntry, SignedPrefsBlob,
+    SubkeyCert,
 };
 
 const TS: u64 = 1_700_000_000;
@@ -36,6 +39,20 @@ fn subkey_signing_key() -> SigningKey {
 
 fn hex_pubkey(k: &SigningKey) -> String {
     hex::encode(k.verifying_key().as_bytes())
+}
+
+/// Standard ed25519→x25519 derivation: SHA-512(seed)[0..32] → clamp.
+/// Mirrors `Identity::dh_keypair()`; replicated here so the derivation
+/// itself is pinned by the MASTER_DH_PUB vector.
+fn master_dh_pub_hex() -> String {
+    let hash = Sha512::digest(master_key().to_bytes());
+    let mut scalar = [0u8; 32];
+    scalar.copy_from_slice(&hash[..32]);
+    scalar[0] &= 248;
+    scalar[31] &= 127;
+    scalar[31] |= 64;
+    let secret = x25519_dalek::StaticSecret::from(scalar);
+    hex::encode(x25519_dalek::PublicKey::from(&secret).as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +98,46 @@ const PAIRING_CLAIM_SIGNING_BYTES: &str =
     "766f78706c792f70616972696e672d636c61696d2f76310006000000746f6b3132334000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630060000006c6170746f70";
 const PAIRING_CLAIM_PROOF: &str =
     "e2eeee6d5b5032974c19b6aff42361829846f2e26e7e329985ad709d6b8c6f45e48156adcb75301570759bd14a1e192f4499fa0273adab1ee3db900821663608";
+
+// X25519 DH pubkey derived from the master seed (SHA-512 + clamp)
+const MASTER_DH_PUB: &str = "4a3807d064d077181cc070989e76891d20dca5559548dc2c77c1a50273882b38";
+
+// DhKeyRecord
+const DH_KEY_RECORD_SIGNING_BYTES: &str =
+    "766f78706c792f64682d6b65792f76310040000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636344000000034613338303764303634643037373138316363303730393839653736383931643230646361353535393534386463326337376331613530323733383832623338";
+const DH_KEY_RECORD_SIG: &str =
+    "055425d9cd0d2488c89bb9b0cc13f7ccb7f8581d20ba767123d4131bff9dd6abbb24b73c111777602d79b4cf4f7f8cc7c9eb0f3b3409bb2f1ab422330a2a7807";
+
+// Shared DM-envelope fixed inputs
+const DM_CONV_ID: &str = "conv123";
+const DM_CIPHERTEXT_HEX: &str = "63697068657274657874"; // hex("ciphertext")
+const DM_NONCE_HEX: &str = "0102030405060708090a0b0c";
+
+// EncryptedDmEnvelope (1:1)
+const DM_ENVELOPE_SIGNING_BYTES: &str =
+    "766f78706c792f646d2d636970686572746578742f76310007000000636f6e76313233140000003633363937303638363537323734363537383734180000003031303230333034303530363037303830393061306230634000000034613338303764303634643037373138316363303730393839653736383931643230646361353535393534386463326337376331613530323733383832623338";
+const DM_ENVELOPE_SIG: &str =
+    "cacd0b3e90b7b09c25d0a2ae508470338a1b6c5b73935ba6245125c13c6bdc67bf647f9e108b59ea3ca913c3e7ad55b6c3a3157b9e95afc995ed9c22f9f34506";
+
+// GroupEncryptedEnvelope — sender_key_version = 1, iteration = 2
+const GROUP_DM_ENVELOPE_SIGNING_BYTES: &str =
+    "766f78706c792f67726f75702d646d2d636970686572746578742f76310007000000636f6e763132330100000031010000003214000000363336393730363836353732373436353738373418000000303130323033303430353036303730383039306130623063";
+const GROUP_DM_ENVELOPE_SIG: &str =
+    "57c14f56b4367584ca5595586dde46dee09757d95200eeab6044948a2c6e39d3db7faa4a2ed352963c5d5ad76f85fb9b4345e3912bdd9d758583b362786b610f";
+
+// Sender-key distribution — version 1, recipients supplied unsorted
+// (subkey first) to exercise the canonical sort by recipient_pubkey.
+const SENDER_KEY_DIST_SIGNING_BYTES: &str =
+    "766f78706c792f67726f75702d6b65792d646973742f76310007000000636f6e76313233010000003140000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636340800000031313232333334344000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630080000003535363637373838";
+const SENDER_KEY_DIST_SIG: &str =
+    "36325dd1c3e2a36618ceef4b8d91a7c71d4274c441dbbc37cb42bf2e96106d59fecf0721cb3042e1410b575d072b79189c14896bbbfc6a4266de7857e45c7a06";
+
+fn dist_recipients() -> Vec<(String, String)> {
+    vec![
+        (SUBKEY_PUB.to_string(), "55667788".to_string()),
+        (MASTER_PUB.to_string(), "11223344".to_string()),
+    ]
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -252,4 +309,72 @@ fn pairing_claim_verify_vector() {
         proof: PAIRING_CLAIM_PROOF.to_string(),
     };
     assert!(claim.verify().is_ok());
+}
+
+#[test]
+fn test_master_dh_pubkey_vector() {
+    assert_eq!(master_dh_pub_hex(), MASTER_DH_PUB);
+}
+
+#[test]
+fn dh_key_record_signing_bytes_vector() {
+    let sb = DhKeyRecord::signing_bytes(MASTER_PUB, MASTER_DH_PUB);
+    assert_eq!(hex::encode(&sb), DH_KEY_RECORD_SIGNING_BYTES);
+}
+
+#[test]
+fn dh_key_record_signature_vector() {
+    let sb = DhKeyRecord::signing_bytes(MASTER_PUB, MASTER_DH_PUB);
+    let sig = master_key().sign(&sb);
+    assert_eq!(hex::encode(sig.to_bytes()), DH_KEY_RECORD_SIG);
+}
+
+#[test]
+fn dh_key_record_verify_vector() {
+    let record = DhKeyRecord {
+        pubkey: MASTER_PUB.to_string(),
+        dh_pubkey_hex: MASTER_DH_PUB.to_string(),
+        signature_hex: DH_KEY_RECORD_SIG.to_string(),
+        published_at: TS as i64,
+    };
+    assert!(record.verify().is_ok());
+}
+
+#[test]
+fn dm_envelope_signing_bytes_vector() {
+    let sb = dm_envelope_signing_bytes(DM_CONV_ID, DM_CIPHERTEXT_HEX, DM_NONCE_HEX, MASTER_DH_PUB);
+    assert_eq!(hex::encode(&sb), DM_ENVELOPE_SIGNING_BYTES);
+}
+
+#[test]
+fn dm_envelope_signature_vector() {
+    let sb = dm_envelope_signing_bytes(DM_CONV_ID, DM_CIPHERTEXT_HEX, DM_NONCE_HEX, MASTER_DH_PUB);
+    let sig = master_key().sign(&sb);
+    assert_eq!(hex::encode(sig.to_bytes()), DM_ENVELOPE_SIG);
+}
+
+#[test]
+fn group_dm_envelope_signing_bytes_vector() {
+    let sb = group_dm_envelope_signing_bytes(DM_CONV_ID, 1, 2, DM_CIPHERTEXT_HEX, DM_NONCE_HEX);
+    assert_eq!(hex::encode(&sb), GROUP_DM_ENVELOPE_SIGNING_BYTES);
+}
+
+#[test]
+fn group_dm_envelope_signature_vector() {
+    let sb = group_dm_envelope_signing_bytes(DM_CONV_ID, 1, 2, DM_CIPHERTEXT_HEX, DM_NONCE_HEX);
+    let sig = master_key().sign(&sb);
+    assert_eq!(hex::encode(sig.to_bytes()), GROUP_DM_ENVELOPE_SIG);
+}
+
+#[test]
+fn sender_key_dist_signing_bytes_vector() {
+    let sb = sender_key_dist_signing_bytes(DM_CONV_ID, 1, &dist_recipients());
+    assert_eq!(hex::encode(&sb), SENDER_KEY_DIST_SIGNING_BYTES);
+}
+
+#[test]
+fn sender_key_dist_signature_vector() {
+    let sb = sender_key_dist_signing_bytes(DM_CONV_ID, 1, &dist_recipients());
+    let sig = master_key().sign(&sb);
+    assert_eq!(hex::encode(sig.to_bytes()), SENDER_KEY_DIST_SIG);
 }

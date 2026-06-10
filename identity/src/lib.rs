@@ -18,6 +18,7 @@ pub use master::MasterIdentity;
 pub use pow::{compute_security_level, leading_zero_bits, verify_security_level};
 pub use subkey::DeviceSubkey;
 pub use wire::{
+    dm_envelope_signing_bytes, group_dm_envelope_signing_bytes, sender_key_dist_signing_bytes,
     DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer, PairingStatus,
     PublicHubEntry, PublicHubProfile, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };

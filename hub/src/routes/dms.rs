@@ -609,19 +609,14 @@ fn parse_dm_attachments(json: Option<String>) -> Vec<Attachment> {
 }
 
 /// Signing bytes for the encrypted DM envelope. Both sender and hub use this.
+/// Canonical encoder (and pinned hex vectors) live in the identity crate.
 fn envelope_signing_bytes(env: &EncryptedDmEnvelope) -> Vec<u8> {
-    let mut out = b"voxply/dm-ciphertext/v1\0".to_vec();
-    for s in [
+    voxply_identity::dm_envelope_signing_bytes(
         &env.conv_id,
         &env.ciphertext_hex,
         &env.nonce_hex,
         &env.dh_pubkey_hex,
-    ] {
-        let b = s.as_bytes();
-        out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-        out.extend_from_slice(b);
-    }
-    out
+    )
 }
 
 fn group_envelope_signing_bytes(
@@ -631,19 +626,13 @@ fn group_envelope_signing_bytes(
     ciphertext_hex: &str,
     nonce_hex: &str,
 ) -> Vec<u8> {
-    let mut out = b"voxply/group-dm-ciphertext/v1\0".to_vec();
-    for s in [
+    voxply_identity::group_dm_envelope_signing_bytes(
         conv_id,
-        &version.to_string(),
-        &iteration.to_string(),
+        version,
+        iteration,
         ciphertext_hex,
         nonce_hex,
-    ] {
-        let b = s.as_bytes();
-        out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-        out.extend_from_slice(b);
-    }
-    out
+    )
 }
 
 fn sender_key_dist_signing_bytes(
@@ -651,22 +640,11 @@ fn sender_key_dist_signing_bytes(
     version: u32,
     recipients: &[SenderKeyRecipientBlob],
 ) -> Vec<u8> {
-    let mut out = b"voxply/group-key-dist/v1\0".to_vec();
-    for s in [conv_id, &version.to_string()] {
-        let b = s.as_bytes();
-        out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-        out.extend_from_slice(b);
-    }
-    let mut sorted: Vec<&SenderKeyRecipientBlob> = recipients.iter().collect();
-    sorted.sort_by(|a, b| a.recipient_pubkey.cmp(&b.recipient_pubkey));
-    for r in sorted {
-        for s in [&r.recipient_pubkey, &r.wrapped_key_hex] {
-            let b = s.as_bytes();
-            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
-            out.extend_from_slice(b);
-        }
-    }
-    out
+    let pairs: Vec<(String, String)> = recipients
+        .iter()
+        .map(|r| (r.recipient_pubkey.clone(), r.wrapped_key_hex.clone()))
+        .collect();
+    voxply_identity::sender_key_dist_signing_bytes(conv_id, version, &pairs)
 }
 
 /// Hub-to-hub DM delivery endpoint. The caller is an authenticated peer hub.

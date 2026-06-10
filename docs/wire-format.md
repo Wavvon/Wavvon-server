@@ -38,6 +38,21 @@ master_pub : 79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664
 subkey_pub : e7f162a10bec559afea195e4dce84b69568d5d2cb0963eb446c0685e2b17f2f0
 ```
 
+Derived X25519 DH public key (standard ed25519→x25519 conversion:
+`SHA-512(master seed)[0..32]` → clamp → `X25519(scalar, basepoint)`):
+
+```
+master_dh_pub : 4a3807d064d077181cc070989e76891d20dca5559548dc2c77c1a50273882b38
+```
+
+Fixed inputs shared by the DM-envelope vectors below:
+
+```
+conv_id        : "conv123"
+ciphertext_hex : 63697068657274657874   (hex of "ciphertext")
+nonce_hex      : 0102030405060708090a0b0c
+```
+
 ---
 
 ## Envelope layouts
@@ -236,6 +251,126 @@ dh_pubkey_hex: write_str(x25519_pubkey_hex)
 ```
 
 Signed by the user's Ed25519 identity key.
+
+**Test vector** — pubkey = `master_pub`, dh_pubkey = `master_dh_pub`:
+
+```
+signing_bytes:
+  766f78706c792f64682d6b65792f7631004000000037396235353632653866653635
+  34663934303738623131326538613938626137393031663835336165363935626564
+  37653065333931306261643034393636344000000034613338303764303634643037
+  37313831636330373039383965373638393164323064636135353539353438646332
+  6337376331613530323733383832623338
+
+signature (master):
+  055425d9cd0d2488c89bb9b0cc13f7ccb7f8581d20ba767123d4131bff9dd6abbb24
+  b73c111777602d79b4cf4f7f8cc7c9eb0f3b3409bb2f1ab422330a2a7807
+```
+
+---
+
+### EncryptedDmEnvelope
+
+Signing bytes for a 1:1 E2E encrypted DM. Signed by the **sender's**
+Ed25519 identity key; the hub recomputes these bytes and verifies the
+signature before storing the envelope.
+
+```
+prefix        : "voxply/dm-ciphertext/v1\0"   (24 bytes incl. NUL)
+conv_id       : write_str(conv_id)
+ciphertext_hex: write_str(ciphertext_hex)
+nonce_hex     : write_str(nonce_hex)
+dh_pubkey_hex : write_str(dh_pubkey_hex)
+```
+
+Note: the hex fields are length-prefixed **hex strings**, not raw bytes.
+
+**Test vector** — conv_id = `"conv123"`, dh_pubkey = `master_dh_pub`:
+
+```
+signing_bytes:
+  766f78706c792f646d2d636970686572746578742f76310007000000636f6e763132
+  33140000003633363937303638363537323734363537383734180000003031303230
+  33303430353036303730383039306130623063400000003461333830376430363464
+  30373731383163633037303938396537363839316432306463613535353935343864
+  63326337376331613530323733383832623338
+
+signature (master):
+  cacd0b3e90b7b09c25d0a2ae508470338a1b6c5b73935ba6245125c13c6bdc67bf64
+  7f9e108b59ea3ca913c3e7ad55b6c3a3157b9e95afc995ed9c22f9f34506
+```
+
+---
+
+### GroupEncryptedEnvelope
+
+Signing bytes for a group E2E encrypted DM (sender-key scheme). Signed
+by the sender's Ed25519 identity key.
+
+```
+prefix            : "voxply/group-dm-ciphertext/v1\0"   (30 bytes incl. NUL)
+conv_id           : write_str(conv_id)
+sender_key_version: write_str(decimal string of u32)
+iteration         : write_str(decimal string of u32)
+ciphertext_hex    : write_str(ciphertext_hex)
+nonce_hex         : write_str(nonce_hex)
+```
+
+Note: `sender_key_version` and `iteration` are length-prefixed
+**decimal strings** (e.g. `1` → `01000000 31`), not raw integers.
+
+**Test vector** — conv_id = `"conv123"`, sender_key_version = 1,
+iteration = 2:
+
+```
+signing_bytes:
+  766f78706c792f67726f75702d646d2d636970686572746578742f76310007000000
+  636f6e76313233010000003101000000321400000036333639373036383635373237
+  34363537383734180000003031303230333034303530363037303830393061306230
+  63
+
+signature (master):
+  57c14f56b4367584ca5595586dde46dee09757d95200eeab6044948a2c6e39d3db7f
+  aa4a2ed352963c5d5ad76f85fb9b4345e3912bdd9d758583b362786b610f
+```
+
+---
+
+### Sender-key distribution (PushSenderKeyRequest)
+
+Signing bytes for a group sender-key distribution push. Signed by the
+sender's Ed25519 identity key.
+
+```
+prefix            : "voxply/group-key-dist/v1\0"   (25 bytes incl. NUL)
+conv_id           : write_str(conv_id)
+sender_key_version: write_str(decimal string of u32)
+per recipient     : write_str(recipient_pubkey)
+                    write_str(wrapped_key_hex)
+```
+
+Recipients are sorted by `recipient_pubkey` (byte-wise ascending)
+before encoding, so the signature is independent of submission order.
+There is **no count prefix** before the recipient list.
+
+**Test vector** — conv_id = `"conv123"`, sender_key_version = 1,
+recipients supplied unsorted as
+`[(subkey_pub, "55667788"), (master_pub, "11223344")]`
+(canonical sort puts `master_pub` first):
+
+```
+signing_bytes:
+  766f78706c792f67726f75702d6b65792d646973742f76310007000000636f6e7631
+  32330100000031400000003739623535363265386665363534663934303738623131
+  32653861393862613739303166383533616536393562656437653065333931306261
+  64303439363634080000003131323233333434400000006537663136326131306265
+  63353539616665613139356534646365383462363935363864356432636230393633
+  65623434366330363835653262313766326630080000003535363637373838
+
+signature (master):
+  36325dd1c3e2a36618ceef4b8d91a7c71d4274c441dbbc37cb42bf2e96106d59fecf
+  0721cb3042e1410b575d072b79189c14896bbbfc6a4266de7857e45c7a06
+```
 
 ---
 
