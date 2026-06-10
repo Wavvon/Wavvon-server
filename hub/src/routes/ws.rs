@@ -3,16 +3,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::routes::chat_models::{
-    HubStreamInfo, VoiceParticipantInfo, WsClientMessage, WsParams, WsServerMessage,
-    VoiceRosterEntry,
+    HubStreamInfo, VoiceParticipantInfo, VoiceRosterEntry, WsClientMessage, WsParams,
+    WsServerMessage,
 };
 use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
 
@@ -31,45 +31,30 @@ pub async fn ws_handler(
     Query(params): Query<WsParams>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let public_key: Option<String> =
-        sqlx::query_scalar("SELECT public_key FROM sessions WHERE token = ?")
-            .bind(&params.token)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Delegate to the shared session-validity helper so the WS admission
+    // checks never drift from what the HTTP AuthUser middleware enforces
+    // (session expiry, revocation, approval_status, bans).
+    let public_key = crate::auth::handlers::validate_ws_token(&state.db, &params.token).await?;
 
-    let public_key = public_key
-        .ok_or((StatusCode::UNAUTHORIZED, "Invalid token".to_string()))?;
-
-    let revoked_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = ?",
-    )
-    .bind(&public_key)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-
-    if revoked_count > 0 {
-        return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
-    }
-
-    tracing::info!("WebSocket connected: {}", &public_key[..16.min(public_key.len())]);
+    tracing::info!(
+        "WebSocket connected: {}",
+        &public_key[..16.min(public_key.len())]
+    );
 
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, state, public_key)))
 }
 
 async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: String) {
     // Determine whether this connection belongs to a bot.
-    let is_bot: bool = sqlx::query_scalar::<_, i64>(
-        "SELECT is_bot FROM users WHERE public_key = ?",
-    )
-    .bind(&public_key)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(0)
-        != 0;
+    let is_bot: bool =
+        sqlx::query_scalar::<_, i64>("SELECT is_bot FROM users WHERE public_key = ?")
+            .bind(&public_key)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0)
+            != 0;
 
     state.online_users.write().await.insert(public_key.clone());
 
@@ -78,11 +63,14 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
     // For bots we use an mpsc channel so that the events module can push
     // hub_event frames without going through the broadcast flood.
     // For regular users we keep the existing broadcast approach.
-    let (bot_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) =
-        mpsc::channel(256);
+    let (bot_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
 
     if is_bot {
-        state.bot_sessions.write().await.insert(public_key.clone(), bot_tx.clone());
+        state
+            .bot_sessions
+            .write()
+            .await
+            .insert(public_key.clone(), bot_tx.clone());
     }
 
     let mut chat_rx = state.chat_tx.subscribe();
@@ -164,7 +152,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                     };
                     let json = serde_json::to_string(&chunk_envelope).unwrap();
                     let _ = ws_tx.send(Message::Text(json.into())).await;
-                    let _ = ws_tx.send(Message::Binary(init_bytes.to_vec().into())).await;
+                    let _ = ws_tx
+                        .send(Message::Binary(init_bytes.to_vec().into()))
+                        .await;
                 }
             }
         }
@@ -219,7 +209,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                             if let crate::routes::chat_models::ChatEvent::Video { .. } = &event {
                                 let val: serde_json::Value = serde_json::from_str(&pre_json).unwrap_or_default();
                                 if let Some(target) = val.get("to_pubkey").and_then(|v| v.as_str()) {
-                                    if target != &public_key {
+                                    if target != public_key {
                                         continue;
                                     }
                                 }
@@ -358,7 +348,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                 .await
                                 .ok()
                                 .flatten()
-                                .unwrap_or_else(|| {
+                                .unwrap_or({
                                     // fall back to legacy channel_settings table
                                     0i64
                                 });
@@ -1778,7 +1768,11 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                     (
                         ch_id.clone(),
                         sid.clone(),
-                        active.cross_channel_subscribers.iter().cloned().collect::<Vec<_>>(),
+                        active
+                            .cross_channel_subscribers
+                            .iter()
+                            .cloned()
+                            .collect::<Vec<_>>(),
                     )
                 })
             })
@@ -1815,7 +1809,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
     }
     state.online_users.write().await.remove(&public_key);
 
-    tracing::info!("WebSocket disconnected: {}", &public_key[..16.min(public_key.len())]);
+    tracing::info!(
+        "WebSocket disconnected: {}",
+        &public_key[..16.min(public_key.len())]
+    );
 }
 
 async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
@@ -1920,12 +1917,7 @@ async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
 
 /// Broadcast a v2 signaling envelope via `chat_tx` using `ChatEvent::ScreenShareSignal`
 /// so the WS dispatch loop delivers it only to `to_pubkey`.
-fn send_v2_signal(
-    state: &AppState,
-    channel_id: String,
-    to_pubkey: String,
-    msg: WsServerMessage,
-) {
+fn send_v2_signal(state: &AppState, channel_id: String, to_pubkey: String, msg: WsServerMessage) {
     let ev = crate::routes::chat_models::ChatEvent::ScreenShareSignal {
         channel_id,
         to_pubkey,
@@ -1942,15 +1934,14 @@ async fn get_voice_participants(state: &AppState, channel_id: &str) -> Vec<Voice
     };
 
     let mut result = Vec::new();
-    for (pk, _addr) in participants {
-        let display_name: Option<String> = sqlx::query_scalar(
-            "SELECT display_name FROM users WHERE public_key = ?",
-        )
-        .bind(pk)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+    for pk in participants.keys() {
+        let display_name: Option<String> =
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+                .bind(pk)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
 
         result.push(VoiceParticipantInfo {
             public_key: pk.clone(),
@@ -2002,13 +1993,12 @@ async fn resolve_role_addrs(
     role_id: &str,
     exclude_addr: std::net::SocketAddr,
 ) -> HashSet<std::net::SocketAddr> {
-    let role_users: Vec<String> = sqlx::query_scalar(
-        "SELECT user_public_key FROM user_roles WHERE role_id = ?",
-    )
-    .bind(role_id)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let role_users: Vec<String> =
+        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = ?")
+            .bind(role_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
 
     let voice_channels = state.voice_channels.read().await;
     let mut addrs = HashSet::new();
@@ -2050,8 +2040,7 @@ async fn re_resolve_whisper_sessions(state: &AppState) {
                 continue;
             }
         };
-        let mut new_addrs =
-            resolve_whisper_targets(state, &defs, sender_addr).await;
+        let mut new_addrs = resolve_whisper_targets(state, &defs, sender_addr).await;
         for def in &defs {
             if def.target_type == "role" {
                 new_addrs.extend(resolve_role_addrs(state, &def.id, sender_addr).await);
@@ -2075,14 +2064,13 @@ async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<VoiceRoster
 
     let mut result = Vec::new();
     for (pk, sid) in ch_map {
-        let display_name: Option<String> = sqlx::query_scalar(
-            "SELECT display_name FROM users WHERE public_key = ?",
-        )
-        .bind(&pk)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+        let display_name: Option<String> =
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+                .bind(&pk)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
         result.push(VoiceRosterEntry {
             sender_id: sid,
             public_key: pk,

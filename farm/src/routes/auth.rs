@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::http::HeaderMap;
+use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -54,7 +54,7 @@ pub struct TokenResponse {
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64
 }
 
@@ -113,8 +113,10 @@ pub async fn verify(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (challenge_hex, expires_at) = row
-        .ok_or((StatusCode::UNAUTHORIZED, "No pending challenge for this key".to_string()))?;
+    let (challenge_hex, expires_at) = row.ok_or((
+        StatusCode::UNAUTHORIZED,
+        "No pending challenge for this key".to_string(),
+    ))?;
 
     if now >= expires_at {
         // Delete expired challenge before returning.
@@ -126,10 +128,14 @@ pub async fn verify(
     }
 
     // Verify the Ed25519 signature over the challenge bytes.
-    let challenge_bytes =
-        hex::decode(&challenge_hex).map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Bad challenge hex in DB".to_string()))?;
-    let sig_bytes =
-        hex::decode(&req.signature).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
+    let challenge_bytes = hex::decode(&challenge_hex).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Bad challenge hex in DB".to_string(),
+        )
+    })?;
+    let sig_bytes = hex::decode(&req.signature)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
     voxply_identity::verify_signature(&req.public_key, &challenge_bytes, &sig_bytes)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
@@ -152,17 +158,27 @@ pub async fn verify(
             if let Some((totp_secret, totp_enabled)) = admin_row {
                 if totp_enabled != 0 {
                     let secret = totp_secret.ok_or_else(|| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, "totp_secret_missing".to_string())
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "totp_secret_missing".to_string(),
+                        )
                     })?;
-                    let code = req.totp_code.as_deref().ok_or_else(|| {
-                        (StatusCode::UNAUTHORIZED, "totp_required".to_string())
-                    })?;
+                    let code = req
+                        .totp_code
+                        .as_deref()
+                        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "totp_required".to_string()))?;
                     let valid = (|| -> Option<bool> {
                         let bytes = Secret::Encoded(secret.clone()).to_bytes().ok()?;
                         let totp = TOTP::new(
-                            Algorithm::SHA1, 6, 1, 30, bytes,
-                            None, "voxply-farm".to_string(),
-                        ).ok()?;
+                            Algorithm::SHA1,
+                            6,
+                            1,
+                            30,
+                            bytes,
+                            None,
+                            "voxply-farm".to_string(),
+                        )
+                        .ok()?;
                         totp.check_current(code).ok()
                     })()
                     .unwrap_or(false);
@@ -301,5 +317,8 @@ fn extract_bearer(headers: &HeaderMap) -> Result<&str, (StatusCode, String)> {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or((StatusCode::UNAUTHORIZED, "Missing or invalid Authorization header".to_string()))
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing or invalid Authorization header".to_string(),
+        ))
 }
