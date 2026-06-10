@@ -150,6 +150,12 @@ pub async fn send_dm(
         ));
     }
 
+    // Federated-ban check: a federally banned user must not be able to send DMs
+    // even when they hold an active session token obtained before the ban.
+    if crate::routes::moderation::is_federated_banned(&state.db, &user.public_key).await? {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+
     // 30 messages per 60 seconds per user
     {
         let mut map = state

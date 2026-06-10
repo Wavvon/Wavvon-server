@@ -66,6 +66,14 @@ pub async fn send_message(
         ));
     }
 
+    // Federated-ban check: reject message submission from any user whose
+    // master key is listed in federated_bans. Auth middleware already blocks
+    // new sessions for these users, but an active session obtained before the
+    // ban was applied can still reach here without this second check.
+    if crate::routes::moderation::is_federated_banned(&state.db, &user.public_key).await? {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
         .bind(&channel_id)
         .fetch_optional(&state.db)

@@ -923,6 +923,36 @@ pub async fn is_voice_muted(
     Ok(count > 0)
 }
 
+/// Returns true if the user's master key (or canonical pubkey for users with
+/// no paired master) appears in `federated_bans`.
+///
+/// Mirrors the check in `auth/middleware.rs` so the same policy is enforced
+/// at the message-submission layer. One indexed query; no cache needed since
+/// federated bans are rare and the `target_master_pubkey` column is indexed.
+pub async fn is_federated_banned(
+    db: &sqlx::AnyPool,
+    public_key: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let master_pk: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+            .bind(public_key)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .flatten();
+
+    let check_key = master_pk.as_deref().unwrap_or(public_key);
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = ?")
+            .bind(check_key)
+            .fetch_one(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(count > 0)
+}
+
 // ---- Federated ban list endpoint ----
 
 /// GET /federation/banlist
