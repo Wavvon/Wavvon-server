@@ -310,6 +310,7 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),

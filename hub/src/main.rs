@@ -557,6 +557,7 @@ async fn main() -> Result<()> {
         started_at: std::time::Instant::now(),
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
+        voice_relay_active: RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
@@ -580,6 +581,18 @@ async fn main() -> Result<()> {
                         map.get(&from_addr).cloned()
                     };
                     if let Some((channel_id, sender_pk)) = lookup {
+                        // Gate: drop the packet if this pubkey no longer has a
+                        // live WS-backed voice session.  This is the enforcement
+                        // point that ties UDP relay lifetime to WS session
+                        // lifetime — leave_voice() removes the entry, so a
+                        // packet arriving after WS disconnect is rejected here
+                        // before any fan-out work is done.
+                        {
+                            let active = voice_state.voice_relay_active.read().await;
+                            if !active.contains(&sender_pk) {
+                                continue;
+                            }
+                        }
                         // Look up the sender's sender_id for this channel.
                         let sender_id: u16 = {
                             let sids = voice_state.voice_sender_ids.read().await;

@@ -294,6 +294,17 @@ pub struct AppState {
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
 
+    /// Pubkeys that currently own a live UDP relay slot.
+    ///
+    /// Inserted on `VoiceJoin`; removed on `leave_voice` (called on WS
+    /// disconnect and on explicit `VoiceLeave`).  The UDP receive loop checks
+    /// this set before forwarding a packet so that stale source addresses from
+    /// a session whose WS connection closed cannot relay traffic.
+    ///
+    /// O(1) read under a shared lock — intentionally kept as a plain
+    /// `RwLock<HashSet>` to avoid adding a new crate dependency.
+    pub voice_relay_active: RwLock<HashSet<String>>,
+
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
 

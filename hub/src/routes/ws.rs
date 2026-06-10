@@ -423,6 +423,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
                                     .insert(public_key.clone(), client_addr);
                                 state.voice_addr_map.write().await
                                     .insert(client_addr, (channel_id.clone(), public_key.clone()));
+                                // Mark this pubkey as having an active relay slot so the
+                                // UDP receive loop knows the WS session is live.
+                                state.voice_relay_active.write().await
+                                    .insert(public_key.clone());
 
                                 voice_channel = Some(channel_id.clone());
 
@@ -1815,6 +1819,16 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: Stri
     );
 }
 
+/// Public helper that exposes the leave-voice cleanup path for integration tests.
+///
+/// Calls `leave_voice` directly so tests can simulate WS disconnect or
+/// explicit leave without needing a live WS connection.  Not part of the
+/// public HTTP/WS API — only referenced from `tests/voice_relay_flow.rs`.
+#[doc(hidden)]
+pub async fn leave_voice_for_test(state: &AppState, public_key: &str, channel_id: &str) {
+    leave_voice(state, public_key, channel_id).await;
+}
+
 async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     let removed_addr = {
         let mut channels = state.voice_channels.write().await;
@@ -1903,6 +1917,12 @@ async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     // Clean up the departing user's whisper session if they were whispering.
     state.whisper_targets.write().await.remove(public_key);
     state.whisper_target_defs.write().await.remove(public_key);
+
+    // Revoke the UDP relay slot.  After this point, packets arriving from the
+    // address previously registered by this user will be dropped by the relay
+    // loop — even if the OS reuses the source port for another process before
+    // the addr_map entry is garbage-collected.
+    state.voice_relay_active.write().await.remove(public_key);
 
     // Broadcast updated roster
     let roster = get_voice_roster(state, channel_id).await;
