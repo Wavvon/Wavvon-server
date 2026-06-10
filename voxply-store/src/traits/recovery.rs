@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::KeyRotationRequestRow;
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait RecoveryStore: Send + Sync {
@@ -31,10 +31,7 @@ pub trait RecoveryStore: Send + Sync {
         contact_pubkey: &str,
     ) -> Result<(), StoreError>;
 
-    async fn list_recovery_contacts(
-        &self,
-        owner_pubkey: &str,
-    ) -> Result<Vec<String>, StoreError>;
+    async fn list_recovery_contacts(&self, owner_pubkey: &str) -> Result<Vec<String>, StoreError>;
 
     // ---- Key rotation requests ----
 

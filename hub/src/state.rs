@@ -54,9 +54,15 @@ pub enum DmEvent {
 impl DmEvent {
     pub fn conversation_id(&self) -> &str {
         match self {
-            DmEvent::Message { conversation_id, .. }
-            | DmEvent::Typing { conversation_id, .. }
-            | DmEvent::MemberChanged { conversation_id, .. } => conversation_id,
+            DmEvent::Message {
+                conversation_id, ..
+            }
+            | DmEvent::Typing {
+                conversation_id, ..
+            }
+            | DmEvent::MemberChanged {
+                conversation_id, ..
+            } => conversation_id,
         }
     }
     pub fn sender(&self) -> &str {
@@ -117,7 +123,7 @@ pub struct ScreenChunkEvent {
 /// Attenuation parameters for a voice zone.
 #[derive(Clone, Debug)]
 pub struct AttenuationConfig {
-    pub model: String,        // "linear" | "inverse_square" | "step" | "exponential"
+    pub model: String, // "linear" | "inverse_square" | "step" | "exponential"
     pub max_radius: f64,
     pub ref_dist: f64,
     pub rolloff: f64,
@@ -262,7 +268,6 @@ pub struct AppState {
     pub video_channels: RwLock<HashMap<String, HashSet<String>>>,
 
     // ---- Farm integration (Phase 1, dual-issue step 1) ----
-
     /// Wall time when this hub process started. Used by /metrics.
     pub started_at: std::time::Instant,
 
@@ -290,7 +295,12 @@ pub struct AppState {
 
     /// In-memory link preview cache: url → (result, inserted_at).
     /// Entries expire after 30 minutes.
-    pub preview_cache: std::sync::Mutex<std::collections::HashMap<String, (crate::routes::preview::LinkPreview, std::time::Instant)>>,
+    pub preview_cache: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (crate::routes::preview::LinkPreview, std::time::Instant),
+        >,
+    >,
 
     /// Full-text search backend. Either TantivySearch or NullSearch.
     pub search: Arc<dyn crate::search::MessageSearch>,

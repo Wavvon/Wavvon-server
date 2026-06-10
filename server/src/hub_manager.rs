@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use anyhow::{Context, Result};
-use tokio::sync::RwLock;
+use std::collections::HashMap;
 use tokio::process::Child;
+use tokio::sync::RwLock;
 
 struct HubProcess {
     port: u16,
@@ -17,7 +17,11 @@ pub struct HubManager {
 
 impl HubManager {
     pub fn new(hub_bin: String, base_port: u16) -> Self {
-        Self { hubs: RwLock::new(HashMap::new()), hub_bin, base_port }
+        Self {
+            hubs: RwLock::new(HashMap::new()),
+            hub_bin,
+            base_port,
+        }
     }
 
     pub async fn spawn_hub(
@@ -31,7 +35,7 @@ impl HubManager {
         let bin = std::env::var("VOXPLY_HUB_BIN").unwrap_or_else(|_| self.hub_bin.clone());
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.env("VOXPLY_HUB_DB", db_path)
-           .env("VOXPLY_HUB_HTTP_PORT", port.to_string());
+            .env("VOXPLY_HUB_HTTP_PORT", port.to_string());
         if let Some(pk) = owner_pubkey {
             cmd.env("VOXPLY_OWNER_PUBKEY", pk);
         }
@@ -39,7 +43,13 @@ impl HubManager {
             cmd.env("VOXPLY_FARM_URL", url);
         }
         let child = cmd.spawn().with_context(|| format!("spawn hub {hub_id}"))?;
-        self.hubs.write().await.insert(hub_id.to_string(), HubProcess { port, _child: child });
+        self.hubs.write().await.insert(
+            hub_id.to_string(),
+            HubProcess {
+                port,
+                _child: child,
+            },
+        );
         tracing::info!(hub_id, port, "Hub spawned");
         Ok(())
     }
@@ -54,7 +64,9 @@ impl HubManager {
     }
 
     pub async fn list_hubs(&self) -> Vec<serde_json::Value> {
-        self.hubs.read().await
+        self.hubs
+            .read()
+            .await
             .iter()
             .map(|(id, p)| serde_json::json!({"hub_id": id, "port": p.port, "status": "running"}))
             .collect()

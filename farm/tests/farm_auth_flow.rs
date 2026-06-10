@@ -44,8 +44,18 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
         .await
         .unwrap();
 
-    let hub_manager = Arc::new(HubManager::new("voxply-hub".to_string(), farm_url.clone(), 9100));
-    let state = Arc::new(FarmState::new(db, keypair, farm_url, hub_manager, "/tmp/hubs-test".to_string()));
+    let hub_manager = Arc::new(HubManager::new(
+        "voxply-hub".to_string(),
+        farm_url.clone(),
+        9100,
+    ));
+    let state = Arc::new(FarmState::new(
+        db,
+        keypair,
+        farm_url,
+        hub_manager,
+        "/tmp/hubs-test".to_string(),
+    ));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state)
 }
@@ -82,7 +92,11 @@ async fn challenge_returns_hex_nonce() {
     resp.assert_status_ok();
     let body: Value = resp.json();
     let challenge = body["challenge"].as_str().unwrap();
-    assert_eq!(challenge.len(), 64, "challenge should be 32 bytes hex (64 chars)");
+    assert_eq!(
+        challenge.len(),
+        64,
+        "challenge should be 32 bytes hex (64 chars)"
+    );
     assert!(hex::decode(challenge).is_ok());
 }
 
@@ -91,13 +105,25 @@ async fn challenge_replaces_existing_pending() {
     let (server, _) = setup().await;
     let pubkey = Identity::generate().public_key_hex();
 
-    let r1 = server.post("/auth/challenge").json(&json!({ "public_key": pubkey })).await;
+    let r1 = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pubkey }))
+        .await;
     r1.assert_status_ok();
-    let c1 = r1.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let c1 = r1.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
-    let r2 = server.post("/auth/challenge").json(&json!({ "public_key": pubkey })).await;
+    let r2 = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pubkey }))
+        .await;
     r2.assert_status_ok();
-    let c2 = r2.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let c2 = r2.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Two challenges for the same key — the second one must be different (random).
     // (Extremely unlikely to collide on 32 random bytes.)
@@ -120,7 +146,10 @@ async fn verify_happy_path_returns_farm_token() {
         .json(&json!({ "public_key": pubkey }))
         .await;
     cr.assert_status_ok();
-    let challenge_hex = cr.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let challenge_hex = cr.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 2. Sign the challenge.
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
@@ -154,7 +183,10 @@ async fn verify_rejects_bad_signature() {
         .json(&json!({ "public_key": pubkey }))
         .await;
     cr.assert_status_ok();
-    let challenge_hex = cr.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let challenge_hex = cr.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Sign with a different identity (wrong key).
     let wrong_identity = Identity::generate();
@@ -196,17 +228,29 @@ async fn renew_returns_new_token_with_different_jti() {
     let pubkey = identity.public_key_hex();
 
     // Authenticate first.
-    let cr = server.post("/auth/challenge").json(&json!({ "public_key": pubkey })).await;
-    let challenge_hex = cr.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let cr = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pubkey }))
+        .await;
+    let challenge_hex = cr.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
     let sig_hex = hex::encode(identity.sign(&challenge_bytes).to_bytes());
-    let vr = server.post("/auth/verify").json(&json!({ "public_key": pubkey, "signature": sig_hex })).await;
+    let vr = server
+        .post("/auth/verify")
+        .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
+        .await;
     let old_token = vr.json::<Value>()["token"].as_str().unwrap().to_string();
 
     // Renew.
     let rr = server
         .post("/auth/renew")
-        .add_header("Authorization", HeaderValue::from_str(&format!("Bearer {old_token}")).unwrap())
+        .add_header(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {old_token}")).unwrap(),
+        )
         .await;
     rr.assert_status_ok();
     let new_token = rr.json::<Value>()["token"].as_str().unwrap().to_string();
@@ -215,7 +259,10 @@ async fn renew_returns_new_token_with_different_jti() {
     let old_payload = verify_token(&farm_pubkey, &old_token).unwrap();
     let new_payload = verify_token(&farm_pubkey, &new_token).unwrap();
 
-    assert_ne!(old_payload.jti, new_payload.jti, "renew must produce a fresh jti");
+    assert_ne!(
+        old_payload.jti, new_payload.jti,
+        "renew must produce a fresh jti"
+    );
     assert_eq!(old_payload.sub, new_payload.sub, "sub must be preserved");
 }
 
@@ -237,11 +284,20 @@ async fn revoke_check_returns_false_for_active_session() {
     let pubkey = identity.public_key_hex();
 
     // Auth to get a token.
-    let cr = server.post("/auth/challenge").json(&json!({ "public_key": pubkey })).await;
-    let challenge_hex = cr.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let cr = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pubkey }))
+        .await;
+    let challenge_hex = cr.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
     let sig_hex = hex::encode(identity.sign(&challenge_bytes).to_bytes());
-    let vr = server.post("/auth/verify").json(&json!({ "public_key": pubkey, "signature": sig_hex })).await;
+    let vr = server
+        .post("/auth/verify")
+        .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
+        .await;
     let token_str = vr.json::<Value>()["token"].as_str().unwrap().to_string();
 
     let payload = verify_token(&state.public_key_hex(), &token_str).unwrap();

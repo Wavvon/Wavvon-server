@@ -37,7 +37,13 @@ pub async fn ban_user(
     user: AuthUser,
     Json(req): Json<BanRequest>,
 ) -> Result<(StatusCode, Json<BanResponse>), (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.target_public_key, BAN_MEMBERS).await?;
+    require_can_moderate(
+        &state,
+        &user.public_key,
+        &req.target_public_key,
+        BAN_MEMBERS,
+    )
+    .await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -48,7 +54,7 @@ pub async fn ban_user(
     .bind(&req.target_public_key)
     .bind(&user.public_key)
     .bind(&req.reason)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -76,7 +82,8 @@ pub async fn ban_user(
                 Some(&target),
                 None,
                 serde_json::json!({ "reason": reason }),
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -141,7 +148,13 @@ pub async fn mute_user(
     user: AuthUser,
     Json(req): Json<MuteRequest>,
 ) -> Result<(StatusCode, Json<MuteResponse>), (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.target_public_key, MUTE_MEMBERS).await?;
+    require_can_moderate(
+        &state,
+        &user.public_key,
+        &req.target_public_key,
+        MUTE_MEMBERS,
+    )
+    .await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -152,7 +165,7 @@ pub async fn mute_user(
     .bind(&req.target_public_key)
     .bind(&user.public_key)
     .bind(&req.reason)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -222,8 +235,13 @@ pub async fn timeout_user(
     user: AuthUser,
     Json(req): Json<TimeoutRequest>,
 ) -> Result<(StatusCode, Json<MuteResponse>), (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.target_public_key, TIMEOUT_MEMBERS)
-        .await?;
+    require_can_moderate(
+        &state,
+        &user.public_key,
+        &req.target_public_key,
+        TIMEOUT_MEMBERS,
+    )
+    .await?;
 
     let now = crate::auth::handlers::unix_timestamp();
     let expires_at = now + req.duration_seconds as i64;
@@ -235,8 +253,8 @@ pub async fn timeout_user(
     .bind(&req.target_public_key)
     .bind(&user.public_key)
     .bind(&req.reason)
-    .bind(&expires_at)
-    .bind(&now)
+    .bind(expires_at)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -266,7 +284,13 @@ pub async fn kick_user(
     user: AuthUser,
     Json(req): Json<KickRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.target_public_key, KICK_MEMBERS).await?;
+    require_can_moderate(
+        &state,
+        &user.public_key,
+        &req.target_public_key,
+        KICK_MEMBERS,
+    )
+    .await?;
 
     // Delete their sessions to force re-auth
     sqlx::query("DELETE FROM sessions WHERE public_key = ?")
@@ -290,7 +314,8 @@ pub async fn kick_user(
                 Some(&target),
                 None,
                 serde_json::json!({}),
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -305,7 +330,13 @@ pub async fn channel_ban(
     Path(channel_id): Path<String>,
     Json(req): Json<ChannelBanRequest>,
 ) -> Result<(StatusCode, Json<ChannelBanResponse>), (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.target_public_key, MUTE_MEMBERS).await?;
+    require_can_moderate(
+        &state,
+        &user.public_key,
+        &req.target_public_key,
+        MUTE_MEMBERS,
+    )
+    .await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -389,7 +420,13 @@ pub async fn voice_mute(
     user: AuthUser,
     Json(req): Json<VoiceMuteRequest>,
 ) -> Result<(StatusCode, Json<VoiceMuteResponse>), (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.target_public_key, MUTE_MEMBERS).await?;
+    require_can_moderate(
+        &state,
+        &user.public_key,
+        &req.target_public_key,
+        MUTE_MEMBERS,
+    )
+    .await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -489,14 +526,13 @@ pub async fn get_talk_power(
     _user: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<TalkPowerResponse>, (StatusCode, String)> {
-    let min_talk_power: i64 = sqlx::query_scalar(
-        "SELECT min_talk_power FROM channel_settings WHERE channel_id = ?",
-    )
-    .bind(&channel_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .unwrap_or(0);
+    let min_talk_power: i64 =
+        sqlx::query_scalar("SELECT min_talk_power FROM channel_settings WHERE channel_id = ?")
+            .bind(&channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .unwrap_or(0);
 
     Ok(Json(TalkPowerResponse {
         channel_id,
@@ -667,14 +703,12 @@ pub async fn channel_voice_unmute(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MUTE_MEMBERS)?;
 
-    sqlx::query(
-        "DELETE FROM channel_voice_mutes WHERE channel_id = ? AND pubkey = ?",
-    )
-    .bind(&channel_id)
-    .bind(&pubkey)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("DELETE FROM channel_voice_mutes WHERE channel_id = ? AND pubkey = ?")
+        .bind(&channel_id)
+        .bind(&pubkey)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -759,14 +793,12 @@ pub async fn lower_hand(
         perms.require(MUTE_MEMBERS)?;
     }
 
-    sqlx::query(
-        "DELETE FROM raise_hand_requests WHERE channel_id = ? AND pubkey = ?",
-    )
-    .bind(&channel_id)
-    .bind(&pubkey)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("DELETE FROM raise_hand_requests WHERE channel_id = ? AND pubkey = ?")
+        .bind(&channel_id)
+        .bind(&pubkey)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -822,11 +854,7 @@ pub async fn is_channel_voice_muted(
     Ok(count > 0)
 }
 
-pub async fn has_raised_hand(
-    db: &sqlx::AnyPool,
-    channel_id: &str,
-    pubkey: &str,
-) -> bool {
+pub async fn has_raised_hand(db: &sqlx::AnyPool, channel_id: &str, pubkey: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM raise_hand_requests WHERE channel_id = ? AND pubkey = ?",
     )
@@ -839,13 +867,11 @@ pub async fn has_raised_hand(
 }
 
 pub async fn is_banned(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM bans WHERE target_public_key = ?",
-    )
-    .bind(public_key)
-    .fetch_one(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = ?")
+        .bind(public_key)
+        .fetch_one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(count > 0)
 }
@@ -858,7 +884,7 @@ pub async fn is_muted(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (Sta
         "SELECT COUNT(*) FROM mutes WHERE target_public_key = ? AND (expires_at IS NULL OR expires_at > ?)",
     )
     .bind(public_key)
-    .bind(&now)
+    .bind(now)
     .fetch_one(db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -887,13 +913,12 @@ pub async fn is_voice_muted(
     db: &sqlx::AnyPool,
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = ?",
-    )
-    .bind(public_key)
-    .fetch_one(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = ?")
+            .bind(public_key)
+            .fetch_one(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(count > 0)
 }
@@ -943,7 +968,10 @@ pub async fn get_federation_banlist(
     let payload_str = match serde_json::to_string(&payload) {
         Ok(s) => s,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialise error: {e}"))
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Serialise error: {e}"),
+            )
                 .into_response();
         }
     };

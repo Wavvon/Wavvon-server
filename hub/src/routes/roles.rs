@@ -62,7 +62,7 @@ pub async fn create_role(
         .bind(&req.name)
         .bind(req.priority)
         .bind(if req.display_separately { 1i64 } else { 0 })
-        .bind(&now)
+        .bind(now)
         .execute(&state.db)
         .await
         .map_err(|e| {
@@ -238,7 +238,7 @@ pub async fn assign_role(
     )
     .bind(&public_key)
     .bind(&role_id)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -271,12 +271,11 @@ pub async fn remove_role(
 
     // Prevent removing the last owner
     if role_id == "builtin-owner" {
-        let owner_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-owner'",
-        )
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        let owner_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-owner'")
+                .fetch_one(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
         if owner_count <= 1 {
             return Err((
@@ -301,7 +300,9 @@ pub async fn get_user_roles(
     _user: AuthUser,
     Path(public_key): Path<String>,
 ) -> Result<Json<Vec<RoleResponse>>, (StatusCode, String)> {
-    fetch_user_roles_response(&state.db, &public_key).await.map(Json)
+    fetch_user_roles_response(&state.db, &public_key)
+        .await
+        .map(Json)
 }
 
 pub async fn list_role_members(
@@ -312,13 +313,12 @@ pub async fn list_role_members(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MANAGE_ROLES)?;
 
-    let members: Vec<String> = sqlx::query_scalar(
-        "SELECT user_public_key FROM user_roles WHERE role_id = ?",
-    )
-    .bind(&role_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let members: Vec<String> =
+        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = ?")
+            .bind(&role_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(Json(members))
 }

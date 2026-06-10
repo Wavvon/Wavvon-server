@@ -123,14 +123,13 @@ pub async fn dispatch_slash(
     let message_id_hint = Uuid::new_v4().to_string();
 
     // Look up invoker display name.
-    let invoker_name: Option<String> = sqlx::query_scalar(
-        "SELECT display_name FROM users WHERE public_key = ?",
-    )
-    .bind(invoker_pubkey)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let invoker_name: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            .bind(invoker_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     let hub_url = hub_url(state).await;
 
@@ -233,14 +232,13 @@ pub async fn dispatch_slash(
         .ok();
 
         // Look up bot display name.
-        let bot_name: Option<String> = sqlx::query_scalar(
-            "SELECT display_name FROM users WHERE public_key = ?",
-        )
-        .bind(&matched.bot_pubkey)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+        let bot_name: Option<String> =
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+                .bind(&matched.bot_pubkey)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
 
         let message = MessageResponse {
             id: msg_id,
@@ -263,7 +261,13 @@ pub async fn dispatch_slash(
                 message: message.clone(),
             };
             let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-            let _ = state.chat_tx.send((ChatEvent::New { channel_id: channel_id.to_string(), message }, json));
+            let _ = state.chat_tx.send((
+                ChatEvent::New {
+                    channel_id: channel_id.to_string(),
+                    message,
+                },
+                json,
+            ));
         }
     }
 
@@ -319,7 +323,13 @@ pub async fn insert_ephemeral_error(
             message: message.clone(),
         };
         let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state.chat_tx.send((ChatEvent::New { channel_id: channel_id.to_string(), message }, json));
+        let _ = state.chat_tx.send((
+            ChatEvent::New {
+                channel_id: channel_id.to_string(),
+                message,
+            },
+            json,
+        ));
     }
 
     Ok(())
@@ -352,14 +362,13 @@ pub async fn dispatch_component(
         sender: String,
     }
 
-    let msg_info: Option<MsgInfo> = sqlx::query_as::<_, MsgInfo>(
-        "SELECT channel_id, sender FROM messages WHERE id = ?",
-    )
-    .bind(message_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let msg_info: Option<MsgInfo> =
+        sqlx::query_as::<_, MsgInfo>("SELECT channel_id, sender FROM messages WHERE id = ?")
+            .bind(message_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     let msg_info = match msg_info {
         Some(m) => m,
@@ -370,15 +379,13 @@ pub async fn dispatch_component(
     };
 
     // Verify the sender is a bot.
-    let is_bot: Option<i64> = sqlx::query_scalar(
-        "SELECT is_bot FROM users WHERE public_key = ?",
-    )
-    .bind(&msg_info.sender)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+        .bind(&msg_info.sender)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
 
     if is_bot != Some(1) {
         // Message not from a bot — components shouldn't fire on normal messages.
@@ -386,15 +393,14 @@ pub async fn dispatch_component(
     }
 
     // Get the bot's webhook_url from bot_profiles.
-    let webhook_url: Option<String> = sqlx::query_scalar(
-        "SELECT webhook_url FROM bot_profiles WHERE pubkey = ?",
-    )
-    .bind(&msg_info.sender)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .flatten();
+    let webhook_url: Option<String> =
+        sqlx::query_scalar("SELECT webhook_url FROM bot_profiles WHERE pubkey = ?")
+            .bind(&msg_info.sender)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .flatten();
 
     let webhook_url = match webhook_url {
         Some(u) if !u.is_empty() => u,
@@ -422,14 +428,13 @@ pub async fn dispatch_component(
     }
 
     // Look up user's display name.
-    let user_name: Option<String> = sqlx::query_scalar(
-        "SELECT display_name FROM users WHERE public_key = ?",
-    )
-    .bind(user_pubkey)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let user_name: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            .bind(user_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     let hub_url = hub_url(state).await;
 
@@ -521,14 +526,12 @@ async fn apply_component_response(
         let now = crate::auth::handlers::unix_timestamp();
 
         if let Some(new_body) = &body {
-            let _ = sqlx::query(
-                "UPDATE messages SET content = ?, edited_at = ? WHERE id = ?",
-            )
-            .bind(new_body)
-            .bind(now)
-            .bind(message_id)
-            .execute(&state.db)
-            .await;
+            let _ = sqlx::query("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?")
+                .bind(new_body)
+                .bind(now)
+                .bind(message_id)
+                .execute(&state.db)
+                .await;
         }
 
         if let Some(rows) = &components {
@@ -559,7 +562,13 @@ async fn apply_component_response(
                 message: updated.clone(),
             };
             let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-            let _ = state.chat_tx.send((ChatEvent::Edited { channel_id: channel_id.to_string(), message: updated }, json));
+            let _ = state.chat_tx.send((
+                ChatEvent::Edited {
+                    channel_id: channel_id.to_string(),
+                    message: updated,
+                },
+                json,
+            ));
         }
     }
 
@@ -581,14 +590,13 @@ async fn apply_component_response(
         .execute(&state.db)
         .await;
 
-        let bot_name: Option<String> = sqlx::query_scalar(
-            "SELECT display_name FROM users WHERE public_key = ?",
-        )
-        .bind(bot_pubkey)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+        let bot_name: Option<String> =
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+                .bind(bot_pubkey)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
 
         let message = MessageResponse {
             id: msg_id,
@@ -611,7 +619,13 @@ async fn apply_component_response(
                 message: message.clone(),
             };
             let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-            let _ = state.chat_tx.send((ChatEvent::New { channel_id: channel_id.to_string(), message }, json));
+            let _ = state.chat_tx.send((
+                ChatEvent::New {
+                    channel_id: channel_id.to_string(),
+                    message,
+                },
+                json,
+            ));
         }
     }
 }

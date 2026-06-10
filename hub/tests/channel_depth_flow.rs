@@ -1,8 +1,8 @@
-
 use serde_json::json;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 // ---- Admin settings endpoints ----
 

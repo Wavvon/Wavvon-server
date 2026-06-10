@@ -76,9 +76,7 @@ impl RateLimiter {
             bucket.tokens -= 1.0;
             // Opportunistic cleanup so the map doesn't grow forever for idle IPs.
             if buckets.len() > 10_000 {
-                buckets.retain(|_, b| {
-                    now.duration_since(b.last_refill) < Duration::from_secs(600)
-                });
+                buckets.retain(|_, b| now.duration_since(b.last_refill) < Duration::from_secs(600));
             }
             true
         } else {

@@ -1,10 +1,10 @@
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_hub::routes::post_models::{PostDetail, PostListResponse, PostSearchResponse};
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 /// Create a forum channel and return its id.
 async fn create_forum_channel(server: &TestServer, token: &str) -> String {

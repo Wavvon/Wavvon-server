@@ -13,7 +13,9 @@ pub async fn run(pool: &AnyPool) -> anyhow::Result<()> {
     if is_sqlite {
         sqlx::query("PRAGMA journal_mode=WAL").execute(pool).await?;
         sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
-        sqlx::query("PRAGMA synchronous=NORMAL").execute(pool).await?;
+        sqlx::query("PRAGMA synchronous=NORMAL")
+            .execute(pool)
+            .await?;
     }
 
     sqlx::query(
@@ -38,11 +40,9 @@ pub async fn run(pool: &AnyPool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sessions (
@@ -1038,11 +1038,9 @@ pub async fn run(pool: &AnyPool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_user_certs_master ON user_certs(master_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_user_certs_master ON user_certs(master_pubkey)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS badge_offers (
@@ -1164,11 +1162,9 @@ pub async fn run(pool: &AnyPool) -> anyhow::Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_pubkey)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS post_replies (

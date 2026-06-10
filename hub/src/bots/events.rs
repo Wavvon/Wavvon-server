@@ -155,13 +155,12 @@ pub async fn replay_events_for_bot(
     let window_start = now - 72 * 3600;
 
     // Find the earliest seq still in the window.
-    let earliest: Option<(i64, i64)> = sqlx::query_as(
-        "SELECT seq, at FROM hub_audit_log WHERE at >= ? ORDER BY seq ASC LIMIT 1",
-    )
-    .bind(window_start)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let earliest: Option<(i64, i64)> =
+        sqlx::query_as("SELECT seq, at FROM hub_audit_log WHERE at >= ? ORDER BY seq ASC LIMIT 1")
+            .bind(window_start)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let (earliest_seq, earliest_at) = match earliest {
         Some((s, a)) => (s, a),
@@ -323,14 +322,13 @@ async fn maybe_redact_message_content(
     bot_pubkey: &str,
     mut payload: serde_json::Value,
 ) -> serde_json::Value {
-    let caps_json: Option<String> = sqlx::query_scalar(
-        "SELECT capabilities FROM bot_profiles WHERE pubkey = ?",
-    )
-    .bind(bot_pubkey)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let caps_json: Option<String> =
+        sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = ?")
+            .bind(bot_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     let caps: Vec<String> = caps_json
         .as_deref()

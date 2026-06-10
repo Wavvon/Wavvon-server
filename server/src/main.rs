@@ -2,9 +2,9 @@ mod agent;
 mod hub_manager;
 mod settings;
 
-use std::sync::Arc;
 use hub_manager::HubManager;
 use settings::Settings;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {

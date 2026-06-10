@@ -73,13 +73,12 @@ async fn load_poll_totals(
     db: &sqlx::AnyPool,
     poll_id: &str,
 ) -> Result<HashMap<String, i64>, (StatusCode, String)> {
-    let rows: Vec<String> = sqlx::query_scalar(
-        "SELECT option_ids FROM poll_votes WHERE poll_id = ?",
-    )
-    .bind(poll_id)
-    .fetch_all(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let rows: Vec<String> =
+        sqlx::query_scalar("SELECT option_ids FROM poll_votes WHERE poll_id = ?")
+            .bind(poll_id)
+            .fetch_all(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let mut totals: HashMap<String, i64> = HashMap::new();
     for row in rows {
@@ -170,12 +169,11 @@ pub async fn create_poll(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::SEND_MESSAGES)?;
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
@@ -193,10 +191,18 @@ pub async fn create_poll(
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
     let max_choices = req.max_choices.unwrap_or(1).max(1);
-    let options_json = serde_json::to_string(&req.options.iter().map(|o| {
-        serde_json::json!({ "id": o.id, "text": o.text })
-    }).collect::<Vec<_>>())
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode error: {e}")))?;
+    let options_json = serde_json::to_string(
+        &req.options
+            .iter()
+            .map(|o| serde_json::json!({ "id": o.id, "text": o.text }))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Encode error: {e}"),
+        )
+    })?;
 
     sqlx::query(
         "INSERT INTO polls (id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at)
@@ -249,18 +255,22 @@ pub async fn get_poll(
 
     let totals = load_poll_totals(&state.db, &poll_id).await?;
 
-    let your_vote_raw: Option<String> =
-        sqlx::query_scalar("SELECT option_ids FROM poll_votes WHERE poll_id = ? AND user_pubkey = ?")
-            .bind(&poll_id)
-            .bind(&user.public_key)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let your_vote_raw: Option<String> = sqlx::query_scalar(
+        "SELECT option_ids FROM poll_votes WHERE poll_id = ? AND user_pubkey = ?",
+    )
+    .bind(&poll_id)
+    .bind(&user.public_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let your_vote = your_vote_raw
-        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
+    let your_vote = your_vote_raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
 
-    Ok(Json(PollWithTotals { poll, totals, your_vote }))
+    Ok(Json(PollWithTotals {
+        poll,
+        totals,
+        your_vote,
+    }))
 }
 
 /// POST /polls/:poll_id/vote
@@ -288,7 +298,10 @@ pub async fn vote_poll(
     }
 
     if req.option_ids.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "option_ids must not be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "option_ids must not be empty".to_string(),
+        ));
     }
     if req.option_ids.len() as i64 > max_choices {
         return Err((
@@ -297,8 +310,12 @@ pub async fn vote_poll(
         ));
     }
 
-    let option_ids_json = serde_json::to_string(&req.option_ids)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode error: {e}")))?;
+    let option_ids_json = serde_json::to_string(&req.option_ids).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Encode error: {e}"),
+        )
+    })?;
 
     sqlx::query(
         "INSERT INTO poll_votes (poll_id, user_pubkey, option_ids)
@@ -321,9 +338,7 @@ pub async fn vote_poll(
             totals: totals.clone(),
         };
         let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state
-            .chat_tx
-            .send((ChatEvent::Poll { channel_id }, json));
+        let _ = state.chat_tx.send((ChatEvent::Poll { channel_id }, json));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -335,12 +350,11 @@ pub async fn delete_poll(
     user: AuthUser,
     Path(poll_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT creator_pubkey FROM polls WHERE id = ?")
-            .bind(&poll_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(String,)> = sqlx::query_as("SELECT creator_pubkey FROM polls WHERE id = ?")
+        .bind(&poll_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let (creator,) = row.ok_or((StatusCode::NOT_FOUND, "Poll not found".to_string()))?;
 

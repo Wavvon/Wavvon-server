@@ -67,8 +67,12 @@ pub async fn list_pending(
     let out: Result<Vec<_>, _> = rows
         .into_iter()
         .map(|r| {
-            let payload: BadgePayload = serde_json::from_str(&r.payload)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Payload parse error: {e}")))?;
+            let payload: BadgePayload = serde_json::from_str(&r.payload).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Payload parse error: {e}"),
+                )
+            })?;
             Ok(PendingBadgeResponse {
                 id: r.id,
                 from_hub_pubkey: r.from_hub_pubkey,
@@ -102,21 +106,41 @@ pub async fn accept_pending(
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .ok_or((StatusCode::NOT_FOUND, "Pending badge offer not found".to_string()))?;
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "Pending badge offer not found".to_string(),
+    ))?;
 
     // Re-verify signature before accepting.
     let payload_bytes = row.payload.as_bytes();
-    let sig_bytes = hex::decode(&row.signature)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex in stored offer".to_string()))?;
-    voxply_identity::verify_signature(&row.from_hub_pubkey, payload_bytes, &sig_bytes)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Badge signature verification failed".to_string()))?;
+    let sig_bytes = hex::decode(&row.signature).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid signature hex in stored offer".to_string(),
+        )
+    })?;
+    voxply_identity::verify_signature(&row.from_hub_pubkey, payload_bytes, &sig_bytes).map_err(
+        |_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Badge signature verification failed".to_string(),
+            )
+        },
+    )?;
 
     // Also verify subject_pubkey matches our own hub.
-    let payload: BadgePayload = serde_json::from_str(&row.payload)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Payload parse error: {e}")))?;
+    let payload: BadgePayload = serde_json::from_str(&row.payload).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Payload parse error: {e}"),
+        )
+    })?;
     let our_pubkey = state.hub_identity.public_key_hex();
     if payload.subject_pubkey != our_pubkey {
-        return Err((StatusCode::BAD_REQUEST, "Badge subject does not match this hub".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Badge subject does not match this hub".to_string(),
+        ));
     }
 
     let accepted_at = crate::auth::handlers::unix_timestamp_iso();
@@ -163,7 +187,10 @@ pub async fn decline_pending(
         .rows_affected();
 
     if affected == 0 {
-        return Err((StatusCode::NOT_FOUND, "Pending badge offer not found".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Pending badge offer not found".to_string(),
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -202,8 +229,12 @@ pub async fn list_badges(
     let out: Result<Vec<_>, _> = rows
         .into_iter()
         .map(|r| {
-            let payload: BadgePayload = serde_json::from_str(&r.payload)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Payload parse error: {e}")))?;
+            let payload: BadgePayload = serde_json::from_str(&r.payload).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Payload parse error: {e}"),
+                )
+            })?;
             Ok(HeldBadgeResponse {
                 id: r.id,
                 issuer_pubkey: r.issuer_pubkey,
@@ -284,7 +315,12 @@ pub async fn issue_badge(
         .federation_client
         .get_info(&recipient_url)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Cannot reach recipient hub: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Cannot reach recipient hub: {e}"),
+            )
+        })?;
 
     let our_pubkey = state.hub_identity.public_key_hex();
     let our_url = load_hub_url(&state).await;
@@ -308,8 +344,12 @@ pub async fn issue_badge(
         expires_at: expires_at.clone(),
     };
 
-    let payload_json = serde_json::to_string(&payload)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialise error: {e}")))?;
+    let payload_json = serde_json::to_string(&payload).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Serialise error: {e}"),
+        )
+    })?;
 
     let sig = state.hub_identity.sign(payload_json.as_bytes());
     let sig_hex = hex::encode(sig.to_bytes());
@@ -327,7 +367,12 @@ pub async fn issue_badge(
             &sig_hex,
         )
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to deliver badge offer: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to deliver badge offer: {e}"),
+            )
+        })?;
 
     // Record the issued badge locally.
     let id = Uuid::new_v4().to_string();
@@ -388,8 +433,12 @@ pub async fn list_issued(
     let out: Result<Vec<_>, _> = rows
         .into_iter()
         .map(|r| {
-            let payload: BadgePayload = serde_json::from_str(&r.payload)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Payload parse error: {e}")))?;
+            let payload: BadgePayload = serde_json::from_str(&r.payload).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Payload parse error: {e}"),
+                )
+            })?;
             Ok(IssuedBadgeResponse {
                 id: r.id,
                 recipient_hub_url: r.recipient_hub_url,
@@ -469,7 +518,7 @@ fn iso_from_unix(secs: u64) -> String {
     let jdn = days + 2_440_588;
     let l = jdn + 68_569;
     let n = (4 * l) / 146_097;
-    let l = l - (146_097 * n + 3) / 4;
+    let l = l - (146_097 * n).div_ceil(4);
     let year_i = (4_000 * (l + 1)) / 1_461_001;
     let l = l - (1_461 * year_i) / 4 + 31;
     let month_i = (80 * l) / 2_447;
@@ -546,17 +595,19 @@ pub async fn revoke_issued_badge(
             .as_secs(),
     );
 
-    let result = sqlx::query(
-        "UPDATE issued_badges SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
-    )
-    .bind(&now)
-    .bind(&id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let result =
+        sqlx::query("UPDATE issued_badges SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
+            .bind(&now)
+            .bind(&id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if result.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, "Badge not found or already revoked".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Badge not found or already revoked".to_string(),
+        ));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -610,12 +661,14 @@ pub async fn federation_badge_revocations(
 
     let out = rows
         .into_iter()
-        .map(|(id, recipient_hub_pubkey, label, revoked_at)| RevokedBadgeEntry {
-            id,
-            recipient_hub_pubkey,
-            label,
-            revoked_at,
-        })
+        .map(
+            |(id, recipient_hub_pubkey, label, revoked_at)| RevokedBadgeEntry {
+                id,
+                recipient_hub_pubkey,
+                label,
+                revoked_at,
+            },
+        )
         .collect();
 
     Ok(Json(out))

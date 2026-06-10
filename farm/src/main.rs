@@ -73,10 +73,7 @@ async fn main() -> Result<()> {
             let provider = opentelemetry_sdk::trace::TracerProvider::builder()
                 .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                 .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new(
-                        "service.name",
-                        env!("CARGO_PKG_NAME"),
-                    ),
+                    opentelemetry::KeyValue::new("service.name", env!("CARGO_PKG_NAME")),
                 ]))
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
@@ -86,9 +83,7 @@ async fn main() -> Result<()> {
     use tracing_subscriber::prelude::*;
     let otel_layer = otlp_provider.as_ref().map(|provider| {
         use opentelemetry::trace::TracerProvider as _;
-        tracing_opentelemetry::layer().with_tracer(
-            provider.tracer(env!("CARGO_PKG_NAME"))
-        )
+        tracing_opentelemetry::layer().with_tracer(provider.tracer(env!("CARGO_PKG_NAME")))
     });
 
     if json_logs {
@@ -180,10 +175,20 @@ async fn main() -> Result<()> {
     };
 
     tracing::info!("Hub binary path: {hub_bin}");
-    let hub_manager = Arc::new(HubManager::new(hub_bin, farm_url.clone(), cfg.hub_base_port));
+    let hub_manager = Arc::new(HubManager::new(
+        hub_bin,
+        farm_url.clone(),
+        cfg.hub_base_port,
+    ));
     hub_manager.spawn_all_from_db(&db).await?;
 
-    let state = Arc::new(FarmState::new(db, keypair, farm_url, hub_manager, cfg.hubs_dir));
+    let state = Arc::new(FarmState::new(
+        db,
+        keypair,
+        farm_url,
+        hub_manager,
+        cfg.hubs_dir,
+    ));
 
     let app = server::create_router(state);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;

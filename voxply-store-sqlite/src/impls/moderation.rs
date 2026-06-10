@@ -42,23 +42,20 @@ impl ModerationStore for SqliteStore {
     }
 
     async fn is_banned(&self, target: &str) -> Result<bool, StoreError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM bans WHERE target_public_key = ?",
-        )
-        .bind(target)
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_err)?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = ?")
+                .bind(target)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_err)?;
         Ok(count > 0)
     }
 
     async fn list_bans(&self) -> Result<Vec<BanRow>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT target_public_key, banned_by, reason, created_at FROM bans",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_err)?;
+        let rows = sqlx::query("SELECT target_public_key, banned_by, reason, created_at FROM bans")
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(rows
             .into_iter()
             .map(|r| BanRow {
@@ -173,13 +170,12 @@ impl ModerationStore for SqliteStore {
     }
 
     async fn is_voice_muted(&self, target: &str) -> Result<bool, StoreError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = ?",
-        )
-        .bind(target)
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_err)?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = ?")
+                .bind(target)
+                .fetch_one(self.pool())
+                .await
+                .map_err(map_err)?;
         Ok(count > 0)
     }
 
@@ -210,14 +206,12 @@ impl ModerationStore for SqliteStore {
     }
 
     async fn channel_unban(&self, channel_id: &str, target: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM channel_bans WHERE channel_id = ? AND target_public_key = ?",
-        )
-        .bind(channel_id)
-        .bind(target)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM channel_bans WHERE channel_id = ? AND target_public_key = ?")
+            .bind(channel_id)
+            .bind(target)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 

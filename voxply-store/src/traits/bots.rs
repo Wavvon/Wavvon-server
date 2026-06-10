@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
-use crate::row_types::{BotProfileRow, BotRow, BotCommandRow, BotEventQueueRow};
+use crate::row_types::{BotCommandRow, BotEventQueueRow, BotProfileRow, BotRow};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait BotStore: Send + Sync {

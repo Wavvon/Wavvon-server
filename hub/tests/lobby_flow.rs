@@ -1,9 +1,9 @@
-
 use serde_json::{json, Value};
 use voxply_hub::auth::models::ChallengeResponse;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn lobby_status_returns_member_when_no_min_level() {

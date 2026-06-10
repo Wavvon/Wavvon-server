@@ -206,23 +206,24 @@ pub async fn create_session(
     perms.require(permissions::START_GAME)?;
 
     // Verify the game is installed.
-    let game_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM hub_games WHERE id = ?")
-            .bind(&req.game_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let game_exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_games WHERE id = ?")
+        .bind(&req.game_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if game_exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Game not found on this hub".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Game not found on this hub".to_string(),
+        ));
     }
 
     // Verify the channel exists.
-    let ch_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if ch_exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
@@ -248,7 +249,10 @@ pub async fn create_session(
 
     // Insert into in-memory map.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         sessions.insert(
             session_id.clone(),
             GameSessionState {
@@ -317,7 +321,10 @@ pub async fn join_session(
 
     // Add player in-memory.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(s) = sessions.get_mut(&session_id) {
             s.players.insert(user.public_key.clone());
         }
@@ -367,7 +374,10 @@ pub async fn patch_state(
         // Admin can also patch.
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
         if !perms.has(permissions::ADMIN) {
-            return Err((StatusCode::FORBIDDEN, "Only the host can patch session state".to_string()));
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Only the host can patch session state".to_string(),
+            ));
         }
     }
 
@@ -381,10 +391,13 @@ pub async fn patch_state(
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .ok_or((StatusCode::NOT_FOUND, "Session not found or ended".to_string()))?;
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "Session not found or ended".to_string(),
+    ))?;
 
-    let mut current: serde_json::Value =
-        serde_json::from_str(&current_json).unwrap_or(serde_json::Value::Object(Default::default()));
+    let mut current: serde_json::Value = serde_json::from_str(&current_json)
+        .unwrap_or(serde_json::Value::Object(Default::default()));
 
     if let (Some(obj), Some(patch_obj)) = (current.as_object_mut(), req.patch.as_object()) {
         for (k, v) in patch_obj {
@@ -394,8 +407,12 @@ pub async fn patch_state(
         current = req.patch.clone();
     }
 
-    let new_json = serde_json::to_string(&current)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("JSON error: {e}")))?;
+    let new_json = serde_json::to_string(&current).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JSON error: {e}"),
+        )
+    })?;
     sqlx::query("UPDATE game_sessions SET state_json = ? WHERE id = ?")
         .bind(&new_json)
         .bind(&session_id)
@@ -405,7 +422,10 @@ pub async fn patch_state(
 
     // Update in-memory state too.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(s) = sessions.get_mut(&session_id) {
             s.in_memory_state = current;
         }
@@ -493,7 +513,10 @@ pub async fn end_session(
     if row.host_pubkey != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
         if !perms.has(permissions::ADMIN) {
-            return Err((StatusCode::FORBIDDEN, "Only the host or an admin can end the session".to_string()));
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Only the host or an admin can end the session".to_string(),
+            ));
         }
     }
 
@@ -507,7 +530,10 @@ pub async fn end_session(
 
     // Remove from in-memory map.
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         sessions.remove(&session_id);
     }
 
@@ -570,14 +596,17 @@ async fn fetch_open_session(
 
 fn session_row_to_response(row: SessionRow, state: &AppState, session_id: &str) -> SessionResponse {
     let players: Vec<String> = {
-        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         sessions
             .get(session_id)
             .map(|s| s.players.iter().cloned().collect())
             .unwrap_or_default()
     };
-    let state_json: serde_json::Value =
-        serde_json::from_str(&row.state_json).unwrap_or(serde_json::Value::Object(Default::default()));
+    let state_json: serde_json::Value = serde_json::from_str(&row.state_json)
+        .unwrap_or(serde_json::Value::Object(Default::default()));
     SessionResponse {
         id: session_id.to_string(),
         channel_id: row.channel_id,
@@ -666,16 +695,18 @@ pub async fn create_session_v2(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if game_row.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Game not found on this hub".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Game not found on this hub".to_string(),
+        ));
     }
     let db_max_players = game_row.and_then(|(_, m)| if m > 1 { Some(m) } else { None });
 
-    let ch_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&req.channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&req.channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if ch_exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
@@ -708,7 +739,10 @@ pub async fn create_session_v2(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     {
-        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         sessions.insert(
             session_id.clone(),
             GameSessionState {
@@ -777,7 +811,10 @@ pub async fn list_sessions(
     Query(q): Query<ListSessionsQuery>,
 ) -> Result<Json<ListSessionsResponse>, (StatusCode, String)> {
     let sessions: Vec<SessionV2Response> = {
-        let sessions_guard = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions_guard = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         sessions_guard
             .values()
             .filter(|s| {
@@ -801,7 +838,10 @@ pub async fn join_session_v2(
     Path(session_id): Path<String>,
 ) -> Result<(StatusCode, Json<SessionV2Response>), (StatusCode, String)> {
     let (channel_id, max_players, current_count, already_in) = {
-        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = sessions
             .get(&session_id)
             .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
@@ -809,7 +849,12 @@ pub async fn join_session_v2(
             return Err((StatusCode::GONE, "Session has ended".to_string()));
         }
         let already_in = s.players.contains(&user.public_key);
-        (s.channel_id.clone(), s.max_players, s.players.len() as i64, already_in)
+        (
+            s.channel_id.clone(),
+            s.max_players,
+            s.players.len() as i64,
+            already_in,
+        )
     };
 
     if !already_in {
@@ -831,7 +876,10 @@ pub async fn join_session_v2(
     let now = now_secs();
 
     let resp = {
-        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = sessions
             .get_mut(&session_id)
             .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
@@ -870,7 +918,10 @@ pub async fn leave_session(
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let (channel_id, was_host, remaining, new_host) = {
-        let mut sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let mut sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let s = sessions
             .get_mut(&session_id)
             .ok_or((StatusCode::NOT_FOUND, "Session not found".to_string()))?;
@@ -910,13 +961,12 @@ pub async fn leave_session(
     );
 
     if remaining == 0 {
-        let _ = sqlx::query(
-            "UPDATE game_sessions SET ended_at = ?, status = 'abandoned' WHERE id = ?",
-        )
-        .bind(chrono_now())
-        .bind(&session_id)
-        .execute(&state.db)
-        .await;
+        let _ =
+            sqlx::query("UPDATE game_sessions SET ended_at = ?, status = 'abandoned' WHERE id = ?")
+                .bind(chrono_now())
+                .bind(&session_id)
+                .execute(&state.db)
+                .await;
 
         broadcast_game_event(
             &state,
@@ -927,7 +977,11 @@ pub async fn leave_session(
                 result: None,
             },
         );
-        state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
+        state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&session_id);
     } else if was_host {
         if let Some(ref nh) = new_host {
             broadcast_game_event(
@@ -962,7 +1016,10 @@ pub async fn get_session_v2(
     Path(session_id): Path<String>,
 ) -> Result<Json<SessionV2Response>, (StatusCode, String)> {
     let resp = {
-        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match sessions.get(&session_id) {
             None => return Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
             Some(s) if s.status == "ended" || s.status == "abandoned" => {
@@ -982,7 +1039,10 @@ pub async fn force_end_session(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Extract all needed data under the lock, then drop the lock before any await.
     let (channel_id, is_host) = {
-        let sessions = state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let sessions = state
+            .active_game_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         match sessions.get(&session_id) {
             None => return Err((StatusCode::NOT_FOUND, "Session not found".to_string())),
             Some(s) => (s.channel_id.clone(), s.host_pubkey == user.public_key),
@@ -998,15 +1058,17 @@ pub async fn force_end_session(
         }
     }
 
-    let _ = sqlx::query(
-        "UPDATE game_sessions SET ended_at = ?, status = 'ended' WHERE id = ?",
-    )
-    .bind(chrono_now())
-    .bind(&session_id)
-    .execute(&state.db)
-    .await;
+    let _ = sqlx::query("UPDATE game_sessions SET ended_at = ?, status = 'ended' WHERE id = ?")
+        .bind(chrono_now())
+        .bind(&session_id)
+        .execute(&state.db)
+        .await;
 
-    state.active_game_sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&session_id);
+    state
+        .active_game_sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&session_id);
 
     broadcast_game_event(
         &state,
@@ -1116,9 +1178,13 @@ pub async fn enable_game(
                     .await
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
             if exists.is_none() {
-                return Err((StatusCode::NOT_FOUND, "Game not installed on this hub".to_string()));
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    "Game not installed on this hub".to_string(),
+                ));
             }
             // Synthesise a manifest from the local row so we can skip the upsert below.
+            #[allow(clippy::type_complexity)]
             let row: (String, String, String, Option<String>, Option<String>, String, Option<String>, i64, i64) =
                 sqlx::query_as(
                     "SELECT id, name, entry_url, description, thumbnail_url, version, author, min_players, max_players FROM hub_games WHERE id = ?",
@@ -1156,9 +1222,12 @@ pub async fn enable_game(
                     format!("Farm returned {}", resp.status()),
                 ));
             }
-            resp.json::<FarmGameManifest>()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Invalid farm response: {e}")))?
+            resp.json::<FarmGameManifest>().await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Invalid farm response: {e}"),
+                )
+            })?
         }
     };
 
@@ -1233,7 +1302,10 @@ pub async fn disable_game(
         .rows_affected();
 
     if rows == 0 {
-        return Err((StatusCode::NOT_FOUND, "Game not enabled on this hub".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Game not enabled on this hub".to_string(),
+        ));
     }
 
     // Remove per-channel scope entries for this game too.
@@ -1278,7 +1350,18 @@ pub async fn list_enabled_games(
     // (the client knows which channel is open and can call with a channel_id param
     // in the future; for now we return the full enabled list and let the client
     // apply the channel restriction using the /admin/games/:id/channels data).
-    let rows: Vec<(String, String, String, Option<String>, Option<String>, String, Option<String>, i64, i64)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        i64,
+        i64,
+    )> = sqlx::query_as(
         "SELECT g.id, g.name, g.entry_url, g.description, g.thumbnail_url, g.version, g.author,
                 g.min_players, g.max_players
          FROM hub_games g
@@ -1291,8 +1374,8 @@ pub async fn list_enabled_games(
 
     let games = rows
         .into_iter()
-        .map(|(id, name, entry_url, description, thumbnail_url, version, author, min_players, max_players)| {
-            EnabledGameEntry {
+        .map(
+            |(
                 id,
                 name,
                 entry_url,
@@ -1302,8 +1385,20 @@ pub async fn list_enabled_games(
                 author,
                 min_players,
                 max_players,
-            }
-        })
+            )| {
+                EnabledGameEntry {
+                    id,
+                    name,
+                    entry_url,
+                    description,
+                    thumbnail_url,
+                    version,
+                    author,
+                    min_players,
+                    max_players,
+                }
+            },
+        )
         .collect();
 
     Ok(Json(ListEnabledGamesResponse { games }))
@@ -1342,7 +1437,12 @@ pub async fn set_game_permissions(
     let sanitised: Vec<&str> = req
         .capabilities
         .iter()
-        .filter_map(|c| VALID_CAPABILITIES.iter().find(|&&v| v == c.as_str()).copied())
+        .filter_map(|c| {
+            VALID_CAPABILITIES
+                .iter()
+                .find(|&&v| v == c.as_str())
+                .copied()
+        })
         .collect();
     let json = serde_json::to_string(&sanitised)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
@@ -1374,7 +1474,10 @@ pub async fn set_game_channels(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if enabled.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Game not enabled on this hub".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Game not enabled on this hub".to_string(),
+        ));
     }
 
     // Replace channel scope atomically: delete old rows, insert new ones.
@@ -1437,7 +1540,21 @@ pub async fn admin_list_games(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::MANAGE_GAMES)?;
 
-    let rows: Vec<(String, String, String, Option<String>, Option<String>, String, Option<String>, i64, i64, Option<String>, Option<String>, String)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        Option<String>,
+        String,
+    )> = sqlx::query_as(
         "SELECT g.id, g.name, g.entry_url, g.description, g.thumbnail_url, g.version, g.author,
                 g.min_players, g.max_players,
                 e.enabled_by, e.enabled_at,
@@ -1451,7 +1568,21 @@ pub async fn admin_list_games(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let mut games = Vec::with_capacity(rows.len());
-    for (id, name, entry_url, description, thumbnail_url, version, author, min_players, max_players, enabled_by, enabled_at, capabilities_json) in rows {
+    for (
+        id,
+        name,
+        entry_url,
+        description,
+        thumbnail_url,
+        version,
+        author,
+        min_players,
+        max_players,
+        enabled_by,
+        enabled_at,
+        capabilities_json,
+    ) in rows
+    {
         let enabled = enabled_by.is_some();
         let channel_scope: Vec<String> = sqlx::query_scalar(
             "SELECT channel_id FROM channel_games WHERE game_id = ? ORDER BY channel_id",

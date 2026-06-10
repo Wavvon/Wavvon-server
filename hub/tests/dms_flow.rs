@@ -13,14 +13,19 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 /// Same as common::setup() but also returns the AnyPool so tests can poke the
 /// database directly (e.g. to mark a dm_outbox row as bounced for a test
 /// that exercises the delivery_failed reporting path).
 async fn setup_with_pool() -> (TestServer, AnyPool) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let pool_handle = db.clone();
     let store: Arc<dyn voxply_store::HubStore> =
@@ -39,7 +44,7 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -54,7 +59,9 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -62,7 +69,7 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
     let app = server::create_router(state);
     (TestServer::new(app), pool_handle)
 }
@@ -110,7 +117,10 @@ async fn dm_conversation_dedup() {
         .await;
     let conv2: ConversationResponse = resp.json();
 
-    assert_eq!(conv1.id, conv2.id, "DM should be deduped between same users");
+    assert_eq!(
+        conv1.id, conv2.id,
+        "DM should be deduped between same users"
+    );
 }
 
 #[tokio::test]
@@ -148,7 +158,10 @@ async fn list_my_conversations() {
         .json(&json!({ "members": [bob.public_key_hex()] }))
         .await;
 
-    let resp = server.get("/conversations").authorization_bearer(&alice_token).await;
+    let resp = server
+        .get("/conversations")
+        .authorization_bearer(&alice_token)
+        .await;
     resp.assert_status_ok();
     let conversations: Vec<ConversationResponse> = resp.json();
     assert_eq!(conversations.len(), 1);
@@ -215,7 +228,11 @@ async fn cannot_create_empty_conversation() {
 
 async fn start_real_hub(name: &str) -> String {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -233,7 +250,7 @@ async fn start_real_hub(name: &str) -> String {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -248,7 +265,9 @@ async fn start_real_hub(name: &str) -> String {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -256,7 +275,7 @@ async fn start_real_hub(name: &str) -> String {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -308,7 +327,11 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -326,7 +349,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -341,7 +364,9 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -349,7 +374,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -417,7 +442,11 @@ async fn dm_delivered_across_hubs() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "Hub B list endpoint failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Hub B list endpoint failed: {}",
+        resp.status()
+    );
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().expect("expected an array");
     assert_eq!(arr.len(), 1, "Bob should see the federated DM");
@@ -477,11 +506,18 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         .fetch_one(&hub_a_state.db)
         .await
         .unwrap();
-    assert_eq!(queued, 1, "message should be queued while recipient is offline");
+    assert_eq!(
+        queued, 1,
+        "message should be queued while recipient is offline"
+    );
 
     // Bring Hub B up on the previously-chosen port.
     sqlx::any::install_default_drivers();
-    let hub_b_db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let hub_b_db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&hub_b_db).await.unwrap();
     let hub_b_store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(hub_b_db.clone()));
@@ -498,7 +534,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -513,7 +549,9 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -521,7 +559,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))
         .await
@@ -549,7 +587,10 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         .fetch_one(&hub_a_state.db)
         .await
         .unwrap();
-    assert_eq!(queued_after, 0, "worker should have delivered and cleared the outbox");
+    assert_eq!(
+        queued_after, 0,
+        "worker should have delivered and cleared the outbox"
+    );
 
     // Hub B should have stored the message.
     let bob_token = authenticate_http(&format!("http://127.0.0.1:{dead_port}"), &bob).await;
@@ -742,7 +783,11 @@ async fn send_dm_uses_home_hub_designation_when_present() {
     assert!(resp.status().is_success());
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "message should have been routed to Hub B via designation");
+    assert_eq!(
+        arr.len(),
+        1,
+        "message should have been routed to Hub B via designation"
+    );
     assert_eq!(arr[0]["content"], "routed via designation");
 }
 
@@ -794,7 +839,11 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
     assert!(resp.status().is_success());
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "message should have been delivered via fallback hub_url");
+    assert_eq!(
+        arr.len(),
+        1,
+        "message should have been delivered via fallback hub_url"
+    );
     assert_eq!(arr[0]["content"], "fallback delivery");
 }
 
@@ -814,7 +863,13 @@ fn make_group_envelope(
 
     // Canonical signing bytes (mirrors group_envelope_signing_bytes in dms.rs)
     let mut signing_msg = b"voxply/group-dm-ciphertext/v1\0".to_vec();
-    for s in [conv_id, &version.to_string(), &iteration.to_string(), &ciphertext_hex, &nonce_hex] {
+    for s in [
+        conv_id,
+        &version.to_string(),
+        &iteration.to_string(),
+        &ciphertext_hex,
+        &nonce_hex,
+    ] {
         let b = s.as_bytes();
         signing_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
         signing_msg.extend_from_slice(b);
@@ -922,7 +977,11 @@ async fn push_and_get_sender_keys_happy_path() {
     resp.assert_status_ok();
     let entries: serde_json::Value = resp.json();
     let arr = entries.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "Bob should see exactly one sender-key entry (from Alice)");
+    assert_eq!(
+        arr.len(),
+        1,
+        "Bob should see exactly one sender-key entry (from Alice)"
+    );
     assert_eq!(arr[0]["sender_pubkey"], alice.public_key_hex());
     assert_eq!(arr[0]["sender_key_version"], 1);
     assert_eq!(arr[0]["wrapped_key_hex"], "aabbccdd");
@@ -1023,8 +1082,14 @@ async fn send_group_encrypted_dm_happy_path() {
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
     let msg: serde_json::Value = resp.json();
-    assert!(msg["group_encrypted_envelope"].is_object(), "response should include group envelope");
-    assert!(msg["encrypted_envelope"].is_null(), "1:1 envelope must be absent");
+    assert!(
+        msg["group_encrypted_envelope"].is_object(),
+        "response should include group envelope"
+    );
+    assert!(
+        msg["encrypted_envelope"].is_null(),
+        "1:1 envelope must be absent"
+    );
 
     // Bob reads the conversation
     let bob_token = common::authenticate(&server, &bob).await;
@@ -1156,6 +1221,8 @@ async fn sender_key_upsert_replaces_old_entry() {
     let entries: serde_json::Value = resp.json();
     let arr = entries.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["wrapped_key_hex"], "11223344", "upsert should replace old wrapped_key_hex");
+    assert_eq!(
+        arr[0]["wrapped_key_hex"], "11223344",
+        "upsert should replace old wrapped_key_hex"
+    );
 }
-

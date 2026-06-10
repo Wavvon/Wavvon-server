@@ -68,8 +68,8 @@ async fn sweep_warnings(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
            AND s.expires_at <= ?
            AND (s.expiry_warned_at IS NULL OR s.expiry_warned_at < ?)",
     )
-    .bind(now)           // not yet expired
-    .bind(warn_before)   // but within the 72-hour window
+    .bind(now) // not yet expired
+    .bind(warn_before) // but within the 72-hour window
     .bind(rewarn_cutoff) // and not warned in the last 24 h
     .fetch_all(&state.db)
     .await?;
@@ -90,13 +90,11 @@ async fn sweep_warnings(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
         }
 
         // Mark warned regardless of whether the bot is currently connected.
-        let _ = sqlx::query(
-            "UPDATE sessions SET expiry_warned_at = ? WHERE token = ?",
-        )
-        .bind(now)
-        .bind(&row.token)
-        .execute(&state.db)
-        .await;
+        let _ = sqlx::query("UPDATE sessions SET expiry_warned_at = ? WHERE token = ?")
+            .bind(now)
+            .bind(&row.token)
+            .execute(&state.db)
+            .await;
     }
 
     Ok(())

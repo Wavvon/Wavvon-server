@@ -231,12 +231,11 @@ pub async fn create_event(
     perms.require(permissions::CREATE_EVENTS)?;
 
     // Verify channel exists.
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&req.channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&req.channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
@@ -462,12 +461,11 @@ pub async fn rsvp_event(
         }
     }
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM hub_events WHERE id = ?")
-            .bind(&event_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = ?")
+        .bind(&event_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
     }
@@ -493,12 +491,11 @@ pub async fn list_rsvps(
     _user: AuthUser,
     Path(event_id): Path<String>,
 ) -> Result<Json<Vec<RsvpEntry>>, (StatusCode, String)> {
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM hub_events WHERE id = ?")
-            .bind(&event_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = ?")
+        .bind(&event_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
     }

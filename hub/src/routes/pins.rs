@@ -49,7 +49,10 @@ pub async fn pin_message(
     match msg_channel {
         None => return Err((StatusCode::NOT_FOUND, "Message not found".to_string())),
         Some(c) if c != channel_id => {
-            return Err((StatusCode::BAD_REQUEST, "Message is not in this channel".to_string()))
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Message is not in this channel".to_string(),
+            ))
         }
         _ => {}
     }
@@ -90,14 +93,12 @@ pub async fn unpin_message(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::MANAGE_MESSAGES)?;
 
-    sqlx::query(
-        "DELETE FROM channel_pins WHERE channel_id = ? AND message_id = ?",
-    )
-    .bind(&channel_id)
-    .bind(&message_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("DELETE FROM channel_pins WHERE channel_id = ? AND message_id = ?")
+        .bind(&channel_id)
+        .bind(&message_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let ws_msg = WsServerMessage::MessageUnpinned {
         channel_id: channel_id.clone(),
@@ -118,12 +119,11 @@ pub async fn list_pins(
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<PinResponse>>, (StatusCode, String)> {
     // Verify channel exists.
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }

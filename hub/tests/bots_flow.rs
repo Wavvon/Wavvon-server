@@ -1,8 +1,8 @@
-
 use serde_json::json;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 // ---------------------------------------------------------------------------
 // Happy-path tests
@@ -173,7 +173,10 @@ async fn bot_token_can_set_commands_and_poll() {
         .json();
     let cmds = detail["commands"].as_array().unwrap();
     assert_eq!(cmds.len(), 2);
-    let cmd_names: Vec<&str> = cmds.iter().map(|c| c["command"].as_str().unwrap()).collect();
+    let cmd_names: Vec<&str> = cmds
+        .iter()
+        .map(|c| c["command"].as_str().unwrap())
+        .collect();
     assert!(cmd_names.contains(&"ping"));
     assert!(cmd_names.contains(&"echo"));
 

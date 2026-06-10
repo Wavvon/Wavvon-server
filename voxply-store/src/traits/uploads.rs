@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::UploadFileRow;
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait UploadStore: Send + Sync {
@@ -13,9 +13,5 @@ pub trait UploadStore: Send + Sync {
     async fn delete_upload(&self, id: &str) -> Result<(), StoreError>;
 
     /// Verify that `id` is a valid image upload in the given channel.
-    async fn is_valid_image_upload(
-        &self,
-        id: &str,
-        channel_id: &str,
-    ) -> Result<bool, StoreError>;
+    async fn is_valid_image_upload(&self, id: &str, channel_id: &str) -> Result<bool, StoreError>;
 }

@@ -1,13 +1,12 @@
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn preview_requires_auth() {
     let server = common::setup().await;
-    let resp = server
-        .get("/preview?url=https%3A%2F%2Fexample.com")
-        .await;
+    let resp = server.get("/preview?url=https%3A%2F%2Fexample.com").await;
     resp.assert_status_unauthorized();
 }
 
@@ -74,10 +73,7 @@ async fn preview_rejects_missing_url_param() {
     let identity = Identity::generate();
     let token = common::authenticate(&server, &identity).await;
 
-    let resp = server
-        .get("/preview")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/preview").authorization_bearer(&token).await;
     // axum returns 400 for a missing required query param
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
 }

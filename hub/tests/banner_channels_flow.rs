@@ -1,8 +1,8 @@
-
 use serde_json::json;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 // ---- Create banner channel: happy paths ----
 
@@ -142,13 +142,13 @@ async fn banner_channel_appears_in_list() {
         .await
         .assert_status(axum::http::StatusCode::CREATED);
 
-    let resp = server
-        .get("/channels")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/channels").authorization_bearer(&token).await;
     resp.assert_status_ok();
     let channels = resp.json::<Vec<serde_json::Value>>();
-    let banner = channels.iter().find(|c| c["name"] == "event-banner").unwrap();
+    let banner = channels
+        .iter()
+        .find(|c| c["name"] == "event-banner")
+        .unwrap();
     assert_eq!(banner["channel_type"], "banner");
     assert_eq!(banner["banner_url"], "https://cdn.example.com/event.webp");
 }

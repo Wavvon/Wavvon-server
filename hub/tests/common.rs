@@ -13,7 +13,11 @@ use voxply_identity::Identity;
 
 pub async fn setup() -> TestServer {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));

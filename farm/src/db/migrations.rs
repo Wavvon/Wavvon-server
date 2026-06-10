@@ -141,11 +141,9 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
     let _ = sqlx::query("ALTER TABLE farms ADD COLUMN totp_secret TEXT")
         .execute(pool)
         .await;
-    let _ = sqlx::query(
-        "ALTER TABLE farms ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0",
-    )
-    .execute(pool)
-    .await;
+    let _ = sqlx::query("ALTER TABLE farms ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
 
     // server_id foreign-key column on the hubs table (NULL = local process).
     let _ = sqlx::query("ALTER TABLE hubs ADD COLUMN server_id TEXT REFERENCES servers(id)")

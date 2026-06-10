@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use crate::auth::middleware::AuthUser;
+use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use voxply_identity::DhKeyRecord;
-use crate::auth::middleware::AuthUser;
-use crate::state::AppState;
 
 #[derive(Deserialize)]
 pub struct PublishDhKeyRequest {
@@ -27,7 +27,10 @@ pub async fn put_dh_key(
     Json(req): Json<PublishDhKeyRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if pubkey != user.public_key {
-        return Err((StatusCode::FORBIDDEN, "Can only publish your own DH key".to_string()));
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Can only publish your own DH key".to_string(),
+        ));
     }
 
     let record = DhKeyRecord {
@@ -36,7 +39,8 @@ pub async fn put_dh_key(
         signature_hex: req.signature_hex.clone(),
         published_at: 0, // validated only; actual timestamp set below
     };
-    record.verify()
+    record
+        .verify()
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid signature: {e}")))?;
 
     let now = crate::auth::handlers::unix_timestamp();

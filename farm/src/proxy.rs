@@ -90,9 +90,7 @@ pub async fn proxy_handler(
     };
 
     // Build reqwest request.
-    let mut rb = state
-        .http_client
-        .request(method.clone(), &upstream_url);
+    let mut rb = state.http_client.request(method.clone(), &upstream_url);
 
     // Forward headers (skip hop-by-hop headers that reqwest manages).
     for (name, value) in &headers {

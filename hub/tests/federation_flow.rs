@@ -6,7 +6,9 @@ use tokio::sync::{broadcast, RwLock};
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::db;
 use voxply_hub::federation::client::FederationClient;
-use voxply_hub::federation::models::{FederatedChannelResponse, FederatedMessageResponse, PeerInfo};
+use voxply_hub::federation::models::{
+    FederatedChannelResponse, FederatedMessageResponse, PeerInfo,
+};
 use voxply_hub::routes::chat_models::ChannelResponse;
 use voxply_hub::server;
 use voxply_hub::state::AppState;
@@ -14,7 +16,11 @@ use voxply_identity::Identity;
 
 async fn start_hub(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -31,7 +37,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -46,7 +52,9 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -54,7 +62,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
 
     let app = server::create_router(state.clone());
 

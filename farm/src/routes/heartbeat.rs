@@ -48,14 +48,13 @@ pub async fn receive_heartbeat(
 
     // Only accept heartbeats from hubs we recognise (hub_pubkey in hubs table).
     // If hub_pubkey is NULL (not yet set) we skip the check and just upsert.
-    let known: Option<i64> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hubs WHERE hub_pubkey = ? AND deleted_at IS NULL",
-    )
-    .bind(&hub_pubkey)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let known: Option<i64> =
+        sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE hub_pubkey = ? AND deleted_at IS NULL")
+            .bind(&hub_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     // If we got a count back and it is zero, the hub is not registered — reject.
     if known == Some(0) {

@@ -117,9 +117,7 @@ pub fn verify_token(farm_pubkey_hex: &str, token_str: &str) -> Result<FarmTokenP
 
     // Check iss_pk matches the known farm pubkey (defence-in-depth vs key rotation).
     if payload.iss_pk != farm_pubkey_hex {
-        return Err(anyhow!(
-            "Token iss_pk does not match cached farm pubkey"
-        ));
+        return Err(anyhow!("Token iss_pk does not match cached farm pubkey"));
     }
 
     Ok(payload)

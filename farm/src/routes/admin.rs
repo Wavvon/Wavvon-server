@@ -111,6 +111,7 @@ struct FarmRow {
 async fn fetch_farm_row(
     db: &sqlx::SqlitePool,
 ) -> Result<FarmRow, (StatusCode, Json<serde_json::Value>)> {
+    #[allow(clippy::type_complexity)]
     let row: Option<(
         String,
         Option<String>,
@@ -196,7 +197,9 @@ fn validate_tags(tags: &[String]) -> Result<(), (StatusCode, Json<serde_json::Va
         if !VALID_TAGS.contains(&tag.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid_tag", "details": format!("unknown tag: {tag}")})),
+                Json(
+                    serde_json::json!({"error": "invalid_tag", "details": format!("unknown tag: {tag}")}),
+                ),
             ));
         }
     }
@@ -207,14 +210,18 @@ fn validate_languages(langs: &[String]) -> Result<(), (StatusCode, Json<serde_js
     if langs.is_empty() || langs.len() > 5 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "invalid_value", "details": "languages must be 1-5 items"})),
+            Json(
+                serde_json::json!({"error": "invalid_value", "details": "languages must be 1-5 items"}),
+            ),
         ));
     }
     for lang in langs {
         if !validate_language(lang) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid_value", "details": format!("invalid BCP-47 code: {lang}")})),
+                Json(
+                    serde_json::json!({"error": "invalid_value", "details": format!("invalid BCP-47 code: {lang}")}),
+                ),
             ));
         }
     }
@@ -253,12 +260,10 @@ pub async fn get_settings(
 
     let row = fetch_farm_row(&state.db).await?;
 
-    let languages: serde_json::Value = serde_json::from_str(&row.languages).unwrap_or_else(|_| {
-        serde_json::json!(["en"])
-    });
-    let tags: serde_json::Value = serde_json::from_str(&row.tags).unwrap_or_else(|_| {
-        serde_json::json!([])
-    });
+    let languages: serde_json::Value =
+        serde_json::from_str(&row.languages).unwrap_or_else(|_| serde_json::json!(["en"]));
+    let tags: serde_json::Value =
+        serde_json::from_str(&row.tags).unwrap_or_else(|_| serde_json::json!([]));
 
     Ok(Json(FarmSettingsResponse {
         name: row.name,
@@ -307,7 +312,9 @@ pub async fn patch_settings(
         if !validate_creation_policy(policy) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid_value", "details": "creation_policy must be open, admin_only, or disabled"})),
+                Json(
+                    serde_json::json!({"error": "invalid_value", "details": "creation_policy must be open, admin_only, or disabled"}),
+                ),
             ));
         }
     }
@@ -505,7 +512,7 @@ pub async fn list_users(
 ) -> Result<Json<ListUsersResponse>, (StatusCode, Json<serde_json::Value>)> {
     require_admin(&headers, &state).await?;
 
-    let limit = query.limit.unwrap_or(50).min(200).max(1);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let now = unix_now();
 
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM farm_users")
@@ -676,18 +683,15 @@ pub async fn public_info(
         ));
     }
 
-    let hub_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE deleted_at IS NULL")
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
+    let hub_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE deleted_at IS NULL")
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
 
-    let languages: serde_json::Value = serde_json::from_str(&row.languages).unwrap_or_else(|_| {
-        serde_json::json!(["en"])
-    });
-    let tags: serde_json::Value = serde_json::from_str(&row.tags).unwrap_or_else(|_| {
-        serde_json::json!([])
-    });
+    let languages: serde_json::Value =
+        serde_json::from_str(&row.languages).unwrap_or_else(|_| serde_json::json!(["en"]));
+    let tags: serde_json::Value =
+        serde_json::from_str(&row.tags).unwrap_or_else(|_| serde_json::json!([]));
 
     Ok(Json(PublicInfoResponse {
         kind: "voxply-farm-public",

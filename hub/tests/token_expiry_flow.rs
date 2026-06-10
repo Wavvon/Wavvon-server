@@ -22,7 +22,11 @@ use voxply_identity::Identity;
 
 async fn make_state() -> Arc<AppState> {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -117,12 +121,7 @@ async fn insert_bot_user(db: &AnyPool, pubkey: &str) {
 }
 
 /// Insert a session row directly with the given `expires_at`.
-async fn insert_session(
-    db: &AnyPool,
-    token: &str,
-    pubkey: &str,
-    expires_at: Option<i64>,
-) {
+async fn insert_session(db: &AnyPool, token: &str, pubkey: &str, expires_at: Option<i64>) {
     let now = voxply_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
@@ -314,12 +313,11 @@ async fn tick_closes_and_deletes_expired_session() {
     assert_eq!(v["reason"], "token_expired");
 
     // Session row should be gone.
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = ?")
-            .bind(token)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = ?")
+        .bind(token)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     assert_eq!(count, 0, "expired session row should be deleted");
 
     // bot_sessions entry should be removed.
@@ -341,12 +339,11 @@ async fn tick_does_not_touch_live_sessions() {
 
     token_expiry::tick(&state).await.unwrap();
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = ?")
-            .bind(token)
-            .fetch_one(&state.db)
-            .await
-            .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = ?")
+        .bind(token)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     assert_eq!(count, 1, "live session should not be deleted");
 }
 
@@ -390,7 +387,10 @@ async fn renew_returns_new_token_with_expires_at() {
     let now = voxply_hub::auth::handlers::unix_timestamp();
     let expected = now + 30 * 24 * 3600;
     let delta = (body.expires_at - expected).abs();
-    assert!(delta < 5, "expires_at should be ~30 days from now, got delta={delta}s");
+    assert!(
+        delta < 5,
+        "expires_at should be ~30 days from now, got delta={delta}s"
+    );
 }
 
 /// Renewal fails when the bearer token is missing.

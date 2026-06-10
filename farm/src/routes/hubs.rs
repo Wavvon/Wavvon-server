@@ -104,59 +104,69 @@ pub async fn list_hubs(
     let farm_pubkey = state.public_key_hex();
     let authed_sub = require_auth(&headers, &farm_pubkey).ok().map(|p| p.sub);
 
-    let rows: Vec<(String, String, Option<String>, String, i64, Option<i64>, String)> =
-        if let Some(ref sub) = authed_sub {
-            // Authenticated: return public hubs + hubs the user owns.
-            sqlx::query_as(
-                "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        String,
+        i64,
+        Option<i64>,
+        String,
+    )> = if let Some(ref sub) = authed_sub {
+        // Authenticated: return public hubs + hubs the user owns.
+        sqlx::query_as(
+            "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey
                  FROM hubs
                  WHERE deleted_at IS NULL
                    AND (visibility = 'public' OR owner_pubkey = ?)",
-            )
-            .bind(sub)
-            .fetch_all(&state.db)
-            .await
-        } else {
-            // Unauthenticated: public hubs only (and only if directory_public is set).
-            let dir_public: bool =
-                sqlx::query_scalar::<_, i64>("SELECT directory_public FROM farms WHERE id = 1")
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|v| v != 0)
-                    .unwrap_or(false);
+        )
+        .bind(sub)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        // Unauthenticated: public hubs only (and only if directory_public is set).
+        let dir_public: bool =
+            sqlx::query_scalar::<_, i64>("SELECT directory_public FROM farms WHERE id = 1")
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .map(|v| v != 0)
+                .unwrap_or(false);
 
-            if !dir_public {
-                return Ok(Json(ListHubsResponse { hubs: vec![] }));
-            }
+        if !dir_public {
+            return Ok(Json(ListHubsResponse { hubs: vec![] }));
+        }
 
-            sqlx::query_as(
-                "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey
+        sqlx::query_as(
+            "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey
                  FROM hubs
                  WHERE deleted_at IS NULL AND visibility = 'public'",
-            )
-            .fetch_all(&state.db)
-            .await
-        }
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("db_error: {e}")})),
-            )
-        })?;
+        )
+        .fetch_all(&state.db)
+        .await
+    }
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("db_error: {e}")})),
+        )
+    })?;
 
     let hubs = rows
         .into_iter()
-        .map(|(id, name, description, visibility, created_at, suspended_at, _owner)| HubEntry {
-            hub_url: hub_url(&state.farm_url, &id),
-            id,
-            name,
-            description,
-            visibility,
-            created_at,
-            suspended_at,
-        })
+        .map(
+            |(id, name, description, visibility, created_at, suspended_at, _owner)| HubEntry {
+                hub_url: hub_url(&state.farm_url, &id),
+                id,
+                name,
+                description,
+                visibility,
+                created_at,
+                suspended_at,
+            },
+        )
         .collect();
 
     Ok(Json(ListHubsResponse { hubs }))
@@ -312,17 +322,16 @@ pub async fn create_hub(
     // Generate a unique hub_id.
     let hub_id = loop {
         let candidate = generate_hub_id();
-        let exists: Option<String> =
-            sqlx::query_scalar("SELECT id FROM hubs WHERE id = ?")
-                .bind(&candidate)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("db_error: {e}")})),
-                    )
-                })?;
+        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hubs WHERE id = ?")
+            .bind(&candidate)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("db_error: {e}")})),
+                )
+            })?;
         if exists.is_none() {
             break candidate;
         }
@@ -335,7 +344,7 @@ pub async fn create_hub(
     let db_path = format!("{}/{}.db", hubs_dir.trim_end_matches('/'), hub_id);
 
     // Ensure the hubs directory exists.
-    if let Err(e) = std::fs::create_dir_all(&hubs_dir) {
+    if let Err(e) = std::fs::create_dir_all(hubs_dir) {
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("cannot create hubs dir: {e}")})),
@@ -395,7 +404,13 @@ pub async fn create_hub(
     }
 
     let url = hub_url(&state.farm_url, &hub_id);
-    Ok((StatusCode::CREATED, Json(CreateHubResponse { id: hub_id, hub_url: url })))
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateHubResponse {
+            id: hub_id,
+            hub_url: url,
+        }),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +421,7 @@ pub async fn get_hub(
     Path(hub_id): Path<String>,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<HubEntry>, (StatusCode, Json<serde_json::Value>)> {
+    #[allow(clippy::type_complexity)]
     let row: Option<(String, Option<String>, String, i64, Option<i64>)> = sqlx::query_as(
         "SELECT name, description, visibility, created_at, suspended_at
          FROM hubs WHERE id = ? AND deleted_at IS NULL",
@@ -491,20 +507,18 @@ pub async fn suspend_hub(
     }
 
     let now = unix_now();
-    sqlx::query(
-        "UPDATE hubs SET suspended_at = ?, suspension_reason = ? WHERE id = ?",
-    )
-    .bind(now)
-    .bind(&req.reason)
-    .bind(&hub_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("db_error: {e}")})),
-        )
-    })?;
+    sqlx::query("UPDATE hubs SET suspended_at = ?, suspension_reason = ? WHERE id = ?")
+        .bind(now)
+        .bind(&req.reason)
+        .bind(&hub_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("db_error: {e}")})),
+            )
+        })?;
 
     Ok(Json(SuspendResponse {
         id: hub_id,
@@ -581,7 +595,11 @@ pub async fn delete_hub(
 // ---------------------------------------------------------------------------
 
 async fn pick_agent(
-    senders: &Arc<tokio::sync::RwLock<std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
+    senders: &Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>,
+        >,
+    >,
 ) -> Option<(String, tokio::sync::mpsc::UnboundedSender<String>)> {
     let map = senders.read().await;
     map.iter().next().map(|(id, s)| (id.clone(), s.clone()))

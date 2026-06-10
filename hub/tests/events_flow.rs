@@ -1,9 +1,9 @@
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 async fn create_channel(server: &TestServer, token: &str) -> String {
     let resp = server
@@ -129,10 +129,7 @@ async fn event_delete_rejected_for_non_creator() {
         }))
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
-    let event_id = resp.json::<Value>()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let event_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
 
     let resp = server
         .delete(&format!("/events/{event_id}"))

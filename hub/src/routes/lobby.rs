@@ -106,25 +106,27 @@ pub async fn get_status(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (lobby_status, entered_at, pow_level) = row.unwrap_or_else(|| ("none".to_string(), None, 0));
+    let (lobby_status, entered_at, pow_level) =
+        row.unwrap_or_else(|| ("none".to_string(), None, 0));
     let current_level = pow_level as u32;
 
     // Determine effective status from the user perspective:
     // "member" = fully joined (no lobby system, or already promoted, or pow meets level)
     // "promoted" = passed the lobby gate
     // "lobby" = currently in the lobby waiting room
-    let effective_status = if lobby_status == "promoted" || current_level >= min_level || min_level == 0 {
-        "member".to_string()
-    } else if lobby_status == "lobby" {
-        "lobby".to_string()
-    } else {
-        // none — not in lobby yet; from client perspective show as member if no gate
-        if min_level == 0 {
+    let effective_status =
+        if lobby_status == "promoted" || current_level >= min_level || min_level == 0 {
             "member".to_string()
+        } else if lobby_status == "lobby" {
+            "lobby".to_string()
         } else {
-            lobby_status
-        }
-    };
+            // none — not in lobby yet; from client perspective show as member if no gate
+            if min_level == 0 {
+                "member".to_string()
+            } else {
+                lobby_status
+            }
+        };
 
     Ok(Json(LobbyStatusResponse {
         status: effective_status,
@@ -150,7 +152,10 @@ pub async fn submit_pow(
     // The proof string is "<hex_nonce>:<claimed_level>".
     let parts: Vec<&str> = req.pow_proof.splitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err((StatusCode::BAD_REQUEST, "Invalid pow_proof format; expected nonce:level".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid pow_proof format; expected nonce:level".to_string(),
+        ));
     }
     let nonce: u64 = parts[0]
         .parse()
@@ -164,14 +169,12 @@ pub async fn submit_pow(
     }
 
     // Update pow_level (only increase, never decrease)
-    let current_pow: i64 = sqlx::query_scalar(
-        "SELECT pow_level FROM users WHERE public_key = ?",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .unwrap_or(0);
+    let current_pow: i64 = sqlx::query_scalar("SELECT pow_level FROM users WHERE public_key = ?")
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .unwrap_or(0);
 
     let new_level = (current_pow as u32).max(claimed_level);
     let promoted = new_level >= min_level && min_level > 0;
@@ -191,7 +194,10 @@ pub async fn submit_pow(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok(Json(SubmitPowResponse { promoted, new_level }))
+    Ok(Json(SubmitPowResponse {
+        promoted,
+        new_level,
+    }))
 }
 
 /// GET /lobby/welcome

@@ -13,7 +13,11 @@ use voxply_identity::Identity;
 
 async fn setup(startup_name: &str) -> TestServer {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -31,7 +35,7 @@ async fn setup(startup_name: &str) -> TestServer {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -46,7 +50,9 @@ async fn setup(startup_name: &str) -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -54,7 +60,7 @@ async fn setup(startup_name: &str) -> TestServer {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
     let app = server::create_router(state);
     TestServer::new(app)
 }
@@ -111,10 +117,7 @@ async fn alliance_member_row_uses_renamed_hub_name() {
 
     // Pull alliance list and verify the member row shows the renamed name,
     // not the startup name.
-    let resp = server
-        .get("/alliances")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/alliances").authorization_bearer(&token).await;
     let alliances = resp.json::<serde_json::Value>();
     let arr = alliances.as_array().unwrap();
     assert_eq!(arr.len(), 1);
@@ -148,10 +151,7 @@ async fn alliance_member_row_falls_back_to_startup_name() {
         .await
         .assert_status(axum::http::StatusCode::CREATED);
 
-    let resp = server
-        .get("/alliances")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/alliances").authorization_bearer(&token).await;
     let arr = resp.json::<serde_json::Value>();
     let alliance_id = arr.as_array().unwrap()[0]["id"].as_str().unwrap();
 

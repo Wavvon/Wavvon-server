@@ -160,14 +160,12 @@ impl BadgeStore for SqliteStore {
     }
 
     async fn revoke_issued_badge(&self, id: &str, revoked_at: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "UPDATE issued_badges SET revoked_at = ? WHERE id = ?",
-        )
-        .bind(revoked_at)
-        .bind(id)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("UPDATE issued_badges SET revoked_at = ? WHERE id = ?")
+            .bind(revoked_at)
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 }

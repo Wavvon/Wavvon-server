@@ -35,7 +35,12 @@ pub async fn update_hub(
         upsert_setting(&state.db, "hub_icon", icon).await?;
     }
     if let Some(flag) = req.require_approval {
-        upsert_setting(&state.db, "require_approval", if flag { "true" } else { "false" }).await?;
+        upsert_setting(
+            &state.db,
+            "require_approval",
+            if flag { "true" } else { "false" },
+        )
+        .await?;
     }
     if let Some(level) = req.min_security_level {
         upsert_setting(&state.db, "min_security_level", &level.to_string()).await?;
@@ -157,7 +162,12 @@ pub async fn patch_channel_depth(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    upsert_setting(&state.db, "max_channel_depth", &req.max_channel_depth.to_string()).await?;
+    upsert_setting(
+        &state.db,
+        "max_channel_depth",
+        &req.max_channel_depth.to_string(),
+    )
+    .await?;
     Ok(StatusCode::OK)
 }
 
@@ -301,7 +311,11 @@ pub async fn read_branding(state: &AppState) -> HubBranding {
     let name = current_hub_name(state).await;
     let description = read_setting(&state.db, "hub_description").await;
     let icon = read_setting(&state.db, "hub_icon").await;
-    HubBranding { name, description, icon }
+    HubBranding {
+        name,
+        description,
+        icon,
+    }
 }
 
 /// Live hub name. The startup-time AppState.hub_name is only the fallback —
@@ -356,13 +370,12 @@ pub async fn list_members(
 
         let mut role_summaries = Vec::with_capacity(roles.len());
         for r in roles {
-            let perms_for_role: Vec<String> = sqlx::query_scalar(
-                "SELECT permission FROM role_permissions WHERE role_id = ?",
-            )
-            .bind(&r.id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            let perms_for_role: Vec<String> =
+                sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = ?")
+                    .bind(&r.id)
+                    .fetch_all(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             role_summaries.push(RoleResponse {
                 id: r.id,

@@ -1,8 +1,9 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
-use crate::row_types::{ConversationRow, DmMessageRow, FriendRow, DhKeyRow};
+use crate::row_types::{ConversationRow, DhKeyRow, DmMessageRow, FriendRow};
+use async_trait::async_trait;
 
 #[async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait DmStore: Send + Sync {
     // ---- Conversations ----
 
@@ -47,11 +48,8 @@ pub trait DmStore: Send + Sync {
         conv_id: &str,
     ) -> Result<Vec<(String, Option<String>)>, StoreError>;
 
-    async fn is_conversation_member(
-        &self,
-        conv_id: &str,
-        pubkey: &str,
-    ) -> Result<bool, StoreError>;
+    async fn is_conversation_member(&self, conv_id: &str, pubkey: &str)
+        -> Result<bool, StoreError>;
 
     // ---- DM messages ----
 
@@ -78,11 +76,8 @@ pub trait DmStore: Send + Sync {
 
     async fn upsert_friend(&self, f: &FriendRow) -> Result<(), StoreError>;
 
-    async fn get_friend(
-        &self,
-        user_a: &str,
-        user_b: &str,
-    ) -> Result<Option<FriendRow>, StoreError>;
+    async fn get_friend(&self, user_a: &str, user_b: &str)
+        -> Result<Option<FriendRow>, StoreError>;
 
     async fn list_friends(&self, pubkey: &str) -> Result<Vec<FriendRow>, StoreError>;
 
@@ -131,7 +126,11 @@ pub trait DmStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<(String, String, i64)>, StoreError>;
 
-    async fn mark_dm_outbox_delivered(&self, message_id: &str, hub_url: &str) -> Result<(), StoreError>;
+    async fn mark_dm_outbox_delivered(
+        &self,
+        message_id: &str,
+        hub_url: &str,
+    ) -> Result<(), StoreError>;
 
     async fn record_dm_outbox_failure(
         &self,

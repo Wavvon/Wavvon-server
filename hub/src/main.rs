@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use sqlx::any::AnyPoolOptions;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
+use voxply_hub::bots::token_expiry;
 use voxply_hub::cert_worker;
 use voxply_hub::db;
-use voxply_hub::bots::token_expiry;
 use voxply_hub::dm_worker;
 use voxply_hub::federation::client::FederationClient;
 use voxply_hub::server;
@@ -47,10 +47,7 @@ async fn main() -> Result<()> {
             let provider = opentelemetry_sdk::trace::TracerProvider::builder()
                 .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                 .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new(
-                        "service.name",
-                        env!("CARGO_PKG_NAME"),
-                    ),
+                    opentelemetry::KeyValue::new("service.name", env!("CARGO_PKG_NAME")),
                 ]))
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
@@ -60,9 +57,7 @@ async fn main() -> Result<()> {
     use tracing_subscriber::prelude::*;
     let otel_layer = otlp_provider.as_ref().map(|provider| {
         use opentelemetry::trace::TracerProvider as _;
-        tracing_opentelemetry::layer().with_tracer(
-            provider.tracer(env!("CARGO_PKG_NAME"))
-        )
+        tracing_opentelemetry::layer().with_tracer(provider.tracer(env!("CARGO_PKG_NAME")))
     });
 
     if json_logs {
@@ -140,8 +135,8 @@ async fn main() -> Result<()> {
     if subcommand.as_deref() == Some("admin") {
         let admin_cmd = std::env::args().nth(2).unwrap_or_default();
         sqlx::any::install_default_drivers();
-        let db_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite:hub.db?mode=ro".to_string());
+        let db_url =
+            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:hub.db?mode=ro".to_string());
         let db = AnyPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
@@ -154,12 +149,11 @@ async fn main() -> Result<()> {
                     .fetch_one(&db)
                     .await
                     .unwrap_or(0);
-                let channels: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM channels WHERE is_category=0",
-                )
-                .fetch_one(&db)
-                .await
-                .unwrap_or(0);
+                let channels: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE is_category=0")
+                        .fetch_one(&db)
+                        .await
+                        .unwrap_or(0);
                 let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
                     .fetch_one(&db)
                     .await
@@ -355,9 +349,7 @@ async fn main() -> Result<()> {
                 println!("Restore complete. Restart the hub.");
             }
             _ => {
-                println!(
-                    "Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore]"
-                );
+                println!("Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore]");
             }
         }
         return Ok(());
@@ -376,7 +368,9 @@ async fn main() -> Result<()> {
     // Install AnyPool drivers (required before connecting with AnyPool).
     sqlx::any::install_default_drivers();
 
-    let db_url = settings.database_url.as_deref()
+    let db_url = settings
+        .database_url
+        .as_deref()
         .unwrap_or("sqlite:hub.db?mode=rwc");
 
     let write_pool = AnyPoolOptions::new()
@@ -480,7 +474,10 @@ async fn main() -> Result<()> {
             )
         };
 
-    let (chat_tx, _) = broadcast::channel::<(voxply_hub::routes::chat_models::ChatEvent, std::sync::Arc<str>)>(256);
+    let (chat_tx, _) = broadcast::channel::<(
+        voxply_hub::routes::chat_models::ChatEvent,
+        std::sync::Arc<str>,
+    )>(256);
     let (voice_event_tx, _) = broadcast::channel(256);
     let (dm_tx, _) = broadcast::channel(256);
     let (screen_share_tx, _) = broadcast::channel(256);
@@ -553,7 +550,9 @@ async fn main() -> Result<()> {
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
         voice_zones: RwLock::new(HashMap::new()),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: RwLock::new(HashMap::new()),
@@ -698,7 +697,11 @@ async fn main() -> Result<()> {
                 };
 
                 for (session_id, channel_id) in stale {
-                    reaper_state.active_game_sessions.lock().unwrap().remove(&session_id);
+                    reaper_state
+                        .active_game_sessions
+                        .lock()
+                        .unwrap()
+                        .remove(&session_id);
 
                     // Mark in DB.
                     let now_str = now.to_string();
@@ -719,12 +722,14 @@ async fn main() -> Result<()> {
                         reason: Some("timeout".to_string()),
                         result: None,
                     };
-                    let json: std::sync::Arc<str> = std::sync::Arc::from(
-                        serde_json::to_string(&msg).unwrap().as_str(),
-                    );
+                    let json: std::sync::Arc<str> =
+                        std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
                     let _ = reaper_state.chat_tx.send((ev, json));
 
-                    tracing::info!("Game session {} timed out and was reaped", &session_id[..8.min(session_id.len())]);
+                    tracing::info!(
+                        "Game session {} timed out and was reaped",
+                        &session_id[..8.min(session_id.len())]
+                    );
                 }
             }
         });
@@ -736,9 +741,10 @@ async fn main() -> Result<()> {
     if let (Some(cert), Some(key)) = (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {
         let cert_path = PathBuf::from(cert);
         let key_path = PathBuf::from(key);
-        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-            .await
-            .with_context(|| format!("Failed to load TLS cert/key from {cert:?} / {key:?}"))?;
+        let rustls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+                .await
+                .with_context(|| format!("Failed to load TLS cert/key from {cert:?} / {key:?}"))?;
         tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
         axum_server::bind_rustls(addr, rustls_config)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
@@ -792,7 +798,9 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
     let current = env!("CARGO_PKG_VERSION");
 
     if latest.is_empty() {
-        anyhow::bail!("GitHub API returned no tag_name — is the repo public and are releases published?");
+        anyhow::bail!(
+            "GitHub API returned no tag_name — is the repo public and are releases published?"
+        );
     }
 
     if latest == current {
@@ -807,8 +815,8 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let asset_name = self_update_asset_name()
-        .context("Self-update is only supported on Linux x86_64")?;
+    let asset_name =
+        self_update_asset_name().context("Self-update is only supported on Linux x86_64")?;
 
     let assets = release["assets"]
         .as_array()
@@ -833,15 +841,17 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
         .error_for_status()
         .context("Download returned an error status")?;
 
-    let bytes = response.bytes().await.context("Failed to read download body")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("Failed to read download body")?;
     println!("Downloaded {} bytes.", bytes.len());
 
-    let current_exe = std::env::current_exe()
-        .context("Cannot determine current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("Cannot determine current executable path")?;
 
     let tmp = current_exe.with_file_name(".voxply-hub-update.tmp");
-    std::fs::write(&tmp, &bytes)
-        .with_context(|| format!("Cannot write temp file {tmp:?}"))?;
+    std::fs::write(&tmp, &bytes).with_context(|| format!("Cannot write temp file {tmp:?}"))?;
 
     #[cfg(unix)]
     {
@@ -903,8 +913,8 @@ fn restore(src_path: &str) -> anyhow::Result<()> {
 /// write it to `hub_rotation.json`, and replace `hub_identity.json` with
 /// the new key. The operator must restart the hub afterwards.
 fn rotate_hub_key(current_path: &Path, _new_path: &Path) -> anyhow::Result<()> {
-    let old_identity = Identity::load(current_path)
-        .context("Failed to load current hub identity")?;
+    let old_identity =
+        Identity::load(current_path).context("Failed to load current hub identity")?;
 
     let new_identity = Identity::generate();
 

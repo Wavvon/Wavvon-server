@@ -9,7 +9,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     if is_sqlite {
         sqlx::query("PRAGMA journal_mode=WAL").execute(pool).await?;
         sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
-        sqlx::query("PRAGMA synchronous=NORMAL").execute(pool).await?;
+        sqlx::query("PRAGMA synchronous=NORMAL")
+            .execute(pool)
+            .await?;
     }
 
     // ---- Core user / session tables ----
@@ -36,11 +38,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sessions (
@@ -963,17 +963,13 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_audit_seq ON hub_audit_log(seq)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_seq ON hub_audit_log(seq)")
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_audit_event_type ON hub_audit_log(event_type)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_event_type ON hub_audit_log(event_type)")
+        .execute(pool)
+        .await?;
 
     // ---- Incoming webhooks ----
 
@@ -1103,11 +1099,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_user_certs_master ON user_certs(master_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_user_certs_master ON user_certs(master_pubkey)")
+        .execute(pool)
+        .await?;
 
     // ---- Badge federation ----
 
@@ -1235,11 +1229,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_pubkey)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS post_replies (
@@ -1420,11 +1412,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_post_reads_post ON post_reads(post_id)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_post_reads_post ON post_reads(post_id)")
+        .execute(pool)
+        .await?;
 
     // ---- File uploads ----
 
@@ -1462,9 +1452,11 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     let _ = sqlx::query("ALTER TABLE channels ADD COLUMN banner_url TEXT")
         .execute(pool)
         .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN banner_file_id TEXT REFERENCES upload_files(id)")
-        .execute(pool)
-        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE channels ADD COLUMN banner_file_id TEXT REFERENCES upload_files(id)",
+    )
+    .execute(pool)
+    .await;
 
     Ok(())
 }

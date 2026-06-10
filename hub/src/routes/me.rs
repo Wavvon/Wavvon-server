@@ -21,8 +21,8 @@ pub async fn me(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (display_name, approval_status, avatar) = row
-        .unwrap_or((None, "approved".to_string(), None));
+    let (display_name, approval_status, avatar) =
+        row.unwrap_or((None, "approved".to_string(), None));
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
@@ -50,7 +50,11 @@ pub async fn update_me(
     }
     if let Some(ref avatar) = req.avatar {
         // Empty string clears the avatar.
-        let stored = if avatar.is_empty() { None } else { Some(avatar.as_str()) };
+        let stored = if avatar.is_empty() {
+            None
+        } else {
+            Some(avatar.as_str())
+        };
         sqlx::query("UPDATE users SET avatar = ? WHERE public_key = ?")
             .bind(stored)
             .bind(&user.public_key)

@@ -20,10 +20,7 @@ use crate::SqliteStore;
 impl Transactional for SqliteStore {
     async fn with_transaction<F, T>(&self, f: F) -> Result<T, StoreError>
     where
-        F: for<'tx> FnOnce(
-                &'tx dyn HubStore,
-            ) -> BoxFuture<'tx, Result<T, StoreError>>
-            + Send,
+        F: for<'tx> FnOnce(&'tx dyn HubStore) -> BoxFuture<'tx, Result<T, StoreError>> + Send,
         T: Send + 'static,
     {
         // Run the closure against self. A future iteration will wrap a real

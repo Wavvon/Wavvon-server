@@ -141,7 +141,9 @@ pub async fn list_servers(
 
     let connected_ids = {
         let map = state.agent_senders.read().await;
-        map.keys().cloned().collect::<std::collections::HashSet<_>>()
+        map.keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
     };
 
     let hub_count_rows: Vec<(String, i64)> = sqlx::query_as(
@@ -166,7 +168,14 @@ pub async fn list_servers(
         .map(|(id, name, region, last_seen_at)| {
             let connected = connected_ids.contains(&id);
             let running_hub_count = hub_counts.get(&id).copied().unwrap_or(0);
-            ServerEntry { id, name, region, connected, last_seen_at, running_hub_count }
+            ServerEntry {
+                id,
+                name,
+                region,
+                connected,
+                last_seen_at,
+                running_hub_count,
+            }
         })
         .collect();
 
@@ -201,13 +210,12 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
     };
     let token_hash = sha256_hex(&token_bytes);
 
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM servers WHERE token_hash = ? AND deleted_at IS NULL",
-    )
-    .bind(&token_hash)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT id FROM servers WHERE token_hash = ? AND deleted_at IS NULL")
+            .bind(&token_hash)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let server_id = match row {
         Some((id,)) => id,
@@ -221,7 +229,11 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
 
     // Split the socket into send/receive halves via an mpsc channel.
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    state.agent_senders.write().await.insert(server_id.clone(), tx);
+    state
+        .agent_senders
+        .write()
+        .await
+        .insert(server_id.clone(), tx);
 
     let (mut ws_sender, mut ws_receiver) = {
         use futures_util::StreamExt;

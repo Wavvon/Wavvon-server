@@ -14,13 +14,12 @@ pub fn spawn(state: Arc<AppState>) {
 }
 
 async fn sync_banlists(state: &AppState) {
-    let sources_json: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM hub_settings WHERE key = 'banlist_sources'",
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let sources_json: Option<String> =
+        sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'banlist_sources'")
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     let sources: Vec<String> = sources_json
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -53,9 +52,7 @@ async fn sync_banlists(state: &AppState) {
                             continue;
                         }
 
-                        if let Some(entries) =
-                            payload.get("entries").and_then(|e| e.as_array())
-                        {
+                        if let Some(entries) = payload.get("entries").and_then(|e| e.as_array()) {
                             let now = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
@@ -78,8 +75,7 @@ async fn sync_banlists(state: &AppState) {
                                     .get("master_pubkey")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("");
-                                let reason =
-                                    entry.get("reason").and_then(|v| v.as_str());
+                                let reason = entry.get("reason").and_then(|v| v.as_str());
                                 let added_at = entry
                                     .get("added_at")
                                     .and_then(|v| v.as_i64())

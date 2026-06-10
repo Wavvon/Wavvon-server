@@ -55,7 +55,13 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
             continue;
         };
 
-        match super::routes::dms::deliver_federated_dm_public(state, &row.recipient_hub_url, &envelope).await {
+        match super::routes::dms::deliver_federated_dm_public(
+            state,
+            &row.recipient_hub_url,
+            &envelope,
+        )
+        .await
+        {
             Ok(()) => {
                 sqlx::query("DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?")
                     .bind(&row.message_id)
@@ -115,7 +121,19 @@ async fn load_envelope(
 ) -> Result<Option<FederatedDmRequest>, sqlx::Error> {
     use crate::routes::dm_models::{EncryptedDmEnvelope, GroupEncryptedEnvelope};
 
-    let Some(msg): Option<(String, String, String, Option<String>, Option<String>, Option<String>, i64, i64, Option<String>, i64)> = sqlx::query_as(
+    #[allow(clippy::type_complexity)]
+    let Some(msg): Option<(
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        i64,
+    )> = sqlx::query_as(
         "SELECT id, conversation_id, sender, content, attachments, signature, created_at,
                 COALESCE(is_encrypted, 0), ciphertext_json,
                 COALESCE(is_group_encrypted, 0)
@@ -128,11 +146,10 @@ async fn load_envelope(
         return Ok(None);
     };
 
-    let conv_type: String =
-        sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
-            .bind(&msg.1)
-            .fetch_one(&state.db)
-            .await?;
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+        .bind(&msg.1)
+        .fetch_one(&state.db)
+        .await?;
 
     let members: Vec<String> =
         sqlx::query_scalar("SELECT public_key FROM conversation_members WHERE conversation_id = ?")

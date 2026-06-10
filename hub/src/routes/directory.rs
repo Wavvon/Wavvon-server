@@ -35,7 +35,7 @@ fn current_nonce() -> String {
     // Algorithm from https://en.wikipedia.org/wiki/Julian_day#Julian_day_number_calculation
     let l = jdn + 68_569;
     let n = (4 * l) / 146_097;
-    let l = l - (146_097 * n + 3) / 4;
+    let l = l - (146_097 * n).div_ceil(4);
     let year_i = (4_000 * (l + 1)) / 1_461_001;
     let l = l - (1_461 * year_i) / 4 + 31;
     let month_i = (80 * l) / 2_447;
@@ -44,7 +44,10 @@ fn current_nonce() -> String {
     let month = month_i + 2 - 12 * l;
     let year = 100 * (n - 49) + year_i + l;
 
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}Z", year, month, day, hour, minute)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}Z",
+        year, month, day, hour, minute
+    )
 }
 
 /// Build the canonical JSON payload exactly as the discovery API expects.
@@ -116,13 +119,8 @@ pub async fn sign_for_directory(
     perms.require(ADMIN)?;
 
     let nonce = current_nonce();
-    let canonical_payload = build_canonical_payload(
-        &req.bio,
-        &req.hub_url,
-        &req.language,
-        &nonce,
-        &req.tags,
-    );
+    let canonical_payload =
+        build_canonical_payload(&req.bio, &req.hub_url, &req.language, &nonce, &req.tags);
 
     let signature = state.hub_identity.sign(canonical_payload.as_bytes());
     let hub_pubkey = state.hub_identity.public_key_hex();

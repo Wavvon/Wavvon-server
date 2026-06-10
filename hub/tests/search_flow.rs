@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,7 +13,8 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 /// Build a TestServer backed by a real TantivySearch on a temp directory.
 /// Returns the TempDir too — drop it after the test to clean up.
@@ -31,9 +31,8 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
     let tmp = tempfile::tempdir().unwrap();
-    let search = Arc::new(
-        voxply_hub::search::tantivy_search::TantivySearch::open(tmp.path()).unwrap(),
-    );
+    let search =
+        Arc::new(voxply_hub::search::tantivy_search::TantivySearch::open(tmp.path()).unwrap());
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
@@ -154,10 +153,7 @@ async fn search_short_query_returns_empty() {
 async fn search_requires_auth() {
     let server = common::setup().await;
 
-    let resp = server
-        .get("/search")
-        .add_query_param("q", "anything")
-        .await;
+    let resp = server.get("/search").add_query_param("q", "anything").await;
     resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 }
 
@@ -195,7 +191,11 @@ async fn search_respects_channel_ban() {
         .await;
     resp.assert_status_ok();
     let before: Vec<SearchResult> = resp.json();
-    assert_eq!(before.len(), 1, "watcher should find the message before ban");
+    assert_eq!(
+        before.len(),
+        1,
+        "watcher should find the message before ban"
+    );
 
     // Insert the ban directly into the DB via the server state (we can't
     // call the endpoint without setting up admin permissions). We use the

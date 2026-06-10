@@ -15,7 +15,11 @@ use voxply_identity::{DeviceSubkey, Identity, MasterIdentity, SubkeyCert};
 
 async fn setup() -> (TestServer, AnyPool) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -31,7 +35,7 @@ async fn setup() -> (TestServer, AnyPool) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -46,7 +50,9 @@ async fn setup() -> (TestServer, AnyPool) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -54,7 +60,7 @@ async fn setup() -> (TestServer, AnyPool) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
 
     let server = TestServer::new(server::create_router(state));
     (server, db)
@@ -63,14 +69,8 @@ async fn setup() -> (TestServer, AnyPool) {
 fn make_cert(master: &MasterIdentity, subkey_pubkey: &str, label: &str) -> SubkeyCert {
     let master_pubkey = master.public_key_hex();
     let issued_at = 1_700_000_000;
-    let bytes = SubkeyCert::signing_bytes(
-        &master_pubkey,
-        subkey_pubkey,
-        label,
-        issued_at,
-        None,
-        &[],
-    );
+    let bytes =
+        SubkeyCert::signing_bytes(&master_pubkey, subkey_pubkey, label, issued_at, None, &[]);
     let signature = hex::encode(master.sign(&bytes).to_bytes());
     SubkeyCert {
         master_pubkey,
@@ -149,22 +149,18 @@ async fn paired_device_auths_and_records_master() {
 
     // /me should return the master pubkey as the canonical identity,
     // not the subkey pubkey.
-    let resp = server
-        .get("/me")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/me").authorization_bearer(&token).await;
     resp.assert_status_ok();
     let me: MeResponse = resp.json();
     assert_eq!(me.public_key, master.public_key_hex());
 
     // The user row records the master.
-    let stored_master: Option<String> = sqlx::query_scalar(
-        "SELECT master_pubkey FROM users WHERE public_key = ?",
-    )
-    .bind(master.public_key_hex())
-    .fetch_one(&db)
-    .await
-    .unwrap();
+    let stored_master: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+            .bind(master.public_key_hex())
+            .fetch_one(&db)
+            .await
+            .unwrap();
     assert_eq!(stored_master, Some(master.public_key_hex()));
 }
 
@@ -187,20 +183,15 @@ async fn second_paired_device_finds_existing_user() {
         .expect("desktop auth");
 
     // Both devices see themselves as the same canonical user.
-    let resp = server
-        .get("/me")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/me").authorization_bearer(&token).await;
     let me: MeResponse = resp.json();
     assert_eq!(me.public_key, master.public_key_hex());
 
-    let user_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users WHERE master_pubkey = ?",
-    )
-    .bind(master.public_key_hex())
-    .fetch_one(&db)
-    .await
-    .unwrap();
+    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE master_pubkey = ?")
+        .bind(master.public_key_hex())
+        .fetch_one(&db)
+        .await
+        .unwrap();
     assert_eq!(user_count, 1);
 }
 
@@ -230,13 +221,12 @@ async fn legacy_user_upgrade_preserves_canonical_pubkey() {
         .unwrap();
     assert_eq!(user_count, 1);
 
-    let stored_master: Option<String> = sqlx::query_scalar(
-        "SELECT master_pubkey FROM users WHERE public_key = ?",
-    )
-    .bind(&alice_pubkey)
-    .fetch_one(&db)
-    .await
-    .unwrap();
+    let stored_master: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+            .bind(&alice_pubkey)
+            .fetch_one(&db)
+            .await
+            .unwrap();
     assert_eq!(stored_master, Some(alice_master.public_key_hex()));
 }
 
@@ -266,13 +256,12 @@ async fn legacy_auth_still_works_unchanged() {
     let me: MeResponse = resp.json();
     assert_eq!(me.public_key, alice.public_key_hex());
 
-    let stored_master: Option<String> = sqlx::query_scalar(
-        "SELECT master_pubkey FROM users WHERE public_key = ?",
-    )
-    .bind(alice.public_key_hex())
-    .fetch_one(&db)
-    .await
-    .unwrap();
+    let stored_master: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+            .bind(alice.public_key_hex())
+            .fetch_one(&db)
+            .await
+            .unwrap();
     // Legacy users have NULL master_pubkey until they upgrade.
     assert_eq!(stored_master, None);
 }
@@ -303,13 +292,12 @@ async fn master_hijack_attempt_is_blocked_by_coalesce() {
         .expect("bob auth");
 
     // Alice's row should still have NULL master.
-    let alice_master_value: Option<String> = sqlx::query_scalar(
-        "SELECT master_pubkey FROM users WHERE public_key = ?",
-    )
-    .bind(&alice_pubkey)
-    .fetch_one(&db)
-    .await
-    .unwrap();
+    let alice_master_value: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+            .bind(&alice_pubkey)
+            .fetch_one(&db)
+            .await
+            .unwrap();
     assert_eq!(alice_master_value, None);
 
     // Two distinct rows exist.
@@ -359,10 +347,7 @@ async fn revoked_key_is_rejected_by_middleware() {
     insert_revocation(&db, &alice.public_key_hex()).await;
 
     // Existing token is now rejected — 401 with the revocation message.
-    let resp = server
-        .get("/me")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/me").authorization_bearer(&token).await;
     resp.assert_status_unauthorized();
     assert!(resp.text().contains("revoked"));
 }

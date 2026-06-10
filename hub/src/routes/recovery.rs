@@ -88,7 +88,10 @@ pub async fn put_contacts(
     Json(req): Json<SetContactsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if req.contacts.len() > 5 {
-        return Err((StatusCode::BAD_REQUEST, "Maximum 5 recovery contacts".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Maximum 5 recovery contacts".to_string(),
+        ));
     }
     if req.threshold == 0 || req.threshold as usize > req.contacts.len() {
         return Err((
@@ -98,7 +101,10 @@ pub async fn put_contacts(
     }
     // Contacts must be distinct from the owner.
     if req.contacts.iter().any(|c| c == &user.public_key) {
-        return Err((StatusCode::BAD_REQUEST, "You cannot be your own recovery contact".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "You cannot be your own recovery contact".to_string(),
+        ));
     }
 
     let now = crate::auth::handlers::unix_timestamp();
@@ -167,7 +173,10 @@ pub async fn get_contacts(
 
     let contacts = contact_rows
         .into_iter()
-        .map(|r| ContactEntry { pubkey: r.contact_pubkey, added_at: r.created_at })
+        .map(|r| ContactEntry {
+            pubkey: r.contact_pubkey,
+            added_at: r.created_at,
+        })
         .collect();
 
     Ok(Json(ContactsResponse {
@@ -183,14 +192,12 @@ pub async fn delete_contact(
     user: AuthUser,
     Path(pubkey): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    sqlx::query(
-        "DELETE FROM recovery_contacts WHERE owner_pubkey = ? AND contact_pubkey = ?",
-    )
-    .bind(&user.public_key)
-    .bind(&pubkey)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("DELETE FROM recovery_contacts WHERE owner_pubkey = ? AND contact_pubkey = ?")
+        .bind(&user.public_key)
+        .bind(&pubkey)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::OK)
 }
@@ -226,7 +233,10 @@ pub async fn post_rotate_key(
 
     // new_pubkey must be distinct from old_pubkey.
     if req.new_pubkey == req.old_pubkey {
-        return Err((StatusCode::BAD_REQUEST, "new_pubkey must differ from old_pubkey".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "new_pubkey must differ from old_pubkey".to_string(),
+        ));
     }
 
     let request_id = Uuid::new_v4().to_string();
@@ -289,13 +299,11 @@ pub async fn post_rotate_key(
 
     // Flip to ready_for_review if threshold reached.
     let status = if valid_count >= threshold {
-        sqlx::query(
-            "UPDATE key_rotation_requests SET status = 'ready_for_review' WHERE id = ?",
-        )
-        .bind(&request_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        sqlx::query("UPDATE key_rotation_requests SET status = 'ready_for_review' WHERE id = ?")
+            .bind(&request_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         "ready_for_review".to_string()
     } else {
         "pending".to_string()
@@ -347,14 +355,13 @@ pub async fn get_my_requests(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let threshold: i64 = sqlx::query_scalar(
-        "SELECT threshold FROM recovery_settings WHERE owner_pubkey = ?",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .unwrap_or(0);
+    let threshold: i64 =
+        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = ?")
+            .bind(&user.public_key)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .unwrap_or(0);
 
     let out = rows
         .into_iter()
@@ -426,7 +433,10 @@ pub async fn admin_approve(
 
     let row = fetch_rotation_request(&state, &id).await?;
     if row.status != "ready_for_review" && row.status != "pending" {
-        return Err((StatusCode::CONFLICT, "Request is not in an approvable state".to_string()));
+        return Err((
+            StatusCode::CONFLICT,
+            "Request is not in an approvable state".to_string(),
+        ));
     }
 
     let now = crate::auth::handlers::unix_timestamp();
@@ -491,7 +501,10 @@ pub async fn admin_deny(
 
     let row = fetch_rotation_request(&state, &id).await?;
     if row.status != "ready_for_review" && row.status != "pending" {
-        return Err((StatusCode::CONFLICT, "Request is not in a deniable state".to_string()));
+        return Err((
+            StatusCode::CONFLICT,
+            "Request is not in a deniable state".to_string(),
+        ));
     }
 
     let now = crate::auth::handlers::unix_timestamp();
@@ -531,7 +544,12 @@ async fn fetch_rotation_request(
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .ok_or_else(|| (StatusCode::NOT_FOUND, "Rotation request not found".to_string()))
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "Rotation request not found".to_string(),
+        )
+    })
 }
 
 #[derive(sqlx::FromRow)]

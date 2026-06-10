@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
-use crate::row_types::{ChannelRow, NewChannel, ChannelPatch};
+use crate::row_types::{ChannelPatch, ChannelRow, NewChannel};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait ChannelStore: Send + Sync {
@@ -40,7 +40,8 @@ pub trait ChannelStore: Send + Sync {
     async fn mark_read(&self, pubkey: &str, channel_id: &str, at: i64) -> Result<(), StoreError>;
 
     /// Get last_read_at for a user/channel pair (None if never read).
-    async fn last_read_at(&self, pubkey: &str, channel_id: &str) -> Result<Option<i64>, StoreError>;
+    async fn last_read_at(&self, pubkey: &str, channel_id: &str)
+        -> Result<Option<i64>, StoreError>;
 
     /// Count messages after last_read_at.
     async fn unread_count(&self, channel_id: &str, after: i64) -> Result<i64, StoreError>;

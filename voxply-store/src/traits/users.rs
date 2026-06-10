@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::UserRow;
+use async_trait::async_trait;
+use std::collections::HashMap;
 
 #[async_trait]
 pub trait UserStore: Send + Sync {

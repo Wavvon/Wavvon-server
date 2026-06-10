@@ -22,8 +22,7 @@ fn row_to_message(r: sqlx::any::AnyRow) -> MessageRow {
     }
 }
 
-const MSG_SELECT: &str =
-    "SELECT m.id, m.channel_id, m.sender, u.display_name AS sender_name,
+const MSG_SELECT: &str = "SELECT m.id, m.channel_id, m.sender, u.display_name AS sender_name,
             m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
             COALESCE(m.reply_count, 0) AS reply_count,
             m.visible_to_pubkey, m.embeds
@@ -135,7 +134,12 @@ impl MessageStore for SqliteStore {
         Ok(rows.into_iter().map(row_to_message).collect())
     }
 
-    async fn edit_message(&self, id: &str, content: &str, edited_at: i64) -> Result<(), StoreError> {
+    async fn edit_message(
+        &self,
+        id: &str,
+        content: &str,
+        edited_at: i64,
+    ) -> Result<(), StoreError> {
         sqlx::query("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?")
             .bind(content)
             .bind(edited_at)
@@ -156,13 +160,11 @@ impl MessageStore for SqliteStore {
     }
 
     async fn increment_reply_count(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = ?",
-        )
-        .bind(id)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = ?")
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -278,14 +280,12 @@ impl MessageStore for SqliteStore {
     }
 
     async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM channel_pins WHERE channel_id = ? AND message_id = ?",
-        )
-        .bind(channel_id)
-        .bind(message_id)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM channel_pins WHERE channel_id = ? AND message_id = ?")
+            .bind(channel_id)
+            .bind(message_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 

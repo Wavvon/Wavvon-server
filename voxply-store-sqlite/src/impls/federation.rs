@@ -23,13 +23,12 @@ impl FederationStore for SqliteStore {
     }
 
     async fn get_peer(&self, public_key: &str) -> Result<Option<PeerRow>, StoreError> {
-        let row = sqlx::query(
-            "SELECT public_key, name, url, added_at FROM peers WHERE public_key = ?",
-        )
-        .bind(public_key)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_err)?;
+        let row =
+            sqlx::query("SELECT public_key, name, url, added_at FROM peers WHERE public_key = ?")
+                .bind(public_key)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(map_err)?;
         Ok(row.map(|r| PeerRow {
             public_key: r.get("public_key"),
             name: r.get("name"),
@@ -39,12 +38,11 @@ impl FederationStore for SqliteStore {
     }
 
     async fn list_peers(&self) -> Result<Vec<PeerRow>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT public_key, name, url, added_at FROM peers ORDER BY added_at DESC",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_err)?;
+        let rows =
+            sqlx::query("SELECT public_key, name, url, added_at FROM peers ORDER BY added_at DESC")
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_err)?;
         Ok(rows
             .into_iter()
             .map(|r| PeerRow {
@@ -143,27 +141,24 @@ impl FederationStore for SqliteStore {
         created_by: &str,
         created_at: i64,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO alliances (id, name, created_by, created_at) VALUES (?, ?, ?, ?)",
-        )
-        .bind(id)
-        .bind(name)
-        .bind(created_by)
-        .bind(created_at)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("INSERT INTO alliances (id, name, created_by, created_at) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(name)
+            .bind(created_by)
+            .bind(created_at)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
     async fn get_alliance(&self, id: &str) -> Result<Option<AllianceRow>, StoreError> {
-        let row = sqlx::query(
-            "SELECT id, name, created_by, created_at FROM alliances WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_err)?;
+        let row =
+            sqlx::query("SELECT id, name, created_by, created_at FROM alliances WHERE id = ?")
+                .bind(id)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(map_err)?;
         Ok(row.map(|r| AllianceRow {
             id: r.get("id"),
             name: r.get("name"),
@@ -221,14 +216,12 @@ impl FederationStore for SqliteStore {
         alliance_id: &str,
         hub_public_key: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM alliance_members WHERE alliance_id = ? AND hub_public_key = ?",
-        )
-        .bind(alliance_id)
-        .bind(hub_public_key)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM alliance_members WHERE alliance_id = ? AND hub_public_key = ?")
+            .bind(alliance_id)
+            .bind(hub_public_key)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 

@@ -96,13 +96,12 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
     tracing::info!("Cert worker: sweeping {} candidates", candidates.len());
 
     // Load banned pubkeys in one query to avoid per-user ban checks.
-    let banned: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
-        "SELECT target_public_key FROM bans",
-    )
-    .fetch_all(&state.db)
-    .await?
-    .into_iter()
-    .collect();
+    let banned: std::collections::HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT target_public_key FROM bans")
+            .fetch_all(&state.db)
+            .await?
+            .into_iter()
+            .collect();
 
     let mut issued = 0usize;
     for pubkey in candidates {
@@ -110,7 +109,9 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
             continue;
         }
         match issue_cert_for(state, &pubkey).await {
-            Ok(_) => { issued += 1; }
+            Ok(_) => {
+                issued += 1;
+            }
             Err((code, msg)) => {
                 tracing::debug!(
                     "Cert worker skipped {}: HTTP {} — {msg}",

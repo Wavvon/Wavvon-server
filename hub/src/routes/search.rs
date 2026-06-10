@@ -65,11 +65,7 @@ pub async fn search_messages(
         channel_ids: visible_channels,
         limit: limit as usize,
     };
-    let hits = state
-        .search
-        .query(&search_params)
-        .await
-        .unwrap_or_default();
+    let hits = state.search.query(&search_params).await.unwrap_or_default();
 
     if hits.is_empty() {
         return Ok(Json(vec![]));
@@ -86,8 +82,7 @@ pub async fn search_messages(
          WHERE m.id IN ({placeholders})"
     );
 
-    let mut q_builder =
-        sqlx::query_as::<_, (String, String, Option<String>)>(&sql);
+    let mut q_builder = sqlx::query_as::<_, (String, String, Option<String>)>(&sql);
     for id in &ids {
         q_builder = q_builder.bind(id);
     }

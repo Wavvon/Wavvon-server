@@ -6,7 +6,8 @@ use voxply_identity::{
     PairingStatus, SubkeyCert,
 };
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 fn now() -> u64 {
     SystemTime::now()
@@ -27,13 +28,8 @@ fn make_offer(master: &MasterIdentity, token: &str, lifetime_secs: u64) -> Pairi
     let home_hubs = vec!["https://a.example".to_string()];
     let issued_at = now();
     let expires_at = issued_at + lifetime_secs;
-    let bytes = PairingOffer::signing_bytes(
-        &master_pubkey,
-        &home_hubs,
-        token,
-        issued_at,
-        expires_at,
-    );
+    let bytes =
+        PairingOffer::signing_bytes(&master_pubkey, &home_hubs, token, issued_at, expires_at);
     let signature = hex::encode(master.sign(&bytes).to_bytes());
     PairingOffer {
         master_pubkey,
@@ -59,14 +55,8 @@ fn make_claim(subkey: &DeviceSubkey, token: &str, label: &str) -> PairingClaim {
 fn make_cert(master: &MasterIdentity, subkey_pubkey: &str, label: &str) -> SubkeyCert {
     let master_pubkey = master.public_key_hex();
     let issued_at = now();
-    let bytes = SubkeyCert::signing_bytes(
-        &master_pubkey,
-        subkey_pubkey,
-        label,
-        issued_at,
-        None,
-        &[],
-    );
+    let bytes =
+        SubkeyCert::signing_bytes(&master_pubkey, subkey_pubkey, label, issued_at, None, &[]);
     let signature = hex::encode(master.sign(&bytes).to_bytes());
     SubkeyCert {
         master_pubkey,
@@ -115,7 +105,10 @@ async fn full_pairing_handshake() {
         .await;
     let status: PairingStatus = resp.json();
     match status {
-        PairingStatus::Claimed { subkey_pubkey, device_label } => {
+        PairingStatus::Claimed {
+            subkey_pubkey,
+            device_label,
+        } => {
             assert_eq!(subkey_pubkey, phone.public_key_hex());
             assert_eq!(device_label, "phone");
         }
@@ -141,7 +134,10 @@ async fn full_pairing_handshake() {
         .await;
     let status: PairingStatus = resp.json();
     match status {
-        PairingStatus::Complete { cert: returned_cert, wrapped_blob_key_hex } => {
+        PairingStatus::Complete {
+            cert: returned_cert,
+            wrapped_blob_key_hex,
+        } => {
             assert_eq!(returned_cert.subkey_pubkey, phone.public_key_hex());
             assert!(returned_cert.verify().is_ok());
             assert_eq!(wrapped_blob_key_hex, "deadbeef");
@@ -256,7 +252,10 @@ async fn complete_before_claim_is_rejected() {
         wrapped_blob_key_hex: "deadbeef".into(),
     };
 
-    let resp = server.post("/identity/pairing/complete").json(&complete).await;
+    let resp = server
+        .post("/identity/pairing/complete")
+        .json(&complete)
+        .await;
     assert_eq!(resp.status_code(), StatusCode::CONFLICT);
 }
 
@@ -287,7 +286,10 @@ async fn complete_rejects_subkey_mismatch() {
         wrapped_blob_key_hex: "deadbeef".into(),
     };
 
-    let resp = server.post("/identity/pairing/complete").json(&complete).await;
+    let resp = server
+        .post("/identity/pairing/complete")
+        .json(&complete)
+        .await;
     assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
 }
 
@@ -319,6 +321,9 @@ async fn complete_rejects_master_mismatch() {
         wrapped_blob_key_hex: "deadbeef".into(),
     };
 
-    let resp = server.post("/identity/pairing/complete").json(&complete).await;
+    let resp = server
+        .post("/identity/pairing/complete")
+        .json(&complete)
+        .await;
     assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
 }

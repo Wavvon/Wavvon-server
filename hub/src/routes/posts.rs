@@ -9,9 +9,9 @@ use crate::auth::middleware::AuthUser;
 use crate::permissions;
 use crate::routes::chat_models::ChatEvent;
 use crate::routes::post_models::{
-    CreatePostRequest, CreateReplyRequest, EditPostRequest, EditReplyRequest, PostDetail,
-    PostListParams, PostListResponse, PostRow, PostSearchHit, PostSearchResponse, ReplyListParams,
-    ReplyRow, SearchParams, post_to_summary, reply_to_view,
+    post_to_summary, reply_to_view, CreatePostRequest, CreateReplyRequest, EditPostRequest,
+    EditReplyRequest, PostDetail, PostListParams, PostListResponse, PostRow, PostSearchHit,
+    PostSearchResponse, ReplyListParams, ReplyRow, SearchParams,
 };
 use crate::state::AppState;
 
@@ -23,20 +23,17 @@ async fn require_forum_channel(
     db: &sqlx::AnyPool,
     channel_id: &str,
 ) -> Result<(), (StatusCode, String)> {
-    let row: Option<(i64, String)> = sqlx::query_as(
-        "SELECT is_category, channel_type FROM channels WHERE id = ?",
-    )
-    .bind(channel_id)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT is_category, channel_type FROM channels WHERE id = ?")
+            .bind(channel_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     match row {
         None => Err((StatusCode::NOT_FOUND, "channel_not_found".to_string())),
         Some((1, _)) => Err((StatusCode::NOT_FOUND, "not_a_forum".to_string())),
-        Some((_, t)) if t != "forum" => {
-            Err((StatusCode::CONFLICT, "not_a_forum".to_string()))
-        }
+        Some((_, t)) if t != "forum" => Err((StatusCode::CONFLICT, "not_a_forum".to_string())),
         _ => Ok(()),
     }
 }
@@ -101,9 +98,12 @@ fn broadcast_forum_event(state: &AppState, channel_id: &str, event: serde_json::
     };
     if let Ok(json) = serde_json::to_string(&ws_msg) {
         let json: Arc<str> = Arc::from(json.as_str());
-        let _ = state
-            .chat_tx
-            .send((ChatEvent::Forum { channel_id: channel_id.to_string() }, json));
+        let _ = state.chat_tx.send((
+            ChatEvent::Forum {
+                channel_id: channel_id.to_string(),
+            },
+            json,
+        ));
     }
 }
 
@@ -182,7 +182,10 @@ pub async fn list_posts(
     };
 
     // Populate unread_reply_count for each post using the caller's read cursor.
-    let mut posts: Vec<_> = rows.iter().map(|r| post_to_summary(r, can_moderate)).collect();
+    let mut posts: Vec<_> = rows
+        .iter()
+        .map(|r| post_to_summary(r, can_moderate))
+        .collect();
     for (summary, row) in posts.iter_mut().zip(rows.iter()) {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM post_replies
@@ -376,23 +379,26 @@ pub async fn edit_post(
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
 
-    let new_title = req.title.as_deref().unwrap_or(&row.title).trim().to_string();
+    let new_title = req
+        .title
+        .as_deref()
+        .unwrap_or(&row.title)
+        .trim()
+        .to_string();
     let new_body = req.body.as_deref().unwrap_or(&row.body).trim().to_string();
     if new_title.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title_required".to_string()));
     }
 
     let now = unix_now();
-    sqlx::query(
-        "UPDATE posts SET title = ?, body = ?, edited_at = ? WHERE id = ?",
-    )
-    .bind(&new_title)
-    .bind(&new_body)
-    .bind(now)
-    .bind(&post_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("UPDATE posts SET title = ?, body = ?, edited_at = ? WHERE id = ?")
+        .bind(&new_title)
+        .bind(&new_body)
+        .bind(now)
+        .bind(&post_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let updated_row = require_post(&state.db, &channel_id, &post_id).await?;
     let summary = post_to_summary(&updated_row, can_moderate);
@@ -623,13 +629,11 @@ pub async fn delete_reply(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Decrement reply_count (don't go below 0).
-    sqlx::query(
-        "UPDATE posts SET reply_count = MAX(0, reply_count - 1) WHERE id = ?",
-    )
-    .bind(&post_id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("UPDATE posts SET reply_count = MAX(0, reply_count - 1) WHERE id = ?")
+        .bind(&post_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     broadcast_forum_event(
         &state,

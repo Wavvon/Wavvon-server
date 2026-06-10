@@ -164,9 +164,18 @@ pub struct EditMessageRequest {
 
 #[derive(Clone, Debug)]
 pub enum ChatEvent {
-    New { channel_id: String, message: MessageResponse },
-    Edited { channel_id: String, message: MessageResponse },
-    Deleted { channel_id: String, message_id: String },
+    New {
+        channel_id: String,
+        message: MessageResponse,
+    },
+    Edited {
+        channel_id: String,
+        message: MessageResponse,
+    },
+    Deleted {
+        channel_id: String,
+        message_id: String,
+    },
     /// Reactions changed on a message. We send the full per-message
     /// summary list rather than diffs so the client can replace the
     /// counts atomically without bookkeeping. `me` is intentionally
@@ -265,7 +274,9 @@ impl ChatEvent {
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
             // (delivery is handled via the dedicated to_pubkey check below).
-            ChatEvent::StreamSubscriptionEnded { source_channel_id, .. } => source_channel_id,
+            ChatEvent::StreamSubscriptionEnded {
+                source_channel_id, ..
+            } => source_channel_id,
         }
     }
 }
@@ -303,7 +314,10 @@ pub enum WsClientMessage {
     #[serde(rename = "typing")]
     Typing { channel_id: String, typing: bool },
     #[serde(rename = "dm_typing")]
-    DmTyping { conversation_id: String, typing: bool },
+    DmTyping {
+        conversation_id: String,
+        typing: bool,
+    },
     #[serde(rename = "screen_share_start")]
     ScreenShareStart {
         channel_id: String,
@@ -390,7 +404,6 @@ pub enum WsClientMessage {
     },
 
     // ---- Video signaling: client → hub ----
-
     #[serde(rename = "video_enable")]
     VideoEnable { channel_id: String },
 
@@ -398,13 +411,25 @@ pub enum WsClientMessage {
     VideoDisable { channel_id: String },
 
     #[serde(rename = "video_offer")]
-    VideoOffer { channel_id: String, to_pubkey: String, sdp: String },
+    VideoOffer {
+        channel_id: String,
+        to_pubkey: String,
+        sdp: String,
+    },
 
     #[serde(rename = "video_answer")]
-    VideoAnswer { channel_id: String, to_pubkey: String, sdp: String },
+    VideoAnswer {
+        channel_id: String,
+        to_pubkey: String,
+        sdp: String,
+    },
 
     #[serde(rename = "video_ice")]
-    VideoIce { channel_id: String, to_pubkey: String, candidate: String },
+    VideoIce {
+        channel_id: String,
+        to_pubkey: String,
+        candidate: String,
+    },
 
     /// Sender opens a whisper session to the listed targets.
     #[serde(rename = "voice_whisper_start")]
@@ -428,7 +453,6 @@ pub enum WsClientMessage {
     },
 
     // ---- Proximity voice: client → hub ----
-
     #[serde(rename = "voice_zone_create")]
     VoiceZoneCreate {
         zone_id: String,
@@ -443,18 +467,12 @@ pub enum WsClientMessage {
     },
 
     #[serde(rename = "voice_zone_destroy")]
-    VoiceZoneDestroy {
-        zone_id: String,
-    },
+    VoiceZoneDestroy { zone_id: String },
 
     #[serde(rename = "voice_position_update")]
-    VoicePositionUpdate {
-        zone_id: String,
-        position: Vec<f64>,
-    },
+    VoicePositionUpdate { zone_id: String, position: Vec<f64> },
 
     // ---- Gaming Tier 2: client → hub ----
-
     #[serde(rename = "game_send")]
     GameSend {
         session_id: String,
@@ -543,10 +561,7 @@ pub enum WsServerMessage {
     /// short machine-readable hint (e.g. "voice_join") so the client can
     /// route the message contextually if it wants.
     #[serde(rename = "error")]
-    Error {
-        context: String,
-        message: String,
-    },
+    Error { context: String, message: String },
     #[serde(rename = "dm")]
     DirectMessage {
         conversation_id: String,
@@ -593,7 +608,6 @@ pub enum WsServerMessage {
     },
 
     // ---- Screen share v2: hub→client forwarded signaling envelopes ----
-
     /// SDP offer forwarded to the target viewer (from_pubkey = sharer).
     #[serde(rename = "screen_share_offer_in")]
     ScreenShareOfferIn {
@@ -637,7 +651,6 @@ pub enum WsServerMessage {
     },
 
     // ---- Video signaling: hub → client ----
-
     /// Broadcast to voice channel: a participant enabled their webcam.
     #[serde(rename = "video_participant_enabled")]
     VideoParticipantEnabled { channel_id: String, pubkey: String },
@@ -649,19 +662,37 @@ pub enum WsServerMessage {
     /// Snapshot of all currently video-enabled pubkeys in a channel.
     /// Sent to a joining voice participant.
     #[serde(rename = "video_participants")]
-    VideoParticipants { channel_id: String, pubkeys: Vec<String> },
+    VideoParticipants {
+        channel_id: String,
+        pubkeys: Vec<String>,
+    },
 
     /// SDP offer forwarded to the target peer (from_pubkey = offerer).
     #[serde(rename = "video_offer_in")]
-    VideoOfferIn { channel_id: String, from_pubkey: String, to_pubkey: String, sdp: String },
+    VideoOfferIn {
+        channel_id: String,
+        from_pubkey: String,
+        to_pubkey: String,
+        sdp: String,
+    },
 
     /// SDP answer forwarded to the target peer (from_pubkey = answerer).
     #[serde(rename = "video_answer_in")]
-    VideoAnswerIn { channel_id: String, from_pubkey: String, to_pubkey: String, sdp: String },
+    VideoAnswerIn {
+        channel_id: String,
+        from_pubkey: String,
+        to_pubkey: String,
+        sdp: String,
+    },
 
     /// ICE candidate forwarded to the target peer.
     #[serde(rename = "video_ice_in")]
-    VideoIceIn { channel_id: String, from_pubkey: String, to_pubkey: String, candidate: String },
+    VideoIceIn {
+        channel_id: String,
+        from_pubkey: String,
+        to_pubkey: String,
+        candidate: String,
+    },
 
     /// Acknowledgement sent to a subscriber after StreamSubscribe succeeds.
     /// The hub will now forward chunks for this stream to the subscriber.
@@ -684,9 +715,7 @@ pub enum WsServerMessage {
     /// Snapshot of all currently active streams across all channels visible to
     /// this user. Sent in response to a `stream_list` client message.
     #[serde(rename = "hub_streams")]
-    HubStreams {
-        streams: Vec<HubStreamInfo>,
-    },
+    HubStreams { streams: Vec<HubStreamInfo> },
     /// Forum post/reply event. The `event` field carries the typed payload
     /// (type, channel_id, post_id, and optionally reply_id).
     #[serde(rename = "forum_event")]
@@ -696,7 +725,6 @@ pub enum WsServerMessage {
     },
 
     // ---- Proximity voice: hub → client ----
-
     /// Broadcast to the channel when a voice zone is created.
     #[serde(rename = "voice_zone_created")]
     VoiceZoneCreated {
@@ -709,10 +737,7 @@ pub enum WsServerMessage {
 
     /// Broadcast to the channel when a voice zone is destroyed.
     #[serde(rename = "voice_zone_destroyed")]
-    VoiceZoneDestroyed {
-        channel_id: String,
-        zone_id: String,
-    },
+    VoiceZoneDestroyed { channel_id: String, zone_id: String },
 
     /// Broadcast to the channel on every accepted position update.
     #[serde(rename = "voice_position_updated")]
@@ -731,7 +756,6 @@ pub enum WsServerMessage {
     },
 
     // ---- Gaming Tier 2: game session envelopes ----
-
     /// A new game session was created in a channel.
     #[serde(rename = "game_session_created")]
     GameSessionCreated {
@@ -776,7 +800,6 @@ pub enum WsServerMessage {
     },
 
     // ---- Spec Tier 2 hub→client additions ----
-
     /// A player joined the session roster (spec variant with display_name).
     #[serde(rename = "game_player_joined")]
     GamePlayerJoined {
@@ -788,10 +811,7 @@ pub enum WsServerMessage {
 
     /// A player left the session roster.
     #[serde(rename = "game_player_left")]
-    GamePlayerLeft {
-        session_id: String,
-        pubkey: String,
-    },
+    GamePlayerLeft { session_id: String, pubkey: String },
 
     /// The host role was transferred to a new player (after host disconnect).
     #[serde(rename = "game_host_changed")]
@@ -868,12 +888,24 @@ pub struct VoiceRosterEntry {
 // Proximity voice types
 // ---------------------------------------------------------------------------
 
-fn default_coord_system() -> String { "2d".to_string() }
-fn default_auth_mode() -> String { "any_channel_member".to_string() }
-fn default_attenuation_model() -> String { "linear".to_string() }
-fn default_max_radius() -> f64 { 200.0 }
-fn default_ref_dist() -> f64 { 20.0 }
-fn default_rolloff() -> f64 { 1.0 }
+fn default_coord_system() -> String {
+    "2d".to_string()
+}
+fn default_auth_mode() -> String {
+    "any_channel_member".to_string()
+}
+fn default_attenuation_model() -> String {
+    "linear".to_string()
+}
+fn default_max_radius() -> f64 {
+    200.0
+}
+fn default_ref_dist() -> f64 {
+    20.0
+}
+fn default_rolloff() -> f64 {
+    1.0
+}
 
 /// Attenuation configuration carried in zone-create and zone-state messages.
 #[derive(Deserialize, Serialize, Clone)]

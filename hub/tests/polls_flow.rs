@@ -1,9 +1,9 @@
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 async fn create_channel(server: &TestServer, token: &str) -> String {
     let resp = server

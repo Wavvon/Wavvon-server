@@ -63,7 +63,8 @@ pub async fn put_designation(
     if body.master_pubkey != master {
         return Err(bad("master_pubkey mismatch between URL and body"));
     }
-    body.verify().map_err(|e| bad(format!("Bad signature: {e}")))?;
+    body.verify()
+        .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
     let current: Option<i64> =
         sqlx::query_scalar("SELECT sequence FROM home_hub_designations WHERE master_pubkey = ?")
@@ -81,8 +82,8 @@ pub async fn put_designation(
         }
     }
 
-    let hubs_json = serde_json::to_string(&body.hubs)
-        .map_err(|e| db_err(format!("serialize hubs: {e}")))?;
+    let hubs_json =
+        serde_json::to_string(&body.hubs).map_err(|e| db_err(format!("serialize hubs: {e}")))?;
 
     sqlx::query(
         "INSERT INTO home_hub_designations
@@ -152,7 +153,8 @@ pub async fn post_device(
     if cert.master_pubkey != master {
         return Err(bad("master_pubkey mismatch between URL and body"));
     }
-    cert.verify().map_err(|e| bad(format!("Bad signature: {e}")))?;
+    cert.verify()
+        .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
     let fallback_json = serde_json::to_string(&cert.fallback_hubs)
         .map_err(|e| db_err(format!("serialize fallback_hubs: {e}")))?;
@@ -220,7 +222,9 @@ pub async fn post_revocation(
     if entry.master_pubkey != master {
         return Err(bad("master_pubkey mismatch between URL and body"));
     }
-    entry.verify().map_err(|e| bad(format!("Bad signature: {e}")))?;
+    entry
+        .verify()
+        .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
     sqlx::query(
         "INSERT INTO subkey_revocations
@@ -272,7 +276,8 @@ pub async fn put_prefs(
     if blob.master_pubkey != master {
         return Err(bad("master_pubkey mismatch between URL and body"));
     }
-    blob.verify().map_err(|e| bad(format!("Bad signature: {e}")))?;
+    blob.verify()
+        .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
     let current: Option<i64> =
         sqlx::query_scalar("SELECT blob_version FROM prefs_blobs WHERE master_pubkey = ?")

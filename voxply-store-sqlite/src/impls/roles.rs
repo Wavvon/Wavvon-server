@@ -35,14 +35,12 @@ impl RoleStore for SqliteStore {
         .map_err(map_err)?;
 
         for perm in &r.permissions {
-            sqlx::query(
-                "INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)",
-            )
-            .bind(&r.id)
-            .bind(perm)
-            .execute(self.pool())
-            .await
-            .map_err(map_err)?;
+            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)")
+                .bind(&r.id)
+                .bind(perm)
+                .execute(self.pool())
+                .await
+                .map_err(map_err)?;
         }
         Ok(())
     }
@@ -110,13 +108,11 @@ impl RoleStore for SqliteStore {
     }
 
     async fn role_permissions(&self, role_id: &str) -> Result<Vec<String>, StoreError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT permission FROM role_permissions WHERE role_id = ?",
-        )
-        .bind(role_id)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, String>("SELECT permission FROM role_permissions WHERE role_id = ?")
+            .bind(role_id)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn set_role_permissions(
@@ -130,14 +126,12 @@ impl RoleStore for SqliteStore {
             .await
             .map_err(map_err)?;
         for perm in perms {
-            sqlx::query(
-                "INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)",
-            )
-            .bind(role_id)
-            .bind(perm)
-            .execute(self.pool())
-            .await
-            .map_err(map_err)?;
+            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)")
+                .bind(role_id)
+                .bind(perm)
+                .execute(self.pool())
+                .await
+                .map_err(map_err)?;
         }
         Ok(())
     }
@@ -157,14 +151,12 @@ impl RoleStore for SqliteStore {
     }
 
     async fn remove_role(&self, pubkey: &str, role_id: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM user_roles WHERE user_public_key = ? AND role_id = ?",
-        )
-        .bind(pubkey)
-        .bind(role_id)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM user_roles WHERE user_public_key = ? AND role_id = ?")
+            .bind(pubkey)
+            .bind(role_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -184,23 +176,19 @@ impl RoleStore for SqliteStore {
     }
 
     async fn role_members(&self, role_id: &str) -> Result<Vec<String>, StoreError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT user_public_key FROM user_roles WHERE role_id = ?",
-        )
-        .bind(role_id)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, String>("SELECT user_public_key FROM user_roles WHERE role_id = ?")
+            .bind(role_id)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn role_member_count(&self, role_id: &str) -> Result<i64, StoreError> {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM user_roles WHERE role_id = ?",
-        )
-        .bind(role_id)
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user_roles WHERE role_id = ?")
+            .bind(role_id)
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn user_permissions(&self, pubkey: &str) -> Result<UserPerms, StoreError> {

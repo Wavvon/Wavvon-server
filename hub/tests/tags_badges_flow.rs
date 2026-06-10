@@ -17,7 +17,11 @@ use voxply_identity::Identity;
 
 async fn setup() -> (TestServer, Identity) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -52,7 +56,9 @@ async fn setup() -> (TestServer, Identity) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -571,10 +577,7 @@ async fn badge_admin_routes_require_auth() {
         .await
         .assert_status_unauthorized();
 
-    server
-        .get("/badges")
-        .await
-        .assert_status_unauthorized();
+    server.get("/badges").await.assert_status_unauthorized();
 
     server
         .post("/badges/pending/fake-id/accept")

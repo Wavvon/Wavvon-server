@@ -51,9 +51,7 @@ async fn main() -> Result<()> {
 
     let app = server::create_router(state);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
-    tracing::info!(
-        "Seed discovery service listening on http://0.0.0.0:{http_port}"
-    );
+    tracing::info!("Seed discovery service listening on http://0.0.0.0:{http_port}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
 

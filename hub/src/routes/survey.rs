@@ -249,12 +249,11 @@ async fn load_survey_admin(
     db: &sqlx::AnyPool,
     survey_id: &str,
 ) -> Result<Option<SurveyAdmin>, (StatusCode, String)> {
-    let survey: Option<SurveyRow> =
-        sqlx::query_as("SELECT id, enabled FROM surveys WHERE id = ?")
-            .bind(survey_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let survey: Option<SurveyRow> = sqlx::query_as("SELECT id, enabled FROM surveys WHERE id = ?")
+        .bind(survey_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let survey = match survey {
         None => return Ok(None),
@@ -344,14 +343,22 @@ pub async fn submit_survey(
         .ok_or((StatusCode::NOT_FOUND, "No active survey".to_string()))?;
 
     if survey.id != req.survey_id {
-        return Err((StatusCode::BAD_REQUEST, "survey_id does not match active survey".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "survey_id does not match active survey".to_string(),
+        ));
     }
 
     // Validate required questions are answered
     for q in &survey.questions {
         if q.required {
             let answered = req.answers.iter().any(|a| {
-                a.question_id == q.id && (a.choice_id.is_some() || a.text_answer.as_deref().map(|s| !s.is_empty()).unwrap_or(false))
+                a.question_id == q.id
+                    && (a.choice_id.is_some()
+                        || a.text_answer
+                            .as_deref()
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false))
             });
             if !answered {
                 return Err((
@@ -400,19 +407,22 @@ pub async fn submit_survey(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-        if a.text_answer.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+        if a.text_answer
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
             has_text = true;
         }
 
         // Apply role mappings for choice answers
         if let Some(choice_id) = &a.choice_id {
-            let role_ids: Vec<String> = sqlx::query_scalar(
-                "SELECT role_id FROM survey_choice_roles WHERE choice_id = ?",
-            )
-            .bind(choice_id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            let role_ids: Vec<String> =
+                sqlx::query_scalar("SELECT role_id FROM survey_choice_roles WHERE choice_id = ?")
+                    .bind(choice_id)
+                    .fetch_all(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             for role_id in role_ids {
                 sqlx::query(

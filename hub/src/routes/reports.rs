@@ -107,13 +107,12 @@ pub async fn review_report(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    let row =
-        sqlx::query("SELECT message_id, reporter_pubkey FROM message_reports WHERE id = ?")
-            .bind(&report_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-            .ok_or((StatusCode::NOT_FOUND, "Report not found".into()))?;
+    let row = sqlx::query("SELECT message_id, reporter_pubkey FROM message_reports WHERE id = ?")
+        .bind(&report_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Report not found".into()))?;
 
     use sqlx::Row;
     let message_id: String = row.get("message_id");

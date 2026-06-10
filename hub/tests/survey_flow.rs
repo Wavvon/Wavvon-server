@@ -1,8 +1,8 @@
-
 use serde_json::{json, Value};
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 fn sample_survey(survey_id: &str, enabled: bool) -> Value {
     json!({

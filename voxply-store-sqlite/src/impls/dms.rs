@@ -13,26 +13,22 @@ impl DmStore for SqliteStore {
         conv_type: &str,
         created_at: i64,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO conversations (id, conv_type, created_at) VALUES (?, ?, ?)",
-        )
-        .bind(id)
-        .bind(conv_type)
-        .bind(created_at)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES (?, ?, ?)")
+            .bind(id)
+            .bind(conv_type)
+            .bind(created_at)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
     async fn get_conversation(&self, id: &str) -> Result<Option<ConversationRow>, StoreError> {
-        let row = sqlx::query(
-            "SELECT id, conv_type, created_at FROM conversations WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_err)?;
+        let row = sqlx::query("SELECT id, conv_type, created_at FROM conversations WHERE id = ?")
+            .bind(id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(row.map(|r| ConversationRow {
             id: r.get("id"),
             conv_type: r.get("conv_type"),
@@ -135,7 +131,12 @@ impl DmStore for SqliteStore {
         .map_err(map_err)?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.get::<String, _>("public_key"), r.get::<Option<String>, _>("hub_url")))
+            .map(|r| {
+                (
+                    r.get::<String, _>("public_key"),
+                    r.get::<Option<String>, _>("hub_url"),
+                )
+            })
             .collect())
     }
 
@@ -252,14 +253,12 @@ impl DmStore for SqliteStore {
     }
 
     async fn unblock_user(&self, owner: &str, blocked: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM dm_blocks WHERE owner_pubkey = ? AND blocked_pubkey = ?",
-        )
-        .bind(owner)
-        .bind(blocked)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM dm_blocks WHERE owner_pubkey = ? AND blocked_pubkey = ?")
+            .bind(owner)
+            .bind(blocked)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -510,14 +509,12 @@ impl DmStore for SqliteStore {
         message_id: &str,
         hub_url: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?",
-        )
-        .bind(message_id)
-        .bind(hub_url)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?")
+            .bind(message_id)
+            .bind(hub_url)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 

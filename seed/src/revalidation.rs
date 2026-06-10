@@ -20,9 +20,7 @@ pub fn spawn(state: Arc<SeedState>) {
             tokio::time::sleep(REVALIDATION_INTERVAL).await;
             match tick(&state).await {
                 Ok((checked, removed)) => {
-                    tracing::info!(
-                        "Revalidated {checked} farms, removed {removed}"
-                    );
+                    tracing::info!("Revalidated {checked} farms, removed {removed}");
                 }
                 Err(e) => {
                     tracing::warn!("Revalidation tick failed: {e}");
@@ -57,16 +55,13 @@ pub async fn tick(state: &SeedState) -> anyhow::Result<(usize, usize)> {
         let keep = match result {
             Err(_) => false,
             Ok(resp) if !resp.status().is_success() => false,
-            Ok(resp) => {
-                match resp.json::<serde_json::Value>().await {
-                    Err(_) => false,
-                    Ok(info) => {
-                        info.get("allow_discovery_listing")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                    }
-                }
-            }
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Err(_) => false,
+                Ok(info) => info
+                    .get("allow_discovery_listing")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            },
         };
 
         if !keep {
@@ -83,10 +78,7 @@ pub async fn tick(state: &SeedState) -> anyhow::Result<(usize, usize)> {
         // the first response was already consumed above via .json()).
         if let Ok(resp2) = state.http_client.get(&probe_url).send().await {
             if let Ok(info) = resp2.json::<serde_json::Value>().await {
-                let hub_count = info
-                    .get("hub_count")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
+                let hub_count = info.get("hub_count").and_then(|v| v.as_i64()).unwrap_or(0);
                 let max_hubs_total: Option<i64> = info
                     .get("max_hubs_total")
                     .and_then(|v| v.as_i64())

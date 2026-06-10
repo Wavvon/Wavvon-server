@@ -171,7 +171,10 @@ async fn farms_lists_registered_entries() {
     assert_eq!(farms.len(), 2);
 
     // Farm A has a capacity_pct (max_hubs_total is set).
-    let farm_a = farms.iter().find(|f| f["farm_url"] == "https://farm-a.test").unwrap();
+    let farm_a = farms
+        .iter()
+        .find(|f| f["farm_url"] == "https://farm-a.test")
+        .unwrap();
     assert_eq!(farm_a["hub_count"], 5);
     assert!(farm_a["capacity_pct"].as_i64().is_some());
     assert_eq!(farm_a["country"], "IT");
@@ -180,7 +183,10 @@ async fn farms_lists_registered_entries() {
     assert!(farm_a["stale"].is_null(), "should not be stale");
 
     // Farm B has unlimited cap — capacity_pct is omitted.
-    let farm_b = farms.iter().find(|f| f["farm_url"] == "https://farm-b.test").unwrap();
+    let farm_b = farms
+        .iter()
+        .find(|f| f["farm_url"] == "https://farm-b.test")
+        .unwrap();
     assert!(farm_b["capacity_pct"].is_null());
 }
 
@@ -194,13 +200,33 @@ async fn farms_filter_by_country() {
     let now = unix_now();
 
     insert_farm(
-        &state, "https://farm-it.test", &"aa".repeat(32), "IT Farm",
-        0, None, Some("IT"), Some("EU-West"), r#"["en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-it.test",
+        &"aa".repeat(32),
+        "IT Farm",
+        0,
+        None,
+        Some("IT"),
+        Some("EU-West"),
+        r#"["en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
     insert_farm(
-        &state, "https://farm-us.test", &"bb".repeat(32), "US Farm",
-        0, None, Some("US"), Some("US-East"), r#"["en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-us.test",
+        &"bb".repeat(32),
+        "US Farm",
+        0,
+        None,
+        Some("US"),
+        Some("US-East"),
+        r#"["en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
 
     let resp = server.get("/farms?country=IT").await;
     resp.assert_status_ok();
@@ -221,13 +247,33 @@ async fn farms_filter_by_region() {
     let now = unix_now();
 
     insert_farm(
-        &state, "https://farm-eu.test", &"aa".repeat(32), "EU Farm",
-        0, None, Some("IT"), Some("EU-West"), r#"["en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-eu.test",
+        &"aa".repeat(32),
+        "EU Farm",
+        0,
+        None,
+        Some("IT"),
+        Some("EU-West"),
+        r#"["en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
     insert_farm(
-        &state, "https://farm-apac.test", &"bb".repeat(32), "APAC Farm",
-        0, None, Some("JP"), Some("APAC"), r#"["ja"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-apac.test",
+        &"bb".repeat(32),
+        "APAC Farm",
+        0,
+        None,
+        Some("JP"),
+        Some("APAC"),
+        r#"["ja"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
 
     let resp = server.get("/farms?region=EU-West").await;
     resp.assert_status_ok();
@@ -247,13 +293,33 @@ async fn farms_filter_by_language() {
     let now = unix_now();
 
     insert_farm(
-        &state, "https://farm-it.test", &"aa".repeat(32), "Italian Farm",
-        0, None, None, None, r#"["it","en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-it.test",
+        &"aa".repeat(32),
+        "Italian Farm",
+        0,
+        None,
+        None,
+        None,
+        r#"["it","en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
     insert_farm(
-        &state, "https://farm-de.test", &"bb".repeat(32), "German Farm",
-        0, None, None, None, r#"["de"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-de.test",
+        &"bb".repeat(32),
+        "German Farm",
+        0,
+        None,
+        None,
+        None,
+        r#"["de"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
 
     let resp = server.get("/farms?language=it").await;
     resp.assert_status_ok();
@@ -274,19 +340,49 @@ async fn farms_filter_by_tag_and_logic() {
 
     // Farm with gaming+community
     insert_farm(
-        &state, "https://farm-gc.test", &"aa".repeat(32), "Gaming+Community",
-        0, None, None, None, r#"["en"]"#, r#"["gaming","community"]"#, now,
-    ).await;
+        &state,
+        "https://farm-gc.test",
+        &"aa".repeat(32),
+        "Gaming+Community",
+        0,
+        None,
+        None,
+        None,
+        r#"["en"]"#,
+        r#"["gaming","community"]"#,
+        now,
+    )
+    .await;
     // Farm with gaming only
     insert_farm(
-        &state, "https://farm-g.test", &"bb".repeat(32), "Gaming Only",
-        0, None, None, None, r#"["en"]"#, r#"["gaming"]"#, now,
-    ).await;
+        &state,
+        "https://farm-g.test",
+        &"bb".repeat(32),
+        "Gaming Only",
+        0,
+        None,
+        None,
+        None,
+        r#"["en"]"#,
+        r#"["gaming"]"#,
+        now,
+    )
+    .await;
     // Farm with no tags
     insert_farm(
-        &state, "https://farm-none.test", &"cc".repeat(32), "No Tags",
-        0, None, None, None, r#"["en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-none.test",
+        &"cc".repeat(32),
+        "No Tags",
+        0,
+        None,
+        None,
+        None,
+        r#"["en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
 
     // ?tag=gaming should return both gaming farms
     let resp = server.get("/farms?tag=gaming").await;
@@ -312,23 +408,49 @@ async fn farms_stale_flag() {
     let stale_time = now - 90000; // 25 hours ago
 
     insert_farm(
-        &state, "https://farm-fresh.test", &"aa".repeat(32), "Fresh Farm",
-        0, None, None, None, r#"["en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-fresh.test",
+        &"aa".repeat(32),
+        "Fresh Farm",
+        0,
+        None,
+        None,
+        None,
+        r#"["en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
     insert_farm(
-        &state, "https://farm-stale.test", &"bb".repeat(32), "Stale Farm",
-        0, None, None, None, r#"["en"]"#, r#"[]"#, stale_time,
-    ).await;
+        &state,
+        "https://farm-stale.test",
+        &"bb".repeat(32),
+        "Stale Farm",
+        0,
+        None,
+        None,
+        None,
+        r#"["en"]"#,
+        r#"[]"#,
+        stale_time,
+    )
+    .await;
 
     let resp = server.get("/farms").await;
     resp.assert_status_ok();
 
     let farms = resp.json::<Value>()["farms"].as_array().unwrap().to_vec();
 
-    let fresh = farms.iter().find(|f| f["farm_url"] == "https://farm-fresh.test").unwrap();
+    let fresh = farms
+        .iter()
+        .find(|f| f["farm_url"] == "https://farm-fresh.test")
+        .unwrap();
     assert!(fresh["stale"].is_null(), "fresh farm should not be stale");
 
-    let stale = farms.iter().find(|f| f["farm_url"] == "https://farm-stale.test").unwrap();
+    let stale = farms
+        .iter()
+        .find(|f| f["farm_url"] == "https://farm-stale.test")
+        .unwrap();
     assert_eq!(stale["stale"], true, "old farm should be stale");
 }
 
@@ -431,7 +553,9 @@ async fn deregister_rejects_invalid_signature() {
     resp.assert_status_bad_request();
     let error = resp.json::<Value>()["error"].as_str().unwrap().to_string();
     assert!(
-        error == "signature_mismatch" || error == "invalid_pubkey_hex" || error == "invalid_signature_length",
+        error == "signature_mismatch"
+            || error == "invalid_pubkey_hex"
+            || error == "invalid_signature_length",
         "unexpected error: {error}"
     );
 }
@@ -484,8 +608,13 @@ async fn deregister_with_valid_signature_removes_farm() {
 
     // Confirm it's gone.
     let list_resp = server.get("/farms").await;
-    let farms = list_resp.json::<Value>()["farms"].as_array().unwrap().to_vec();
-    assert!(!farms.iter().any(|f| f["farm_url"] == "https://farm-del2.test"));
+    let farms = list_resp.json::<Value>()["farms"]
+        .as_array()
+        .unwrap()
+        .to_vec();
+    assert!(!farms
+        .iter()
+        .any(|f| f["farm_url"] == "https://farm-del2.test"));
 }
 
 #[tokio::test]
@@ -528,19 +657,49 @@ async fn farms_filter_combined_country_and_language() {
 
     // IT farm with Italian
     insert_farm(
-        &state, "https://farm-it-it.test", &"aa".repeat(32), "IT Italian",
-        0, None, Some("IT"), Some("EU-West"), r#"["it","en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-it-it.test",
+        &"aa".repeat(32),
+        "IT Italian",
+        0,
+        None,
+        Some("IT"),
+        Some("EU-West"),
+        r#"["it","en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
     // IT farm with English only
     insert_farm(
-        &state, "https://farm-it-en.test", &"bb".repeat(32), "IT English",
-        0, None, Some("IT"), Some("EU-West"), r#"["en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-it-en.test",
+        &"bb".repeat(32),
+        "IT English",
+        0,
+        None,
+        Some("IT"),
+        Some("EU-West"),
+        r#"["en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
     // US farm with English
     insert_farm(
-        &state, "https://farm-us-en.test", &"cc".repeat(32), "US English",
-        0, None, Some("US"), Some("US-East"), r#"["en"]"#, r#"[]"#, now,
-    ).await;
+        &state,
+        "https://farm-us-en.test",
+        &"cc".repeat(32),
+        "US English",
+        0,
+        None,
+        Some("US"),
+        Some("US-East"),
+        r#"["en"]"#,
+        r#"[]"#,
+        now,
+    )
+    .await;
 
     let resp = server.get("/farms?country=IT&language=it").await;
     resp.assert_status_ok();

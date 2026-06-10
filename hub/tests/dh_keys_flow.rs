@@ -1,8 +1,8 @@
-
 use serde_json::json;
 use voxply_identity::{DhKeyRecord, Identity};
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 fn make_dh_publish_body(identity: &Identity) -> serde_json::Value {
     let (_, dh_pub) = identity.dh_keypair();
@@ -38,9 +38,7 @@ async fn publish_and_fetch_dh_key() {
         .assert_status(axum::http::StatusCode::OK);
 
     // GET now returns the key
-    let resp = server
-        .get(&format!("/identity/{pubkey}/dh-key"))
-        .await;
+    let resp = server.get(&format!("/identity/{pubkey}/dh-key")).await;
     resp.assert_status_ok();
     let result: serde_json::Value = resp.json();
     assert_eq!(result["dh_pubkey_hex"], body["dh_pubkey_hex"]);

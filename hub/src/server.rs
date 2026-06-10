@@ -38,7 +38,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     // Rate-limited write sub-router (channels, messages, DMs, etc.).
     let write_routes = Router::new()
         .route("/channels", post(routes::channels::create_channel))
-        .route("/channels/{channel_id}/messages", post(routes::messages::send_message))
+        .route(
+            "/channels/{channel_id}/messages",
+            post(routes::messages::send_message),
+        )
         .route("/conversations", post(routes::dms::create_conversation))
         .route(
             "/conversations/{conversation_id}/messages",
@@ -58,20 +61,47 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/hub/members", get(routes::hub::list_members))
         .route("/hub/settings", get(routes::hub::get_hub_settings))
         .route("/hub/pending", get(routes::hub::list_pending))
-        .route("/hub/pending/{target_key}/approve", post(routes::hub::approve_user))
-        .route("/hub/icons", get(routes::hub_icons::list_icons).post(routes::hub_icons::create_icon))
+        .route(
+            "/hub/pending/{target_key}/approve",
+            post(routes::hub::approve_user),
+        )
+        .route(
+            "/hub/icons",
+            get(routes::hub_icons::list_icons).post(routes::hub_icons::create_icon),
+        )
         .route(
             "/hub/icons/{icon_id}",
             axum::routing::patch(routes::hub_icons::rename_icon)
                 .delete(routes::hub_icons::delete_icon),
         )
-        .route("/admin/settings/pow", get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings))
-        .route("/admin/settings/channel-depth", get(routes::hub::get_channel_depth).patch(routes::hub::patch_channel_depth))
-        .route("/admin/settings/moderation", patch(routes::hub::patch_moderation_settings))
-        .route("/admin/settings/listing", patch(routes::listing::patch_listing))
-        .route("/admin/settings/tags", get(routes::tags::get_tags).patch(routes::tags::patch_tags))
-        .route("/admin/directory-sign", post(routes::directory::sign_for_directory))
-        .route("/profile/{pubkey}", get(routes::profile::get_profile).put(routes::profile::put_profile))
+        .route(
+            "/admin/settings/pow",
+            get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
+        )
+        .route(
+            "/admin/settings/channel-depth",
+            get(routes::hub::get_channel_depth).patch(routes::hub::patch_channel_depth),
+        )
+        .route(
+            "/admin/settings/moderation",
+            patch(routes::hub::patch_moderation_settings),
+        )
+        .route(
+            "/admin/settings/listing",
+            patch(routes::listing::patch_listing),
+        )
+        .route(
+            "/admin/settings/tags",
+            get(routes::tags::get_tags).patch(routes::tags::patch_tags),
+        )
+        .route(
+            "/admin/directory-sign",
+            post(routes::directory::sign_for_directory),
+        )
+        .route(
+            "/profile/{pubkey}",
+            get(routes::profile::get_profile).put(routes::profile::put_profile),
+        )
         .merge(auth_routes)
         .merge(write_routes)
         .route("/me", get(routes::me::me).patch(routes::me::update_me))
@@ -81,8 +111,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::patch(routes::channels::update_channel)
                 .delete(routes::channels::delete_channel),
         )
-        .route("/channels/reorder", post(routes::channels::reorder_channels))
-        .route("/channels/{channel_id}/messages", get(routes::messages::get_messages))
+        .route(
+            "/channels/reorder",
+            post(routes::channels::reorder_channels),
+        )
+        .route(
+            "/channels/{channel_id}/messages",
+            get(routes::messages::get_messages),
+        )
         .route(
             "/channels/{channel_id}/messages/{message_id}",
             axum::routing::patch(routes::messages::edit_message)
@@ -97,40 +133,91 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::delete(routes::messages::remove_reaction),
         )
         // ---- Content reporting (Task #33) ----
-        .route("/messages/{id}/report", post(routes::reports::report_message))
+        .route(
+            "/messages/{id}/report",
+            post(routes::reports::report_message),
+        )
         .route("/admin/reports", get(routes::reports::list_reports))
-        .route("/admin/reports/{id}/review", post(routes::reports::review_report))
+        .route(
+            "/admin/reports/{id}/review",
+            post(routes::reports::review_report),
+        )
         // ---- Admin bot management (internal service accounts) ----
-        .route("/admin/bots", get(routes::bots::admin_list_bots).post(routes::bots::admin_create_bot))
-        .route("/admin/bots/{pubkey}", get(routes::bots::admin_get_bot).delete(routes::bots::admin_delete_bot))
-        .route("/admin/bots/{pubkey}/webhook", put(routes::bots::admin_set_webhook))
+        .route(
+            "/admin/bots",
+            get(routes::bots::admin_list_bots).post(routes::bots::admin_create_bot),
+        )
+        .route(
+            "/admin/bots/{pubkey}",
+            get(routes::bots::admin_get_bot).delete(routes::bots::admin_delete_bot),
+        )
+        .route(
+            "/admin/bots/{pubkey}/webhook",
+            put(routes::bots::admin_set_webhook),
+        )
         .route("/admin/audit-log", get(routes::bots::admin_audit_log))
         // ---- Bot API (token auth, internal service accounts) ----
         .route("/bot/commands", put(routes::bots::bot_set_commands))
         .route("/bot/send", post(routes::bots::bot_send_message))
         .route("/bot/poll", get(routes::bots::bot_poll))
-        .route("/bot/events", axum::routing::delete(routes::bots::bot_ack_events))
+        .route(
+            "/bot/events",
+            axum::routing::delete(routes::bots::bot_ack_events),
+        )
         // ---- External bot system ----
         // /bots/me, /bots/me/profile, /bots/me/commands, /bots/me/subscriptions
         // must be registered before /bots/{pubkey} so axum doesn't match "me"
         // as a path parameter.
         .route("/bots/me", get(routes::bots::ext_bot_me))
-        .route("/bots/me/profile", put(routes::bots::ext_update_bot_profile))
-        .route("/bots/me/commands", put(routes::bots::ext_update_bot_commands))
-        .route("/bots/me/subscriptions", put(routes::bots::ext_update_bot_subscriptions))
+        .route(
+            "/bots/me/profile",
+            put(routes::bots::ext_update_bot_profile),
+        )
+        .route(
+            "/bots/me/commands",
+            put(routes::bots::ext_update_bot_commands),
+        )
+        .route(
+            "/bots/me/subscriptions",
+            put(routes::bots::ext_update_bot_subscriptions),
+        )
         .route("/bots/accept-invite", post(routes::bots::ext_accept_invite))
-        .route("/bots", get(routes::bots::ext_list_bots).post(routes::bots::ext_invite_bot))
+        .route(
+            "/bots",
+            get(routes::bots::ext_list_bots).post(routes::bots::ext_invite_bot),
+        )
         .route("/bots/{pubkey}", delete(routes::bots::ext_remove_bot))
         // ---- Incoming webhooks ----
         .route("/admin/webhooks", post(routes::webhooks::create_webhook))
-        .route("/admin/webhooks/{id}", delete(routes::webhooks::delete_webhook))
-        .route("/webhooks/{id}/{token}", post(routes::webhooks::post_webhook_message))
+        .route(
+            "/admin/webhooks/{id}",
+            delete(routes::webhooks::delete_webhook),
+        )
+        .route(
+            "/webhooks/{id}/{token}",
+            post(routes::webhooks::post_webhook_message),
+        )
         .route("/users", get(routes::users::list_users))
-        .route("/users/{pubkey}/profile", get(routes::users::get_user_profile))
-        .route("/channels/{channel_id}/members", get(routes::users::channel_members))
-        .route("/voice/populations", get(routes::channels::voice_populations))
-        .route("/voice/active-users", get(routes::channels::voice_active_users))
-        .route("/voice/participants", get(routes::channels::voice_channel_participants))
+        .route(
+            "/users/{pubkey}/profile",
+            get(routes::users::get_user_profile),
+        )
+        .route(
+            "/channels/{channel_id}/members",
+            get(routes::users::channel_members),
+        )
+        .route(
+            "/voice/populations",
+            get(routes::channels::voice_populations),
+        )
+        .route(
+            "/voice/active-users",
+            get(routes::channels::voice_active_users),
+        )
+        .route(
+            "/voice/participants",
+            get(routes::channels::voice_channel_participants),
+        )
         .route("/ws", get(routes::ws::ws_handler))
         .route("/conversations", get(routes::dms::list_conversations))
         .route(
@@ -150,61 +237,203 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             delete(routes::dms::remove_conversation_member),
         )
         .route("/federation/dm", post(routes::dms::receive_federated_dm))
-        .route("/federation/badge-offer", post(federation::handlers::receive_badge_offer))
-        .route("/federation/badge-revocations", get(routes::badges::federation_badge_revocations))
-        .route("/federation/banlist", get(routes::moderation::get_federation_banlist))
+        .route(
+            "/federation/badge-offer",
+            post(federation::handlers::receive_badge_offer),
+        )
+        .route(
+            "/federation/badge-revocations",
+            get(routes::badges::federation_badge_revocations),
+        )
+        .route(
+            "/federation/banlist",
+            get(routes::moderation::get_federation_banlist),
+        )
         .route("/federation/listing", get(routes::listing::get_listing))
-        .route("/friends", get(routes::friends::list_friends).post(routes::friends::send_friend_request))
-        .route("/friends/pending", get(routes::friends::list_pending_requests))
-        .route("/friends/{public_key}/accept", post(routes::friends::accept_friend_request))
-        .route("/friends/{public_key}", axum::routing::delete(routes::friends::remove_friend))
-        .route("/roles", get(routes::roles::list_roles).post(routes::roles::create_role))
-        .route("/roles/{role_id}", axum::routing::patch(routes::roles::update_role).delete(routes::roles::delete_role))
-        .route("/roles/{role_id}/members", get(routes::roles::list_role_members))
-        .route("/users/{public_key}/roles", get(routes::roles::get_user_roles))
-        .route("/users/{public_key}/roles/{role_id}", put(routes::roles::assign_role).delete(routes::roles::remove_role))
-        .route("/invites", get(routes::invites::list_invites).post(routes::invites::create_invite))
-        .route("/invites/{code}", axum::routing::delete(routes::invites::revoke_invite))
+        .route(
+            "/friends",
+            get(routes::friends::list_friends).post(routes::friends::send_friend_request),
+        )
+        .route(
+            "/friends/pending",
+            get(routes::friends::list_pending_requests),
+        )
+        .route(
+            "/friends/{public_key}/accept",
+            post(routes::friends::accept_friend_request),
+        )
+        .route(
+            "/friends/{public_key}",
+            axum::routing::delete(routes::friends::remove_friend),
+        )
+        .route(
+            "/roles",
+            get(routes::roles::list_roles).post(routes::roles::create_role),
+        )
+        .route(
+            "/roles/{role_id}",
+            axum::routing::patch(routes::roles::update_role).delete(routes::roles::delete_role),
+        )
+        .route(
+            "/roles/{role_id}/members",
+            get(routes::roles::list_role_members),
+        )
+        .route(
+            "/users/{public_key}/roles",
+            get(routes::roles::get_user_roles),
+        )
+        .route(
+            "/users/{public_key}/roles/{role_id}",
+            put(routes::roles::assign_role).delete(routes::roles::remove_role),
+        )
+        .route(
+            "/invites",
+            get(routes::invites::list_invites).post(routes::invites::create_invite),
+        )
+        .route(
+            "/invites/{code}",
+            axum::routing::delete(routes::invites::revoke_invite),
+        )
         // ---- Join links (Feature 5) ----
-        .route("/join/{code}", get(routes::invites::get_join_info).post(routes::invites::join_with_invite))
+        .route(
+            "/join/{code}",
+            get(routes::invites::get_join_info).post(routes::invites::join_with_invite),
+        )
         // ---- Unread counts (Feature 2) ----
         // Must be registered before /channels/{channel_id} to avoid "unread" being matched as a path param.
         .route("/channels/unread", get(routes::channels::get_unread_counts))
-        .route("/channels/{channel_id}/read", post(routes::channels::mark_channel_read))
-        .route("/moderation/bans", get(routes::moderation::list_bans).post(routes::moderation::ban_user))
-        .route("/moderation/bans/{target_key}", axum::routing::delete(routes::moderation::unban_user))
-        .route("/moderation/mutes", get(routes::moderation::list_mutes).post(routes::moderation::mute_user))
-        .route("/moderation/mutes/{target_key}", axum::routing::delete(routes::moderation::unmute_user))
-        .route("/moderation/timeout", post(routes::moderation::timeout_user))
+        .route(
+            "/channels/{channel_id}/read",
+            post(routes::channels::mark_channel_read),
+        )
+        .route(
+            "/moderation/bans",
+            get(routes::moderation::list_bans).post(routes::moderation::ban_user),
+        )
+        .route(
+            "/moderation/bans/{target_key}",
+            axum::routing::delete(routes::moderation::unban_user),
+        )
+        .route(
+            "/moderation/mutes",
+            get(routes::moderation::list_mutes).post(routes::moderation::mute_user),
+        )
+        .route(
+            "/moderation/mutes/{target_key}",
+            axum::routing::delete(routes::moderation::unmute_user),
+        )
+        .route(
+            "/moderation/timeout",
+            post(routes::moderation::timeout_user),
+        )
         .route("/moderation/kick", post(routes::moderation::kick_user))
-        .route("/moderation/channels/{channel_id}/bans", get(routes::moderation::list_channel_bans).post(routes::moderation::channel_ban))
-        .route("/moderation/channels/{channel_id}/bans/{target_key}", axum::routing::delete(routes::moderation::channel_unban))
-        .route("/moderation/voice-mutes", get(routes::moderation::list_voice_mutes).post(routes::moderation::voice_mute))
-        .route("/moderation/voice-mutes/{target_key}", axum::routing::delete(routes::moderation::voice_unmute))
-        .route("/channels/{channel_id}/talk-power", get(routes::moderation::get_talk_power).post(routes::moderation::set_talk_power))
+        .route(
+            "/moderation/channels/{channel_id}/bans",
+            get(routes::moderation::list_channel_bans).post(routes::moderation::channel_ban),
+        )
+        .route(
+            "/moderation/channels/{channel_id}/bans/{target_key}",
+            axum::routing::delete(routes::moderation::channel_unban),
+        )
+        .route(
+            "/moderation/voice-mutes",
+            get(routes::moderation::list_voice_mutes).post(routes::moderation::voice_mute),
+        )
+        .route(
+            "/moderation/voice-mutes/{target_key}",
+            axum::routing::delete(routes::moderation::voice_unmute),
+        )
+        .route(
+            "/channels/{channel_id}/talk-power",
+            get(routes::moderation::get_talk_power).post(routes::moderation::set_talk_power),
+        )
         // ---- Channel-scoped moderation (pubkey field, task #6/#7/#8) ----
-        .route("/channels/{channel_id}/bans", get(routes::moderation::list_channel_bans_v2).post(routes::moderation::channel_ban_v2))
-        .route("/channels/{channel_id}/bans/{pubkey}", axum::routing::delete(routes::moderation::channel_unban_v2))
-        .route("/channels/{channel_id}/voice-mutes", get(routes::moderation::list_channel_voice_mutes).post(routes::moderation::channel_voice_mute))
-        .route("/channels/{channel_id}/voice-mutes/{pubkey}", axum::routing::delete(routes::moderation::channel_voice_unmute))
-        .route("/channels/{channel_id}/raise-hand", post(routes::moderation::raise_hand))
-        .route("/channels/{channel_id}/raise-hand/{pubkey}", axum::routing::delete(routes::moderation::lower_hand))
-        .route("/channels/{channel_id}/raise-hands", get(routes::moderation::list_raise_hands))
-        .route("/alliances", get(routes::alliances::list_alliances).post(routes::alliances::create_alliance))
-        .route("/alliances/join", post(routes::alliances::join_alliance_local))
-        .route("/alliances/pending-invites", get(routes::alliances::list_pending_invites))
-        .route("/alliances/pending-invites/{invite_id}/accept", post(routes::alliances::accept_pending_invite))
-        .route("/alliances/pending-invites/{invite_id}", axum::routing::delete(routes::alliances::decline_pending_invite))
-        .route("/alliances/{alliance_id}", get(routes::alliances::get_alliance))
-        .route("/alliances/{alliance_id}/invite", post(routes::alliances::create_invite))
-        .route("/alliances/{alliance_id}/push-invite", post(routes::alliances::push_invite_handler))
-        .route("/alliances/{alliance_id}/join", post(routes::alliances::join_alliance))
-        .route("/alliances/{alliance_id}/leave", axum::routing::delete(routes::alliances::leave_alliance))
-        .route("/alliances/{alliance_id}/channels", get(routes::alliances::list_shared_channels)
-            .post(routes::alliances::share_channel))
-        .route("/alliances/{alliance_id}/channels/{channel_id}", axum::routing::delete(routes::alliances::unshare_channel))
-        .route("/alliances/{alliance_id}/channels/{channel_id}/messages", get(routes::alliances::get_alliance_channel_messages).post(routes::alliances::post_alliance_channel_message))
-        .route("/federation/alliance-invite", post(routes::alliances::receive_federation_alliance_invite))
+        .route(
+            "/channels/{channel_id}/bans",
+            get(routes::moderation::list_channel_bans_v2).post(routes::moderation::channel_ban_v2),
+        )
+        .route(
+            "/channels/{channel_id}/bans/{pubkey}",
+            axum::routing::delete(routes::moderation::channel_unban_v2),
+        )
+        .route(
+            "/channels/{channel_id}/voice-mutes",
+            get(routes::moderation::list_channel_voice_mutes)
+                .post(routes::moderation::channel_voice_mute),
+        )
+        .route(
+            "/channels/{channel_id}/voice-mutes/{pubkey}",
+            axum::routing::delete(routes::moderation::channel_voice_unmute),
+        )
+        .route(
+            "/channels/{channel_id}/raise-hand",
+            post(routes::moderation::raise_hand),
+        )
+        .route(
+            "/channels/{channel_id}/raise-hand/{pubkey}",
+            axum::routing::delete(routes::moderation::lower_hand),
+        )
+        .route(
+            "/channels/{channel_id}/raise-hands",
+            get(routes::moderation::list_raise_hands),
+        )
+        .route(
+            "/alliances",
+            get(routes::alliances::list_alliances).post(routes::alliances::create_alliance),
+        )
+        .route(
+            "/alliances/join",
+            post(routes::alliances::join_alliance_local),
+        )
+        .route(
+            "/alliances/pending-invites",
+            get(routes::alliances::list_pending_invites),
+        )
+        .route(
+            "/alliances/pending-invites/{invite_id}/accept",
+            post(routes::alliances::accept_pending_invite),
+        )
+        .route(
+            "/alliances/pending-invites/{invite_id}",
+            axum::routing::delete(routes::alliances::decline_pending_invite),
+        )
+        .route(
+            "/alliances/{alliance_id}",
+            get(routes::alliances::get_alliance),
+        )
+        .route(
+            "/alliances/{alliance_id}/invite",
+            post(routes::alliances::create_invite),
+        )
+        .route(
+            "/alliances/{alliance_id}/push-invite",
+            post(routes::alliances::push_invite_handler),
+        )
+        .route(
+            "/alliances/{alliance_id}/join",
+            post(routes::alliances::join_alliance),
+        )
+        .route(
+            "/alliances/{alliance_id}/leave",
+            axum::routing::delete(routes::alliances::leave_alliance),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels",
+            get(routes::alliances::list_shared_channels).post(routes::alliances::share_channel),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}",
+            axum::routing::delete(routes::alliances::unshare_channel),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/messages",
+            get(routes::alliances::get_alliance_channel_messages)
+                .post(routes::alliances::post_alliance_channel_message),
+        )
+        .route(
+            "/federation/alliance-invite",
+            post(routes::alliances::receive_federation_alliance_invite),
+        )
         .route(
             "/identity/{master}/designation",
             get(routes::identity::get_designation).post(routes::identity::put_designation),
@@ -227,45 +456,96 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/identity/pairing/offer", post(routes::pairing::post_offer))
         .route("/identity/pairing/claim", post(routes::pairing::post_claim))
-        .route("/identity/pairing/complete", post(routes::pairing::post_complete))
-        .route("/identity/pairing/status/{token}", get(routes::pairing::get_status))
+        .route(
+            "/identity/pairing/complete",
+            post(routes::pairing::post_complete),
+        )
+        .route(
+            "/identity/pairing/status/{token}",
+            get(routes::pairing::get_status),
+        )
         // ---- Certification routes (Task #20 / #21) ----
         .route("/admin/certs", get(routes::certs::admin_list))
         .route("/admin/certs/{pubkey}", post(routes::certs::admin_issue))
-        .route("/admin/certs/{pubkey}/revoke", post(routes::certs::admin_revoke))
-        .route("/admin/settings/certs", get(routes::certs::get_cert_settings).patch(routes::certs::patch_cert_settings))
-        .route("/identity/{pubkey}/certs", get(routes::certs::list_user_certs))
+        .route(
+            "/admin/certs/{pubkey}/revoke",
+            post(routes::certs::admin_revoke),
+        )
+        .route(
+            "/admin/settings/certs",
+            get(routes::certs::get_cert_settings).patch(routes::certs::patch_cert_settings),
+        )
+        .route(
+            "/identity/{pubkey}/certs",
+            get(routes::certs::list_user_certs),
+        )
         .route("/certs/revocations", get(routes::certs::get_revocations))
         // ---- Badge admin routes ----
         .route("/badges/pending", get(routes::badges::list_pending))
-        .route("/badges/pending/{id}/accept", post(routes::badges::accept_pending))
-        .route("/badges/pending/{id}/decline", post(routes::badges::decline_pending))
+        .route(
+            "/badges/pending/{id}/accept",
+            post(routes::badges::accept_pending),
+        )
+        .route(
+            "/badges/pending/{id}/decline",
+            post(routes::badges::decline_pending),
+        )
         .route("/badges", get(routes::badges::list_badges))
         .route("/badges/{id}", delete(routes::badges::delete_badge))
         .route("/admin/badges/issue", post(routes::badges::issue_badge))
         .route("/admin/badges/issued", get(routes::badges::list_issued))
-        .route("/admin/badges/issued/{id}/revoke", axum::routing::delete(routes::badges::revoke_issued_badge))
+        .route(
+            "/admin/badges/issued/{id}/revoke",
+            axum::routing::delete(routes::badges::revoke_issued_badge),
+        )
         .route("/federation/peers", get(federation::handlers::list_peers))
         .route("/federation/peers", post(federation::handlers::add_peer))
-        .route("/federation/peers/{peer_key}/channels", get(federation::handlers::peer_channels))
-        .route("/federation/channels", get(federation::handlers::all_federated_channels))
-        .route("/federation/channels/{fed_channel_id}/messages", get(federation::handlers::federated_messages)
-            .post(federation::handlers::send_federated_message))
+        .route(
+            "/federation/peers/{peer_key}/channels",
+            get(federation::handlers::peer_channels),
+        )
+        .route(
+            "/federation/channels",
+            get(federation::handlers::all_federated_channels),
+        )
+        .route(
+            "/federation/channels/{fed_channel_id}/messages",
+            get(federation::handlers::federated_messages)
+                .post(federation::handlers::send_federated_message),
+        )
         // ---- Lobby ----
         .route("/lobby/status", get(routes::lobby::get_status))
         .route("/lobby/submit-pow", post(routes::lobby::submit_pow))
         .route("/lobby/welcome", get(routes::lobby::get_welcome))
-        .route("/hub/settings/lobby", put(routes::lobby::update_lobby_settings))
+        .route(
+            "/hub/settings/lobby",
+            put(routes::lobby::update_lobby_settings),
+        )
         // ---- Bot Challenge ----
         .route("/challenge/new", get(routes::challenge::new_challenge))
-        .route("/challenge/verify", post(routes::challenge::verify_challenge))
-        .route("/hub/settings/challenge", put(routes::challenge::update_challenge_settings))
+        .route(
+            "/challenge/verify",
+            post(routes::challenge::verify_challenge),
+        )
+        .route(
+            "/hub/settings/challenge",
+            put(routes::challenge::update_challenge_settings),
+        )
         // ---- Survey ----
         .route("/survey/current", get(routes::survey::get_current))
         .route("/survey/submit", post(routes::survey::submit_survey))
-        .route("/admin/survey", get(routes::survey::admin_get_survey).put(routes::survey::admin_put_survey))
-        .route("/admin/survey/responses", get(routes::survey::admin_list_responses))
-        .route("/admin/survey/responses/{pubkey}", get(routes::survey::admin_get_response_for_pubkey))
+        .route(
+            "/admin/survey",
+            get(routes::survey::admin_get_survey).put(routes::survey::admin_put_survey),
+        )
+        .route(
+            "/admin/survey/responses",
+            get(routes::survey::admin_list_responses),
+        )
+        .route(
+            "/admin/survey/responses/{pubkey}",
+            get(routes::survey::admin_get_response_for_pubkey),
+        )
         // ---- Forum ----
         // Search must be registered before /:post_id so axum doesn't match "search"
         // as a path parameter.
@@ -304,28 +584,58 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             post(routes::posts::mark_post_read),
         )
         // ---- Gaming: game install (Tier 1 minimal) + Tier 2 sessions ----
-        .route("/admin/games", post(routes::games::install_game).get(routes::games::admin_list_games))
-        .route("/admin/games/{id}/channels", put(routes::games::set_game_channels))
-        .route("/admin/games/{id}/permissions", put(routes::games::set_game_permissions))
+        .route(
+            "/admin/games",
+            post(routes::games::install_game).get(routes::games::admin_list_games),
+        )
+        .route(
+            "/admin/games/{id}/channels",
+            put(routes::games::set_game_channels),
+        )
+        .route(
+            "/admin/games/{id}/permissions",
+            put(routes::games::set_game_permissions),
+        )
         // Farm-aware enable/disable
-        .route("/games/{id}/enable", post(routes::games::enable_game).delete(routes::games::disable_game))
+        .route(
+            "/games/{id}/enable",
+            post(routes::games::enable_game).delete(routes::games::disable_game),
+        )
         // Player-facing enabled games list
         .route("/games", get(routes::games::list_enabled_games))
         // Spec Tier 2 session routes (must come before /:id/enable to avoid ambiguity)
         // Note: /games/sessions must be registered before /games/{id}/sessions so axum
         // doesn't match "sessions" as a game_id path param.
         .route("/games/sessions", get(routes::games::list_sessions))
-        .route("/games/sessions/{session_id}", get(routes::games::get_session_v2).delete(routes::games::force_end_session))
-        .route("/games/sessions/{session_id}/join", post(routes::games::join_session_v2))
-        .route("/games/sessions/{session_id}/leave", post(routes::games::leave_session))
-        .route("/games/{game_id}/sessions", post(routes::games::create_session_v2))
+        .route(
+            "/games/sessions/{session_id}",
+            get(routes::games::get_session_v2).delete(routes::games::force_end_session),
+        )
+        .route(
+            "/games/sessions/{session_id}/join",
+            post(routes::games::join_session_v2),
+        )
+        .route(
+            "/games/sessions/{session_id}/leave",
+            post(routes::games::leave_session),
+        )
+        .route(
+            "/games/{game_id}/sessions",
+            post(routes::games::create_session_v2),
+        )
         // Legacy channel-scoped session routes (keep for existing tests)
         .route(
             "/channels/{channel_id}/game-sessions",
             post(routes::games::create_session),
         )
-        .route("/game-sessions/{session_id}/join", post(routes::games::join_session))
-        .route("/game-sessions/{session_id}", get(routes::games::get_session))
+        .route(
+            "/game-sessions/{session_id}/join",
+            post(routes::games::join_session),
+        )
+        .route(
+            "/game-sessions/{session_id}",
+            get(routes::games::get_session),
+        )
         .route(
             "/game-sessions/{session_id}/state",
             post(routes::games::patch_state),
@@ -347,11 +657,23 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/recovery/contacts/{pubkey}",
             delete(routes::recovery::delete_contact),
         )
-        .route("/recovery/rotate-key", post(routes::recovery::post_rotate_key))
+        .route(
+            "/recovery/rotate-key",
+            post(routes::recovery::post_rotate_key),
+        )
         .route("/recovery/requests", get(routes::recovery::get_my_requests))
-        .route("/admin/recovery/pending", get(routes::recovery::admin_list_pending))
-        .route("/admin/recovery/{id}/approve", post(routes::recovery::admin_approve))
-        .route("/admin/recovery/{id}/deny", post(routes::recovery::admin_deny))
+        .route(
+            "/admin/recovery/pending",
+            get(routes::recovery::admin_list_pending),
+        )
+        .route(
+            "/admin/recovery/{id}/approve",
+            post(routes::recovery::admin_approve),
+        )
+        .route(
+            "/admin/recovery/{id}/deny",
+            post(routes::recovery::admin_deny),
+        )
         // ---- DM block set (Task #25) ----
         .route(
             "/identity/dm-blocks",
@@ -363,9 +685,15 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/emojis", get(routes::emojis::list_emojis))
         .route("/emojis/{id}/image", get(routes::emojis::get_emoji_image))
         .route("/admin/emojis", post(routes::emojis::create_emoji))
-        .route("/admin/emojis/{id}", axum::routing::delete(routes::emojis::delete_emoji))
+        .route(
+            "/admin/emojis/{id}",
+            axum::routing::delete(routes::emojis::delete_emoji),
+        )
         // ---- Events / calendar (Task #30) ----
-        .route("/events", post(routes::events::create_event).get(routes::events::list_events))
+        .route(
+            "/events",
+            post(routes::events::create_event).get(routes::events::list_events),
+        )
         .route(
             "/events/{event_id}",
             get(routes::events::get_event)
@@ -375,7 +703,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/events/{event_id}/rsvp", post(routes::events::rsvp_event))
         .route("/events/{event_id}/rsvps", get(routes::events::list_rsvps))
         // ---- File uploads ----
-        .route("/channels/{channel_id}/upload", post(routes::uploads::upload_file))
+        .route(
+            "/channels/{channel_id}/upload",
+            post(routes::uploads::upload_file),
+        )
         .route("/uploads/{filename}", get(routes::uploads::serve_upload))
         // ---- Message pinning ----
         .route(
@@ -384,7 +715,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         .route("/channels/{channel_id}/pins", get(routes::pins::list_pins))
         // ---- Native polls (Task #31) ----
-        .route("/channels/{channel_id}/polls", post(routes::polls::create_poll))
+        .route(
+            "/channels/{channel_id}/polls",
+            post(routes::polls::create_poll),
+        )
         .route(
             "/polls/{poll_id}",
             get(routes::polls::get_poll).delete(routes::polls::delete_poll),

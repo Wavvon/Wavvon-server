@@ -14,7 +14,10 @@ pub async fn send_friend_request(
     Json(req): Json<FriendRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if req.target_public_key == user.public_key {
-        return Err((StatusCode::BAD_REQUEST, "Cannot friend yourself".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Cannot friend yourself".to_string(),
+        ));
     }
 
     let now = crate::auth::handlers::unix_timestamp();
@@ -22,7 +25,11 @@ pub async fn send_friend_request(
     // Cross-hub adds (hub_url provided) skip the pending state because there's
     // no federated notification path yet — leaving them pending forever would
     // be misleading. Same-hub adds keep the existing accept/reject flow.
-    let status = if req.hub_url.is_some() { "accepted" } else { "pending" };
+    let status = if req.hub_url.is_some() {
+        "accepted"
+    } else {
+        "pending"
+    };
 
     sqlx::query(
         "INSERT INTO friends (user_a, user_b, status, created_at, hub_url, display_name)
@@ -57,7 +64,10 @@ pub async fn accept_friend_request(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if result.rows_affected() == 0 {
-        return Err((StatusCode::NOT_FOUND, "No pending request from this user".to_string()));
+        return Err((
+            StatusCode::NOT_FOUND,
+            "No pending request from this user".to_string(),
+        ));
     }
 
     Ok(StatusCode::OK)
@@ -69,14 +79,16 @@ pub async fn remove_friend(
     Path(target_key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Remove in both directions
-    sqlx::query("DELETE FROM friends WHERE (user_a = ? AND user_b = ?) OR (user_a = ? AND user_b = ?)")
-        .bind(&user.public_key)
-        .bind(&target_key)
-        .bind(&target_key)
-        .bind(&user.public_key)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query(
+        "DELETE FROM friends WHERE (user_a = ? AND user_b = ?) OR (user_a = ? AND user_b = ?)",
+    )
+    .bind(&user.public_key)
+    .bind(&target_key)
+    .bind(&target_key)
+    .bind(&user.public_key)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -155,14 +167,13 @@ pub async fn list_pending_requests(
 
     let mut result = Vec::new();
     for row in rows {
-        let display_name: Option<String> = sqlx::query_scalar(
-            "SELECT display_name FROM users WHERE public_key = ?",
-        )
-        .bind(&row.friend_key)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-        .flatten();
+        let display_name: Option<String> =
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+                .bind(&row.friend_key)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
 
         result.push(FriendInfo {
             public_key: row.friend_key,

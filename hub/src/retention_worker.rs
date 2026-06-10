@@ -4,8 +4,7 @@ use crate::state::AppState;
 
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(86400)); // 24h
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400)); // 24h
         interval.tick().await; // skip immediate first tick
         loop {
             interval.tick().await;

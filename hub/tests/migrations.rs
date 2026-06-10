@@ -4,18 +4,21 @@ use voxply_hub::db;
 #[tokio::test]
 async fn migrations_idempotent_on_fresh_db() {
     sqlx::any::install_default_drivers();
-    let pool = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let pool = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
 
     // Running twice in a row should not fail
     db::migrations::run(&pool).await.unwrap();
     db::migrations::run(&pool).await.unwrap();
 
     // All expected columns exist on channels
-    let cols: Vec<(String,)> =
-        sqlx::query_as("SELECT name FROM pragma_table_info('channels')")
-            .fetch_all(&pool)
-            .await
-            .unwrap();
+    let cols: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('channels')")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
     let names: Vec<&str> = cols.iter().map(|(n,)| n.as_str()).collect();
 
     assert!(names.contains(&"id"));
@@ -29,7 +32,11 @@ async fn migrations_idempotent_on_fresh_db() {
 #[tokio::test]
 async fn migrations_data_survives_rerun() {
     sqlx::any::install_default_drivers();
-    let pool = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let pool = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
 
     // First run: fresh schema
     db::migrations::run(&pool).await.unwrap();
@@ -53,19 +60,21 @@ async fn migrations_data_survives_rerun() {
     // Running migrations again must not destroy existing data
     db::migrations::run(&pool).await.unwrap();
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM channels WHERE id = 'ch-survives'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE id = 'ch-survives'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(count, 1, "channel row must survive migration rerun");
 }
 
 #[tokio::test]
 async fn migrations_create_all_core_tables() {
     sqlx::any::install_default_drivers();
-    let pool = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let pool = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
 
     db::migrations::run(&pool).await.unwrap();
 

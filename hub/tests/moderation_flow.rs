@@ -14,7 +14,8 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn ban_blocks_authentication() {
@@ -242,7 +243,11 @@ async fn channel_ban_blocks_messages() {
 
     // Unban
     server
-        .delete(&format!("/moderation/channels/{}/bans/{}", channel.id, user2.public_key_hex()))
+        .delete(&format!(
+            "/moderation/channels/{}/bans/{}",
+            channel.id,
+            user2.public_key_hex()
+        ))
         .authorization_bearer(&owner_token)
         .await
         .assert_status(axum::http::StatusCode::NO_CONTENT);
@@ -264,7 +269,11 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 /// Spin up a real listener so we can connect a WebSocket client to it.
 async fn spawn_real_hub() -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -279,7 +288,7 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -294,7 +303,9 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -302,7 +313,7 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -347,11 +358,7 @@ async fn http_authenticate(hub_url: &str, identity: &Identity) -> String {
 }
 
 /// Send a voice_join over WS, return the first server frame as JSON.
-async fn ws_voice_join_and_recv(
-    hub_url: &str,
-    token: &str,
-    channel_id: &str,
-) -> serde_json::Value {
+async fn ws_voice_join_and_recv(hub_url: &str, token: &str, channel_id: &str) -> serde_json::Value {
     let ws_url = hub_url
         .replace("http://", "ws://")
         .replace("https://", "wss://");
@@ -361,7 +368,9 @@ async fn ws_voice_join_and_recv(
 
     // Consume the `hello` frame the hub sends on connect.
     let hello_frame = rx.next().await.unwrap().unwrap();
-    let WsMessage::Text(hello_text) = hello_frame else { panic!("expected hello text frame") };
+    let WsMessage::Text(hello_text) = hello_frame else {
+        panic!("expected hello text frame")
+    };
     let hello: serde_json::Value = serde_json::from_str(&hello_text).unwrap();
     assert_eq!(hello["type"], "hello", "first frame should be hello");
 
@@ -373,7 +382,9 @@ async fn ws_voice_join_and_recv(
     .await
     .unwrap();
     let frame = rx.next().await.unwrap().unwrap();
-    let WsMessage::Text(text) = frame else { panic!("expected text frame, got {frame:?}") };
+    let WsMessage::Text(text) = frame else {
+        panic!("expected text frame, got {frame:?}")
+    };
     serde_json::from_str(&text).unwrap()
 }
 
@@ -452,13 +463,12 @@ async fn talk_power_blocks_low_priority_user() {
         .unwrap();
 
     // Sanity: confirm the row landed
-    let stored: i64 = sqlx::query_scalar(
-        "SELECT min_talk_power FROM channel_settings WHERE channel_id = ?",
-    )
-    .bind(&channel.id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap();
+    let stored: i64 =
+        sqlx::query_scalar("SELECT min_talk_power FROM channel_settings WHERE channel_id = ?")
+            .bind(&channel.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
     assert_eq!(stored, 100);
 
     // Random user tries to join — should be refused
@@ -531,7 +541,11 @@ async fn channel_ban_v2_blocks_messages_and_list() {
 
     // Unban
     server
-        .delete(&format!("/channels/{}/bans/{}", channel.id, user2.public_key_hex()))
+        .delete(&format!(
+            "/channels/{}/bans/{}",
+            channel.id,
+            user2.public_key_hex()
+        ))
         .authorization_bearer(&owner_token)
         .await
         .assert_status(axum::http::StatusCode::NO_CONTENT);
@@ -760,13 +774,11 @@ async fn raise_hand_allows_voice_join_below_threshold() {
         .unwrap();
 
     // Confirm min_talk_power was written to the channels table
-    let stored: i64 = sqlx::query_scalar(
-        "SELECT min_talk_power FROM channels WHERE id = ?",
-    )
-    .bind(&channel.id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap();
+    let stored: i64 = sqlx::query_scalar("SELECT min_talk_power FROM channels WHERE id = ?")
+        .bind(&channel.id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
     assert_eq!(stored, 100);
 
     // user2 (priority 0) is blocked without hand raised

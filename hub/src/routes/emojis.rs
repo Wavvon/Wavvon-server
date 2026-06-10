@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use base64::{Engine, engine::general_purpose::STANDARD};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
@@ -19,12 +19,11 @@ pub struct EmojiInfo {
 }
 
 pub async fn list_emojis(State(state): State<Arc<AppState>>) -> Json<Vec<EmojiInfo>> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, name FROM hub_emojis ORDER BY name",
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, name FROM hub_emojis ORDER BY name")
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
 
     Json(
         rows.into_iter()
@@ -41,13 +40,12 @@ pub async fn get_emoji_image(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT mime, data_b64 FROM hub_emojis WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT mime, data_b64 FROM hub_emojis WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let (mime, data_b64) = row.ok_or((StatusCode::NOT_FOUND, "Not found".into()))?;
     let bytes = STANDARD

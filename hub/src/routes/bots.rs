@@ -210,7 +210,10 @@ pub async fn admin_create_bot(
 ) -> Result<(StatusCode, Json<BotCreatedResponse>), (StatusCode, String)> {
     let display_name = req.display_name.trim().to_string();
     if display_name.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "display_name cannot be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "display_name cannot be empty".to_string(),
+        ));
     }
 
     let public_key = format!("bot_{}", Uuid::new_v4().simple());
@@ -445,12 +448,11 @@ pub async fn bot_send_message(
     let bot = authenticate_bot(&state.db, &headers).await?;
 
     // Verify channel exists.
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&req.channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&req.channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
@@ -492,7 +494,13 @@ pub async fn bot_send_message(
             message: message.clone(),
         };
         let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state.chat_tx.send((ChatEvent::New { channel_id: req.channel_id, message }, json));
+        let _ = state.chat_tx.send((
+            ChatEvent::New {
+                channel_id: req.channel_id,
+                message,
+            },
+            json,
+        ));
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -742,11 +750,15 @@ pub async fn ext_accept_invite(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (stored_token, expires) = row
-        .ok_or((StatusCode::NOT_FOUND, "Bot not found or not invited".to_string()))?;
+    let (stored_token, expires) = row.ok_or((
+        StatusCode::NOT_FOUND,
+        "Bot not found or not invited".to_string(),
+    ))?;
 
-    let stored_token =
-        stored_token.ok_or((StatusCode::NOT_FOUND, "No pending invite for this bot".to_string()))?;
+    let stored_token = stored_token.ok_or((
+        StatusCode::NOT_FOUND,
+        "No pending invite for this bot".to_string(),
+    ))?;
 
     let now = crate::auth::handlers::unix_timestamp();
     if let Some(exp) = expires {
@@ -759,8 +771,12 @@ pub async fn ext_accept_invite(
     let token_bytes = stored_token.as_bytes();
     let sig_bytes = hex::decode(&req.signature_over_token)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
-    voxply_identity::verify_signature(&req.pubkey, token_bytes, &sig_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature over invite token".to_string()))?;
+    voxply_identity::verify_signature(&req.pubkey, token_bytes, &sig_bytes).map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid signature over invite token".to_string(),
+        )
+    })?;
 
     // Approve and clear the invite token.
     sqlx::query(
@@ -905,14 +921,12 @@ pub async fn ext_bot_me(
     user: AuthUser,
 ) -> Result<Json<BotMeResponse>, (StatusCode, String)> {
     // Verify caller is a bot.
-    let is_bot: Option<i64> = sqlx::query_scalar(
-        "SELECT is_bot FROM users WHERE public_key = ?",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .flatten();
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .flatten();
 
     if is_bot != Some(1) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
@@ -937,8 +951,7 @@ pub async fn ext_bot_me(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let capabilities: Vec<String> =
-        serde_json::from_str(&profile.capabilities).unwrap_or_default();
+    let capabilities: Vec<String> = serde_json::from_str(&profile.capabilities).unwrap_or_default();
 
     Ok(Json(BotMeResponse {
         pubkey: profile.pubkey,
@@ -969,14 +982,12 @@ pub async fn ext_update_bot_profile(
     user: AuthUser,
     Json(meta): Json<BotMeta>,
 ) -> Result<Json<BotMeResponse>, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar(
-        "SELECT is_bot FROM users WHERE public_key = ?",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .flatten();
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .flatten();
 
     if is_bot != Some(1) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
@@ -1015,14 +1026,12 @@ pub async fn ext_update_bot_commands(
     user: AuthUser,
     Json(req): Json<UpdateCommandsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar(
-        "SELECT is_bot FROM users WHERE public_key = ?",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .flatten();
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .flatten();
 
     if is_bot != Some(1) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
@@ -1061,14 +1070,12 @@ pub async fn ext_update_bot_subscriptions(
     user: AuthUser,
     Json(req): Json<UpdateSubscriptionsRequest>,
 ) -> Result<Json<SetSubscriptionsResponse>, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar(
-        "SELECT is_bot FROM users WHERE public_key = ?",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .flatten();
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .flatten();
 
     if is_bot != Some(1) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
@@ -1076,9 +1083,9 @@ pub async fn ext_update_bot_subscriptions(
 
     // Validate: message.* events require an explicit channels list.
     for sub in &req.subscriptions {
-        let is_message_event = sub.event.starts_with("message.")
-            && sub.event != "message.mention_bot"; // mention_bot is hub-scoped, no channels needed
-        if is_message_event && sub.channels.as_ref().map_or(true, |v| v.is_empty()) {
+        let is_message_event =
+            sub.event.starts_with("message.") && sub.event != "message.mention_bot"; // mention_bot is hub-scoped, no channels needed
+        if is_message_event && sub.channels.as_ref().is_none_or(|v| v.is_empty()) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -1146,7 +1153,7 @@ pub async fn admin_audit_log(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::ADMIN)?;
 
-    let limit = params.limit.unwrap_or(50).min(200).max(1);
+    let limit = params.limit.unwrap_or(50).clamp(1, 200);
     // We fetch limit+1 to detect whether there's a next page.
     let fetch_limit = limit + 1;
 

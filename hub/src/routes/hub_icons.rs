@@ -1,12 +1,12 @@
-use std::sync::Arc;
+use crate::auth::middleware::AuthUser;
+use crate::permissions;
+use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use uuid::Uuid;
-use crate::auth::middleware::AuthUser;
-use crate::permissions;
-use crate::state::AppState;
 
 const MAX_SVG_BYTES: usize = 50 * 1024;
 
@@ -50,10 +50,17 @@ pub async fn list_icons(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok(Json(rows.into_iter().map(|r| HubIconResponse {
-        id: r.id, name: r.name, svg_content: r.svg_content,
-        uploaded_by: r.uploaded_by, created_at: r.created_at,
-    }).collect()))
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| HubIconResponse {
+                id: r.id,
+                name: r.name,
+                svg_content: r.svg_content,
+                uploaded_by: r.uploaded_by,
+                created_at: r.created_at,
+            })
+            .collect(),
+    ))
 }
 
 pub async fn create_icon(
@@ -69,7 +76,10 @@ pub async fn create_icon(
         return Err((StatusCode::BAD_REQUEST, "Icon name cannot be empty".into()));
     }
     if req.svg_content.len() > MAX_SVG_BYTES {
-        return Err((StatusCode::BAD_REQUEST, "SVG content exceeds 50 KB limit".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "SVG content exceeds 50 KB limit".into(),
+        ));
     }
 
     let id = Uuid::new_v4().to_string();
@@ -87,10 +97,16 @@ pub async fn create_icon(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok((StatusCode::CREATED, Json(HubIconResponse {
-        id, name, svg_content: req.svg_content,
-        uploaded_by: user.public_key, created_at: now,
-    })))
+    Ok((
+        StatusCode::CREATED,
+        Json(HubIconResponse {
+            id,
+            name,
+            svg_content: req.svg_content,
+            uploaded_by: user.public_key,
+            created_at: now,
+        }),
+    ))
 }
 
 pub async fn rename_icon(

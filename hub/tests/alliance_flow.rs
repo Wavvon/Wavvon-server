@@ -14,7 +14,11 @@ use voxply_identity::Identity;
 
 async fn start_hub(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -32,7 +36,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -47,7 +51,9 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -55,7 +61,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+    });
 
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -377,7 +383,12 @@ async fn push_invite_happy_path() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "push-invite: {}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status(),
+        200,
+        "push-invite: {}",
+        resp.text().await.unwrap_or_default()
+    );
 
     // Hub B: should now see one pending invite
     let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
@@ -396,13 +407,20 @@ async fn push_invite_happy_path() {
 
     // Hub B: accept the invite (supply our own URL so Hub A can call back).
     let resp = client
-        .post(format!("{hub_b_url}/alliances/pending-invites/{invite_id}/accept"))
+        .post(format!(
+            "{hub_b_url}/alliances/pending-invites/{invite_id}/accept"
+        ))
         .bearer_auth(&token_b)
         .json(&json!({ "own_hub_url": hub_b_url }))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "accept: {}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status(),
+        200,
+        "accept: {}",
+        resp.text().await.unwrap_or_default()
+    );
 
     // Hub B: pending list should now be empty
     let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
@@ -488,7 +506,12 @@ async fn push_invite_decline() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 204, "decline: {}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status(),
+        204,
+        "decline: {}",
+        resp.text().await.unwrap_or_default()
+    );
 
     // Pending list should be empty
     let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
@@ -512,7 +535,10 @@ async fn push_invite_decline() {
         .json()
         .await
         .unwrap();
-    assert!(b_alliances.is_empty(), "Hub B should not have joined after declining");
+    assert!(
+        b_alliances.is_empty(),
+        "Hub B should not have joined after declining"
+    );
 }
 
 #[tokio::test]

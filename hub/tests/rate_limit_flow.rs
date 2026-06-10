@@ -14,67 +14,11 @@ use voxply_identity::Identity;
 
 async fn start_real_hub() -> String {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
-
-    let state = Arc::new(AppState {
-        hub_name: "rate-test".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        db_read: None,
-        store,
-        pending_challenges: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
-
-    let app = server::create_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let url = format!("http://127.0.0.1:{port}");
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
         .await
         .unwrap();
-    });
-    url
-}
-
-async fn setup_server() -> TestServer {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -107,7 +51,75 @@ async fn setup_server() -> TestServer {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        started_at: std::time::Instant::now(),
+        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+    });
+
+    let app = server::create_router(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}");
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    url
+}
+
+async fn setup_server() -> TestServer {
+    sqlx::any::install_default_drivers();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    db::migrations::run(&db).await.unwrap();
+    let store: Arc<dyn voxply_store::HubStore> =
+        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let (chat_tx, _) = broadcast::channel(256);
+    let (voice_event_tx, _) = broadcast::channel(16);
+
+    let state = Arc::new(AppState {
+        hub_name: "rate-test".to_string(),
+        hub_identity: Identity::generate(),
+        db,
+        db_read: None,
+        store,
+        pending_challenges: RwLock::new(HashMap::new()),
+        chat_tx,
+        federation_client: FederationClient::new(),
+        peer_tokens: RwLock::new(HashMap::new()),
+        voice_channels: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
+        voice_sender_ids: RwLock::new(HashMap::new()),
+        voice_next_sender_id: RwLock::new(HashMap::new()),
+        voice_zones: RwLock::new(HashMap::new()),
+        voice_udp_port: 0,
+        voice_event_tx,
+        dm_tx: broadcast::channel(16).0,
+        online_users: RwLock::new(std::collections::HashSet::new()),
+        screen_shares: RwLock::new(HashMap::new()),
+        screen_share_tx: broadcast::channel(16).0,
+        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        http_client: reqwest::Client::new(),
+        farm_url: None,
+        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -237,5 +249,8 @@ async fn auth_challenge_rate_limits_burst() {
             break;
         }
     }
-    assert!(got_429, "expected at least one 429 after bursting past the auth limit");
+    assert!(
+        got_429,
+        "expected at least one 429 after bursting past the auth limit"
+    );
 }

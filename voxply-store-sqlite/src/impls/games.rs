@@ -104,7 +104,12 @@ impl GameStore for SqliteStore {
         Ok(())
     }
 
-    async fn enable_game(&self, game_id: &str, enabled_at: &str, enabled_by: &str) -> Result<(), StoreError> {
+    async fn enable_game(
+        &self,
+        game_id: &str,
+        enabled_at: &str,
+        enabled_by: &str,
+    ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO enabled_games (game_id, enabled_at, enabled_by)
              VALUES (?, ?, ?) ON CONFLICT(game_id) DO UPDATE SET
@@ -129,17 +134,19 @@ impl GameStore for SqliteStore {
     }
 
     async fn is_game_enabled(&self, game_id: &str) -> Result<bool, StoreError> {
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM enabled_games WHERE game_id = ?",
-        )
-        .bind(game_id)
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_err)?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM enabled_games WHERE game_id = ?")
+            .bind(game_id)
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(count > 0)
     }
 
-    async fn assign_game_to_channel(&self, channel_id: &str, game_id: &str) -> Result<(), StoreError> {
+    async fn assign_game_to_channel(
+        &self,
+        channel_id: &str,
+        game_id: &str,
+    ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO channel_games (channel_id, game_id) VALUES (?, ?)
              ON CONFLICT DO NOTHING",
@@ -152,26 +159,26 @@ impl GameStore for SqliteStore {
         Ok(())
     }
 
-    async fn remove_game_from_channel(&self, channel_id: &str, game_id: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM channel_games WHERE channel_id = ? AND game_id = ?",
-        )
-        .bind(channel_id)
-        .bind(game_id)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+    async fn remove_game_from_channel(
+        &self,
+        channel_id: &str,
+        game_id: &str,
+    ) -> Result<(), StoreError> {
+        sqlx::query("DELETE FROM channel_games WHERE channel_id = ? AND game_id = ?")
+            .bind(channel_id)
+            .bind(game_id)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
     async fn channel_games(&self, channel_id: &str) -> Result<Vec<String>, StoreError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT game_id FROM channel_games WHERE channel_id = ?",
-        )
-        .bind(channel_id)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, String>("SELECT game_id FROM channel_games WHERE channel_id = ?")
+            .bind(channel_id)
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn create_game_session(&self, s: &GameSessionRow) -> Result<(), StoreError> {
@@ -232,14 +239,12 @@ impl GameStore for SqliteStore {
     }
 
     async fn end_game_session(&self, id: &str, ended_at: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "UPDATE game_sessions SET ended_at = ?, status = 'ended' WHERE id = ?",
-        )
-        .bind(ended_at)
-        .bind(id)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("UPDATE game_sessions SET ended_at = ?, status = 'ended' WHERE id = ?")
+            .bind(ended_at)
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -285,11 +290,7 @@ impl GameStore for SqliteStore {
         Ok(())
     }
 
-    async fn get_game_kv(
-        &self,
-        session_id: &str,
-        key: &str,
-    ) -> Result<Option<String>, StoreError> {
+    async fn get_game_kv(&self, session_id: &str, key: &str) -> Result<Option<String>, StoreError> {
         sqlx::query_scalar::<_, String>(
             "SELECT value FROM game_shared_kv WHERE session_id = ? AND key = ?",
         )
@@ -301,14 +302,12 @@ impl GameStore for SqliteStore {
     }
 
     async fn delete_game_kv(&self, session_id: &str, key: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM game_shared_kv WHERE session_id = ? AND key = ?",
-        )
-        .bind(session_id)
-        .bind(key)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM game_shared_kv WHERE session_id = ? AND key = ?")
+            .bind(session_id)
+            .bind(key)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 

@@ -35,13 +35,12 @@ pub async fn revoke_check(
         .unwrap()
         .as_secs() as i64;
 
-    let row: Option<(Option<i64>, i64)> = sqlx::query_as(
-        "SELECT revoked_at, expires_at FROM farm_sessions WHERE jti = ?",
-    )
-    .bind(&req.jti)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(Option<i64>, i64)> =
+        sqlx::query_as("SELECT revoked_at, expires_at FROM farm_sessions WHERE jti = ?")
+            .bind(&req.jti)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let revoked = match row {
         None => true, // unknown jti

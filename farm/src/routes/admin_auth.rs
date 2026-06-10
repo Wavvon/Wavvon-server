@@ -23,8 +23,16 @@ fn totp_from_base32(secret_b32: &str) -> Result<TOTP, String> {
     let secret = Secret::Encoded(secret_b32.to_string())
         .to_bytes()
         .map_err(|e| format!("invalid base32 secret: {e}"))?;
-    TOTP::new(Algorithm::SHA1, 6, 1, 30, secret, None, "voxply-farm".to_string())
-        .map_err(|e| format!("totp construction failed: {e}"))
+    TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret,
+        None,
+        "voxply-farm".to_string(),
+    )
+    .map_err(|e| format!("totp construction failed: {e}"))
 }
 
 /// Verify a 6-digit TOTP code against a base32 secret. Returns true if valid.

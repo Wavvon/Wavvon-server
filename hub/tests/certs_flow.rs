@@ -21,7 +21,11 @@ use voxply_identity::Identity;
 
 async fn make_state() -> Arc<AppState> {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -174,12 +178,13 @@ async fn admin_revoke_cert() {
         .assert_status(axum::http::StatusCode::NO_CONTENT);
 
     // Public endpoint returns empty (revoked cert filtered out).
-    let resp = server
-        .get(&format!("/identity/{member_pk}/certs"))
-        .await;
+    let resp = server.get(&format!("/identity/{member_pk}/certs")).await;
     resp.assert_status_ok();
     let certs: Vec<Certification> = resp.json();
-    assert!(certs.is_empty(), "revoked cert should not appear in public list");
+    assert!(
+        certs.is_empty(),
+        "revoked cert should not appear in public list"
+    );
 }
 
 /// Non-admin cannot issue a cert.
@@ -238,9 +243,7 @@ async fn cert_worker_issues_on_tick() {
     cert_worker::tick(&state).await.unwrap();
 
     // Check the public endpoint returns a cert (reads cert_issuances).
-    let resp = server
-        .get(&format!("/identity/{member_pk}/certs"))
-        .await;
+    let resp = server.get(&format!("/identity/{member_pk}/certs")).await;
     resp.assert_status_ok();
     let certs: Vec<Certification> = resp.json();
     assert!(!certs.is_empty(), "worker should have issued a cert");
@@ -391,7 +394,9 @@ async fn info_includes_cert_requirement() {
         .assert_status(axum::http::StatusCode::NO_CONTENT);
 
     let info: serde_json::Value = server.get("/info").await.json();
-    let req = info.get("cert_requirement").expect("cert_requirement should be present");
+    let req = info
+        .get("cert_requirement")
+        .expect("cert_requirement should be present");
     assert_eq!(req["mode"], "any");
 }
 
