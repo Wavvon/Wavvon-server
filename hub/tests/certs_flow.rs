@@ -64,6 +64,7 @@ async fn make_state() -> Arc<AppState> {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     })
 }
 

@@ -25,4 +25,11 @@ impl MessageSearch for NullSearch {
     > {
         Box::pin(async { Ok(vec![]) })
     }
+
+    fn reindex_all<'a>(
+        &'a self,
+        _messages: Vec<crate::search::IndexedMessage>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
 }

@@ -560,6 +560,7 @@ async fn main() -> Result<()> {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     // Bind voice UDP socket and start forwarding task

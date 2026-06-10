@@ -144,6 +144,41 @@ impl MessageSearch for TantivySearch {
         })
     }
 
+    fn reindex_all<'a>(
+        &'a self,
+        messages: Vec<IndexedMessage>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        let writer = self.writer.clone();
+        let id_field = self.id_field;
+        let channel_field = self.channel_field;
+        let author_field = self.author_field;
+        let content_field = self.content_field;
+        let ts_field = self.ts_field;
+
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut w = writer.lock().unwrap();
+                // Delete all existing documents before rebuilding.
+                w.delete_all_documents()?;
+                for msg in messages {
+                    let d = doc!(
+                        id_field => msg.id.as_str(),
+                        channel_field => msg.channel_id.as_str(),
+                        author_field => msg.author_pubkey.as_str(),
+                        content_field => msg.content.as_str(),
+                        ts_field => msg.timestamp,
+                    );
+                    w.add_document(d)?;
+                }
+                w.commit()?;
+                Ok::<_, tantivy::TantivyError>(())
+            })
+            .await
+            .unwrap()
+            .map_err(anyhow::Error::from)
+        })
+    }
+
     fn query<'a>(
         &'a self,
         params: &'a SearchParams,

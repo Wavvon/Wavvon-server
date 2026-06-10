@@ -67,6 +67,7 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
+        reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     (TestServer::new(server::create_router(state)), tmp)
 }
@@ -154,6 +155,47 @@ async fn search_requires_auth() {
     let server = common::setup().await;
 
     let resp = server.get("/search").add_query_param("q", "anything").await;
+    resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+}
+
+/// Admin reindex returns 202 Accepted and the status field.
+#[tokio::test]
+async fn admin_reindex_accepted_for_admin() {
+    let (server, _tmp) = setup_with_search().await;
+    let admin = Identity::generate();
+    let admin_token = authenticate(&server, &admin).await; // first user → owner → admin
+
+    let resp = server
+        .post("/admin/search/reindex")
+        .authorization_bearer(&admin_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::ACCEPTED);
+    let body: serde_json::Value = resp.json();
+    assert_eq!(body["status"], "started");
+}
+
+/// Non-admin users must receive 403.
+#[tokio::test]
+async fn admin_reindex_forbidden_for_non_admin() {
+    let (server, _tmp) = setup_with_search().await;
+    // First user is admin; create a second non-admin user.
+    let admin = Identity::generate();
+    let _admin_token = authenticate(&server, &admin).await;
+    let user = Identity::generate();
+    let user_token = authenticate(&server, &user).await;
+
+    let resp = server
+        .post("/admin/search/reindex")
+        .authorization_bearer(&user_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+/// Unauthenticated access is rejected.
+#[tokio::test]
+async fn admin_reindex_requires_auth() {
+    let (server, _tmp) = setup_with_search().await;
+    let resp = server.post("/admin/search/reindex").await;
     resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 }
 

@@ -1,3 +1,4 @@
+pub mod admin_search;
 pub mod alliance_models;
 pub mod alliances;
 pub mod badges;

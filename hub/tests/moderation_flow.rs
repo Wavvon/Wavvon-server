@@ -313,6 +313,7 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -797,4 +798,75 @@ async fn raise_hand_allows_voice_join_below_threshold() {
     // user2 can now join voice
     let frame = ws_voice_join_and_recv(&hub_url, &user2_token, &channel.id).await;
     assert_eq!(frame["type"], "voice_joined");
+}
+
+/// A user whose master key appears in `federated_bans` must not be able to
+/// post messages even when they hold a valid session token obtained before
+/// the ban was applied. This directly exercises the `is_federated_banned`
+/// helper added in this changeset.
+#[tokio::test]
+async fn federated_ban_blocks_message_posting() {
+    // Use spawn_real_hub so we have access to the DB to insert the ban row.
+    let (hub_url, state) = spawn_real_hub().await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = http_authenticate(&hub_url, &owner).await;
+
+    let user = Identity::generate();
+    let user_token = http_authenticate(&hub_url, &user).await;
+
+    // Create a channel.
+    let channel: ChannelResponse = client
+        .post(format!("{hub_url}/channels"))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "name": "general" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // User can post before the federated ban.
+    let pre_ban = client
+        .post(format!("{hub_url}/channels/{}/messages", channel.id))
+        .bearer_auth(&user_token)
+        .json(&json!({ "content": "hello before ban", "attachments": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pre_ban.status(), 201);
+
+    // Insert a row directly into `federated_bans`, simulating what the
+    // banlist_worker does when a peer hub subscribes a ban.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    sqlx::query(
+        "INSERT INTO federated_bans
+             (source_hub_pubkey, target_master_pubkey, reason, added_at, synced_at)
+         VALUES ('peer-hub-pubkey', ?, 'test', ?, ?)",
+    )
+    .bind(user.public_key_hex())
+    .bind(now)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .expect("insert into federated_bans");
+
+    // The user's active token must now be rejected at the message endpoint.
+    let post_ban = client
+        .post(format!("{hub_url}/channels/{}/messages", channel.id))
+        .bearer_auth(&user_token)
+        .json(&json!({ "content": "should be blocked", "attachments": [] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        post_ban.status(),
+        403,
+        "federally banned user must not post messages"
+    );
 }

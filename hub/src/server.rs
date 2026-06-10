@@ -681,6 +681,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
         // ---- Global message search (Task #28) ----
         .route("/search", get(routes::search::search_messages))
+        // ---- Admin search reindex ----
+        .route(
+            "/admin/search/reindex",
+            post(routes::admin_search::admin_reindex),
+        )
         // ---- Custom emojis (Task #29) ----
         .route("/emojis", get(routes::emojis::list_emojis))
         .route("/emojis/{id}/image", get(routes::emojis::get_emoji_image))
