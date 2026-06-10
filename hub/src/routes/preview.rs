@@ -212,11 +212,48 @@ fn html_decode(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
+/// Per-user burst cap for preview fetches.
+/// 10 requests per 60-second window is generous for normal link-unfurl UX
+/// while bounding the outbound-fetch fan-out a single user can cause.
+const PREVIEW_RATE_LIMIT: u32 = 10;
+const PREVIEW_RATE_WINDOW_SECS: u64 = 60;
+
 pub async fn get_preview(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Query(params): Query<PreviewQuery>,
 ) -> Result<Json<LinkPreview>, (StatusCode, String)> {
+    // Per-user rate limit: 10 preview fetches per 60 seconds.
+    // Cache hits are counted too — they're cheap, but the outer window
+    // keeps one user from monopolising the endpoint.
+    {
+        let mut map = state
+            .rate_limiters
+            .preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(PREVIEW_RATE_WINDOW_SECS);
+
+        // Opportunistic eviction (same pattern as the messages limiter).
+        const EVICTION_THRESHOLD: usize = 5_000;
+        if map.len() >= EVICTION_THRESHOLD {
+            map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
+        }
+
+        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        if now.duration_since(entry.1) > window {
+            *entry = (0, now);
+        }
+        if entry.0 >= PREVIEW_RATE_LIMIT {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "preview_rate_limited".to_string(),
+            ));
+        }
+        entry.0 += 1;
+    }
+
     let url_str = params.url.trim().to_string();
 
     // Validate scheme

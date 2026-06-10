@@ -199,12 +199,16 @@ pub struct WhisperTargetDef {
 pub struct RateLimiters {
     /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
     pub messages: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-user fixed-window rate limiter for link preview fetches (10 requests/60 s).
+    /// Each preview may trigger an outbound HTTP fetch, so we throttle per user.
+    pub preview: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 impl Default for RateLimiters {
     fn default() -> Self {
         Self {
             messages: Mutex::new(HashMap::new()),
+            preview: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -304,6 +308,11 @@ pub struct AppState {
 
     /// Full-text search backend. Either TantivySearch or NullSearch.
     pub search: Arc<dyn crate::search::MessageSearch>,
+
+    /// Guards against concurrent admin reindex runs. Set to `true` while a
+    /// reindex is in progress; callers that see `true` receive 202 with
+    /// `{"status":"already_running"}` and do not start a second job.
+    pub reindex_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct PendingChallenge {
