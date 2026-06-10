@@ -774,13 +774,6 @@ pub enum WsServerMessage {
         player_pubkey: String,
     },
 
-    /// A player left a game session (voluntary leave or disconnect).
-    #[serde(rename = "game_session_left")]
-    GameSessionLeft {
-        session_id: String,
-        player_pubkey: String,
-    },
-
     /// The host posted a state patch (opaque JSON). Relayed to all roster
     /// members so clients can apply it to their local view.
     #[serde(rename = "game_state_updated")]
