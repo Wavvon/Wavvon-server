@@ -48,7 +48,7 @@ async fn make_state() -> Arc<AppState> {
         voice_udp_port: 0,
         voice_event_tx: broadcast::channel(16).0,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(HashMap::new()),
@@ -211,7 +211,11 @@ async fn tick_sends_warning_for_near_expiry_session() {
 
     // Register a fake WS sender so the tick can push to it.
     let (tx, mut rx) = mpsc::channel::<String>(8);
-    state.bot_sessions.write().await.insert(pk.clone(), tx);
+    {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("test-session".to_string(), tx);
+        state.bot_sessions.write().await.insert(pk.clone(), inner);
+    };
 
     token_expiry::tick(&state).await.unwrap();
 
@@ -245,7 +249,11 @@ async fn tick_does_not_warn_session_with_distant_expiry() {
     insert_session(&state.db, token, &pk, Some(expires_at)).await;
 
     let (tx, mut rx) = mpsc::channel::<String>(8);
-    state.bot_sessions.write().await.insert(pk.clone(), tx);
+    {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("test-session".to_string(), tx);
+        state.bot_sessions.write().await.insert(pk.clone(), inner);
+    };
 
     token_expiry::tick(&state).await.unwrap();
 
@@ -277,7 +285,11 @@ async fn tick_does_not_rewarn_recently_warned_session() {
         .unwrap();
 
     let (tx, mut rx) = mpsc::channel::<String>(8);
-    state.bot_sessions.write().await.insert(pk.clone(), tx);
+    {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("test-session".to_string(), tx);
+        state.bot_sessions.write().await.insert(pk.clone(), inner);
+    };
 
     token_expiry::tick(&state).await.unwrap();
 
@@ -304,7 +316,11 @@ async fn tick_closes_and_deletes_expired_session() {
     insert_session(&state.db, token, &pk, Some(past)).await;
 
     let (tx, mut rx) = mpsc::channel::<String>(8);
-    state.bot_sessions.write().await.insert(pk.clone(), tx);
+    {
+        let mut inner = std::collections::HashMap::new();
+        inner.insert("test-session".to_string(), tx);
+        state.bot_sessions.write().await.insert(pk.clone(), inner);
+    };
 
     token_expiry::tick(&state).await.unwrap();
 

@@ -9,6 +9,11 @@ pub(super) struct ConnState {
     pub public_key: String,
     /// Whether this connection belongs to a bot.
     pub is_bot: bool,
+    /// Unique id for this WS session (UUID v4). Stored here so handler
+    /// functions (e.g. screen share start) can tag resources they create
+    /// without an extra parameter, enabling session-scoped cleanup on
+    /// disconnect.
+    pub session_id: String,
     /// Voice channel the client is currently in, if any.
     pub voice_channel: Option<String>,
     /// Pending screen-share chunk header waiting for the binary frame.
@@ -31,12 +36,14 @@ impl ConnState {
     pub fn new(
         public_key: String,
         is_bot: bool,
+        session_id: String,
         subscribed: HashSet<String>,
         my_conversations: HashSet<String>,
     ) -> Self {
         Self {
             public_key,
             is_bot,
+            session_id,
             voice_channel: None,
             pending_chunk: None,
             subscribed,

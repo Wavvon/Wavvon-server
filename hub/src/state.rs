@@ -85,6 +85,11 @@ pub struct ScreenStreamMeta {
     pub mime: String,
     pub has_audio: bool,
     pub sharer_pubkey: String,
+    /// Unique WS session id of the connection that started this stream.
+    /// Used to discriminate cleanup: on disconnect only streams from the
+    /// disconnecting session are removed, leaving streams from other
+    /// concurrent sessions intact.
+    pub session_id: String,
     /// Cached WebM init segment for late joiners. Set on the first chunk
     /// where `is_init == true`.
     pub init_chunk: Option<Bytes>,
@@ -244,19 +249,29 @@ pub struct AppState {
     pub voice_event_tx: broadcast::Sender<(String, WsServerMessage)>,
     // DM relay: broadcast DMs to all WS clients (they filter by conversation membership)
     pub dm_tx: broadcast::Sender<DmEvent>,
-    // Online users: public_key set (updated by WS connect/disconnect)
-    pub online_users: RwLock<std::collections::HashSet<String>>,
+    // Online users: public_key → session refcount (updated by WS connect/disconnect).
+    // A key is present iff at least one WS session for that pubkey is alive.
+    // Refcounted so multi-device / reconnect-overlap is handled correctly: the
+    // second connect increments, the first disconnect decrements but does NOT
+    // remove the key until the count reaches zero.
+    pub online_users: RwLock<HashMap<String, usize>>,
     /// Active screen-share sessions: (channel_id, sharer_pubkey) → ActiveShare.
     /// Multiple concurrent sharers per channel are allowed (multi-stream overlay).
     /// In-memory only — cleared on process restart.
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.
     pub screen_share_tx: broadcast::Sender<ScreenChunkEvent>,
-    /// Active bot WS sessions: bot_pubkey → mpsc sender for pre-serialised
-    /// JSON text frames. Bots use a separate channel from the regular WS
-    /// broadcast so we can push targeted hub_event messages without looping
-    /// through every connected client.
-    pub bot_sessions: RwLock<HashMap<String, mpsc::Sender<String>>>,
+    /// Active bot WS sessions: bot_pubkey → { session_id → mpsc sender }.
+    ///
+    /// A bot pubkey can have multiple concurrent WS sessions (e.g. reconnect
+    /// overlap, multi-process bot deployments).  Each session is identified by
+    /// a unique UUID generated at connect time.  On disconnect only the entry
+    /// for that session's UUID is removed — not all entries for the pubkey —
+    /// so the surviving session(s) continue to receive push messages.
+    ///
+    /// Token-expiry sweep removes all sessions for a pubkey at once (a token
+    /// revocation is pubkey-wide).
+    pub bot_sessions: RwLock<HashMap<String, HashMap<String, mpsc::Sender<String>>>>,
 
     /// Active voice zones: (channel_id, zone_id) → VoiceZone.
     /// Ephemeral — cleared on hub restart.

@@ -81,12 +81,16 @@ async fn sweep_warnings(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
     let sessions = state.bot_sessions.read().await;
 
     for row in &rows {
-        if let Some(tx) = sessions.get(&row.public_key) {
+        // Deliver to all active WS sessions for this bot pubkey.
+        if let Some(per_bot) = sessions.get(&row.public_key) {
             let msg = serde_json::json!({
                 "type": "token_expiring_soon",
                 "expires_at": row.expires_at,
-            });
-            let _ = tx.try_send(msg.to_string());
+            })
+            .to_string();
+            for tx in per_bot.values() {
+                let _ = tx.try_send(msg.clone());
+            }
         }
 
         // Mark warned regardless of whether the bot is currently connected.
@@ -131,17 +135,20 @@ async fn sweep_expired(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
     let mut sessions = state.bot_sessions.write().await;
 
     for row in &rows {
-        // Push the bot_removed notice, then drop the sender so the WS task
-        // sees the channel closed and terminates the connection.
-        if let Some(tx) = sessions.remove(&row.public_key) {
+        // Token expiry is pubkey-wide: remove all WS sessions for this pubkey
+        // and push bot_removed to each, so every live connection is closed.
+        if let Some(per_bot) = sessions.remove(&row.public_key) {
             let msg = serde_json::json!({
                 "type": "bot_removed",
                 "reason": "token_expired",
-            });
+            })
+            .to_string();
             // Best-effort: the channel may already be full or the bot gone.
-            let _ = tx.try_send(msg.to_string());
-            // Dropping `tx` here closes the mpsc channel; the WS write loop
+            // Dropping each `tx` closes its mpsc channel; the WS write loop
             // in ws.rs will see `None` from `rx.recv()` and close the socket.
+            for tx in per_bot.into_values() {
+                let _ = tx.try_send(msg.clone());
+            }
         }
 
         // Delete the expired session row.

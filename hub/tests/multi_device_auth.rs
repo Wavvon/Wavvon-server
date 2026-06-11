@@ -42,7 +42,7 @@ async fn setup() -> (TestServer, AnyPool) {
         voice_udp_port: 0,
         voice_event_tx: broadcast::channel(16).0,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),

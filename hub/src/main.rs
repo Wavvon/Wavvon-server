@@ -736,7 +736,7 @@ async fn main() -> Result<()> {
         voice_udp_port,
         voice_event_tx,
         dm_tx,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx,
         bot_sessions: RwLock::new(HashMap::new()),

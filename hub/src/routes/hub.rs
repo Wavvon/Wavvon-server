@@ -388,7 +388,7 @@ pub async fn list_members(
         }
 
         result.push(MemberAdminInfo {
-            online: online.contains(&u.public_key),
+            online: online.contains_key(&u.public_key),
             public_key: u.public_key,
             display_name: u.display_name,
             first_seen_at: u.first_seen_at,

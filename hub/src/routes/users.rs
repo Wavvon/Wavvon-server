@@ -77,7 +77,7 @@ pub async fn list_users(
     let result: Vec<UserInfo> = rows
         .into_iter()
         .map(|r| UserInfo {
-            online: online.contains(&r.public_key),
+            online: online.contains_key(&r.public_key),
             public_key: r.public_key,
             display_name: r.display_name,
             avatar: r.avatar,
@@ -114,7 +114,7 @@ pub async fn channel_members(
     Ok(Json(
         rows.into_iter()
             .map(|r| UserInfo {
-                online: online.contains(&r.public_key),
+                online: online.contains_key(&r.public_key),
                 public_key: r.public_key,
                 display_name: r.display_name,
                 avatar: r.avatar,

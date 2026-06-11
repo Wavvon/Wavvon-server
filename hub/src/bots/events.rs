@@ -88,9 +88,14 @@ pub async fn publish_hub_event(
     let sessions = state.bot_sessions.read().await;
 
     for sub in &subs {
-        let Some(tx) = sessions.get(&sub.bot_pubkey) else {
+        // A bot pubkey may have multiple concurrent WS sessions; skip if none
+        // are active.
+        let Some(per_bot) = sessions.get(&sub.bot_pubkey) else {
             continue;
         };
+        if per_bot.is_empty() {
+            continue;
+        }
 
         // Check bot_channel_scope: if the bot has any scope rows, the event's
         // channel_id must be in scope (or event has no channel).
@@ -133,9 +138,11 @@ pub async fn publish_hub_event(
         });
 
         let json = envelope.to_string();
-        // Non-blocking send; if the channel is full the event is dropped for
-        // this bot (back-pressure is acceptable for best-effort delivery).
-        let _ = tx.try_send(json);
+        // Deliver to all active sessions for this bot pubkey. Non-blocking
+        // send; a full channel drops the event for that session only.
+        for tx in per_bot.values() {
+            let _ = tx.try_send(json.clone());
+        }
     }
 }
 

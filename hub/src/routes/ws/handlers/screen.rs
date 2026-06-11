@@ -159,6 +159,7 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
                 mime: mime.clone(),
                 has_audio,
                 sharer_pubkey: cs.public_key.clone(),
+                session_id: cs.session_id.clone(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),
             },

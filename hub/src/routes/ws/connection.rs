@@ -24,18 +24,29 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
             .unwrap_or(0)
             != 0;
 
-    state.online_users.write().await.insert(public_key.clone());
+    // Increment the online-users refcount for this pubkey.
+    {
+        let mut online = state.online_users.write().await;
+        *online.entry(public_key.clone()).or_insert(0) += 1;
+    }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     let (bot_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
+
+    // Unique id for this specific WS session — used to discriminate
+    // bot_sessions entries so a newer session does not overwrite the older
+    // sender, and so the first disconnect does not evict the second session.
+    let session_id = uuid::Uuid::new_v4().to_string();
 
     if is_bot {
         state
             .bot_sessions
             .write()
             .await
-            .insert(public_key.clone(), bot_tx.clone());
+            .entry(public_key.clone())
+            .or_default()
+            .insert(session_id.clone(), bot_tx.clone());
     }
 
     let mut chat_rx = state.chat_tx.subscribe();
@@ -116,7 +127,13 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
         }
     }
 
-    let mut cs = ConnState::new(public_key.clone(), is_bot, subscribed, my_conversations);
+    let mut cs = ConnState::new(
+        public_key.clone(),
+        is_bot,
+        session_id.clone(),
+        subscribed,
+        my_conversations,
+    );
 
     // ── Main select! loop ────────────────────────────────────────────────────
 
@@ -340,31 +357,81 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     {
         let mut shares = state.screen_shares.write().await;
 
+        // Collect (ch_id, stream_id, subscribers) for streams that belong
+        // to THIS session — these are the ones we end. Streams started by
+        // other concurrent sessions of the same pubkey are left intact.
         let ended_streams: Vec<(String, String, Vec<String>)> = shares
             .iter()
             .filter(|((_, sharer), _)| sharer.as_str() == public_key.as_str())
             .flat_map(|((ch_id, _), active)| {
-                active.streams.keys().map(move |sid| {
-                    (
-                        ch_id.clone(),
-                        sid.clone(),
-                        active
-                            .cross_channel_subscribers
-                            .iter()
-                            .cloned()
-                            .collect::<Vec<_>>(),
-                    )
-                })
+                active
+                    .streams
+                    .iter()
+                    .filter(|(_, meta)| meta.session_id == session_id)
+                    .map(move |(sid, active_meta)| {
+                        (
+                            ch_id.clone(),
+                            sid.clone(),
+                            active_meta
+                                .init_chunk
+                                .as_ref()
+                                .map(|_| {
+                                    // We just need the subscribers list from
+                                    // the ActiveShare — borrow it separately.
+                                    vec![]
+                                })
+                                .unwrap_or_default(),
+                        )
+                    })
             })
             .collect();
 
-        shares.retain(|(_, sharer), _| sharer != &public_key);
+        // Collect cross_channel_subscribers for this session's streams
+        // (can't borrow inside the closure above due to the outer iter borrow).
+        let ended_with_subs: Vec<(String, String, Vec<String>)> = shares
+            .iter()
+            .filter(|((_, sharer), _)| sharer.as_str() == public_key.as_str())
+            .flat_map(|((ch_id, _), active)| {
+                active
+                    .streams
+                    .iter()
+                    .filter(|(_, meta)| meta.session_id == session_id)
+                    .map(move |(sid, _)| {
+                        (
+                            ch_id.clone(),
+                            sid.clone(),
+                            active
+                                .cross_channel_subscribers
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+            })
+            .collect();
+        let _ = ended_streams; // superseded by ended_with_subs
+
+        // Remove only this session's streams from each ActiveShare entry.
+        // Drop the entire ActiveShare entry if streams becomes empty.
+        shares.retain(|(_, sharer), active| {
+            if sharer == &public_key {
+                active
+                    .streams
+                    .retain(|_, meta| meta.session_id != session_id);
+                !active.streams.is_empty()
+            } else {
+                true
+            }
+        });
+
+        // Remove the disconnecting user as a viewer/subscriber from all
+        // remaining shares (they may have been watching someone else's share).
         for active in shares.values_mut() {
             active.viewers.remove(&public_key);
             active.cross_channel_subscribers.remove(&public_key);
         }
 
-        for (ch_id, stream_id, subscribers) in ended_streams {
+        for (ch_id, stream_id, subscribers) in ended_with_subs {
             for subscriber_pubkey in subscribers {
                 let ev = crate::routes::chat_models::ChatEvent::StreamSubscriptionEnded {
                     to_pubkey: subscriber_pubkey.clone(),
@@ -383,9 +450,28 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     }
 
     if is_bot {
-        state.bot_sessions.write().await.remove(&public_key);
+        let mut sessions = state.bot_sessions.write().await;
+        if let Some(per_bot) = sessions.get_mut(&public_key) {
+            per_bot.remove(&session_id);
+            if per_bot.is_empty() {
+                sessions.remove(&public_key);
+            }
+        }
     }
-    state.online_users.write().await.remove(&public_key);
+
+    // Decrement the online-users refcount; remove the key only when it
+    // reaches zero so that other concurrent sessions for the same pubkey
+    // are not erroneously marked offline.
+    {
+        let mut online = state.online_users.write().await;
+        if let Some(count) = online.get_mut(&public_key) {
+            if *count <= 1 {
+                online.remove(&public_key);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
 
     tracing::info!(
         "WebSocket disconnected: {}",
