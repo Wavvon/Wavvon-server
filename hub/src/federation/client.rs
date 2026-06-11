@@ -60,6 +60,7 @@ impl FederationClient {
                 "public_key": pub_key,
                 "challenge": challenge.challenge,
                 "signature": hex::encode(signature.to_bytes()),
+                "is_hub": true,
             }))
             .send()
             .await

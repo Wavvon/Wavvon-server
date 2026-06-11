@@ -195,6 +195,7 @@ async fn load_envelope(
         created_at: msg.6,
         encrypted_envelope,
         group_encrypted_envelope,
+        sender_hub_url: None,
     }))
 }
 

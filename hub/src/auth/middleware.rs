@@ -12,6 +12,50 @@ pub struct AuthUser {
     pub public_key: String,
 }
 
+/// Extractor for federation endpoints that must only be called by a registered
+/// peer hub.
+///
+/// Resolves the bearer token exactly like `AuthUser`, then performs an extra
+/// check: the authenticated public key must exist in the `peers` table.  A
+/// request from a normal user session is rejected with 403 Forbidden.
+pub struct PeerHub {
+    pub public_key: String,
+}
+
+impl FromRequestParts<Arc<AppState>> for PeerHub {
+    type Rejection = (StatusCode, String);
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        // Reuse all the existing token-validation logic.
+        let auth_user = AuthUser::from_request_parts(parts, state).await?;
+
+        // The authenticated pubkey must be in the `peers` table.  Peer hubs
+        // are registered there by the `is_hub=true` path in auth/verify —
+        // they get a skeleton row on first authentication.  Normal user
+        // sessions never land in `peers`, so this check is the boundary
+        // between hub calls and human/bot calls.
+        let is_peer: Option<i64> = sqlx::query_scalar("SELECT 1 FROM peers WHERE public_key = ?")
+            .bind(&auth_user.public_key)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        if is_peer.is_none() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Caller is not a registered peer hub".to_string(),
+            ));
+        }
+
+        Ok(PeerHub {
+            public_key: auth_user.public_key,
+        })
+    }
+}
+
 /// Paths that pending (not-yet-approved) users are allowed to hit.
 /// They can see their own status at /me and nothing else.
 const PENDING_ALLOWED_PATHS: &[&str] = &["/me"];

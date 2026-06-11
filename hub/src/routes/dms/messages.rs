@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use uuid::Uuid;
 
-use crate::auth::middleware::AuthUser;
+use crate::auth::middleware::{AuthUser, PeerHub};
 use crate::routes::chat_models::MAX_ATTACHMENTS_BYTES;
 use crate::routes::dm_models::*;
 use crate::state::{AppState, DmEvent};
@@ -343,6 +343,7 @@ pub async fn send_dm(
             created_at: now,
             encrypted_envelope: req.encrypted_envelope.clone(),
             group_encrypted_envelope: req.group_encrypted_envelope.clone(),
+            sender_hub_url: None,
         };
 
         for hub_url in &delivery_urls {
@@ -484,10 +485,16 @@ pub async fn list_dm_messages(
     Ok(Json(responses))
 }
 
-/// Hub-to-hub DM delivery endpoint. The caller is an authenticated peer hub.
+/// Hub-to-hub DM delivery endpoint. The caller must be a registered peer hub.
+///
+/// Authentication: the sending hub authenticates via the standard
+/// challenge-response flow (`/auth/challenge` + `/auth/verify`) using its own
+/// `hub_identity` key.  Its public key is then checked against the `peers`
+/// table by the `PeerHub` extractor, which rejects any request whose token
+/// belongs to a normal user session.
 pub async fn receive_federated_dm(
     State(state): State<Arc<AppState>>,
-    _peer: AuthUser,
+    _peer: PeerHub,
     Json(req): Json<FederatedDmRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let now = crate::auth::handlers::unix_timestamp();

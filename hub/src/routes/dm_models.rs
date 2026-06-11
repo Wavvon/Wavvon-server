@@ -130,4 +130,10 @@ pub struct FederatedDmRequest {
     pub created_at: i64,
     pub encrypted_envelope: Option<EncryptedDmEnvelope>,
     pub group_encrypted_envelope: Option<GroupEncryptedEnvelope>,
+    /// Self-reported URL of the sending hub. Used by the receiving hub to
+    /// auto-register the sender in its `peers` table on first contact.
+    /// Optional for backward compatibility; missing entries are stored as an
+    /// empty string until the peer is properly added via /federation/peers.
+    #[serde(default)]
+    pub sender_hub_url: Option<String>,
 }

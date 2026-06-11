@@ -1234,3 +1234,113 @@ async fn sender_key_upsert_replaces_old_entry() {
         "upsert should replace old wrapped_key_hex"
     );
 }
+
+// ---------------------------------------------------------------------------
+// H4 security fix: /federation/dm must reject non-peer callers
+// ---------------------------------------------------------------------------
+
+/// A normal locally-authenticated user MUST NOT be able to POST to
+/// `/federation/dm`.  Before the H4 fix the endpoint accepted any valid
+/// AuthUser; after the fix it requires the caller to be in the `peers` table.
+#[tokio::test]
+async fn federated_dm_rejects_normal_user() {
+    let hub = start_real_hub("hub-h4-reject").await;
+    let client = reqwest::Client::new();
+
+    // Register a normal user on this hub.
+    let alice = Identity::generate();
+    let alice_token = authenticate_http(&hub, &alice).await;
+
+    // Craft a spoofed federated-DM payload claiming to be from an arbitrary sender.
+    let spoofed_sender = Identity::generate();
+    let payload = serde_json::json!({
+        "message_id": "aaaabbbbccccdddd0000111122223333",
+        "conversation_id": "cccc0000111122223333444455556666",
+        "conv_type": "dm",
+        "sender": spoofed_sender.public_key_hex(),
+        "members": [alice.public_key_hex(), spoofed_sender.public_key_hex()],
+        "content": "injected plaintext",
+        "attachments": [],
+        "signature": null,
+        "created_at": 1_700_000_000i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&alice_token)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    // Must be rejected — 403 Forbidden because alice is not a peer hub.
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "normal user must not be able to post to /federation/dm"
+    );
+}
+
+/// A legitimate peer hub (Hub A) that has gone through the federation
+/// challenge-response handshake MUST be able to deliver DMs to Hub B.
+/// This is a regression guard: the fix must not break the valid path.
+#[tokio::test]
+async fn federated_dm_accepts_registered_peer_hub() {
+    // This test reuses the cross-hub DM flow which exercises the full
+    // federation path.  If the PeerHub extractor incorrectly rejects a
+    // registered peer, the message will not appear on Hub B.
+    let hub_a = start_real_hub("hub-h4-a").await;
+    let hub_b = start_real_hub("hub-h4-b").await;
+    let client = reqwest::Client::new();
+
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let alice_token = authenticate_http(&hub_a, &alice).await;
+    authenticate_http(&hub_b, &bob).await;
+
+    // Alice creates a cross-hub conversation.
+    let mut member_hubs = std::collections::HashMap::new();
+    member_hubs.insert(bob.public_key_hex(), hub_b.clone());
+    let resp = client
+        .post(format!("{hub_a}/conversations"))
+        .bearer_auth(&alice_token)
+        .json(&serde_json::json!({
+            "members": [bob.public_key_hex()],
+            "member_hubs": member_hubs,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "create conversation failed");
+    let conv: ConversationResponse = resp.json().await.unwrap();
+
+    // Alice sends a DM; Hub A federates it to Hub B.
+    let resp = client
+        .post(format!("{hub_a}/conversations/{}/messages", conv.id))
+        .bearer_auth(&alice_token)
+        .json(&serde_json::json!({ "content": "peer delivery test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Bob reads from Hub B — message must be there.
+    let bob_token = authenticate_http(&hub_b, &bob).await;
+    let resp = client
+        .get(format!("{hub_b}/conversations/{}/messages", conv.id))
+        .bearer_auth(&bob_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let messages: serde_json::Value = resp.json().await.unwrap();
+    let arr = messages.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        1,
+        "federated DM from registered peer must arrive"
+    );
+    assert_eq!(arr[0]["content"], "peer delivery test");
+}

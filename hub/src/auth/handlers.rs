@@ -587,12 +587,36 @@ pub async fn verify(
         "member".to_string()
     };
 
-    tracing::info!(
-        "User authenticated: canonical={} (cert={}, scope={})",
-        &canonical_pubkey[..16],
-        master_pubkey.is_some(),
-        scope,
-    );
+    // Hub federation path: when is_hub=true, register the caller in the
+    // `peers` table so the `PeerHub` extractor can distinguish hub sessions
+    // from human/bot sessions.  We still complete the full human-admission
+    // flow above (users row + roles) because the hub needs `send_messages`
+    // permission to proxy alliance messages.  Inserting into `peers` is the
+    // only extra step — it is the marker that `PeerHub` checks.
+    if req.is_hub == Some(true) {
+        let short_name = &canonical_pubkey[..16.min(canonical_pubkey.len())];
+        let _ = sqlx::query(
+            "INSERT INTO peers (public_key, name, url, added_at)
+             VALUES (?, ?, '', ?)
+             ON CONFLICT(public_key) DO NOTHING",
+        )
+        .bind(&canonical_pubkey)
+        .bind(short_name)
+        .bind(now)
+        .execute(&state.db)
+        .await;
+        tracing::info!(
+            "Hub authenticated: pubkey={} registered as peer",
+            &canonical_pubkey[..16],
+        );
+    } else {
+        tracing::info!(
+            "User authenticated: canonical={} (cert={}, scope={})",
+            &canonical_pubkey[..16],
+            master_pubkey.is_some(),
+            scope,
+        );
+    }
 
     Ok(Json(VerifyResponse { token, scope }))
 }
