@@ -17,8 +17,173 @@ use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 use voxply_store_sqlite::SqliteStore;
 
+/// Print the `--help` text to stdout.
+fn print_help() {
+    println!("voxply-hub {}\n", env!("CARGO_PKG_VERSION"));
+    println!("USAGE:");
+    println!("  voxply-hub [SUBCOMMAND | OPTION]\n");
+    println!("SUBCOMMANDS:");
+    println!("  migrate          Apply DB migrations and exit");
+    println!("  backup [FILE]    Write a backup archive (default: hub-backup-<ts>.tar.gz)");
+    println!("  restore FILE     Restore from a backup archive");
+    println!("  rotate-key       Generate a new hub keypair and sign a rotation payload");
+    println!("  update [--check] Self-update binary from GitHub releases (Linux x86_64 only)");
+    println!("  admin <cmd>      Admin CLI (stats|users|channels|tokens|backup|restore)\n");
+    println!("OPTIONS:");
+    println!("  -h, --help       Print this help message");
+    println!("  -V, --version    Print version");
+    println!("  --doctor         Pre-flight checks: bind ports, verify TLS files, check disk\n");
+    println!("ENVIRONMENT VARIABLES:");
+
+    let name_w = voxply_hub::settings::ENV_VAR_HELP
+        .iter()
+        .map(|(n, _, _)| n.len())
+        .max()
+        .unwrap_or(20);
+    let default_w = voxply_hub::settings::ENV_VAR_HELP
+        .iter()
+        .map(|(_, d, _)| d.len())
+        .max()
+        .unwrap_or(10);
+
+    println!(
+        "  {:<name_w$}  {:<default_w$}  {}",
+        "Variable", "Default", "Purpose"
+    );
+    println!(
+        "  {:<name_w$}  {:<default_w$}  {}",
+        "-".repeat(name_w),
+        "-".repeat(default_w),
+        "-".repeat(40)
+    );
+    for (name, default, purpose) in voxply_hub::settings::ENV_VAR_HELP {
+        println!("  {name:<name_w$}  {default:<default_w$}  {purpose}");
+    }
+    println!();
+    println!("Configuration is also accepted from hub.toml in the working directory.");
+    println!("Environment variables override hub.toml values.");
+}
+
+/// Run --doctor pre-flight checks. Returns true if all checks pass.
+async fn run_doctor() -> bool {
+    use std::net::TcpListener;
+    use tokio::net::UdpSocket;
+
+    let settings = match voxply_hub::settings::load() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("FAIL  settings: {e}");
+            return false;
+        }
+    };
+    println!("PASS  settings: loaded");
+
+    let mut all_pass = true;
+
+    // Check TCP port
+    match TcpListener::bind(format!("0.0.0.0:{}", settings.http_port)) {
+        Ok(_) => println!("PASS  HTTP port {}: bindable", settings.http_port),
+        Err(e) => {
+            println!("FAIL  HTTP port {}: {e}", settings.http_port);
+            all_pass = false;
+        }
+    }
+
+    // Check UDP port
+    match UdpSocket::bind(format!("0.0.0.0:{}", settings.voice_udp_port)).await {
+        Ok(_) => println!("PASS  Voice UDP port {}: bindable", settings.voice_udp_port),
+        Err(e) => {
+            println!("FAIL  Voice UDP port {}: {e}", settings.voice_udp_port);
+            all_pass = false;
+        }
+    }
+
+    // Check TLS files if configured
+    match (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {
+        (Some(cert), Some(key)) => {
+            for (label, path) in [("TLS cert", cert), ("TLS key", key)] {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        // Minimal PEM sanity: file must contain "-----BEGIN"
+                        if bytes.windows(11).any(|w| w == b"-----BEGIN ") {
+                            println!("PASS  {label} ({path}): readable PEM");
+                        } else {
+                            println!(
+                                "FAIL  {label} ({path}): file exists but does not look like PEM"
+                            );
+                            all_pass = false;
+                        }
+                    }
+                    Err(e) => {
+                        println!("FAIL  {label} ({path}): {e}");
+                        all_pass = false;
+                    }
+                }
+            }
+        }
+        (None, None) => {
+            println!("INFO  TLS: not configured (plaintext HTTP)");
+        }
+        _ => {
+            println!(
+                "FAIL  TLS: VOXPLY_TLS_CERT and VOXPLY_TLS_KEY must both be set or both unset"
+            );
+            all_pass = false;
+        }
+    }
+
+    // Check working directory writable
+    let probe = ".voxply-doctor-probe";
+    match std::fs::write(probe, b"ok") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            println!(
+                "PASS  working directory ({}): writable",
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "?".into())
+            );
+        }
+        Err(e) => {
+            println!(
+                "FAIL  working directory ({}): {e}",
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "?".into())
+            );
+            all_pass = false;
+        }
+    }
+
+    if all_pass {
+        println!("\nAll checks passed.");
+    } else {
+        println!("\nOne or more checks failed.");
+    }
+    all_pass
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Fast-path CLI flags that don't need settings or logging.
+    let args: Vec<String> = std::env::args().collect();
+    let first_arg = args.get(1).map(|s| s.as_str());
+
+    if matches!(first_arg, Some("-h") | Some("--help")) {
+        print_help();
+        return Ok(());
+    }
+
+    if matches!(first_arg, Some("-V") | Some("--version")) {
+        println!("voxply-hub {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if first_arg == Some("--doctor") {
+        let ok = run_doctor().await;
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+
     let settings = match voxply_hub::settings::load() {
         Ok(s) => s,
         Err(e) => {
@@ -78,9 +243,9 @@ async fn main() -> Result<()> {
         tracing::info!("OpenTelemetry OTLP trace export enabled");
     }
 
-    // Subcommand dispatch. `voxply-hub migrate` runs migrations and exits
-    // without starting the HTTP server or UDP listener. Useful for CI,
-    // one-off schema upgrades, or running against a prod DB over SSH.
+    // Subcommand dispatch (migrate, backup, restore, rotate-key, update, admin).
+    // These exit before the server starts; `--help` / `--version` / `--doctor`
+    // are handled above before settings are loaded.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
         sqlx::any::install_default_drivers();
@@ -357,6 +522,35 @@ async fn main() -> Result<()> {
 
     let http_port = settings.http_port;
     let voice_udp_port = settings.voice_udp_port;
+
+    // ---- Startup summary banner ----
+    let tls_enabled = settings.tls_cert.is_some() && settings.tls_key.is_some();
+    let scheme = if tls_enabled { "https" } else { "http" };
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "?".into());
+
+    tracing::info!(
+        "voxply-hub {} starting  port={} ({scheme})  voice_udp={}  tls={}  cors={}",
+        env!("CARGO_PKG_VERSION"),
+        http_port,
+        voice_udp_port,
+        if tls_enabled { "enabled" } else { "disabled" },
+        settings.cors_origins,
+    );
+    tracing::info!("data files: {cwd}/hub.db  {cwd}/hub_identity.json");
+
+    if !tls_enabled {
+        tracing::warn!(
+            "TLS is disabled — browser clients served over HTTPS cannot connect to an http:// hub \
+             (mixed-content blocked). Set VOXPLY_TLS_CERT and VOXPLY_TLS_KEY or terminate TLS at a reverse proxy."
+        );
+    }
+    tracing::info!(
+        "Reminder: the voice UDP port {} must be open in any cloud firewall / security group — \
+         voice fails silently when the port is blocked.",
+        voice_udp_port
+    );
 
     let (hub_identity, is_new) = Identity::load_or_create(Path::new("hub_identity.json"))?;
     if is_new {
@@ -749,7 +943,7 @@ async fn main() -> Result<()> {
         });
     }
 
-    let app = server::create_router(state);
+    let app = server::create_router_with_cors(state, &settings.cors_origins);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
     if let (Some(cert), Some(key)) = (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {

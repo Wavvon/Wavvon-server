@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{extract::Request, middleware::Next, response::Response, Router};
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::auth;
@@ -21,7 +22,52 @@ async fn attach_request_id(req: Request, next: Next) -> Response {
     resp
 }
 
+/// Build the CORS layer from the `cors_origins` setting string.
+///
+/// `"*"` → permissive any-origin.
+/// Anything else is treated as a comma-separated list of exact origin strings
+/// (e.g. `"https://app.example.com,https://other.io"`).
+pub fn build_cors_layer(cors_origins: &str) -> CorsLayer {
+    let allow_methods = AllowMethods::list([
+        axum::http::Method::GET,
+        axum::http::Method::POST,
+        axum::http::Method::PUT,
+        axum::http::Method::PATCH,
+        axum::http::Method::DELETE,
+        axum::http::Method::OPTIONS,
+    ]);
+    let allow_headers = AllowHeaders::list([
+        axum::http::header::AUTHORIZATION,
+        axum::http::header::CONTENT_TYPE,
+    ]);
+
+    let cors = if cors_origins.trim() == "*" {
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::any())
+            .allow_methods(allow_methods)
+            .allow_headers(allow_headers)
+            .max_age(std::time::Duration::from_secs(86400))
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = cors_origins
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods(allow_methods)
+            .allow_headers(allow_headers)
+            .max_age(std::time::Duration::from_secs(86400))
+    };
+    cors
+}
+
 pub fn create_router(state: Arc<AppState>) -> Router {
+    create_router_with_cors(state, "*")
+}
+
+pub fn create_router_with_cors(state: Arc<AppState>, cors_origins: &str) -> Router {
     let auth_limiter = RateLimiter::new(Config::AUTH);
     let write_limiter = RateLimiter::new(Config::WRITE);
 
@@ -731,6 +777,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/polls/{poll_id}/vote", post(routes::polls::vote_poll))
         // ---- Link preview ----
         .route("/preview", get(routes::preview::get_preview))
+        .layer(build_cors_layer(cors_origins))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(attach_request_id))
         .with_state(state)
