@@ -18,6 +18,8 @@ This repository is the entire backend: the hub server plus the optional
 fleet tooling (farm controller, server agent, seed registry) and the
 canonical identity crate.
 
+![A community served by a single hub binary - unified channels, voice, presence](https://raw.githubusercontent.com/Voxply/Voxply/main/assets/screenshot-channel.png)
+
 ## Highlights
 
 - **You own everything.** All community data lives in one SQLite file
