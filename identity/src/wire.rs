@@ -377,6 +377,30 @@ pub fn group_dm_envelope_signing_bytes(
     buf
 }
 
+/// Canonical signing bytes for a plaintext federated DM.
+///
+/// Covers the fields the client knows at send time:
+/// `conversation_id || conv_type || content`.
+/// Domain tag: `"voxply/federated-dm/v1\0"`.
+///
+/// `message_id` and `created_at` are hub-assigned and therefore excluded from
+/// the signed payload; the client cannot know them before the hub responds.
+/// The conversation_id + conv_type + content triple is sufficient to prevent a
+/// remote hub from injecting a message with a forged `sender` field — an
+/// attacker claiming `sender=victim` cannot produce victim's Ed25519 signature
+/// over these bytes.
+pub fn federated_plaintext_dm_signing_bytes(
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+) -> Vec<u8> {
+    let mut buf = b"voxply/federated-dm/v1\0".to_vec();
+    write_str(&mut buf, conversation_id);
+    write_str(&mut buf, conv_type);
+    write_str(&mut buf, content);
+    buf
+}
+
 /// Signing bytes for a sender-key distribution push
 /// (`PushSenderKeyRequest`). Each recipient is a
 /// `(recipient_pubkey, wrapped_key_hex)` pair; pairs are sorted by

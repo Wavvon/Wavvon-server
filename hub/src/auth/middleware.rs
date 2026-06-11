@@ -16,8 +16,15 @@ pub struct AuthUser {
 /// peer hub.
 ///
 /// Resolves the bearer token exactly like `AuthUser`, then performs an extra
-/// check: the authenticated public key must exist in the `peers` table.  A
-/// request from a normal user session is rejected with 403 Forbidden.
+/// check: the authenticated public key must exist in the `peers` table.
+/// A request from a normal user session is rejected with 403 Forbidden.
+///
+/// **Defense-in-depth only.** The `peers` table can be populated via the
+/// self-asserted `is_hub=true` path in `/auth/verify`, which means a
+/// determined attacker can pass this check with an arbitrary keypair.
+/// The actual anti-spoofing boundary for plaintext DMs is the Ed25519
+/// signature check in `receive_federated_dm`: the `sender` field must be
+/// backed by a valid signature that only the true sender can produce.
 pub struct PeerHub {
     pub public_key: String,
 }
@@ -32,11 +39,7 @@ impl FromRequestParts<Arc<AppState>> for PeerHub {
         // Reuse all the existing token-validation logic.
         let auth_user = AuthUser::from_request_parts(parts, state).await?;
 
-        // The authenticated pubkey must be in the `peers` table.  Peer hubs
-        // are registered there by the `is_hub=true` path in auth/verify —
-        // they get a skeleton row on first authentication.  Normal user
-        // sessions never land in `peers`, so this check is the boundary
-        // between hub calls and human/bot calls.
+        // The authenticated pubkey must be in the `peers` table.
         let is_peer: Option<i64> = sqlx::query_scalar("SELECT 1 FROM peers WHERE public_key = ?")
             .bind(&auth_user.public_key)
             .fetch_optional(&state.db)

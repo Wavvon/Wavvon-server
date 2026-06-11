@@ -588,11 +588,15 @@ pub async fn verify(
     };
 
     // Hub federation path: when is_hub=true, register the caller in the
-    // `peers` table so the `PeerHub` extractor can distinguish hub sessions
-    // from human/bot sessions.  We still complete the full human-admission
-    // flow above (users row + roles) because the hub needs `send_messages`
-    // permission to proxy alliance messages.  Inserting into `peers` is the
-    // only extra step — it is the marker that `PeerHub` checks.
+    // `peers` table so the `PeerHub` extractor can route hub sessions
+    // separately from human/bot sessions.  We still complete the full
+    // human-admission flow above (users row + roles) because the hub needs
+    // `send_messages` permission to proxy alliance messages.
+    //
+    // NOTE: this self-registration is NOT a security boundary for DM
+    // injection.  Any key can self-assert is_hub=true and land in `peers`.
+    // The real anti-spoofing gate is the Ed25519 sender signature checked in
+    // `receive_federated_dm`, which cannot be forged without the sender's key.
     if req.is_hub == Some(true) {
         let short_name = &canonical_pubkey[..16.min(canonical_pubkey.len())];
         let _ = sqlx::query(

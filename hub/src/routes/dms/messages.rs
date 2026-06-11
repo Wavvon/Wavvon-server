@@ -245,15 +245,44 @@ pub async fn send_dm(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     } else {
         let content = req.content.as_deref().unwrap_or("");
+
+        // If the client supplied a plaintext signature, verify it now (before
+        // storage) so we don't persist a message with a bad signature that would
+        // be rejected by receiving hubs during federation.
+        let plaintext_sig_hex: Option<String> = if let Some(ref sig_hex) = req.plaintext_signature {
+            let signing_bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+                &conversation_id,
+                &conv_type,
+                content,
+            );
+            let sig_bytes = hex::decode(sig_hex).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Bad plaintext_signature hex: {e}"),
+                )
+            })?;
+            voxply_identity::verify_signature(&user.public_key, &signing_bytes, &sig_bytes)
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid plaintext_signature: {e}"),
+                    )
+                })?;
+            Some(sig_hex.clone())
+        } else {
+            None
+        };
+
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, ?, ?, NULL, ?, 0, NULL, 0)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)",
         )
         .bind(&message_id)
         .bind(&conversation_id)
         .bind(&user.public_key)
         .bind(content)
         .bind(&attachments_json)
+        .bind(&plaintext_sig_hex)
         .bind(now)
         .execute(&state.db)
         .await
@@ -339,7 +368,10 @@ pub async fn send_dm(
             members: member_keys.clone(),
             content: req.content.clone(),
             attachments: req.attachments.clone(),
-            signature: None,
+            // Forward the sender's plaintext signature so receiving hubs can
+            // verify it against the `sender` pubkey.  Encrypted-envelope DMs
+            // carry their own per-envelope signature and don't need this field.
+            signature: req.plaintext_signature.clone(),
             created_at: now,
             encrypted_envelope: req.encrypted_envelope.clone(),
             group_encrypted_envelope: req.group_encrypted_envelope.clone(),
@@ -485,13 +517,20 @@ pub async fn list_dm_messages(
     Ok(Json(responses))
 }
 
-/// Hub-to-hub DM delivery endpoint. The caller must be a registered peer hub.
+/// Hub-to-hub DM delivery endpoint.
 ///
-/// Authentication: the sending hub authenticates via the standard
-/// challenge-response flow (`/auth/challenge` + `/auth/verify`) using its own
-/// `hub_identity` key.  Its public key is then checked against the `peers`
-/// table by the `PeerHub` extractor, which rejects any request whose token
-/// belongs to a normal user session.
+/// Two-layer verification:
+/// 1. `PeerHub` extractor (defense-in-depth): requires the bearer token to
+///    belong to a key in the `peers` table.  This filters out most unauthorized
+///    callers but is NOT the security boundary for sender-identity claims,
+///    because `peers` rows can be inserted via the self-asserted `is_hub=true`
+///    path in `/auth/verify`.
+/// 2. Sender signature (the real boundary): for plaintext DMs, `req.signature`
+///    must be a valid Ed25519 signature by `req.sender` over the canonical
+///    signing bytes for the message.  An attacker who sets `sender=victim` but
+///    does not hold victim's private key cannot produce a valid signature and
+///    will be rejected with 401.  Encrypted-envelope DMs are authenticated by
+///    their own per-envelope signatures (already verified here).
 pub async fn receive_federated_dm(
     State(state): State<Arc<AppState>>,
     _peer: PeerHub,
@@ -639,6 +678,32 @@ pub async fn receive_federated_dm(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     } else {
         let content = req.content.as_deref().unwrap_or("");
+
+        // Require the sender to have signed the plaintext payload.
+        // This is the cryptographic proof that the `sender` field is authentic:
+        // an attacker setting sender=victim cannot produce victim's signature.
+        // This check holds regardless of how the caller passed the PeerHub
+        // extractor (including via the self-asserted is_hub=true path).
+        let sig_hex = req.signature.as_deref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "plaintext federated DM requires a sender signature".to_string(),
+        ))?;
+        let signing_bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+            &req.conversation_id,
+            &req.conv_type,
+            content,
+        );
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
+        voxply_identity::verify_signature(&req.sender, &signing_bytes, &sig_bytes).map_err(
+            |e| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    format!("Sender signature verification failed: {e}"),
+                )
+            },
+        )?;
+
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
              VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)",

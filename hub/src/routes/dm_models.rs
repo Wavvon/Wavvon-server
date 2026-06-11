@@ -33,6 +33,13 @@ pub struct SendDmRequest {
     pub encrypted_envelope: Option<EncryptedDmEnvelope>,
     /// Present instead of content when the message is group E2E encrypted.
     pub group_encrypted_envelope: Option<GroupEncryptedEnvelope>,
+    /// Ed25519 signature (hex) by the sender's identity key over the canonical
+    /// plaintext-DM signing bytes (see `voxply_identity::federated_plaintext_dm_signing_bytes`).
+    /// Required for plaintext DMs that will be federated to a remote hub.
+    /// Encrypted-envelope DMs authenticate via their own per-envelope signature
+    /// and do not use this field.
+    #[serde(default)]
+    pub plaintext_signature: Option<String>,
 }
 
 /// Wire envelope for an E2E encrypted 1:1 DM.

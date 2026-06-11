@@ -328,6 +328,23 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
     verify.token
 }
 
+/// Build a valid `plaintext_signature` for a plaintext DM.
+///
+/// The canonical form mirrors `voxply_identity::federated_plaintext_dm_signing_bytes`:
+/// domain tag + len-prefixed(conversation_id) + len-prefixed(conv_type) + len-prefixed(content).
+/// `conv_type` is always `"dm"` for 1:1 conversations and `"group"` for group ones;
+/// tests that only deal with 1:1 DMs can pass `"dm"` directly.
+fn make_plaintext_sig(
+    sender: &Identity,
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+) -> String {
+    let bytes =
+        voxply_identity::federated_plaintext_dm_signing_bytes(conversation_id, conv_type, content);
+    hex::encode(sender.sign(&bytes).to_bytes())
+}
+
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
@@ -429,10 +446,12 @@ async fn dm_delivered_across_hubs() {
     let conv: ConversationResponse = serde_json::from_str(&body_text).unwrap();
 
     // Alice sends a DM. Hub A persists it locally and federates to Hub B.
+    let content = "hi bob, from across hubs";
+    let sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "hi bob, from across hubs" }))
+        .json(&json!({ "content": content, "plaintext_signature": sig }))
         .send()
         .await
         .unwrap();
@@ -456,7 +475,7 @@ async fn dm_delivered_across_hubs() {
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().expect("expected an array");
     assert_eq!(arr.len(), 1, "Bob should see the federated DM");
-    assert_eq!(arr[0]["content"], "hi bob, from across hubs");
+    assert_eq!(arr[0]["content"], content);
     assert_eq!(arr[0]["sender"], alice.public_key_hex());
 }
 
@@ -498,10 +517,12 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     let conv: ConversationResponse = resp.json().await.unwrap();
 
     // Send while Hub B is down. POST still succeeds (Hub A accepts and queues).
+    let retry_content = "hi from retry land";
+    let retry_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, retry_content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "hi from retry land" }))
+        .json(&json!({ "content": retry_content, "plaintext_signature": retry_sig }))
         .send()
         .await
         .unwrap();
@@ -614,7 +635,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["content"], "hi from retry land");
+    assert_eq!(arr[0]["content"], retry_content);
 }
 
 #[tokio::test]
@@ -769,10 +790,12 @@ async fn send_dm_uses_home_hub_designation_when_present() {
 
     // Alice sends a DM. Hub A should route via the designation to Hub B,
     // ignoring the placeholder hub_url.
+    let desig_content = "routed via designation";
+    let desig_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, desig_content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "routed via designation" }))
+        .json(&json!({ "content": desig_content, "plaintext_signature": desig_sig }))
         .send()
         .await
         .unwrap();
@@ -796,7 +819,7 @@ async fn send_dm_uses_home_hub_designation_when_present() {
         1,
         "message should have been routed to Hub B via designation"
     );
-    assert_eq!(arr[0]["content"], "routed via designation");
+    assert_eq!(arr[0]["content"], desig_content);
 }
 
 /// When no home_hub_designations row exists, send_dm falls back to the
@@ -826,10 +849,12 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
     assert!(resp.status().is_success());
     let conv: ConversationResponse = resp.json().await.unwrap();
 
+    let fallback_content = "fallback delivery";
+    let fallback_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, fallback_content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "fallback delivery" }))
+        .json(&json!({ "content": fallback_content, "plaintext_signature": fallback_sig }))
         .send()
         .await
         .unwrap();
@@ -852,7 +877,7 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
         1,
         "message should have been delivered via fallback hub_url"
     );
-    assert_eq!(arr[0]["content"], "fallback delivery");
+    assert_eq!(arr[0]["content"], fallback_content);
 }
 
 // ---------------------------------------------------------------------------
@@ -1236,12 +1261,12 @@ async fn sender_key_upsert_replaces_old_entry() {
 }
 
 // ---------------------------------------------------------------------------
-// H4 security fix: /federation/dm must reject non-peer callers
+// H4 hardened security: /federation/dm requires a valid sender signature
 // ---------------------------------------------------------------------------
 
 /// A normal locally-authenticated user MUST NOT be able to POST to
-/// `/federation/dm`.  Before the H4 fix the endpoint accepted any valid
-/// AuthUser; after the fix it requires the caller to be in the `peers` table.
+/// `/federation/dm`.  The `PeerHub` extractor rejects requests whose token
+/// doesn't belong to a key in the `peers` table.
 #[tokio::test]
 async fn federated_dm_rejects_normal_user() {
     let hub = start_real_hub("hub-h4-reject").await;
@@ -1281,6 +1306,186 @@ async fn federated_dm_rejects_normal_user() {
     );
 }
 
+/// The critical bypass test: an attacker who calls /auth/verify with is_hub=true
+/// lands in the `peers` table and passes the PeerHub extractor.  They must still
+/// be rejected when they post a DM with sender=<victim> and a missing or
+/// invalid signature, because only the victim can sign with the victim's key.
+#[tokio::test]
+async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
+    let hub = start_real_hub("hub-h4-bypass").await;
+    let client = reqwest::Client::new();
+
+    // Attacker generates their own keypair and authenticates with is_hub=true
+    // to self-register in the peers table.
+    let attacker = Identity::generate();
+    let attacker_token = {
+        let challenge: ChallengeResponse = client
+            .post(format!("{hub}/auth/challenge"))
+            .json(&serde_json::json!({ "public_key": attacker.public_key_hex() }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+        let signature = attacker.sign(&challenge_bytes);
+        let verify: VerifyResponse = client
+            .post(format!("{hub}/auth/verify"))
+            .json(&serde_json::json!({
+                "public_key": attacker.public_key_hex(),
+                "challenge": challenge.challenge,
+                "signature": hex::encode(signature.to_bytes()),
+                "is_hub": true,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        verify.token
+    };
+
+    let victim = Identity::generate();
+    let conv_id = "cccc0000111122223333444455556666";
+
+    // --- Case 1: missing signature ---
+    let payload_no_sig = serde_json::json!({
+        "message_id": "aaaabbbbccccdddd0000111122223333",
+        "conversation_id": conv_id,
+        "conv_type": "dm",
+        "sender": victim.public_key_hex(),
+        "members": [attacker.public_key_hex(), victim.public_key_hex()],
+        "content": "injected without signature",
+        "attachments": [],
+        "signature": null,
+        "created_at": 1_700_000_000i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&attacker_token)
+        .json(&payload_no_sig)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "federated DM without sender signature must be rejected even when caller passed PeerHub"
+    );
+
+    // --- Case 2: attacker signs with their OWN key but claims sender=victim ---
+    let wrong_sig = {
+        let bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+            conv_id,
+            "dm",
+            "injected with wrong key",
+        );
+        hex::encode(attacker.sign(&bytes).to_bytes())
+    };
+    let payload_wrong_sig = serde_json::json!({
+        "message_id": "bbbbbbbbccccdddd0000111122223334",
+        "conversation_id": conv_id,
+        "conv_type": "dm",
+        "sender": victim.public_key_hex(),
+        "members": [attacker.public_key_hex(), victim.public_key_hex()],
+        "content": "injected with wrong key",
+        "attachments": [],
+        "signature": wrong_sig,
+        "created_at": 1_700_000_001i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&attacker_token)
+        .json(&payload_wrong_sig)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "federated DM signed by wrong key must be rejected"
+    );
+}
+
+/// Correctly-signed plaintext DM posted directly to /federation/dm must be
+/// accepted when the caller is a registered peer.  This verifies the happy
+/// path of the signature check.
+#[tokio::test]
+async fn federated_dm_accepts_correctly_signed_plaintext() {
+    let hub = start_real_hub("hub-h4-signed").await;
+    let client = reqwest::Client::new();
+
+    // Register the "sending hub" via is_hub=true.
+    let hub_identity = Identity::generate();
+    let hub_token = {
+        let challenge: ChallengeResponse = client
+            .post(format!("{hub}/auth/challenge"))
+            .json(&serde_json::json!({ "public_key": hub_identity.public_key_hex() }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+        let signature = hub_identity.sign(&challenge_bytes);
+        let verify: VerifyResponse = client
+            .post(format!("{hub}/auth/verify"))
+            .json(&serde_json::json!({
+                "public_key": hub_identity.public_key_hex(),
+                "challenge": challenge.challenge,
+                "signature": hex::encode(signature.to_bytes()),
+                "is_hub": true,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        verify.token
+    };
+
+    // The actual sender is a real user with a real keypair.
+    let sender = Identity::generate();
+    let conv_id = "dddd0000111122223333444455556666";
+    let content = "legitimate message from real sender";
+
+    let sig = make_plaintext_sig(&sender, conv_id, "dm", content);
+
+    let payload = serde_json::json!({
+        "message_id": "ccccccccddddeeee0000111122223335",
+        "conversation_id": conv_id,
+        "conv_type": "dm",
+        "sender": sender.public_key_hex(),
+        "members": [sender.public_key_hex(), hub_identity.public_key_hex()],
+        "content": content,
+        "attachments": [],
+        "signature": sig,
+        "created_at": 1_700_000_002i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&hub_token)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "correctly-signed federated DM must be accepted"
+    );
+}
+
 /// A legitimate peer hub (Hub A) that has gone through the federation
 /// challenge-response handshake MUST be able to deliver DMs to Hub B.
 /// This is a regression guard: the fix must not break the valid path.
@@ -1315,10 +1520,12 @@ async fn federated_dm_accepts_registered_peer_hub() {
     let conv: ConversationResponse = resp.json().await.unwrap();
 
     // Alice sends a DM; Hub A federates it to Hub B.
+    let peer_content = "peer delivery test";
+    let peer_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, peer_content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&serde_json::json!({ "content": "peer delivery test" }))
+        .json(&serde_json::json!({ "content": peer_content, "plaintext_signature": peer_sig }))
         .send()
         .await
         .unwrap();
@@ -1342,5 +1549,5 @@ async fn federated_dm_accepts_registered_peer_hub() {
         1,
         "federated DM from registered peer must arrive"
     );
-    assert_eq!(arr[0]["content"], "peer delivery test");
+    assert_eq!(arr[0]["content"], peer_content);
 }
