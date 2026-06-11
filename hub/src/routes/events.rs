@@ -119,10 +119,6 @@ fn format_unix_utc(ts: i64) -> String {
     format!("{yr:04}-{mth:02}-{d:02} {h:02}:{m:02} UTC")
 }
 
-fn system_message_sender() -> &'static str {
-    "00000000000000000000000000000000000000000000000000000000000000000000"
-}
-
 async fn load_rsvp_counts(
     db: &sqlx::AnyPool,
     event_id: &str,
@@ -147,7 +143,8 @@ async fn load_rsvp_counts(
     Ok(counts)
 }
 
-/// Insert a system card message into the channel and broadcast it over WS.
+/// Insert a card message into the channel and broadcast it over WS.
+/// The creator's users row is guaranteed to exist (they just authenticated).
 async fn post_event_card(
     state: &AppState,
     channel_id: &str,
@@ -160,19 +157,7 @@ async fn post_event_card(
     let content = format!("**{}** — {}", event.title, dt);
     let msg_id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
-    let sender = system_message_sender();
-
-    // Ensure the system-message sender exists so the FK is satisfied.
-    sqlx::query(
-        "INSERT INTO users (public_key, first_seen_at, last_seen_at) VALUES (?, ?, ?)
-         ON CONFLICT (public_key) DO NOTHING",
-    )
-    .bind(sender)
-    .bind(now)
-    .bind(now)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let sender = &event.creator_pubkey;
 
     sqlx::query(
         "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)",

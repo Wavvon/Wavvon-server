@@ -1458,5 +1458,52 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // ---- Perf indexes (H12) ----
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_messages_channel_created
+         ON messages(channel_id, created_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_messages_reply_to
+         ON messages(reply_to)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dm_messages_conversation_created
+         ON dm_messages(conversation_id, created_at)",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Federated bans target index (H13) ----
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_federated_bans_target
+         ON federated_bans(target_master_pubkey)",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Cleanup phantom zero-sender rows (H1) ----
+    // Removes the placeholder users row inserted by the old poll/event card
+    // code. The guard prevents deletion if any old card messages still
+    // reference it (FK would fail anyway, but this makes the intent explicit).
+    let _ = sqlx::query(
+        "DELETE FROM users
+         WHERE public_key = '00000000000000000000000000000000000000000000000000000000000000000000'
+           AND NOT EXISTS (
+               SELECT 1 FROM messages
+               WHERE sender = '00000000000000000000000000000000000000000000000000000000000000000000'
+           )",
+    )
+    .execute(pool)
+    .await;
+
     Ok(())
 }

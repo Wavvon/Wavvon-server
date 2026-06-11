@@ -64,10 +64,6 @@ pub struct PollWithTotals {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn system_message_sender() -> &'static str {
-    "00000000000000000000000000000000000000000000000000000000000000000000"
-}
-
 /// Aggregate vote counts across all voters for a poll.
 async fn load_poll_totals(
     db: &sqlx::AnyPool,
@@ -90,7 +86,8 @@ async fn load_poll_totals(
     Ok(totals)
 }
 
-/// Insert a system card message for the poll into the channel and broadcast via WS.
+/// Insert a card message for the poll into the channel and broadcast via WS.
+/// The creator's users row is guaranteed to exist (they just authenticated).
 async fn post_poll_card(
     state: &AppState,
     channel_id: &str,
@@ -99,18 +96,7 @@ async fn post_poll_card(
     let content = format!("**Poll:** {}", poll.question);
     let msg_id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
-    let sender = system_message_sender();
-
-    sqlx::query(
-        "INSERT INTO users (public_key, first_seen_at, last_seen_at) VALUES (?, ?, ?)
-         ON CONFLICT (public_key) DO NOTHING",
-    )
-    .bind(sender)
-    .bind(now)
-    .bind(now)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let sender = &poll.creator_pubkey;
 
     sqlx::query(
         "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)",

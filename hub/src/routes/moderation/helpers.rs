@@ -90,8 +90,8 @@ pub async fn has_raised_hand(db: &sqlx::AnyPool, channel_id: &str, pubkey: &str)
 /// no paired master) appears in `federated_bans`.
 ///
 /// Mirrors the check in `auth/middleware.rs` so the same policy is enforced
-/// at the message-submission layer. One indexed query; no cache needed since
-/// federated bans are rare and the `target_master_pubkey` column is indexed.
+/// at the message-submission layer. One indexed query on
+/// `idx_federated_bans_target`; no cache needed since federated bans are rare.
 pub async fn is_federated_banned(
     db: &sqlx::AnyPool,
     public_key: &str,
