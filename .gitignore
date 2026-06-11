@@ -1,6 +1,8 @@
 /target
 .claude/
 .obsidian/
+# demo-seed credentials output (contains session tokens / recovery phrases)
+demo-credentials.json
 **/*.db
 **/*.db-shm
 **/*.db-wal
