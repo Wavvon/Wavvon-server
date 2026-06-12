@@ -11,6 +11,7 @@ use crate::federation;
 use crate::rate_limit::{self, Config, RateLimiter};
 use crate::routes;
 use crate::state::AppState;
+use crate::web_client::WebClientConfig;
 
 async fn attach_request_id(req: Request, next: Next) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
@@ -68,11 +69,16 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 pub fn create_router_with_cors(state: Arc<AppState>, cors_origins: &str) -> Router {
-    create_router_full(state, cors_origins, false)
+    create_router_full(state, cors_origins, false, None)
 }
 
 /// Full constructor used by `main()` — exposes all knobs tests don't need.
-pub fn create_router_full(state: Arc<AppState>, cors_origins: &str, trusted_proxy: bool) -> Router {
+pub fn create_router_full(
+    state: Arc<AppState>,
+    cors_origins: &str,
+    trusted_proxy: bool,
+    web_client: Option<Arc<WebClientConfig>>,
+) -> Router {
     let auth_limiter = RateLimiter::new(Config::AUTH, trusted_proxy);
     let write_limiter = RateLimiter::new(Config::WRITE, trusted_proxy);
 
@@ -103,7 +109,7 @@ pub fn create_router_full(state: Arc<AppState>, cors_origins: &str, trusted_prox
             async move { rate_limit::enforce(l, req, next).await }
         }));
 
-    Router::new()
+    let api_router = Router::new()
         .route("/health", get(routes::health::get_health))
         .route("/info", get(routes::health::info))
         .route("/key-rotation", get(routes::key_rotation::get_key_rotation))
@@ -785,5 +791,16 @@ pub fn create_router_full(state: Arc<AppState>, cors_origins: &str, trusted_prox
         .layer(build_cors_layer(cors_origins))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(attach_request_id))
-        .with_state(state)
+        .with_state(state);
+
+    // Attach the SPA fallback when a web client directory is configured.
+    // All named API routes above take priority; only truly unmatched paths
+    // reach the fallback.  The fallback itself is NOT a `.route()` call so
+    // it does not appear in the OpenAPI coverage check.
+    if let Some(cfg) = web_client {
+        let fallback = crate::web_client::build_fallback(cfg);
+        api_router.fallback_service(fallback)
+    } else {
+        api_router
+    }
 }

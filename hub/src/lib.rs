@@ -14,3 +14,4 @@ pub mod search;
 pub mod server;
 pub mod settings;
 pub mod state;
+pub mod web_client;

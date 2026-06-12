@@ -155,6 +155,35 @@ async fn run_doctor() -> bool {
         }
     }
 
+    // Check web client directory when configured
+    match settings.web_client_dir.as_deref() {
+        None => {
+            println!("INFO  web client: disabled (VOXPLY_WEB_CLIENT_DIR not set)");
+        }
+        Some(dir) => {
+            let dir_path = std::path::Path::new(dir);
+            if !dir_path.exists() {
+                println!("FAIL  web client dir '{dir}': directory does not exist");
+                all_pass = false;
+            } else {
+                let index = dir_path.join("index.html");
+                match std::fs::read(&index) {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        println!("PASS  web client dir '{dir}': directory exists, index.html readable ({} bytes)", bytes.len());
+                    }
+                    Ok(_) => {
+                        println!("FAIL  web client dir '{dir}': index.html exists but is empty");
+                        all_pass = false;
+                    }
+                    Err(e) => {
+                        println!("FAIL  web client dir '{dir}': cannot read index.html: {e}");
+                        all_pass = false;
+                    }
+                }
+            }
+        }
+    }
+
     if all_pass {
         println!("\nAll checks passed.");
     } else {
@@ -551,6 +580,10 @@ async fn main() -> Result<()> {
          voice fails silently when the port is blocked.",
         voice_udp_port
     );
+    match settings.web_client_dir.as_deref() {
+        Some(dir) => tracing::info!("web client: serving from {dir}"),
+        None => tracing::info!("web client: disabled (set VOXPLY_WEB_CLIENT_DIR to enable)"),
+    }
 
     let (hub_identity, is_new) = Identity::load_or_create(Path::new("hub_identity.json"))?;
     if is_new {
@@ -1071,7 +1104,32 @@ async fn main() -> Result<()> {
         );
     }
 
-    let app = server::create_router_full(state, &settings.cors_origins, settings.trusted_proxy);
+    // Load and validate the web client directory when configured.
+    // Fail fast here so a misconfigured path doesn't silently result in a
+    // running hub that 404s everything at /.
+    let web_client_cfg = match settings.web_client_dir.as_deref() {
+        Some(dir) => match voxply_hub::web_client::WebClientConfig::load(dir) {
+            Ok(cfg) => {
+                tracing::info!(
+                    "web client: loaded {} bytes for index.html from {dir}",
+                    cfg.index_html.len()
+                );
+                Some(std::sync::Arc::new(cfg))
+            }
+            Err(e) => {
+                tracing::error!("web client configuration error: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
+    let app = server::create_router_full(
+        state,
+        &settings.cors_origins,
+        settings.trusted_proxy,
+        web_client_cfg,
+    );
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
     if let (Some(cert), Some(key)) = (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {

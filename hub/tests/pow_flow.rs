@@ -176,9 +176,31 @@ async fn auth_rejected_when_pow_level_below_minimum() {
     let newcomer = Identity::generate();
     let pub_key = newcomer.public_key_hex();
 
-    // Compute a nonce that satisfies level 4 (below the minimum of 8)
-    let (nonce, level) = compute_security_level(&pub_key, 0, 4);
-    assert!(level >= 4);
+    // Find a nonce whose hash achieves exactly 4–7 leading zero bits: it
+    // satisfies the low level-4 target but provably falls short of the
+    // hub's minimum of 8.  Such nonces are the overwhelming majority
+    // (probability ~255/256 per candidate), so this loop terminates almost
+    // immediately and makes the test fully deterministic.
+    const LOW: u32 = 4;
+    const MIN: u32 = 8;
+    let (nonce, level) = {
+        let mut search_start: u64 = 0;
+        loop {
+            let (n, lvl) = compute_security_level(&pub_key, search_start, LOW);
+            if lvl < MIN {
+                // This nonce satisfies LOW but not MIN — exactly what we need.
+                break (n, lvl);
+            }
+            // Unlucky: the nonce accidentally meets MIN too.  Skip past it
+            // and keep searching from the next candidate.
+            search_start = n + 1;
+        }
+    };
+    assert!(level >= LOW, "nonce must satisfy the low target");
+    assert!(
+        level < MIN,
+        "nonce must NOT satisfy the hub minimum (test invariant)"
+    );
 
     // Submit with the low level — must be rejected
     let resp = do_auth_with_pow(&server, &newcomer, Some(nonce), Some(level as u8)).await;
