@@ -85,7 +85,7 @@ fn xff_ip(headers: &HeaderMap) -> Option<IpAddr> {
     val.split(',')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .last()?
+        .next_back()?
         .parse()
         .ok()
 }
