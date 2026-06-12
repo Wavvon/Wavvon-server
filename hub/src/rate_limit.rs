@@ -84,8 +84,7 @@ fn xff_ip(headers: &HeaderMap) -> Option<IpAddr> {
     // The last entry is the one appended by our trusted proxy.
     val.split(',')
         .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .next_back()?
+        .rfind(|s| !s.is_empty())?
         .parse()
         .ok()
 }

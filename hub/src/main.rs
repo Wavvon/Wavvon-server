@@ -47,8 +47,8 @@ fn print_help() {
         .unwrap_or(10);
 
     println!(
-        "  {:<name_w$}  {:<default_w$}  {}",
-        "Variable", "Default", "Purpose"
+        "  {:<name_w$}  {:<default_w$}  Purpose",
+        "Variable", "Default"
     );
     println!(
         "  {:<name_w$}  {:<default_w$}  {}",
