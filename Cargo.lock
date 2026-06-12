@@ -4527,7 +4527,7 @@ dependencies = [
 
 [[package]]
 name = "voxply-hub"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
