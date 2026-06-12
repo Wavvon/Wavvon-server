@@ -95,6 +95,14 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          NEVER set this if the hub is directly internet-facing — XFF is client-controlled and \
          would allow limiter bypass.",
     ),
+    (
+        "VOXPLY_WEB_CLIENT_DIR",
+        "(unset)",
+        "Path to a directory of pre-built web-client assets. When set, the hub serves the \
+         client at / with SPA fallback (Accept: text/html gets index.html; other requests get \
+         a plain 404). Unset = API-only, no static serving. The official Docker image sets \
+         this to /web-client automatically.",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +166,15 @@ pub struct Settings {
     ///
     /// Env: VOXPLY_TRUSTED_PROXY
     pub trusted_proxy: bool,
+    /// Path to a directory of pre-built web-client assets.
+    ///
+    /// When set, the hub serves the browser client from `/` with SPA fallback:
+    /// unmatched paths that carry `Accept: text/html` get `index.html`; other
+    /// unmatched paths get a plain 404 so API error semantics are preserved.
+    /// When unset the hub is API-only and no fallback is registered at all.
+    ///
+    /// Env: VOXPLY_WEB_CLIENT_DIR
+    pub web_client_dir: Option<String>,
 }
 
 /// Load hub settings from (in priority order, highest last):
