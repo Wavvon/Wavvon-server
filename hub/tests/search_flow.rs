@@ -65,6 +65,8 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
