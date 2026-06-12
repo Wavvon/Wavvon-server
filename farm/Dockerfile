@@ -5,7 +5,10 @@
 #
 # Or use docker-compose.farm.yml from the workspace root.
 
-FROM rust:1-slim AS builder
+# Builder and runtime MUST be pinned to the same Debian release: a floating
+# rust:1-slim tracks the newest Debian, and a binary built against its glibc
+# will not start on an older runtime base (bit us on v0.2.1: GLIBC_2.38).
+FROM rust:1-slim-trixie AS builder
 
 # No system deps needed — all TLS is handled by rustls (pure Rust)
 
@@ -14,7 +17,7 @@ COPY . .
 RUN cargo build --release -p voxply-farm
 
 # ---------- runtime ----------
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
