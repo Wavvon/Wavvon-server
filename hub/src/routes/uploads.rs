@@ -15,8 +15,12 @@ const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
 const BANNER_MAX_UPLOAD_BYTES: usize = 512 * 1024;
 
 /// Allowed mime types for uploads.
+/// SVG is intentionally excluded: it can carry script content and must not
+/// be served with a content-type that causes browsers to execute it.
+/// Previously-uploaded SVG files are still served but with
+/// Content-Disposition: attachment so they are downloaded, not rendered.
 fn is_allowed_mime(mime: &str) -> bool {
-    mime.starts_with("image/")
+    (mime.starts_with("image/") && mime != "image/svg+xml")
         || mime == "video/mp4"
         || mime == "application/pdf"
         || mime == "text/plain"
@@ -49,11 +53,15 @@ pub async fn upload_file(
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let channel_type = channel_type
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
+    let channel_type =
+        channel_type.ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
 
     let is_banner = channel_type == "banner";
-    let effective_max = if is_banner { BANNER_MAX_UPLOAD_BYTES } else { MAX_UPLOAD_BYTES };
+    let effective_max = if is_banner {
+        BANNER_MAX_UPLOAD_BYTES
+    } else {
+        MAX_UPLOAD_BYTES
+    };
 
     // Extract the "file" field from the multipart body.
     let mut file_bytes: Option<Vec<u8>> = None;
@@ -99,8 +107,12 @@ pub async fn upload_file(
         break;
     }
 
-    let bytes = file_bytes
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "No 'file' field in upload".to_string()))?;
+    let bytes = file_bytes.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "No 'file' field in upload".to_string(),
+        )
+    })?;
 
     // Mime type validation.
     if is_banner {
@@ -111,7 +123,10 @@ pub async fn upload_file(
         if !allowed_banner_mime {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Banner images must be PNG, JPEG, GIF, or WebP; got '{}'", content_type),
+                format!(
+                    "Banner images must be PNG, JPEG, GIF, or WebP; got '{}'",
+                    content_type
+                ),
             ));
         }
     } else if !is_allowed_mime(&content_type) {
@@ -137,9 +152,12 @@ pub async fn upload_file(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("FS error: {e}")))?;
 
     let path = format!("{}/{}", dir.trim_end_matches('/'), stored_filename);
-    tokio::fs::write(&path, &bytes)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Write error: {e}")))?;
+    tokio::fs::write(&path, &bytes).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Write error: {e}"),
+        )
+    })?;
 
     let size = bytes.len();
     let now = crate::auth::handlers::unix_timestamp();
@@ -175,9 +193,7 @@ pub async fn upload_file(
 
 /// GET /uploads/:filename
 /// Public — no auth needed, filenames are unguessable UUIDs.
-pub async fn serve_upload(
-    Path(filename): Path<String>,
-) -> Result<Response, (StatusCode, String)> {
+pub async fn serve_upload(Path(filename): Path<String>) -> Result<Response, (StatusCode, String)> {
     // Reject path traversal attempts.
     if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
         return Err((StatusCode::BAD_REQUEST, "Invalid filename".to_string()));
@@ -203,6 +219,12 @@ pub async fn serve_upload(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_str(mime)
             .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream")),
+    );
+    // Force all uploads to be downloaded rather than rendered inline.
+    // This is defence-in-depth: prevents XSS via uploaded HTML/SVG/etc.
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment"),
     );
 
     Ok(resp)

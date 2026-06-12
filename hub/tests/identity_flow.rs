@@ -1,10 +1,10 @@
-
 use axum::http::StatusCode;
 use voxply_identity::{
     DeviceSubkey, HomeHubList, Identity, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 fn signed_designation(
     master: &voxply_identity::MasterIdentity,
@@ -15,7 +15,13 @@ fn signed_designation(
     let master_pubkey = master.public_key_hex();
     let bytes = HomeHubList::signing_bytes(&master_pubkey, &hubs, issued_at, sequence);
     let signature = hex::encode(master.sign(&bytes).to_bytes());
-    HomeHubList { master_pubkey, hubs, issued_at, sequence, signature }
+    HomeHubList {
+        master_pubkey,
+        hubs,
+        issued_at,
+        sequence,
+        signature,
+    }
 }
 
 fn signed_cert(
@@ -25,7 +31,8 @@ fn signed_cert(
     issued_at: u64,
 ) -> SubkeyCert {
     let master_pubkey = master.public_key_hex();
-    let bytes = SubkeyCert::signing_bytes(&master_pubkey, subkey_pubkey, label, issued_at, None, &[]);
+    let bytes =
+        SubkeyCert::signing_bytes(&master_pubkey, subkey_pubkey, label, issued_at, None, &[]);
     let signature = hex::encode(master.sign(&bytes).to_bytes());
     SubkeyCert {
         master_pubkey,
@@ -174,7 +181,9 @@ async fn devices_post_and_list() {
         .await
         .assert_status_ok();
 
-    let resp = server.get(&format!("/identity/{master_pubkey}/devices")).await;
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/devices"))
+        .await;
     resp.assert_status_ok();
     let certs: Vec<SubkeyCert> = resp.json();
     assert_eq!(certs.len(), 2);
@@ -226,7 +235,9 @@ async fn prefs_blob_roundtrip_with_version_check() {
         .await
         .assert_status_ok();
 
-    let resp = server.get(&format!("/identity/{master_pubkey}/prefs")).await;
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/prefs"))
+        .await;
     resp.assert_status_ok();
     let got: SignedPrefsBlob = resp.json();
     assert_eq!(got.blob_version, 1);
@@ -248,7 +259,9 @@ async fn prefs_blob_roundtrip_with_version_check() {
         .await
         .assert_status_ok();
 
-    let resp = server.get(&format!("/identity/{master_pubkey}/prefs")).await;
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/prefs"))
+        .await;
     let got: SignedPrefsBlob = resp.json();
     assert_eq!(got.blob_version, 2);
 }
@@ -264,10 +277,14 @@ async fn empty_resources_return_404_or_empty() {
         .await;
     assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
 
-    let resp = server.get(&format!("/identity/{master_pubkey}/prefs")).await;
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/prefs"))
+        .await;
     assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
 
-    let resp = server.get(&format!("/identity/{master_pubkey}/devices")).await;
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/devices"))
+        .await;
     resp.assert_status_ok();
     let v: Vec<SubkeyCert> = resp.json();
     assert!(v.is_empty());

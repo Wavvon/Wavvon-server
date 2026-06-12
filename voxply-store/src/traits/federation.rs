@@ -1,8 +1,9 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
-use crate::row_types::{PeerRow, FederatedChannelRow};
+use crate::row_types::{FederatedChannelRow, PeerRow};
+use async_trait::async_trait;
 
 #[async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait FederationStore: Send + Sync {
     // ---- Peers ----
 
@@ -39,7 +40,10 @@ pub trait FederationStore: Send + Sync {
         created_at: i64,
     ) -> Result<(), StoreError>;
 
-    async fn get_alliance(&self, id: &str) -> Result<Option<crate::row_types::AllianceRow>, StoreError>;
+    async fn get_alliance(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::row_types::AllianceRow>, StoreError>;
 
     async fn list_alliances(&self) -> Result<Vec<crate::row_types::AllianceRow>, StoreError>;
 

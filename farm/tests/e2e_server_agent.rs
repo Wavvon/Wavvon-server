@@ -109,7 +109,11 @@ async fn authenticate(client: &Client, base: &str, identity: &Identity) -> Strin
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "verify failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "verify failed: {}",
+        resp.status()
+    );
     let body: Value = resp.json().await.unwrap();
     body["token"].as_str().unwrap().to_string()
 }
@@ -271,7 +275,11 @@ async fn totp_setup_confirm_and_login_enforcement() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "totp/setup failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "totp/setup failed: {}",
+        resp.status()
+    );
     let setup: Value = resp.json().await.unwrap();
     let secret = setup["secret"].as_str().unwrap().to_string();
     assert!(!secret.is_empty());
@@ -357,7 +365,15 @@ fn totp_code_from_secret(secret_b32: &str) -> String {
     let secret_bytes = Secret::Encoded(secret_b32.to_string())
         .to_bytes()
         .expect("invalid base32 secret");
-    let totp = TOTP::new(Algorithm::SHA1, 6, 1, 30, secret_bytes, None, "test".to_string())
-        .unwrap();
+    let totp = TOTP::new(
+        Algorithm::SHA1,
+        6,
+        1,
+        30,
+        secret_bytes,
+        None,
+        "test".to_string(),
+    )
+    .unwrap();
     totp.generate_current().unwrap()
 }

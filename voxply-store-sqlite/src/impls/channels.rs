@@ -198,42 +198,34 @@ impl ChannelStore for SqliteStore {
     }
 
     async fn max_channel_order(&self) -> Result<i64, StoreError> {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COALESCE(MAX(display_order), -1) FROM channels",
-        )
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, i64>("SELECT COALESCE(MAX(display_order), -1) FROM channels")
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn child_count(&self, parent_id: &str) -> Result<i64, StoreError> {
-        sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM channels WHERE parent_id = ?",
-        )
-        .bind(parent_id)
-        .fetch_one(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE parent_id = ?")
+            .bind(parent_id)
+            .fetch_one(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn parent_id_of(&self, channel_id: &str) -> Result<Option<String>, StoreError> {
-        sqlx::query_scalar::<_, Option<String>>(
-            "SELECT parent_id FROM channels WHERE id = ?",
-        )
-        .bind(channel_id)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_err)
-        .map(|opt| opt.flatten())
+        sqlx::query_scalar::<_, Option<String>>("SELECT parent_id FROM channels WHERE id = ?")
+            .bind(channel_id)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_err)
+            .map(|opt| opt.flatten())
     }
 
     async fn list_leaf_channel_ids(&self) -> Result<Vec<String>, StoreError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT id FROM channels WHERE is_category = 0",
-        )
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, String>("SELECT id FROM channels WHERE is_category = 0")
+            .fetch_all(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn mark_read(&self, pubkey: &str, channel_id: &str, at: i64) -> Result<(), StoreError> {
@@ -251,7 +243,11 @@ impl ChannelStore for SqliteStore {
         Ok(())
     }
 
-    async fn last_read_at(&self, pubkey: &str, channel_id: &str) -> Result<Option<i64>, StoreError> {
+    async fn last_read_at(
+        &self,
+        pubkey: &str,
+        channel_id: &str,
+    ) -> Result<Option<i64>, StoreError> {
         sqlx::query_scalar::<_, i64>(
             "SELECT last_read_at FROM channel_last_read WHERE user_pubkey = ? AND channel_id = ?",
         )

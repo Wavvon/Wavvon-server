@@ -16,7 +16,10 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         .route("/auth/verify", post(routes::auth::verify))
         .route("/auth/renew", post(routes::auth::renew))
         // Belt-and-braces revocation check for hubs.
-        .route("/farm/auth/revoke-check", post(routes::revoke::revoke_check))
+        .route(
+            "/farm/auth/revoke-check",
+            post(routes::revoke::revoke_check),
+        )
         // Hub management routes.
         .route(
             "/farm/hubs",
@@ -29,13 +32,25 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         )
         .route("/farm/hubs/{hub_id}", delete(routes::hubs::delete_hub))
         // Server agent management routes.
-        .route("/farm/admin/server-token", post(routes::servers::generate_server_token))
+        .route(
+            "/farm/admin/server-token",
+            post(routes::servers::generate_server_token),
+        )
         .route("/farm/admin/servers", get(routes::servers::list_servers))
         .route("/ws/agent", get(routes::servers::ws_agent_handler))
         // TOTP 2FA routes for admin account.
-        .route("/farm/admin/totp/setup", post(routes::admin_auth::totp_setup))
-        .route("/farm/admin/totp/confirm", post(routes::admin_auth::totp_confirm))
-        .route("/farm/admin/totp/disable", post(routes::admin_auth::totp_disable))
+        .route(
+            "/farm/admin/totp/setup",
+            post(routes::admin_auth::totp_setup),
+        )
+        .route(
+            "/farm/admin/totp/confirm",
+            post(routes::admin_auth::totp_confirm),
+        )
+        .route(
+            "/farm/admin/totp/disable",
+            post(routes::admin_auth::totp_disable),
+        )
         // Phase 3 — farm settings (admin).
         .route(
             "/farm/settings",
@@ -52,7 +67,10 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         // Phase 3 — public discovery probe (unauthenticated).
         .route("/farm/public-info", get(routes::admin::public_info))
         // Hub heartbeat — pushed by each hub every 60 s.
-        .route("/farm/heartbeat", post(routes::heartbeat::receive_heartbeat))
+        .route(
+            "/farm/heartbeat",
+            post(routes::heartbeat::receive_heartbeat),
+        )
         // Farm admin fleet view — requires farm admin auth.
         .route("/farm/admin/fleet", get(routes::heartbeat::get_fleet))
         // Gaming — farm-level game catalogue.
@@ -71,10 +89,7 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
             get(routes::games::get_kv).put(routes::games::put_kv),
         )
         // Proxy catch-all — must be last (fallback for all /hub/<id>/... requests).
-        .route(
-            "/hub/{hub_id}/{*path}",
-            any(crate::proxy::proxy_handler),
-        )
+        .route("/hub/{hub_id}/{*path}", any(crate::proxy::proxy_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

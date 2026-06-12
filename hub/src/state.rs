@@ -54,9 +54,15 @@ pub enum DmEvent {
 impl DmEvent {
     pub fn conversation_id(&self) -> &str {
         match self {
-            DmEvent::Message { conversation_id, .. }
-            | DmEvent::Typing { conversation_id, .. }
-            | DmEvent::MemberChanged { conversation_id, .. } => conversation_id,
+            DmEvent::Message {
+                conversation_id, ..
+            }
+            | DmEvent::Typing {
+                conversation_id, ..
+            }
+            | DmEvent::MemberChanged {
+                conversation_id, ..
+            } => conversation_id,
         }
     }
     pub fn sender(&self) -> &str {
@@ -79,6 +85,11 @@ pub struct ScreenStreamMeta {
     pub mime: String,
     pub has_audio: bool,
     pub sharer_pubkey: String,
+    /// Unique WS session id of the connection that started this stream.
+    /// Used to discriminate cleanup: on disconnect only streams from the
+    /// disconnecting session are removed, leaving streams from other
+    /// concurrent sessions intact.
+    pub session_id: String,
     /// Cached WebM init segment for late joiners. Set on the first chunk
     /// where `is_init == true`.
     pub init_chunk: Option<Bytes>,
@@ -117,7 +128,7 @@ pub struct ScreenChunkEvent {
 /// Attenuation parameters for a voice zone.
 #[derive(Clone, Debug)]
 pub struct AttenuationConfig {
-    pub model: String,        // "linear" | "inverse_square" | "step" | "exponential"
+    pub model: String, // "linear" | "inverse_square" | "step" | "exponential"
     pub max_radius: f64,
     pub ref_dist: f64,
     pub rolloff: f64,
@@ -193,12 +204,16 @@ pub struct WhisperTargetDef {
 pub struct RateLimiters {
     /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
     pub messages: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-user fixed-window rate limiter for link preview fetches (10 requests/60 s).
+    /// Each preview may trigger an outbound HTTP fetch, so we throttle per user.
+    pub preview: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 impl Default for RateLimiters {
     fn default() -> Self {
         Self {
             messages: Mutex::new(HashMap::new()),
+            preview: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -234,19 +249,29 @@ pub struct AppState {
     pub voice_event_tx: broadcast::Sender<(String, WsServerMessage)>,
     // DM relay: broadcast DMs to all WS clients (they filter by conversation membership)
     pub dm_tx: broadcast::Sender<DmEvent>,
-    // Online users: public_key set (updated by WS connect/disconnect)
-    pub online_users: RwLock<std::collections::HashSet<String>>,
+    // Online users: public_key → session refcount (updated by WS connect/disconnect).
+    // A key is present iff at least one WS session for that pubkey is alive.
+    // Refcounted so multi-device / reconnect-overlap is handled correctly: the
+    // second connect increments, the first disconnect decrements but does NOT
+    // remove the key until the count reaches zero.
+    pub online_users: RwLock<HashMap<String, usize>>,
     /// Active screen-share sessions: (channel_id, sharer_pubkey) → ActiveShare.
     /// Multiple concurrent sharers per channel are allowed (multi-stream overlay).
     /// In-memory only — cleared on process restart.
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.
     pub screen_share_tx: broadcast::Sender<ScreenChunkEvent>,
-    /// Active bot WS sessions: bot_pubkey → mpsc sender for pre-serialised
-    /// JSON text frames. Bots use a separate channel from the regular WS
-    /// broadcast so we can push targeted hub_event messages without looping
-    /// through every connected client.
-    pub bot_sessions: RwLock<HashMap<String, mpsc::Sender<String>>>,
+    /// Active bot WS sessions: bot_pubkey → { session_id → mpsc sender }.
+    ///
+    /// A bot pubkey can have multiple concurrent WS sessions (e.g. reconnect
+    /// overlap, multi-process bot deployments).  Each session is identified by
+    /// a unique UUID generated at connect time.  On disconnect only the entry
+    /// for that session's UUID is removed — not all entries for the pubkey —
+    /// so the surviving session(s) continue to receive push messages.
+    ///
+    /// Token-expiry sweep removes all sessions for a pubkey at once (a token
+    /// revocation is pubkey-wide).
+    pub bot_sessions: RwLock<HashMap<String, HashMap<String, mpsc::Sender<String>>>>,
 
     /// Active voice zones: (channel_id, zone_id) → VoiceZone.
     /// Ephemeral — cleared on hub restart.
@@ -262,7 +287,6 @@ pub struct AppState {
     pub video_channels: RwLock<HashMap<String, HashSet<String>>>,
 
     // ---- Farm integration (Phase 1, dual-issue step 1) ----
-
     /// Wall time when this hub process started. Used by /metrics.
     pub started_at: std::time::Instant,
 
@@ -285,15 +309,36 @@ pub struct AppState {
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
 
+    /// Pubkeys that currently own a live UDP relay slot.
+    ///
+    /// Inserted on `VoiceJoin`; removed on `leave_voice` (called on WS
+    /// disconnect and on explicit `VoiceLeave`).  The UDP receive loop checks
+    /// this set before forwarding a packet so that stale source addresses from
+    /// a session whose WS connection closed cannot relay traffic.
+    ///
+    /// O(1) read under a shared lock — intentionally kept as a plain
+    /// `RwLock<HashSet>` to avoid adding a new crate dependency.
+    pub voice_relay_active: RwLock<HashSet<String>>,
+
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
 
     /// In-memory link preview cache: url → (result, inserted_at).
     /// Entries expire after 30 minutes.
-    pub preview_cache: std::sync::Mutex<std::collections::HashMap<String, (crate::routes::preview::LinkPreview, std::time::Instant)>>,
+    pub preview_cache: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            (crate::routes::preview::LinkPreview, std::time::Instant),
+        >,
+    >,
 
     /// Full-text search backend. Either TantivySearch or NullSearch.
     pub search: Arc<dyn crate::search::MessageSearch>,
+
+    /// Guards against concurrent admin reindex runs. Set to `true` while a
+    /// reindex is in progress; callers that see `true` receive 202 with
+    /// `{"status":"already_running"}` and do not start a second job.
+    pub reindex_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct PendingChallenge {

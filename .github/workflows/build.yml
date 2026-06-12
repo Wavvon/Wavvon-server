@@ -14,9 +14,30 @@ jobs:
         os: [ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+
+      - name: Fetch API spec (Voxply docs repo)
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: Voxply/Voxply
+          sparse-checkout: |
+            openapi.yaml
+            scripts/check-openapi-coverage.mjs
+          sparse-checkout-cone-mode: false
+          path: _docs
+
+      - name: Check every registered route is documented in openapi.yaml
+        run: node _docs/scripts/check-openapi-coverage.mjs "$GITHUB_WORKSPACE"
+
+      - name: Cargo fmt check
+        run: cargo fmt --all -- --check
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace -- -D warnings
 
       - name: Cargo check
         run: cargo check --workspace

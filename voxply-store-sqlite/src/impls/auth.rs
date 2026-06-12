@@ -27,13 +27,11 @@ impl AuthStore for SqliteStore {
     }
 
     async fn session_pubkey(&self, token: &str) -> Result<Option<String>, StoreError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT public_key FROM sessions WHERE token = ?",
-        )
-        .bind(token)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, String>("SELECT public_key FROM sessions WHERE token = ?")
+            .bind(token)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn delete_session(&self, token: &str) -> Result<(), StoreError> {
@@ -56,13 +54,12 @@ impl AuthStore for SqliteStore {
         };
 
         // Existing multi-device user?
-        if let Some(canonical) = sqlx::query_scalar::<_, String>(
-            "SELECT public_key FROM users WHERE master_pubkey = ?",
-        )
-        .bind(master)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_err)?
+        if let Some(canonical) =
+            sqlx::query_scalar::<_, String>("SELECT public_key FROM users WHERE master_pubkey = ?")
+                .bind(master)
+                .fetch_optional(self.pool())
+                .await
+                .map_err(map_err)?
         {
             return Ok((canonical, Some(master.to_string())));
         }

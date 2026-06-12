@@ -1,9 +1,9 @@
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 async fn create_channel(server: &TestServer, token: &str) -> String {
     let resp = server
@@ -109,6 +109,46 @@ async fn event_happy_path() {
     resp.assert_status(axum::http::StatusCode::NOT_FOUND);
 }
 
+/// Card message inserted by create_event uses the creator's pubkey as sender,
+/// not the old zero-string phantom sender.
+#[tokio::test]
+async fn event_card_sender_is_creator() {
+    let server = common::setup().await;
+    let id = Identity::generate();
+    let token = common::authenticate(&server, &id).await;
+    let channel_id = create_channel(&server, &token).await;
+
+    let resp = server
+        .post("/events")
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "channel_id": channel_id,
+            "title": "Sender check event",
+            "starts_at": 9_999_999_999i64,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let event: Value = resp.json();
+    let creator_pubkey = event["creator_pubkey"].as_str().unwrap().to_string();
+
+    let resp = server
+        .get(&format!("/channels/{channel_id}/messages"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    resp.assert_status_success();
+    let messages: Value = resp.json();
+    let msgs = messages.as_array().unwrap();
+    assert!(!msgs.is_empty(), "expected at least one card message");
+    let card = &msgs[0];
+    assert_eq!(
+        card["sender"].as_str().unwrap(),
+        creator_pubkey,
+        "event card sender must be the creator, not the zero phantom"
+    );
+    let zero = "00000000000000000000000000000000000000000000000000000000000000000000";
+    assert_ne!(card["sender"].as_str().unwrap(), zero);
+}
+
 /// Non-creator without admin cannot delete another user's event.
 #[tokio::test]
 async fn event_delete_rejected_for_non_creator() {
@@ -129,10 +169,7 @@ async fn event_delete_rejected_for_non_creator() {
         }))
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
-    let event_id = resp.json::<Value>()["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let event_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
 
     let resp = server
         .delete(&format!("/events/{event_id}"))

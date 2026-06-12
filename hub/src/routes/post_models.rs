@@ -175,7 +175,11 @@ pub fn post_to_summary(row: &PostRow, viewer_can_moderate: bool) -> PostSummary 
         } else {
             Some(row.author_pubkey.clone())
         },
-        title: if is_deleted { None } else { Some(row.title.clone()) },
+        title: if is_deleted {
+            None
+        } else {
+            Some(row.title.clone())
+        },
         created_at: row.created_at,
         edited_at: row.edited_at,
         is_pinned: row.is_pinned != 0,
@@ -198,7 +202,11 @@ pub fn reply_to_view(row: &ReplyRow, viewer_can_moderate: bool) -> ReplyView {
         } else {
             Some(row.author_pubkey.clone())
         },
-        body: if is_deleted { None } else { Some(row.body.clone()) },
+        body: if is_deleted {
+            None
+        } else {
+            Some(row.body.clone())
+        },
         created_at: row.created_at,
         edited_at: row.edited_at,
         reply_to_id: row.reply_to_id.clone(),

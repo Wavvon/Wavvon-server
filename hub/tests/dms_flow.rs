@@ -13,14 +13,19 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 /// Same as common::setup() but also returns the AnyPool so tests can poke the
 /// database directly (e.g. to mark a dm_outbox row as bounced for a test
 /// that exercises the delivery_failed reporting path).
 async fn setup_with_pool() -> (TestServer, AnyPool) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let pool_handle = db.clone();
     let store: Arc<dyn voxply_store::HubStore> =
@@ -39,14 +44,14 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
@@ -54,15 +59,19 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
     let app = server::create_router(state);
     (TestServer::new(app), pool_handle)
 }
@@ -110,7 +119,10 @@ async fn dm_conversation_dedup() {
         .await;
     let conv2: ConversationResponse = resp.json();
 
-    assert_eq!(conv1.id, conv2.id, "DM should be deduped between same users");
+    assert_eq!(
+        conv1.id, conv2.id,
+        "DM should be deduped between same users"
+    );
 }
 
 #[tokio::test]
@@ -148,7 +160,10 @@ async fn list_my_conversations() {
         .json(&json!({ "members": [bob.public_key_hex()] }))
         .await;
 
-    let resp = server.get("/conversations").authorization_bearer(&alice_token).await;
+    let resp = server
+        .get("/conversations")
+        .authorization_bearer(&alice_token)
+        .await;
     resp.assert_status_ok();
     let conversations: Vec<ConversationResponse> = resp.json();
     assert_eq!(conversations.len(), 1);
@@ -215,7 +230,11 @@ async fn cannot_create_empty_conversation() {
 
 async fn start_real_hub(name: &str) -> String {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -233,14 +252,14 @@ async fn start_real_hub(name: &str) -> String {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
@@ -248,15 +267,19 @@ async fn start_real_hub(name: &str) -> String {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -305,10 +328,31 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
     verify.token
 }
 
+/// Build a valid `plaintext_signature` for a plaintext DM.
+///
+/// The canonical form mirrors `voxply_identity::federated_plaintext_dm_signing_bytes`:
+/// domain tag + len-prefixed(conversation_id) + len-prefixed(conv_type) + len-prefixed(content).
+/// `conv_type` is always `"dm"` for 1:1 conversations and `"group"` for group ones;
+/// tests that only deal with 1:1 DMs can pass `"dm"` directly.
+fn make_plaintext_sig(
+    sender: &Identity,
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+) -> String {
+    let bytes =
+        voxply_identity::federated_plaintext_dm_signing_bytes(conversation_id, conv_type, content);
+    hex::encode(sender.sign(&bytes).to_bytes())
+}
+
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -326,14 +370,14 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
@@ -341,15 +385,19 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -398,10 +446,12 @@ async fn dm_delivered_across_hubs() {
     let conv: ConversationResponse = serde_json::from_str(&body_text).unwrap();
 
     // Alice sends a DM. Hub A persists it locally and federates to Hub B.
+    let content = "hi bob, from across hubs";
+    let sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "hi bob, from across hubs" }))
+        .json(&json!({ "content": content, "plaintext_signature": sig }))
         .send()
         .await
         .unwrap();
@@ -417,11 +467,15 @@ async fn dm_delivered_across_hubs() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "Hub B list endpoint failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "Hub B list endpoint failed: {}",
+        resp.status()
+    );
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().expect("expected an array");
     assert_eq!(arr.len(), 1, "Bob should see the federated DM");
-    assert_eq!(arr[0]["content"], "hi bob, from across hubs");
+    assert_eq!(arr[0]["content"], content);
     assert_eq!(arr[0]["sender"], alice.public_key_hex());
 }
 
@@ -463,10 +517,12 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     let conv: ConversationResponse = resp.json().await.unwrap();
 
     // Send while Hub B is down. POST still succeeds (Hub A accepts and queues).
+    let retry_content = "hi from retry land";
+    let retry_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, retry_content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "hi from retry land" }))
+        .json(&json!({ "content": retry_content, "plaintext_signature": retry_sig }))
         .send()
         .await
         .unwrap();
@@ -477,11 +533,18 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         .fetch_one(&hub_a_state.db)
         .await
         .unwrap();
-    assert_eq!(queued, 1, "message should be queued while recipient is offline");
+    assert_eq!(
+        queued, 1,
+        "message should be queued while recipient is offline"
+    );
 
     // Bring Hub B up on the previously-chosen port.
     sqlx::any::install_default_drivers();
-    let hub_b_db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let hub_b_db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&hub_b_db).await.unwrap();
     let hub_b_store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(hub_b_db.clone()));
@@ -498,14 +561,14 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
         voice_event_tx: voice_event_tx_b,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
@@ -513,15 +576,19 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))
         .await
@@ -549,7 +616,10 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         .fetch_one(&hub_a_state.db)
         .await
         .unwrap();
-    assert_eq!(queued_after, 0, "worker should have delivered and cleared the outbox");
+    assert_eq!(
+        queued_after, 0,
+        "worker should have delivered and cleared the outbox"
+    );
 
     // Hub B should have stored the message.
     let bob_token = authenticate_http(&format!("http://127.0.0.1:{dead_port}"), &bob).await;
@@ -565,7 +635,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["content"], "hi from retry land");
+    assert_eq!(arr[0]["content"], retry_content);
 }
 
 #[tokio::test]
@@ -720,10 +790,12 @@ async fn send_dm_uses_home_hub_designation_when_present() {
 
     // Alice sends a DM. Hub A should route via the designation to Hub B,
     // ignoring the placeholder hub_url.
+    let desig_content = "routed via designation";
+    let desig_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, desig_content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "routed via designation" }))
+        .json(&json!({ "content": desig_content, "plaintext_signature": desig_sig }))
         .send()
         .await
         .unwrap();
@@ -742,8 +814,12 @@ async fn send_dm_uses_home_hub_designation_when_present() {
     assert!(resp.status().is_success());
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "message should have been routed to Hub B via designation");
-    assert_eq!(arr[0]["content"], "routed via designation");
+    assert_eq!(
+        arr.len(),
+        1,
+        "message should have been routed to Hub B via designation"
+    );
+    assert_eq!(arr[0]["content"], desig_content);
 }
 
 /// When no home_hub_designations row exists, send_dm falls back to the
@@ -773,10 +849,12 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
     assert!(resp.status().is_success());
     let conv: ConversationResponse = resp.json().await.unwrap();
 
+    let fallback_content = "fallback delivery";
+    let fallback_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, fallback_content);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": "fallback delivery" }))
+        .json(&json!({ "content": fallback_content, "plaintext_signature": fallback_sig }))
         .send()
         .await
         .unwrap();
@@ -794,8 +872,12 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
     assert!(resp.status().is_success());
     let messages: serde_json::Value = resp.json().await.unwrap();
     let arr = messages.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "message should have been delivered via fallback hub_url");
-    assert_eq!(arr[0]["content"], "fallback delivery");
+    assert_eq!(
+        arr.len(),
+        1,
+        "message should have been delivered via fallback hub_url"
+    );
+    assert_eq!(arr[0]["content"], fallback_content);
 }
 
 // ---------------------------------------------------------------------------
@@ -814,7 +896,13 @@ fn make_group_envelope(
 
     // Canonical signing bytes (mirrors group_envelope_signing_bytes in dms.rs)
     let mut signing_msg = b"voxply/group-dm-ciphertext/v1\0".to_vec();
-    for s in [conv_id, &version.to_string(), &iteration.to_string(), &ciphertext_hex, &nonce_hex] {
+    for s in [
+        conv_id,
+        &version.to_string(),
+        &iteration.to_string(),
+        &ciphertext_hex,
+        &nonce_hex,
+    ] {
         let b = s.as_bytes();
         signing_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
         signing_msg.extend_from_slice(b);
@@ -922,7 +1010,11 @@ async fn push_and_get_sender_keys_happy_path() {
     resp.assert_status_ok();
     let entries: serde_json::Value = resp.json();
     let arr = entries.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "Bob should see exactly one sender-key entry (from Alice)");
+    assert_eq!(
+        arr.len(),
+        1,
+        "Bob should see exactly one sender-key entry (from Alice)"
+    );
     assert_eq!(arr[0]["sender_pubkey"], alice.public_key_hex());
     assert_eq!(arr[0]["sender_key_version"], 1);
     assert_eq!(arr[0]["wrapped_key_hex"], "aabbccdd");
@@ -1023,8 +1115,14 @@ async fn send_group_encrypted_dm_happy_path() {
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
     let msg: serde_json::Value = resp.json();
-    assert!(msg["group_encrypted_envelope"].is_object(), "response should include group envelope");
-    assert!(msg["encrypted_envelope"].is_null(), "1:1 envelope must be absent");
+    assert!(
+        msg["group_encrypted_envelope"].is_object(),
+        "response should include group envelope"
+    );
+    assert!(
+        msg["encrypted_envelope"].is_null(),
+        "1:1 envelope must be absent"
+    );
 
     // Bob reads the conversation
     let bob_token = common::authenticate(&server, &bob).await;
@@ -1156,6 +1254,300 @@ async fn sender_key_upsert_replaces_old_entry() {
     let entries: serde_json::Value = resp.json();
     let arr = entries.as_array().unwrap();
     assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["wrapped_key_hex"], "11223344", "upsert should replace old wrapped_key_hex");
+    assert_eq!(
+        arr[0]["wrapped_key_hex"], "11223344",
+        "upsert should replace old wrapped_key_hex"
+    );
 }
 
+// ---------------------------------------------------------------------------
+// H4 hardened security: /federation/dm requires a valid sender signature
+// ---------------------------------------------------------------------------
+
+/// A normal locally-authenticated user MUST NOT be able to POST to
+/// `/federation/dm`.  The `PeerHub` extractor rejects requests whose token
+/// doesn't belong to a key in the `peers` table.
+#[tokio::test]
+async fn federated_dm_rejects_normal_user() {
+    let hub = start_real_hub("hub-h4-reject").await;
+    let client = reqwest::Client::new();
+
+    // Register a normal user on this hub.
+    let alice = Identity::generate();
+    let alice_token = authenticate_http(&hub, &alice).await;
+
+    // Craft a spoofed federated-DM payload claiming to be from an arbitrary sender.
+    let spoofed_sender = Identity::generate();
+    let payload = serde_json::json!({
+        "message_id": "aaaabbbbccccdddd0000111122223333",
+        "conversation_id": "cccc0000111122223333444455556666",
+        "conv_type": "dm",
+        "sender": spoofed_sender.public_key_hex(),
+        "members": [alice.public_key_hex(), spoofed_sender.public_key_hex()],
+        "content": "injected plaintext",
+        "attachments": [],
+        "signature": null,
+        "created_at": 1_700_000_000i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&alice_token)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    // Must be rejected — 403 Forbidden because alice is not a peer hub.
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "normal user must not be able to post to /federation/dm"
+    );
+}
+
+/// The critical bypass test: an attacker who calls /auth/verify with is_hub=true
+/// lands in the `peers` table and passes the PeerHub extractor.  They must still
+/// be rejected when they post a DM with sender=<victim> and a missing or
+/// invalid signature, because only the victim can sign with the victim's key.
+#[tokio::test]
+async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
+    let hub = start_real_hub("hub-h4-bypass").await;
+    let client = reqwest::Client::new();
+
+    // Attacker generates their own keypair and authenticates with is_hub=true
+    // to self-register in the peers table.
+    let attacker = Identity::generate();
+    let attacker_token = {
+        let challenge: ChallengeResponse = client
+            .post(format!("{hub}/auth/challenge"))
+            .json(&serde_json::json!({ "public_key": attacker.public_key_hex() }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+        let signature = attacker.sign(&challenge_bytes);
+        let verify: VerifyResponse = client
+            .post(format!("{hub}/auth/verify"))
+            .json(&serde_json::json!({
+                "public_key": attacker.public_key_hex(),
+                "challenge": challenge.challenge,
+                "signature": hex::encode(signature.to_bytes()),
+                "is_hub": true,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        verify.token
+    };
+
+    let victim = Identity::generate();
+    let conv_id = "cccc0000111122223333444455556666";
+
+    // --- Case 1: missing signature ---
+    let payload_no_sig = serde_json::json!({
+        "message_id": "aaaabbbbccccdddd0000111122223333",
+        "conversation_id": conv_id,
+        "conv_type": "dm",
+        "sender": victim.public_key_hex(),
+        "members": [attacker.public_key_hex(), victim.public_key_hex()],
+        "content": "injected without signature",
+        "attachments": [],
+        "signature": null,
+        "created_at": 1_700_000_000i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&attacker_token)
+        .json(&payload_no_sig)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "federated DM without sender signature must be rejected even when caller passed PeerHub"
+    );
+
+    // --- Case 2: attacker signs with their OWN key but claims sender=victim ---
+    let wrong_sig = {
+        let bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+            conv_id,
+            "dm",
+            "injected with wrong key",
+        );
+        hex::encode(attacker.sign(&bytes).to_bytes())
+    };
+    let payload_wrong_sig = serde_json::json!({
+        "message_id": "bbbbbbbbccccdddd0000111122223334",
+        "conversation_id": conv_id,
+        "conv_type": "dm",
+        "sender": victim.public_key_hex(),
+        "members": [attacker.public_key_hex(), victim.public_key_hex()],
+        "content": "injected with wrong key",
+        "attachments": [],
+        "signature": wrong_sig,
+        "created_at": 1_700_000_001i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&attacker_token)
+        .json(&payload_wrong_sig)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "federated DM signed by wrong key must be rejected"
+    );
+}
+
+/// Correctly-signed plaintext DM posted directly to /federation/dm must be
+/// accepted when the caller is a registered peer.  This verifies the happy
+/// path of the signature check.
+#[tokio::test]
+async fn federated_dm_accepts_correctly_signed_plaintext() {
+    let hub = start_real_hub("hub-h4-signed").await;
+    let client = reqwest::Client::new();
+
+    // Register the "sending hub" via is_hub=true.
+    let hub_identity = Identity::generate();
+    let hub_token = {
+        let challenge: ChallengeResponse = client
+            .post(format!("{hub}/auth/challenge"))
+            .json(&serde_json::json!({ "public_key": hub_identity.public_key_hex() }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+        let signature = hub_identity.sign(&challenge_bytes);
+        let verify: VerifyResponse = client
+            .post(format!("{hub}/auth/verify"))
+            .json(&serde_json::json!({
+                "public_key": hub_identity.public_key_hex(),
+                "challenge": challenge.challenge,
+                "signature": hex::encode(signature.to_bytes()),
+                "is_hub": true,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        verify.token
+    };
+
+    // The actual sender is a real user with a real keypair.
+    let sender = Identity::generate();
+    let conv_id = "dddd0000111122223333444455556666";
+    let content = "legitimate message from real sender";
+
+    let sig = make_plaintext_sig(&sender, conv_id, "dm", content);
+
+    let payload = serde_json::json!({
+        "message_id": "ccccccccddddeeee0000111122223335",
+        "conversation_id": conv_id,
+        "conv_type": "dm",
+        "sender": sender.public_key_hex(),
+        "members": [sender.public_key_hex(), hub_identity.public_key_hex()],
+        "content": content,
+        "attachments": [],
+        "signature": sig,
+        "created_at": 1_700_000_002i64,
+    });
+
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&hub_token)
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "correctly-signed federated DM must be accepted"
+    );
+}
+
+/// A legitimate peer hub (Hub A) that has gone through the federation
+/// challenge-response handshake MUST be able to deliver DMs to Hub B.
+/// This is a regression guard: the fix must not break the valid path.
+#[tokio::test]
+async fn federated_dm_accepts_registered_peer_hub() {
+    // This test reuses the cross-hub DM flow which exercises the full
+    // federation path.  If the PeerHub extractor incorrectly rejects a
+    // registered peer, the message will not appear on Hub B.
+    let hub_a = start_real_hub("hub-h4-a").await;
+    let hub_b = start_real_hub("hub-h4-b").await;
+    let client = reqwest::Client::new();
+
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let alice_token = authenticate_http(&hub_a, &alice).await;
+    authenticate_http(&hub_b, &bob).await;
+
+    // Alice creates a cross-hub conversation.
+    let mut member_hubs = std::collections::HashMap::new();
+    member_hubs.insert(bob.public_key_hex(), hub_b.clone());
+    let resp = client
+        .post(format!("{hub_a}/conversations"))
+        .bearer_auth(&alice_token)
+        .json(&serde_json::json!({
+            "members": [bob.public_key_hex()],
+            "member_hubs": member_hubs,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "create conversation failed");
+    let conv: ConversationResponse = resp.json().await.unwrap();
+
+    // Alice sends a DM; Hub A federates it to Hub B.
+    let peer_content = "peer delivery test";
+    let peer_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, peer_content);
+    let resp = client
+        .post(format!("{hub_a}/conversations/{}/messages", conv.id))
+        .bearer_auth(&alice_token)
+        .json(&serde_json::json!({ "content": peer_content, "plaintext_signature": peer_sig }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Bob reads from Hub B — message must be there.
+    let bob_token = authenticate_http(&hub_b, &bob).await;
+    let resp = client
+        .get(format!("{hub_b}/conversations/{}/messages", conv.id))
+        .bearer_auth(&bob_token)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let messages: serde_json::Value = resp.json().await.unwrap();
+    let arr = messages.as_array().unwrap();
+    assert_eq!(
+        arr.len(),
+        1,
+        "federated DM from registered peer must arrive"
+    );
+    assert_eq!(arr[0]["content"], peer_content);
+}

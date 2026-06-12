@@ -61,15 +61,14 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     .and_then(|v| v.parse().ok())
     .unwrap_or(0);
 
-    let invite_only: bool = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM hub_settings WHERE key = 'invite_only'",
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .map(|v| v == "true")
-    .unwrap_or(false);
+    let invite_only: bool =
+        sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'invite_only'")
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
     let challenge_mode: String = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'challenge_mode'",
@@ -80,7 +79,9 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     .flatten()
     .unwrap_or_else(|| "off".to_string());
 
-    let self_tags = crate::routes::tags::load_tags(&state).await.unwrap_or_default();
+    let self_tags = crate::routes::tags::load_tags(&state)
+        .await
+        .unwrap_or_default();
     let nsfw = crate::routes::tags::load_nsfw(&state).await;
     let badges = crate::routes::badges::load_active_badges(&state).await;
 
@@ -95,10 +96,9 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         .unwrap_or(0);
 
     // Include the hub key rotation payload if one is active.
-    let rotation: Option<serde_json::Value> =
-        std::fs::read_to_string("hub_rotation.json")
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
+    let rotation: Option<serde_json::Value> = std::fs::read_to_string("hub_rotation.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
 
     Json(InfoResponse {
         name: branding.name,

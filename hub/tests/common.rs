@@ -13,7 +13,11 @@ use voxply_identity::Identity;
 
 pub async fn setup() -> TestServer {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -38,7 +42,7 @@ pub async fn setup() -> TestServer {
         voice_udp_port: 0,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
@@ -53,9 +57,11 @@ pub async fn setup() -> TestServer {
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     let app = server::create_router(state);
     TestServer::new(app)

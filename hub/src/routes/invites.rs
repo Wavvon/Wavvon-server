@@ -94,12 +94,18 @@ pub async fn revoke_invite(
 
 /// Called during auth to validate and consume an invite code.
 /// Returns Ok(()) if the code is valid, Err if not.
+///
+/// Uses a single atomic UPDATE with the guard conditions so that
+/// concurrent registrations cannot over-consume a limited invite.
 pub async fn validate_and_use_invite(
     db: &sqlx::AnyPool,
     code: &str,
 ) -> Result<(), (StatusCode, String)> {
     let now = crate::auth::handlers::unix_timestamp();
 
+    // First verify the code exists and hasn't expired (expiry is checked here
+    // because SQLite doesn't have a clean way to distinguish "not found" from
+    // "max_uses exceeded" without a separate read).
     let invite = sqlx::query_as::<_, InviteRow>(
         "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = ?",
     )
@@ -115,18 +121,23 @@ pub async fn validate_and_use_invite(
         }
     }
 
-    if let Some(max_uses) = invite.max_uses {
-        if invite.uses >= max_uses {
-            return Err((StatusCode::FORBIDDEN, "Invite code has been used up".to_string()));
-        }
-    }
+    // Atomic conditional increment: only increments when uses < max_uses (or max_uses is NULL).
+    // rows_affected == 0 means the race was lost and the invite is now exhausted.
+    let result = sqlx::query(
+        "UPDATE invites SET uses = uses + 1
+         WHERE code = ? AND (max_uses IS NULL OR uses < max_uses)",
+    )
+    .bind(code)
+    .execute(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Increment usage
-    sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = ?")
-        .bind(code)
-        .execute(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Invite code has been used up".to_string(),
+        ));
+    }
 
     Ok(())
 }
@@ -210,25 +221,22 @@ pub async fn join_with_invite(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Auto-approve: set approval_status = 'approved' for this user
-    sqlx::query(
-        "UPDATE users SET approval_status = 'approved' WHERE public_key = ?",
-    )
-    .bind(&user.public_key)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = ?")
+        .bind(&user.public_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Check if the hub requires invites
 pub async fn is_invite_only(db: &sqlx::AnyPool) -> Result<bool, (StatusCode, String)> {
-    let value: Option<String> = sqlx::query_scalar(
-        "SELECT value FROM hub_settings WHERE key = 'invite_only'",
-    )
-    .fetch_optional(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let value: Option<String> =
+        sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'invite_only'")
+            .fetch_optional(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(value.as_deref() == Some("true"))
 }

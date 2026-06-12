@@ -7,9 +7,9 @@ use anyhow::{Context, Result};
 use sqlx::any::AnyPoolOptions;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
+use voxply_hub::bots::token_expiry;
 use voxply_hub::cert_worker;
 use voxply_hub::db;
-use voxply_hub::bots::token_expiry;
 use voxply_hub::dm_worker;
 use voxply_hub::federation::client::FederationClient;
 use voxply_hub::server;
@@ -17,8 +17,173 @@ use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 use voxply_store_sqlite::SqliteStore;
 
+/// Print the `--help` text to stdout.
+fn print_help() {
+    println!("voxply-hub {}\n", env!("CARGO_PKG_VERSION"));
+    println!("USAGE:");
+    println!("  voxply-hub [SUBCOMMAND | OPTION]\n");
+    println!("SUBCOMMANDS:");
+    println!("  migrate          Apply DB migrations and exit");
+    println!("  backup [FILE]    Write a backup archive (default: hub-backup-<ts>.tar.gz)");
+    println!("  restore FILE     Restore from a backup archive");
+    println!("  rotate-key       Generate a new hub keypair and sign a rotation payload");
+    println!("  update [--check] Self-update binary from GitHub releases (Linux x86_64 only)");
+    println!("  admin <cmd>      Admin CLI (stats|users|channels|tokens|backup|restore)\n");
+    println!("OPTIONS:");
+    println!("  -h, --help       Print this help message");
+    println!("  -V, --version    Print version");
+    println!("  --doctor         Pre-flight checks: bind ports, verify TLS files, check disk\n");
+    println!("ENVIRONMENT VARIABLES:");
+
+    let name_w = voxply_hub::settings::ENV_VAR_HELP
+        .iter()
+        .map(|(n, _, _)| n.len())
+        .max()
+        .unwrap_or(20);
+    let default_w = voxply_hub::settings::ENV_VAR_HELP
+        .iter()
+        .map(|(_, d, _)| d.len())
+        .max()
+        .unwrap_or(10);
+
+    println!(
+        "  {:<name_w$}  {:<default_w$}  {}",
+        "Variable", "Default", "Purpose"
+    );
+    println!(
+        "  {:<name_w$}  {:<default_w$}  {}",
+        "-".repeat(name_w),
+        "-".repeat(default_w),
+        "-".repeat(40)
+    );
+    for (name, default, purpose) in voxply_hub::settings::ENV_VAR_HELP {
+        println!("  {name:<name_w$}  {default:<default_w$}  {purpose}");
+    }
+    println!();
+    println!("Configuration is also accepted from hub.toml in the working directory.");
+    println!("Environment variables override hub.toml values.");
+}
+
+/// Run --doctor pre-flight checks. Returns true if all checks pass.
+async fn run_doctor() -> bool {
+    use std::net::TcpListener;
+    use tokio::net::UdpSocket;
+
+    let settings = match voxply_hub::settings::load() {
+        Ok(s) => s,
+        Err(e) => {
+            println!("FAIL  settings: {e}");
+            return false;
+        }
+    };
+    println!("PASS  settings: loaded");
+
+    let mut all_pass = true;
+
+    // Check TCP port
+    match TcpListener::bind(format!("0.0.0.0:{}", settings.http_port)) {
+        Ok(_) => println!("PASS  HTTP port {}: bindable", settings.http_port),
+        Err(e) => {
+            println!("FAIL  HTTP port {}: {e}", settings.http_port);
+            all_pass = false;
+        }
+    }
+
+    // Check UDP port
+    match UdpSocket::bind(format!("0.0.0.0:{}", settings.voice_udp_port)).await {
+        Ok(_) => println!("PASS  Voice UDP port {}: bindable", settings.voice_udp_port),
+        Err(e) => {
+            println!("FAIL  Voice UDP port {}: {e}", settings.voice_udp_port);
+            all_pass = false;
+        }
+    }
+
+    // Check TLS files if configured
+    match (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {
+        (Some(cert), Some(key)) => {
+            for (label, path) in [("TLS cert", cert), ("TLS key", key)] {
+                match std::fs::read(path) {
+                    Ok(bytes) => {
+                        // Minimal PEM sanity: file must contain "-----BEGIN"
+                        if bytes.windows(11).any(|w| w == b"-----BEGIN ") {
+                            println!("PASS  {label} ({path}): readable PEM");
+                        } else {
+                            println!(
+                                "FAIL  {label} ({path}): file exists but does not look like PEM"
+                            );
+                            all_pass = false;
+                        }
+                    }
+                    Err(e) => {
+                        println!("FAIL  {label} ({path}): {e}");
+                        all_pass = false;
+                    }
+                }
+            }
+        }
+        (None, None) => {
+            println!("INFO  TLS: not configured (plaintext HTTP)");
+        }
+        _ => {
+            println!(
+                "FAIL  TLS: VOXPLY_TLS_CERT and VOXPLY_TLS_KEY must both be set or both unset"
+            );
+            all_pass = false;
+        }
+    }
+
+    // Check working directory writable
+    let probe = ".voxply-doctor-probe";
+    match std::fs::write(probe, b"ok") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(probe);
+            println!(
+                "PASS  working directory ({}): writable",
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "?".into())
+            );
+        }
+        Err(e) => {
+            println!(
+                "FAIL  working directory ({}): {e}",
+                std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "?".into())
+            );
+            all_pass = false;
+        }
+    }
+
+    if all_pass {
+        println!("\nAll checks passed.");
+    } else {
+        println!("\nOne or more checks failed.");
+    }
+    all_pass
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Fast-path CLI flags that don't need settings or logging.
+    let args: Vec<String> = std::env::args().collect();
+    let first_arg = args.get(1).map(|s| s.as_str());
+
+    if matches!(first_arg, Some("-h") | Some("--help")) {
+        print_help();
+        return Ok(());
+    }
+
+    if matches!(first_arg, Some("-V") | Some("--version")) {
+        println!("voxply-hub {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
+    if first_arg == Some("--doctor") {
+        let ok = run_doctor().await;
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+
     let settings = match voxply_hub::settings::load() {
         Ok(s) => s,
         Err(e) => {
@@ -47,10 +212,7 @@ async fn main() -> Result<()> {
             let provider = opentelemetry_sdk::trace::TracerProvider::builder()
                 .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
                 .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new(
-                        "service.name",
-                        env!("CARGO_PKG_NAME"),
-                    ),
+                    opentelemetry::KeyValue::new("service.name", env!("CARGO_PKG_NAME")),
                 ]))
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
@@ -60,9 +222,7 @@ async fn main() -> Result<()> {
     use tracing_subscriber::prelude::*;
     let otel_layer = otlp_provider.as_ref().map(|provider| {
         use opentelemetry::trace::TracerProvider as _;
-        tracing_opentelemetry::layer().with_tracer(
-            provider.tracer(env!("CARGO_PKG_NAME"))
-        )
+        tracing_opentelemetry::layer().with_tracer(provider.tracer(env!("CARGO_PKG_NAME")))
     });
 
     if json_logs {
@@ -83,9 +243,9 @@ async fn main() -> Result<()> {
         tracing::info!("OpenTelemetry OTLP trace export enabled");
     }
 
-    // Subcommand dispatch. `voxply-hub migrate` runs migrations and exits
-    // without starting the HTTP server or UDP listener. Useful for CI,
-    // one-off schema upgrades, or running against a prod DB over SSH.
+    // Subcommand dispatch (migrate, backup, restore, rotate-key, update, admin).
+    // These exit before the server starts; `--help` / `--version` / `--doctor`
+    // are handled above before settings are loaded.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
         sqlx::any::install_default_drivers();
@@ -140,8 +300,8 @@ async fn main() -> Result<()> {
     if subcommand.as_deref() == Some("admin") {
         let admin_cmd = std::env::args().nth(2).unwrap_or_default();
         sqlx::any::install_default_drivers();
-        let db_url = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite:hub.db?mode=ro".to_string());
+        let db_url =
+            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:hub.db?mode=ro".to_string());
         let db = AnyPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
@@ -154,12 +314,11 @@ async fn main() -> Result<()> {
                     .fetch_one(&db)
                     .await
                     .unwrap_or(0);
-                let channels: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM channels WHERE is_category=0",
-                )
-                .fetch_one(&db)
-                .await
-                .unwrap_or(0);
+                let channels: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE is_category=0")
+                        .fetch_one(&db)
+                        .await
+                        .unwrap_or(0);
                 let messages: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
                     .fetch_one(&db)
                     .await
@@ -355,9 +514,7 @@ async fn main() -> Result<()> {
                 println!("Restore complete. Restart the hub.");
             }
             _ => {
-                println!(
-                    "Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore]"
-                );
+                println!("Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore]");
             }
         }
         return Ok(());
@@ -365,6 +522,35 @@ async fn main() -> Result<()> {
 
     let http_port = settings.http_port;
     let voice_udp_port = settings.voice_udp_port;
+
+    // ---- Startup summary banner ----
+    let tls_enabled = settings.tls_cert.is_some() && settings.tls_key.is_some();
+    let scheme = if tls_enabled { "https" } else { "http" };
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "?".into());
+
+    tracing::info!(
+        "voxply-hub {} starting  port={} ({scheme})  voice_udp={}  tls={}  cors={}",
+        env!("CARGO_PKG_VERSION"),
+        http_port,
+        voice_udp_port,
+        if tls_enabled { "enabled" } else { "disabled" },
+        settings.cors_origins,
+    );
+    tracing::info!("data files: {cwd}/hub.db  {cwd}/hub_identity.json");
+
+    if !tls_enabled {
+        tracing::warn!(
+            "TLS is disabled — browser clients served over HTTPS cannot connect to an http:// hub \
+             (mixed-content blocked). Set VOXPLY_TLS_CERT and VOXPLY_TLS_KEY or terminate TLS at a reverse proxy."
+        );
+    }
+    tracing::info!(
+        "Reminder: the voice UDP port {} must be open in any cloud firewall / security group — \
+         voice fails silently when the port is blocked.",
+        voice_udp_port
+    );
 
     let (hub_identity, is_new) = Identity::load_or_create(Path::new("hub_identity.json"))?;
     if is_new {
@@ -376,7 +562,9 @@ async fn main() -> Result<()> {
     // Install AnyPool drivers (required before connecting with AnyPool).
     sqlx::any::install_default_drivers();
 
-    let db_url = settings.database_url.as_deref()
+    let db_url = settings
+        .database_url
+        .as_deref()
         .unwrap_or("sqlite:hub.db?mode=rwc");
 
     let write_pool = AnyPoolOptions::new()
@@ -480,7 +668,10 @@ async fn main() -> Result<()> {
             )
         };
 
-    let (chat_tx, _) = broadcast::channel::<(voxply_hub::routes::chat_models::ChatEvent, std::sync::Arc<str>)>(256);
+    let (chat_tx, _) = broadcast::channel::<(
+        voxply_hub::routes::chat_models::ChatEvent,
+        std::sync::Arc<str>,
+    )>(256);
     let (voice_event_tx, _) = broadcast::channel(256);
     let (dm_tx, _) = broadcast::channel(256);
     let (screen_share_tx, _) = broadcast::channel(256);
@@ -545,7 +736,7 @@ async fn main() -> Result<()> {
         voice_udp_port,
         voice_event_tx,
         dm_tx,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx,
         bot_sessions: RwLock::new(HashMap::new()),
@@ -553,14 +744,18 @@ async fn main() -> Result<()> {
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
         voice_zones: RwLock::new(HashMap::new()),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
+        voice_relay_active: RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
 
     // Bind voice UDP socket and start forwarding task
@@ -580,6 +775,18 @@ async fn main() -> Result<()> {
                         map.get(&from_addr).cloned()
                     };
                     if let Some((channel_id, sender_pk)) = lookup {
+                        // Gate: drop the packet if this pubkey no longer has a
+                        // live WS-backed voice session.  This is the enforcement
+                        // point that ties UDP relay lifetime to WS session
+                        // lifetime — leave_voice() removes the entry, so a
+                        // packet arriving after WS disconnect is rejected here
+                        // before any fan-out work is done.
+                        {
+                            let active = voice_state.voice_relay_active.read().await;
+                            if !active.contains(&sender_pk) {
+                                continue;
+                            }
+                        }
                         // Look up the sender's sender_id for this channel.
                         let sender_id: u16 = {
                             let sids = voice_state.voice_sender_ids.read().await;
@@ -698,7 +905,11 @@ async fn main() -> Result<()> {
                 };
 
                 for (session_id, channel_id) in stale {
-                    reaper_state.active_game_sessions.lock().unwrap().remove(&session_id);
+                    reaper_state
+                        .active_game_sessions
+                        .lock()
+                        .unwrap()
+                        .remove(&session_id);
 
                     // Mark in DB.
                     let now_str = now.to_string();
@@ -719,26 +930,42 @@ async fn main() -> Result<()> {
                         reason: Some("timeout".to_string()),
                         result: None,
                     };
-                    let json: std::sync::Arc<str> = std::sync::Arc::from(
-                        serde_json::to_string(&msg).unwrap().as_str(),
-                    );
+                    let json: std::sync::Arc<str> =
+                        std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
                     let _ = reaper_state.chat_tx.send((ev, json));
 
-                    tracing::info!("Game session {} timed out and was reaped", &session_id[..8.min(session_id.len())]);
+                    tracing::info!(
+                        "Game session {} timed out and was reaped",
+                        &session_id[..8.min(session_id.len())]
+                    );
                 }
             }
         });
     }
 
-    let app = server::create_router(state);
+    // Log whether the rate limiter will trust X-Forwarded-For.
+    if settings.trusted_proxy {
+        tracing::info!(
+            "Rate limiter: trusted-proxy mode ENABLED — real client IP derived from \
+             X-Forwarded-For (last entry). Assumes a single reverse proxy in front."
+        );
+    } else {
+        tracing::info!(
+            "Rate limiter: direct mode (socket peer address). \
+             Set VOXPLY_TRUSTED_PROXY=true when a reverse proxy terminates TLS in front."
+        );
+    }
+
+    let app = server::create_router_full(state, &settings.cors_origins, settings.trusted_proxy);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
     if let (Some(cert), Some(key)) = (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {
         let cert_path = PathBuf::from(cert);
         let key_path = PathBuf::from(key);
-        let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-            .await
-            .with_context(|| format!("Failed to load TLS cert/key from {cert:?} / {key:?}"))?;
+        let rustls_config =
+            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+                .await
+                .with_context(|| format!("Failed to load TLS cert/key from {cert:?} / {key:?}"))?;
         tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
         axum_server::bind_rustls(addr, rustls_config)
             .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
@@ -792,7 +1019,9 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
     let current = env!("CARGO_PKG_VERSION");
 
     if latest.is_empty() {
-        anyhow::bail!("GitHub API returned no tag_name — is the repo public and are releases published?");
+        anyhow::bail!(
+            "GitHub API returned no tag_name — is the repo public and are releases published?"
+        );
     }
 
     if latest == current {
@@ -807,8 +1036,8 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let asset_name = self_update_asset_name()
-        .context("Self-update is only supported on Linux x86_64")?;
+    let asset_name =
+        self_update_asset_name().context("Self-update is only supported on Linux x86_64")?;
 
     let assets = release["assets"]
         .as_array()
@@ -833,15 +1062,17 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
         .error_for_status()
         .context("Download returned an error status")?;
 
-    let bytes = response.bytes().await.context("Failed to read download body")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("Failed to read download body")?;
     println!("Downloaded {} bytes.", bytes.len());
 
-    let current_exe = std::env::current_exe()
-        .context("Cannot determine current executable path")?;
+    let current_exe =
+        std::env::current_exe().context("Cannot determine current executable path")?;
 
     let tmp = current_exe.with_file_name(".voxply-hub-update.tmp");
-    std::fs::write(&tmp, &bytes)
-        .with_context(|| format!("Cannot write temp file {tmp:?}"))?;
+    std::fs::write(&tmp, &bytes).with_context(|| format!("Cannot write temp file {tmp:?}"))?;
 
     #[cfg(unix)]
     {
@@ -903,8 +1134,8 @@ fn restore(src_path: &str) -> anyhow::Result<()> {
 /// write it to `hub_rotation.json`, and replace `hub_identity.json` with
 /// the new key. The operator must restart the hub afterwards.
 fn rotate_hub_key(current_path: &Path, _new_path: &Path) -> anyhow::Result<()> {
-    let old_identity = Identity::load(current_path)
-        .context("Failed to load current hub identity")?;
+    let old_identity =
+        Identity::load(current_path).context("Failed to load current hub identity")?;
 
     let new_identity = Identity::generate();
 

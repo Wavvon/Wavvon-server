@@ -10,13 +10,11 @@ use crate::SqliteStore;
 #[async_trait]
 impl SettingsStore for SqliteStore {
     async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT value FROM hub_settings WHERE key = ?",
-        )
-        .bind(key)
-        .fetch_optional(self.pool())
-        .await
-        .map_err(map_err)
+        sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_err)
     }
 
     async fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {

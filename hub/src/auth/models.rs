@@ -45,6 +45,12 @@ pub struct VerifyRequest {
     /// Bot challenge token (required when challenge_mode != 'off').
     #[serde(default)]
     pub challenge_token: Option<String>,
+    /// Hub self-declaration. When true the caller is a peer hub authenticating
+    /// for federation delivery.  The hub is auto-registered in the `peers`
+    /// table and does NOT receive human role assignments.  The token is tagged
+    /// so that `PeerHub` can distinguish it from regular user sessions.
+    #[serde(default)]
+    pub is_hub: Option<bool>,
     /// External bot self-declaration. When true, the hub expects a
     /// pre-existing `users` row with approval_status='bot_pending'.
     #[serde(default)]

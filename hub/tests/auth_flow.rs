@@ -1,10 +1,10 @@
-
 use serde_json::json;
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::routes::me::MeResponse;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn full_auth_flow() {
@@ -39,10 +39,7 @@ async fn full_auth_flow() {
     assert!(!verify.token.is_empty());
 
     // 4. Use token to access /me
-    let resp = server
-        .get("/me")
-        .authorization_bearer(&verify.token)
-        .await;
+    let resp = server.get("/me").authorization_bearer(&verify.token).await;
     resp.assert_status_ok();
     let me: MeResponse = resp.json();
     assert_eq!(me.public_key, pub_key);
@@ -76,10 +73,7 @@ async fn pending_members_are_blocked_until_approved() {
     let newbie_token = common::authenticate(&server, &newbie).await;
 
     // Can see their own status
-    let resp = server
-        .get("/me")
-        .authorization_bearer(&newbie_token)
-        .await;
+    let resp = server.get("/me").authorization_bearer(&newbie_token).await;
     resp.assert_status_ok();
     let me: MeResponse = resp.json();
     assert_eq!(me.approval_status, "pending");

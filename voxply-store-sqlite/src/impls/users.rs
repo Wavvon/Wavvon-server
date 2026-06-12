@@ -125,14 +125,13 @@ impl UserStore for SqliteStore {
     ) -> Result<HashMap<String, Option<String>>, StoreError> {
         let mut map = HashMap::new();
         for pk in pubkeys {
-            let name: Option<String> = sqlx::query_scalar(
-                "SELECT display_name FROM users WHERE public_key = ?",
-            )
-            .bind(pk)
-            .fetch_optional(self.pool())
-            .await
-            .map_err(map_err)?
-            .flatten();
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+                    .bind(pk)
+                    .fetch_optional(self.pool())
+                    .await
+                    .map_err(map_err)?
+                    .flatten();
             map.insert(pk.clone(), name);
         }
         Ok(map)
@@ -154,15 +153,13 @@ impl UserStore for SqliteStore {
         status: &str,
         entered_at: Option<i64>,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "UPDATE users SET lobby_status = ?, lobby_entered_at = ? WHERE public_key = ?",
-        )
-        .bind(status)
-        .bind(entered_at)
-        .bind(pubkey)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("UPDATE users SET lobby_status = ?, lobby_entered_at = ? WHERE public_key = ?")
+            .bind(status)
+            .bind(entered_at)
+            .bind(pubkey)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -30,33 +30,53 @@ pub struct PreviewQuery {
     pub url: String,
 }
 
-/// Returns true if the IP address falls within a private/loopback range.
+/// Returns true if the IP address falls within a private/loopback/link-local range.
+/// Covers IPv4 private ranges, IPv6 unique-local (fc00::/7), IPv6 link-local
+/// (fe80::/10), and IPv4-mapped IPv6 (::ffff:x.x.x.x treated as their embedded v4).
 fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            let octets = v4.octets();
-            // 127.0.0.0/8
-            octets[0] == 127
-            // 10.0.0.0/8
-            || octets[0] == 10
-            // 172.16.0.0/12
-            || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
-            // 192.168.0.0/16
-            || (octets[0] == 192 && octets[1] == 168)
-            // 169.254.0.0/16 (link-local)
-            || (octets[0] == 169 && octets[1] == 254)
-        }
+        IpAddr::V4(v4) => is_private_v4(v4),
         IpAddr::V6(v6) => {
             // ::1 loopback
-            v6.is_loopback()
+            if v6.is_loopback() {
+                return true;
+            }
+            // IPv4-mapped: ::ffff:x.x.x.x — validate the embedded v4 address
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_v4(v4);
+            }
+            let segs = v6.segments();
+            // fc00::/7 — unique local (fc00:: through fdff::)
+            if segs[0] & 0xfe00 == 0xfc00 {
+                return true;
+            }
+            // fe80::/10 — link local
+            if segs[0] & 0xffc0 == 0xfe80 {
+                return true;
+            }
+            false
         }
     }
 }
 
-/// Perform SSRF-safe DNS resolution. Returns Err with "ssrf_blocked" if any
-/// resolved address is in a private range, or Err with "dns_failed" if
-/// resolution fails entirely.
-fn check_ssrf(host: &str, port: u16) -> Result<(), &'static str> {
+fn is_private_v4(v4: Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    // 127.0.0.0/8 loopback
+    octets[0] == 127
+    // 10.0.0.0/8
+    || octets[0] == 10
+    // 172.16.0.0/12
+    || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
+    // 192.168.0.0/16
+    || (octets[0] == 192 && octets[1] == 168)
+    // 169.254.0.0/16 (link-local)
+    || (octets[0] == 169 && octets[1] == 254)
+}
+
+/// Perform SSRF-safe DNS resolution. Returns the list of validated SocketAddrs
+/// (all checked to be non-private) so the caller can connect to a specific one,
+/// preventing DNS-rebinding between the check and the connection.
+fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>, &'static str> {
     let addr_str = format!("{host}:{port}");
     let addrs: Vec<SocketAddr> = addr_str
         .to_socket_addrs()
@@ -73,7 +93,7 @@ fn check_ssrf(host: &str, port: u16) -> Result<(), &'static str> {
         }
     }
 
-    Ok(())
+    Ok(addrs)
 }
 
 /// Extract OG/meta tags and title from raw HTML bytes.
@@ -166,7 +186,7 @@ fn get_attr(tag: &str, attr: &str) -> Option<String> {
 
     // Try attr="value" and attr='value'
     for quote in &['"', '\''] {
-        let pattern = format!("{}={}",  lower_attr, quote);
+        let pattern = format!("{}={}", lower_attr, quote);
         if let Some(idx) = lower_tag.find(&pattern) {
             let value_start = idx + pattern.len();
             if value_start < tag.len() {
@@ -192,11 +212,48 @@ fn html_decode(s: &str) -> String {
         .replace("&apos;", "'")
 }
 
+/// Per-user burst cap for preview fetches.
+/// 10 requests per 60-second window is generous for normal link-unfurl UX
+/// while bounding the outbound-fetch fan-out a single user can cause.
+const PREVIEW_RATE_LIMIT: u32 = 10;
+const PREVIEW_RATE_WINDOW_SECS: u64 = 60;
+
 pub async fn get_preview(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Query(params): Query<PreviewQuery>,
 ) -> Result<Json<LinkPreview>, (StatusCode, String)> {
+    // Per-user rate limit: 10 preview fetches per 60 seconds.
+    // Cache hits are counted too — they're cheap, but the outer window
+    // keeps one user from monopolising the endpoint.
+    {
+        let mut map = state
+            .rate_limiters
+            .preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(PREVIEW_RATE_WINDOW_SECS);
+
+        // Opportunistic eviction (same pattern as the messages limiter).
+        const EVICTION_THRESHOLD: usize = 5_000;
+        if map.len() >= EVICTION_THRESHOLD {
+            map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
+        }
+
+        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        if now.duration_since(entry.1) > window {
+            *entry = (0, now);
+        }
+        if entry.0 >= PREVIEW_RATE_LIMIT {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "preview_rate_limited".to_string(),
+            ));
+        }
+        entry.0 += 1;
+    }
+
     let url_str = params.url.trim().to_string();
 
     // Validate scheme
@@ -217,7 +274,7 @@ pub async fn get_preview(
     };
 
     let authority_end = after_scheme
-        .find(|c| c == '/' || c == '?' || c == '#')
+        .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let authority = &after_scheme[..authority_end];
 
@@ -230,7 +287,9 @@ pub async fn get_preview(
         // IPv6 literal
         let bracket_end = authority.find(']').unwrap_or(authority.len());
         let host_part = &authority[1..bracket_end];
-        let port_part = authority.get(bracket_end + 2..).and_then(|p| p.parse::<u16>().ok());
+        let port_part = authority
+            .get(bracket_end + 2..)
+            .and_then(|p| p.parse::<u16>().ok());
         let default_port = if is_https { 443u16 } else { 80u16 };
         (host_part.to_string(), port_part.unwrap_or(default_port))
     } else if let Some(colon) = authority.rfind(':') {
@@ -251,13 +310,18 @@ pub async fn get_preview(
         return Err((StatusCode::BAD_REQUEST, "ssrf_blocked".to_string()));
     }
 
-    // SSRF check — DNS resolve before fetching
-    check_ssrf(&host, port)
+    // SSRF check — DNS resolve once, validate all IPs, keep the result.
+    // We then pin reqwest to one of the validated addresses so a second DNS
+    // lookup at connection time cannot return a different (private) IP.
+    let validated_addrs = resolve_and_check_ssrf(&host, port)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Check cache
     {
-        let cache = state.preview_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let cache = state
+            .preview_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some((cached, inserted_at)) = cache.get(&url_str) {
             if inserted_at.elapsed().as_secs() < CACHE_TTL_SECS {
                 return Ok(Json(cached.clone()));
@@ -265,11 +329,24 @@ pub async fn get_preview(
         }
     }
 
-    // Fetch with timeout
-    let resp = state
-        .http_client
-        .get(&url_str)
+    // Build a one-shot client that is pinned to the first validated address.
+    // This prevents DNS-rebinding: the hostname in the URL resolves to the
+    // address we already validated, not whatever the DNS says at connect time.
+    let pinned_addr = validated_addrs[0];
+    let pinned_client = reqwest::Client::builder()
+        .resolve(&host, pinned_addr)
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("client_build_error: {e}"),
+            )
+        })?;
+
+    // Fetch with timeout
+    let resp = pinned_client
+        .get(&url_str)
         .header("User-Agent", "Mozilla/5.0 Voxply-Hub LinkPreview/1.0")
         .send()
         .await
@@ -305,7 +382,10 @@ pub async fn get_preview(
 
     // Store in cache
     {
-        let mut cache = state.preview_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = state
+            .preview_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         cache.insert(url_str, (preview.clone(), Instant::now()));
     }
 

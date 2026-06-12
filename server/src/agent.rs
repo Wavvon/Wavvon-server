@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::hub_manager::HubManager;
@@ -10,7 +10,8 @@ pub async fn run(cfg: &Settings, manager: Arc<HubManager>) -> Result<()> {
     let ws_url = build_ws_url(&cfg.farm_url, &cfg.server_token);
     tracing::info!(url = %ws_url, "Connecting to farm");
 
-    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
         .context("WebSocket connect failed")?;
 
     let (mut write, mut read) = ws_stream.split();
@@ -18,18 +19,34 @@ pub async fn run(cfg: &Settings, manager: Arc<HubManager>) -> Result<()> {
     let hello = serde_json::json!({"type": "hello", "version": "0.1.0"});
     write.send(Message::Text(hello.to_string().into())).await?;
 
-    while let Some(msg) = read.next().await {
-        let msg = msg?;
-        match msg {
-            Message::Text(text) => {
-                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(reply) = handle_message(&val, &manager, cfg).await {
-                        write.send(Message::Text(reply.into())).await?;
+    while let Some(raw) = read.next().await {
+        match raw {
+            Err(e) => {
+                // Transport error (not a close frame) — log and terminate so
+                // the outer reconnect loop can re-establish the connection.
+                tracing::warn!(error = %e, "Agent WS transport error");
+                break;
+            }
+            Ok(msg) => match msg {
+                Message::Text(text) => {
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(val) => {
+                            if let Some(reply) = handle_message(&val, &manager, cfg).await {
+                                if let Err(e) = write.send(Message::Text(reply.into())).await {
+                                    tracing::warn!(error = %e, "Agent WS send error");
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Malformed JSON from the farm — log and continue; do not crash.
+                            tracing::warn!(error = %e, "Agent WS: received non-JSON message, skipping");
+                        }
                     }
                 }
-            }
-            Message::Close(_) => break,
-            _ => {}
+                Message::Close(_) => break,
+                _ => {}
+            },
         }
     }
 
@@ -51,8 +68,14 @@ async fn handle_message(
             let hub_id = msg.get("hub_id")?.as_str()?.to_string();
             let db_path = msg.get("db_path")?.as_str()?.to_string();
             let port = msg.get("port")?.as_u64()? as u16;
-            let owner_pubkey = msg.get("owner_pubkey").and_then(|v| v.as_str()).map(str::to_string);
-            let farm_url = msg.get("farm_url").and_then(|v| v.as_str()).map(str::to_string);
+            let owner_pubkey = msg
+                .get("owner_pubkey")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let farm_url = msg
+                .get("farm_url")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
 
             match manager.spawn_hub(
                 &hub_id,

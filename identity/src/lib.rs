@@ -13,15 +13,15 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use x25519_dalek;
-
 pub use ecies::{unwrap_blob_key, wrap_blob_key};
 pub use master::MasterIdentity;
 pub use pow::{compute_security_level, leading_zero_bits, verify_security_level};
 pub use subkey::DeviceSubkey;
 pub use wire::{
-    DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer, PairingStatus,
-    PublicHubEntry, PublicHubProfile, RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    dm_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
+    group_dm_envelope_signing_bytes, sender_key_dist_signing_bytes, DhKeyRecord, HomeHubList,
+    PairingClaim, PairingComplete, PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile,
+    RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 pub struct Identity {
@@ -133,9 +133,9 @@ impl Identity {
     /// Uses the standard ed25519→x25519 conversion:
     /// SHA-512(seed)[0..32] → clamp → X25519 scalar.
     pub fn dh_keypair(&self) -> (x25519_dalek::StaticSecret, x25519_dalek::PublicKey) {
-        use sha2::{Sha512, Digest};
+        use sha2::{Digest, Sha512};
         let seed = self.signing_key.to_bytes();
-        let hash = Sha512::digest(&seed);
+        let hash = Sha512::digest(seed);
         let mut scalar = [0u8; 32];
         scalar.copy_from_slice(&hash[..32]);
         // X25519 clamping
@@ -154,13 +154,16 @@ impl fmt::Display for Identity {
     }
 }
 
-pub fn verify_signature(public_key_hex: &str, message: &[u8], signature_bytes: &[u8]) -> Result<()> {
+pub fn verify_signature(
+    public_key_hex: &str,
+    message: &[u8],
+    signature_bytes: &[u8],
+) -> Result<()> {
     let pub_bytes = hex::decode(public_key_hex).context("Invalid public key hex")?;
     let pub_array: [u8; 32] = pub_bytes
         .try_into()
         .map_err(|_| anyhow::anyhow!("Public key must be 32 bytes"))?;
-    let verifying_key =
-        VerifyingKey::from_bytes(&pub_array).context("Invalid public key bytes")?;
+    let verifying_key = VerifyingKey::from_bytes(&pub_array).context("Invalid public key bytes")?;
 
     let sig_array: [u8; 64] = signature_bytes
         .try_into()
@@ -278,7 +281,10 @@ mod tests {
         let phrase = identity.recovery_phrase();
         let m_from_phrase = MasterIdentity::derive_from_phrase(&phrase).unwrap();
         let m_from_identity = identity.master().unwrap();
-        assert_eq!(m_from_phrase.public_key_hex(), m_from_identity.public_key_hex());
+        assert_eq!(
+            m_from_phrase.public_key_hex(),
+            m_from_identity.public_key_hex()
+        );
     }
 
     #[test]
@@ -288,11 +294,7 @@ mod tests {
         let message = b"phase 1 wiring";
         let signature = master.sign(message);
 
-        let result = verify_signature(
-            &master.public_key_hex(),
-            message,
-            &signature.to_bytes(),
-        );
+        let result = verify_signature(&master.public_key_hex(), message, &signature.to_bytes());
         assert!(result.is_ok());
     }
 
@@ -342,14 +344,23 @@ mod tests {
         let identity = Identity::generate();
         let master = identity.master().unwrap();
         let master_pubkey = master.public_key_hex();
-        let hubs = vec!["https://a.example".to_string(), "https://b.example".to_string()];
+        let hubs = vec![
+            "https://a.example".to_string(),
+            "https://b.example".to_string(),
+        ];
         let issued_at = 1_700_000_000;
         let sequence = 1;
 
         let bytes = HomeHubList::signing_bytes(&master_pubkey, &hubs, issued_at, sequence);
         let signature = hex::encode(master.sign(&bytes).to_bytes());
 
-        let entry = HomeHubList { master_pubkey, hubs, issued_at, sequence, signature };
+        let entry = HomeHubList {
+            master_pubkey,
+            hubs,
+            issued_at,
+            sequence,
+            signature,
+        };
         assert!(entry.verify().is_ok());
     }
 
@@ -363,7 +374,13 @@ mod tests {
         let bytes = HomeHubList::signing_bytes(&master_pubkey, &hubs, 1, 1);
         let signature = hex::encode(master.sign(&bytes).to_bytes());
 
-        let mut entry = HomeHubList { master_pubkey, hubs, issued_at: 1, sequence: 1, signature };
+        let mut entry = HomeHubList {
+            master_pubkey,
+            hubs,
+            issued_at: 1,
+            sequence: 1,
+            signature,
+        };
         entry.hubs.push("https://attacker.example".to_string());
         assert!(entry.verify().is_err());
     }

@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::{MessageRow, NewMessage};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait MessageStore: Send + Sync {
@@ -28,13 +28,11 @@ pub trait MessageStore: Send + Sync {
     ) -> Result<Vec<MessageRow>, StoreError>;
 
     /// Fetch messages by a list of IDs (used after full-text search).
-    async fn messages_by_ids(
-        &self,
-        ids: &[String],
-    ) -> Result<Vec<MessageRow>, StoreError>;
+    async fn messages_by_ids(&self, ids: &[String]) -> Result<Vec<MessageRow>, StoreError>;
 
     /// Update content and edited_at.
-    async fn edit_message(&self, id: &str, content: &str, edited_at: i64) -> Result<(), StoreError>;
+    async fn edit_message(&self, id: &str, content: &str, edited_at: i64)
+        -> Result<(), StoreError>;
 
     /// Delete a message.
     async fn delete_message(&self, id: &str) -> Result<(), StoreError>;
@@ -92,5 +90,8 @@ pub trait MessageStore: Send + Sync {
     async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<(), StoreError>;
 
     /// List all pins for a channel.
-    async fn list_pins(&self, channel_id: &str) -> Result<Vec<crate::row_types::PinRow>, StoreError>;
+    async fn list_pins(
+        &self,
+        channel_id: &str,
+    ) -> Result<Vec<crate::row_types::PinRow>, StoreError>;
 }

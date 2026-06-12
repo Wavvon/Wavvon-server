@@ -1,0 +1,824 @@
+use std::sync::Arc;
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::Json;
+use uuid::Uuid;
+
+use crate::auth::middleware::{AuthUser, PeerHub};
+use crate::routes::chat_models::MAX_ATTACHMENTS_BYTES;
+use crate::routes::dm_models::*;
+use crate::state::{AppState, DmEvent};
+
+use super::keys::{envelope_signing_bytes, group_envelope_signing_bytes};
+use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
+
+pub async fn send_dm(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<SendDmRequest>,
+) -> Result<(StatusCode, Json<DmMessageResponse>), (StatusCode, String)> {
+    let members = load_members(&state, &conversation_id).await?;
+    if !members.iter().any(|m| m.public_key == user.public_key) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Not a member of this conversation".to_string(),
+        ));
+    }
+
+    // Federated-ban check: a federally banned user must not be able to send DMs
+    // even when they hold an active session token obtained before the ban.
+    if crate::routes::moderation::is_federated_banned(&state.db, &user.public_key).await? {
+        return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+    }
+
+    // 30 messages per 60 seconds per user
+    {
+        let mut map = state
+            .rate_limiters
+            .messages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        if now.duration_since(entry.1) > std::time::Duration::from_secs(60) {
+            *entry = (0, now);
+        }
+        if entry.0 >= 30 {
+            return Err((StatusCode::TOO_MANY_REQUESTS, "rate_limited".to_string()));
+        }
+        entry.0 += 1;
+    }
+
+    // Block check: if any recipient has blocked the sender, return a success-shaped
+    // response (200 OK with a placeholder) so the sender cannot detect the block.
+    for m in &members {
+        if m.public_key == user.public_key {
+            continue;
+        }
+        if crate::routes::identity::is_dm_blocked(&state.db, &m.public_key, &user.public_key).await
+        {
+            // Return success-shaped 200; nothing is stored or broadcast.
+            let now = crate::auth::handlers::unix_timestamp();
+            return Ok((
+                StatusCode::CREATED,
+                Json(DmMessageResponse {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    conversation_id,
+                    sender: user.public_key,
+                    sender_name: None,
+                    content: req.content,
+                    created_at: now,
+                    attachments: req.attachments,
+                    delivery_failed: false,
+                    is_encrypted: false,
+                    encrypted_envelope: None,
+                    group_encrypted_envelope: None,
+                }),
+            ));
+        }
+    }
+
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+        .bind(&conversation_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .ok_or((StatusCode::NOT_FOUND, "Conversation not found".to_string()))?;
+
+    // Validate: exactly one of content, encrypted_envelope, or group_encrypted_envelope
+    // must be provided.
+    let present = [
+        req.content.is_some(),
+        req.encrypted_envelope.is_some(),
+        req.group_encrypted_envelope.is_some(),
+    ]
+    .iter()
+    .filter(|&&v| v)
+    .count();
+    if present == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "One of content, encrypted_envelope, or group_encrypted_envelope is required"
+                .to_string(),
+        ));
+    }
+    if present > 1 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Provide exactly one of content, encrypted_envelope, or group_encrypted_envelope"
+                .to_string(),
+        ));
+    }
+
+    let is_encrypted = req.encrypted_envelope.is_some();
+    let is_group_encrypted = req.group_encrypted_envelope.is_some();
+
+    if is_encrypted && conv_type != "dm" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "E2E encryption is only supported for 1:1 DMs".to_string(),
+        ));
+    }
+    if is_group_encrypted && conv_type != "group" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Group E2E encryption is only supported for group conversations".to_string(),
+        ));
+    }
+
+    // Same per-message attachment cap as channel messages.
+    let attach_total: usize = req.attachments.iter().map(|a| a.data_b64.len()).sum();
+    if attach_total > MAX_ATTACHMENTS_BYTES {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Attachments exceed {}MB cap",
+                MAX_ATTACHMENTS_BYTES / 1024 / 1024
+            ),
+        ));
+    }
+
+    if is_encrypted {
+        let env = req.encrypted_envelope.as_ref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "encrypted_envelope missing".to_string(),
+        ))?;
+        // Verify the Ed25519 signature over the envelope fields.
+        let msg = envelope_signing_bytes(env);
+        let sig_bytes = hex::decode(&env.signature_hex)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
+        voxply_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid envelope signature: {e}"),
+            )
+        })?;
+    }
+
+    if is_group_encrypted {
+        let env = req.group_encrypted_envelope.as_ref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "group_encrypted_envelope missing".to_string(),
+        ))?;
+        let msg = group_envelope_signing_bytes(
+            &env.conv_id,
+            env.sender_key_version,
+            env.iteration,
+            &env.ciphertext_hex,
+            &env.nonce_hex,
+        );
+        let sig_bytes = hex::decode(&env.signature_hex).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Bad group envelope signature hex: {e}"),
+            )
+        })?;
+        voxply_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid group envelope signature: {e}"),
+            )
+        })?;
+    }
+
+    let attachments_json = if req.attachments.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(&req.attachments)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?,
+        )
+    };
+
+    let message_id = Uuid::new_v4().to_string();
+    let now = crate::auth::handlers::unix_timestamp();
+
+    if is_encrypted {
+        let env = req.encrypted_envelope.as_ref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "encrypted_envelope missing".to_string(),
+        ))?;
+        let ciphertext_json = serde_json::to_string(env).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Encode envelope: {e}"),
+            )
+        })?;
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
+             VALUES (?, ?, ?, NULL, ?, NULL, ?, 1, ?, 0)",
+        )
+        .bind(&message_id)
+        .bind(&conversation_id)
+        .bind(&user.public_key)
+        .bind(&attachments_json)
+        .bind(now)
+        .bind(&ciphertext_json)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    } else if is_group_encrypted {
+        let env = req.group_encrypted_envelope.as_ref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "group_encrypted_envelope missing".to_string(),
+        ))?;
+        let ciphertext_json = serde_json::to_string(env).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Encode group envelope: {e}"),
+            )
+        })?;
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
+             VALUES (?, ?, ?, NULL, ?, NULL, ?, 0, ?, 1)",
+        )
+        .bind(&message_id)
+        .bind(&conversation_id)
+        .bind(&user.public_key)
+        .bind(&attachments_json)
+        .bind(now)
+        .bind(&ciphertext_json)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    } else {
+        let content = req.content.as_deref().unwrap_or("");
+
+        // If the client supplied a plaintext signature, verify it now (before
+        // storage) so we don't persist a message with a bad signature that would
+        // be rejected by receiving hubs during federation.
+        let plaintext_sig_hex: Option<String> = if let Some(ref sig_hex) = req.plaintext_signature {
+            let signing_bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+                &conversation_id,
+                &conv_type,
+                content,
+            );
+            let sig_bytes = hex::decode(sig_hex).map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Bad plaintext_signature hex: {e}"),
+                )
+            })?;
+            voxply_identity::verify_signature(&user.public_key, &signing_bytes, &sig_bytes)
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid plaintext_signature: {e}"),
+                    )
+                })?;
+            Some(sig_hex.clone())
+        } else {
+            None
+        };
+
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)",
+        )
+        .bind(&message_id)
+        .bind(&conversation_id)
+        .bind(&user.public_key)
+        .bind(content)
+        .bind(&attachments_json)
+        .bind(&plaintext_sig_hex)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    // Broadcast to local WS subscribers (other members on this same hub).
+    let sender_name: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            .bind(&user.public_key)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .flatten();
+
+    // For encrypted messages, broadcast a placeholder so WS subscribers get
+    // notified and know to re-fetch the full envelope via the HTTP API.
+    let ws_content = if is_encrypted || is_group_encrypted {
+        "[encrypted]".to_string()
+    } else {
+        req.content.clone().unwrap_or_default()
+    };
+
+    let _ = state.dm_tx.send(DmEvent::Message {
+        conversation_id: conversation_id.clone(),
+        sender: user.public_key.clone(),
+        sender_name: sender_name.clone(),
+        content: ws_content,
+        timestamp: now,
+    });
+
+    // Federate to each remote member's delivery hub.
+    // Phase 5: if the member has a HomeHubList designation stored here, deliver
+    // to every URL in that list (one outbox row per URL). Otherwise fall back to
+    // the single hub_url recorded in conversation_members.
+    let member_keys: Vec<String> = members.iter().map(|m| m.public_key.clone()).collect();
+    for m in &members {
+        if m.public_key == user.public_key {
+            continue;
+        }
+
+        // Resolve delivery URLs via the home-hub designation when available.
+        let delivery_urls: Vec<String> = {
+            // Step 1: look up master_pubkey for this member.
+            let master_pubkey: Option<String> =
+                sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+                    .bind(&m.public_key)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                    .flatten();
+
+            // Step 2: if a master is known, try the designation table.
+            let designation_urls: Option<Vec<String>> = if let Some(ref mpk) = master_pubkey {
+                let hubs_json: Option<String> = sqlx::query_scalar(
+                    "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = ?",
+                )
+                .bind(mpk)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+                hubs_json.and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+            } else {
+                None
+            };
+
+            // Step 3: use the designation list, or fall back to the stored hub_url.
+            match designation_urls {
+                Some(urls) if !urls.is_empty() => urls,
+                _ => match &m.hub_url {
+                    Some(url) => vec![url.clone()],
+                    None => continue,
+                },
+            }
+        };
+
+        let envelope = FederatedDmRequest {
+            message_id: message_id.clone(),
+            conversation_id: conversation_id.clone(),
+            conv_type: conv_type.clone(),
+            sender: user.public_key.clone(),
+            members: member_keys.clone(),
+            content: req.content.clone(),
+            attachments: req.attachments.clone(),
+            // Forward the sender's plaintext signature so receiving hubs can
+            // verify it against the `sender` pubkey.  Encrypted-envelope DMs
+            // carry their own per-envelope signature and don't need this field.
+            signature: req.plaintext_signature.clone(),
+            created_at: now,
+            encrypted_envelope: req.encrypted_envelope.clone(),
+            group_encrypted_envelope: req.group_encrypted_envelope.clone(),
+            sender_hub_url: None,
+        };
+
+        for hub_url in &delivery_urls {
+            sqlx::query(
+                "INSERT INTO dm_outbox
+                 (message_id, recipient_hub_url, attempts, next_attempt_at)
+                 VALUES (?, ?, 0, ?) ON CONFLICT (message_id, recipient_hub_url) DO NOTHING",
+            )
+            .bind(&message_id)
+            .bind(hub_url)
+            .bind(now)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+            match deliver_federated_dm(&state, hub_url, &envelope).await {
+                Ok(()) => {
+                    let _ = sqlx::query(
+                        "DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?",
+                    )
+                    .bind(&message_id)
+                    .bind(hub_url)
+                    .execute(&state.db)
+                    .await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "DM {} to {} failed immediately, leaving in outbox for retry: {e}",
+                        &message_id[..8],
+                        hub_url
+                    );
+                    let _ = sqlx::query(
+                        "UPDATE dm_outbox SET attempts = 1, next_attempt_at = ?, last_error = ?
+                         WHERE message_id = ? AND recipient_hub_url = ?",
+                    )
+                    .bind(now + 10)
+                    .bind(&e)
+                    .bind(&message_id)
+                    .bind(hub_url)
+                    .execute(&state.db)
+                    .await;
+                }
+            }
+        }
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(DmMessageResponse {
+            id: message_id,
+            conversation_id,
+            sender: user.public_key,
+            sender_name,
+            content: req.content,
+            created_at: now,
+            attachments: req.attachments,
+            delivery_failed: false,
+            is_encrypted,
+            encrypted_envelope: req.encrypted_envelope,
+            group_encrypted_envelope: req.group_encrypted_envelope,
+        }),
+    ))
+}
+
+pub async fn list_dm_messages(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, String)> {
+    let is_member: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ? AND public_key = ?",
+    )
+    .bind(&conversation_id)
+    .bind(&user.public_key)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if is_member == 0 {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Not a member of this conversation".to_string(),
+        ));
+    }
+
+    let rows = sqlx::query_as::<_, DmMessageRow>(
+        "SELECT m.id, m.conversation_id, m.sender, u.display_name as sender_name,
+                m.content, m.attachments, m.created_at,
+                COALESCE(m.is_encrypted, 0) AS is_encrypted,
+                m.ciphertext_json,
+                COALESCE(m.is_group_encrypted, 0) AS is_group_encrypted,
+                EXISTS (
+                    SELECT 1 FROM dm_outbox o
+                    WHERE o.message_id = m.id AND o.bounced_at IS NOT NULL
+                ) AS delivery_failed
+         FROM dm_messages m
+         LEFT JOIN users u ON u.public_key = m.sender
+         WHERE m.conversation_id = ?
+         ORDER BY m.created_at ASC",
+    )
+    .bind(&conversation_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let mut responses = Vec::with_capacity(rows.len());
+    for r in rows {
+        let is_enc = r.is_encrypted != 0;
+        let is_group_enc = r.is_group_encrypted != 0;
+        let encrypted_envelope = if is_enc {
+            r.ciphertext_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<EncryptedDmEnvelope>(s).ok())
+        } else {
+            None
+        };
+        let group_encrypted_envelope = if is_group_enc {
+            r.ciphertext_json
+                .as_deref()
+                .and_then(|s| serde_json::from_str::<GroupEncryptedEnvelope>(s).ok())
+        } else {
+            None
+        };
+        responses.push(DmMessageResponse {
+            id: r.id,
+            conversation_id: r.conversation_id,
+            sender: r.sender,
+            sender_name: r.sender_name,
+            content: r.content,
+            created_at: r.created_at,
+            attachments: parse_dm_attachments(r.attachments),
+            delivery_failed: r.delivery_failed != 0,
+            is_encrypted: is_enc,
+            encrypted_envelope,
+            group_encrypted_envelope,
+        });
+    }
+
+    Ok(Json(responses))
+}
+
+/// Hub-to-hub DM delivery endpoint.
+///
+/// Two-layer verification:
+/// 1. `PeerHub` extractor (defense-in-depth): requires the bearer token to
+///    belong to a key in the `peers` table.  This filters out most unauthorized
+///    callers but is NOT the security boundary for sender-identity claims,
+///    because `peers` rows can be inserted via the self-asserted `is_hub=true`
+///    path in `/auth/verify`.
+/// 2. Sender signature (the real boundary): for plaintext DMs, `req.signature`
+///    must be a valid Ed25519 signature by `req.sender` over the canonical
+///    signing bytes for the message.  An attacker who sets `sender=victim` but
+///    does not hold victim's private key cannot produce a valid signature and
+///    will be rejected with 401.  Encrypted-envelope DMs are authenticated by
+///    their own per-envelope signatures (already verified here).
+pub async fn receive_federated_dm(
+    State(state): State<Arc<AppState>>,
+    _peer: PeerHub,
+    Json(req): Json<FederatedDmRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let now = crate::auth::handlers::unix_timestamp();
+
+    // Idempotent: if we've already stored this message, succeed without double-broadcast.
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM dm_messages WHERE id = ?")
+        .bind(&req.message_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if exists.is_some() {
+        return Ok(StatusCode::OK);
+    }
+
+    // Block check for federated inbound DM: if any local recipient has blocked the sender,
+    // return 200 (success-shaped) so the sending hub cannot detect the block.
+    for member_key in &req.members {
+        if member_key == &req.sender {
+            continue;
+        }
+        if crate::routes::identity::is_dm_blocked(&state.db, member_key, &req.sender).await {
+            return Ok(StatusCode::OK);
+        }
+    }
+
+    // Auto-create the conversation on this hub if this is the first time we've seen it.
+    let conv_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM conversations WHERE id = ?")
+            .bind(&req.conversation_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if conv_exists.is_none() {
+        sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES (?, ?, ?)")
+            .bind(&req.conversation_id)
+            .bind(&req.conv_type)
+            .bind(req.created_at)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        for member in &req.members {
+            ensure_user_stub(&state.db, member, req.created_at).await?;
+            sqlx::query(
+                "INSERT INTO conversation_members
+                 (conversation_id, public_key, joined_at, hub_url) VALUES (?, ?, ?, NULL)
+                 ON CONFLICT (conversation_id, public_key) DO NOTHING",
+            )
+            .bind(&req.conversation_id)
+            .bind(member)
+            .bind(req.created_at)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        }
+    }
+
+    ensure_user_stub(&state.db, &req.sender, req.created_at).await?;
+
+    let attachments_json = if req.attachments.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&req.attachments).ok()
+    };
+
+    let is_encrypted = req.encrypted_envelope.is_some();
+    let is_group_encrypted = req.group_encrypted_envelope.is_some();
+
+    if is_encrypted {
+        let env = req.encrypted_envelope.as_ref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "encrypted_envelope missing".to_string(),
+        ))?;
+        // Verify the signature before storing.
+        let msg = envelope_signing_bytes(env);
+        let sig_bytes = hex::decode(&env.signature_hex)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
+        voxply_identity::verify_signature(&req.sender, &msg, &sig_bytes).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid envelope signature: {e}"),
+            )
+        })?;
+
+        let ciphertext_json = serde_json::to_string(env)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, 1, ?, 0)",
+        )
+        .bind(&req.message_id)
+        .bind(&req.conversation_id)
+        .bind(&req.sender)
+        .bind(&attachments_json)
+        .bind(&req.signature)
+        .bind(req.created_at)
+        .bind(&ciphertext_json)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    } else if is_group_encrypted {
+        let env = req.group_encrypted_envelope.as_ref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "group_encrypted_envelope missing".to_string(),
+        ))?;
+        let msg = group_envelope_signing_bytes(
+            &env.conv_id,
+            env.sender_key_version,
+            env.iteration,
+            &env.ciphertext_hex,
+            &env.nonce_hex,
+        );
+        let sig_bytes = hex::decode(&env.signature_hex).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Bad group envelope signature hex: {e}"),
+            )
+        })?;
+        voxply_identity::verify_signature(&req.sender, &msg, &sig_bytes).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid group envelope signature: {e}"),
+            )
+        })?;
+
+        let ciphertext_json = serde_json::to_string(env)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, 0, ?, 1)",
+        )
+        .bind(&req.message_id)
+        .bind(&req.conversation_id)
+        .bind(&req.sender)
+        .bind(&attachments_json)
+        .bind(&req.signature)
+        .bind(req.created_at)
+        .bind(&ciphertext_json)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    } else {
+        let content = req.content.as_deref().unwrap_or("");
+
+        // Require the sender to have signed the plaintext payload.
+        // This is the cryptographic proof that the `sender` field is authentic:
+        // an attacker setting sender=victim cannot produce victim's signature.
+        // This check holds regardless of how the caller passed the PeerHub
+        // extractor (including via the self-asserted is_hub=true path).
+        let sig_hex = req.signature.as_deref().ok_or((
+            StatusCode::BAD_REQUEST,
+            "plaintext federated DM requires a sender signature".to_string(),
+        ))?;
+        let signing_bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+            &req.conversation_id,
+            &req.conv_type,
+            content,
+        );
+        let sig_bytes = hex::decode(sig_hex)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
+        voxply_identity::verify_signature(&req.sender, &signing_bytes, &sig_bytes).map_err(
+            |e| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    format!("Sender signature verification failed: {e}"),
+                )
+            },
+        )?;
+
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)",
+        )
+        .bind(&req.message_id)
+        .bind(&req.conversation_id)
+        .bind(&req.sender)
+        .bind(content)
+        .bind(&attachments_json)
+        .bind(&req.signature)
+        .bind(req.created_at)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    // Broadcast to any local members connected via WS.
+    let sender_name: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            .bind(&req.sender)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+    let ws_content = if is_encrypted || is_group_encrypted {
+        "[encrypted]".to_string()
+    } else {
+        req.content.clone().unwrap_or_default()
+    };
+
+    let _ = state.dm_tx.send(DmEvent::Message {
+        conversation_id: req.conversation_id,
+        sender: req.sender,
+        sender_name,
+        content: ws_content,
+        timestamp: req.created_at.max(now),
+    });
+
+    Ok(StatusCode::OK)
+}
+
+/// Public wrapper around `deliver_federated_dm` for the retry worker.
+pub async fn deliver_federated_dm_public(
+    state: &AppState,
+    hub_url: &str,
+    envelope: &FederatedDmRequest,
+) -> Result<(), String> {
+    deliver_federated_dm(state, hub_url, envelope).await
+}
+
+async fn deliver_federated_dm(
+    state: &AppState,
+    hub_url: &str,
+    envelope: &FederatedDmRequest,
+) -> Result<(), String> {
+    // Ensure we have a session token for this remote hub — authenticate once if not cached.
+    let token = {
+        let peer_key: Option<String> =
+            sqlx::query_scalar("SELECT public_key FROM peers WHERE url = ?")
+                .bind(hub_url)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| format!("peer lookup: {e}"))?;
+
+        let cached = if let Some(ref key) = peer_key {
+            state.peer_tokens.read().await.get(key).cloned()
+        } else {
+            None
+        };
+
+        if let Some(t) = cached {
+            t
+        } else {
+            let fresh = state
+                .federation_client
+                .authenticate(hub_url, &state.hub_identity)
+                .await
+                .map_err(|e| format!("authenticate: {e}"))?;
+
+            let info = state
+                .federation_client
+                .get_info(hub_url)
+                .await
+                .map_err(|e| format!("get_info: {e}"))?;
+            let now = crate::auth::handlers::unix_timestamp();
+            let _ = sqlx::query(
+                "INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)
+                 ON CONFLICT(public_key) DO UPDATE SET name = ?, url = ?",
+            )
+            .bind(&info.public_key)
+            .bind(&info.name)
+            .bind(hub_url)
+            .bind(now)
+            .bind(&info.name)
+            .bind(hub_url)
+            .execute(&state.db)
+            .await;
+            state
+                .peer_tokens
+                .write()
+                .await
+                .insert(info.public_key, fresh.clone());
+            fresh
+        }
+    };
+
+    let resp = state
+        .federation_client
+        .post_federated_dm(hub_url, &token, envelope)
+        .await
+        .map_err(|e| format!("deliver: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("remote hub returned {}", resp.status()));
+    }
+    Ok(())
+}

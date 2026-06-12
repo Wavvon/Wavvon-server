@@ -16,7 +16,11 @@ use voxply_identity::Identity;
 /// Boot a real TCP listener on a random port and return the base URL.
 async fn start_hub() -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+    let db = sqlx::any::AnyPoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
     db::migrations::run(&db).await.unwrap();
     let store: Arc<dyn voxply_store::HubStore> =
         Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
@@ -34,14 +38,14 @@ async fn start_hub() -> (String, Arc<AppState>) {
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
-                voice_addr_map: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(256).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
@@ -49,15 +53,19 @@ async fn start_hub() -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
-        });
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    });
 
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -215,18 +223,30 @@ async fn screen_share_start_chunk_stop_fan_out() {
     let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
 
     // Viewer subscribes first
-    send_text(&mut viewer_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
 
     // Sharer subscribes too (so chat events reach them) then starts the share
-    send_text(&mut sharer_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
-    send_text(&mut sharer_tx, json!({
-        "type": "screen_share_start",
-        "channel_id": ch.id,
-        "stream_id": "stream-1",
-        "kind": "screen",
-        "mime": "video/webm;codecs=vp8,opus",
-        "has_audio": true,
-    })).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "stream-1",
+            "kind": "screen",
+            "mime": "video/webm;codecs=vp8,opus",
+            "has_audio": true,
+        }),
+    )
+    .await;
 
     // Viewer should receive screen_share_started
     let started = next_text(&mut viewer_rx).await;
@@ -236,13 +256,17 @@ async fn screen_share_start_chunk_stop_fan_out() {
     assert_eq!(started["has_audio"], true);
 
     // Sharer sends a chunk envelope then binary data
-    send_text(&mut sharer_tx, json!({
-        "type": "screen_share_chunk",
-        "channel_id": ch.id,
-        "stream_id": "stream-1",
-        "seq": 0,
-        "is_init": true,
-    })).await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_chunk",
+            "channel_id": ch.id,
+            "stream_id": "stream-1",
+            "seq": 0,
+            "is_init": true,
+        }),
+    )
+    .await;
 
     sharer_tx
         .send(TsMessage::Binary(b"INIT_SEGMENT_BYTES".to_vec().into()))
@@ -262,11 +286,15 @@ async fn screen_share_start_chunk_stop_fan_out() {
     }
 
     // Sharer sends stop
-    send_text(&mut sharer_tx, json!({
-        "type": "screen_share_stop",
-        "channel_id": ch.id,
-        "stream_id": "stream-1",
-    })).await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_stop",
+            "channel_id": ch.id,
+            "stream_id": "stream-1",
+        }),
+    )
+    .await;
 
     let stopped = next_text(&mut viewer_rx).await;
     assert_eq!(stopped["type"], "screen_share_stopped");
@@ -289,23 +317,35 @@ async fn late_joiner_receives_init_chunk() {
     let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
 
     // Sharer starts, sends init chunk
-    send_text(&mut sharer_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
-    send_text(&mut sharer_tx, json!({
-        "type": "screen_share_start",
-        "channel_id": ch.id,
-        "stream_id": "str-abc",
-        "kind": "screen",
-        "mime": "video/webm;codecs=vp8",
-        "has_audio": false,
-    })).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "str-abc",
+            "kind": "screen",
+            "mime": "video/webm;codecs=vp8",
+            "has_audio": false,
+        }),
+    )
+    .await;
 
-    send_text(&mut sharer_tx, json!({
-        "type": "screen_share_chunk",
-        "channel_id": ch.id,
-        "stream_id": "str-abc",
-        "seq": 0,
-        "is_init": true,
-    })).await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_chunk",
+            "channel_id": ch.id,
+            "stream_id": "str-abc",
+            "seq": 0,
+            "is_init": true,
+        }),
+    )
+    .await;
     sharer_tx
         .send(TsMessage::Binary(b"WEBM_INIT".to_vec().into()))
         .await
@@ -316,7 +356,11 @@ async fn late_joiner_receives_init_chunk() {
 
     // Late viewer now connects and subscribes
     let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
-    send_text(&mut viewer_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
 
     // Should receive screen_share_started
     let started = next_text(&mut viewer_rx).await;
@@ -356,18 +400,30 @@ async fn multiple_concurrent_sharers_allowed() {
     let (mut bob_tx, _bob_rx) = connect_ws(&base, &bob_token).await;
     let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
 
-    send_text(&mut viewer_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
 
     // Alice starts sharing
-    send_text(&mut alice_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
-    send_text(&mut alice_tx, json!({
-        "type": "screen_share_start",
-        "channel_id": ch.id,
-        "stream_id": "alice-stream",
-        "kind": "screen",
-        "mime": "video/webm",
-        "has_audio": false,
-    })).await;
+    send_text(
+        &mut alice_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut alice_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "alice-stream",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
 
     // Viewer sees Alice start
     let alice_start = next_text(&mut viewer_rx).await;
@@ -375,30 +431,45 @@ async fn multiple_concurrent_sharers_allowed() {
     assert_eq!(alice_start["stream_id"], "alice-stream");
 
     // Bob subscribes and starts sharing in the same channel — must succeed
-    send_text(&mut bob_tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
-    send_text(&mut bob_tx, json!({
-        "type": "screen_share_start",
-        "channel_id": ch.id,
-        "stream_id": "bob-stream",
-        "kind": "screen",
-        "mime": "video/webm",
-        "has_audio": false,
-    })).await;
+    send_text(
+        &mut bob_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut bob_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "bob-stream",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
 
     // Viewer sees Bob start — no error expected
     let bob_start = next_text(&mut viewer_rx).await;
-    assert_eq!(bob_start["type"], "screen_share_started", "Bob should be allowed to share alongside Alice");
+    assert_eq!(
+        bob_start["type"], "screen_share_started",
+        "Bob should be allowed to share alongside Alice"
+    );
     assert_eq!(bob_start["stream_id"], "bob-stream");
 
     // Bob's own WS should NOT have received an error
     // (send a benign chunk to provoke a response and check it isn't an error)
-    send_text(&mut bob_tx, json!({
-        "type": "screen_share_chunk",
-        "channel_id": ch.id,
-        "stream_id": "bob-stream",
-        "seq": 0,
-        "is_init": true,
-    })).await;
+    send_text(
+        &mut bob_tx,
+        json!({
+            "type": "screen_share_chunk",
+            "channel_id": ch.id,
+            "stream_id": "bob-stream",
+            "seq": 0,
+            "is_init": true,
+        }),
+    )
+    .await;
     bob_tx
         .send(TsMessage::Binary(b"BOB_INIT".to_vec().into()))
         .await

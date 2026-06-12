@@ -57,11 +57,20 @@ impl HomeHubList {
     }
 
     pub fn to_signing_bytes(&self) -> Vec<u8> {
-        Self::signing_bytes(&self.master_pubkey, &self.hubs, self.issued_at, self.sequence)
+        Self::signing_bytes(
+            &self.master_pubkey,
+            &self.hubs,
+            self.issued_at,
+            self.sequence,
+        )
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -116,7 +125,11 @@ impl SubkeyCert {
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -143,7 +156,11 @@ impl RevocationEntry {
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -175,8 +192,8 @@ impl SignedPrefsBlob {
     }
 
     pub fn to_signing_bytes(&self) -> Result<Vec<u8>> {
-        let ciphertext =
-            hex::decode(&self.ciphertext_hex).map_err(|e| anyhow!("Invalid ciphertext hex: {e}"))?;
+        let ciphertext = hex::decode(&self.ciphertext_hex)
+            .map_err(|e| anyhow!("Invalid ciphertext hex: {e}"))?;
         Ok(Self::signing_bytes(
             &self.master_pubkey,
             self.blob_version,
@@ -232,7 +249,11 @@ impl PairingOffer {
     }
 
     pub fn verify(&self) -> Result<()> {
-        check_sig(&self.master_pubkey, &self.to_signing_bytes(), &self.signature)
+        check_sig(
+            &self.master_pubkey,
+            &self.to_signing_bytes(),
+            &self.signature,
+        )
     }
 }
 
@@ -320,6 +341,88 @@ impl DhKeyRecord {
     }
 }
 
+/// Signing bytes for a 1:1 encrypted DM envelope
+/// (`EncryptedDmEnvelope`). Signed by the sender's identity key; both
+/// the sender and the hub compute these bytes.
+pub fn dm_envelope_signing_bytes(
+    conv_id: &str,
+    ciphertext_hex: &str,
+    nonce_hex: &str,
+    dh_pubkey_hex: &str,
+) -> Vec<u8> {
+    let mut buf = b"voxply/dm-ciphertext/v1\0".to_vec();
+    write_str(&mut buf, conv_id);
+    write_str(&mut buf, ciphertext_hex);
+    write_str(&mut buf, nonce_hex);
+    write_str(&mut buf, dh_pubkey_hex);
+    buf
+}
+
+/// Signing bytes for a group encrypted DM envelope
+/// (`GroupEncryptedEnvelope`). The u32 fields are encoded as
+/// length-prefixed **decimal strings**, not raw integers.
+pub fn group_dm_envelope_signing_bytes(
+    conv_id: &str,
+    sender_key_version: u32,
+    iteration: u32,
+    ciphertext_hex: &str,
+    nonce_hex: &str,
+) -> Vec<u8> {
+    let mut buf = b"voxply/group-dm-ciphertext/v1\0".to_vec();
+    write_str(&mut buf, conv_id);
+    write_str(&mut buf, &sender_key_version.to_string());
+    write_str(&mut buf, &iteration.to_string());
+    write_str(&mut buf, ciphertext_hex);
+    write_str(&mut buf, nonce_hex);
+    buf
+}
+
+/// Canonical signing bytes for a plaintext federated DM.
+///
+/// Covers the fields the client knows at send time:
+/// `conversation_id || conv_type || content`.
+/// Domain tag: `"voxply/federated-dm/v1\0"`.
+///
+/// `message_id` and `created_at` are hub-assigned and therefore excluded from
+/// the signed payload; the client cannot know them before the hub responds.
+/// The conversation_id + conv_type + content triple is sufficient to prevent a
+/// remote hub from injecting a message with a forged `sender` field — an
+/// attacker claiming `sender=victim` cannot produce victim's Ed25519 signature
+/// over these bytes.
+pub fn federated_plaintext_dm_signing_bytes(
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+) -> Vec<u8> {
+    let mut buf = b"voxply/federated-dm/v1\0".to_vec();
+    write_str(&mut buf, conversation_id);
+    write_str(&mut buf, conv_type);
+    write_str(&mut buf, content);
+    buf
+}
+
+/// Signing bytes for a sender-key distribution push
+/// (`PushSenderKeyRequest`). Each recipient is a
+/// `(recipient_pubkey, wrapped_key_hex)` pair; pairs are sorted by
+/// `recipient_pubkey` before encoding so the signature is independent
+/// of submission order.
+pub fn sender_key_dist_signing_bytes(
+    conv_id: &str,
+    sender_key_version: u32,
+    recipients: &[(String, String)],
+) -> Vec<u8> {
+    let mut buf = b"voxply/group-key-dist/v1\0".to_vec();
+    write_str(&mut buf, conv_id);
+    write_str(&mut buf, &sender_key_version.to_string());
+    let mut sorted: Vec<&(String, String)> = recipients.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    for (pubkey, wrapped_hex) in sorted {
+        write_str(&mut buf, pubkey);
+        write_str(&mut buf, wrapped_hex);
+    }
+    buf
+}
+
 /// One entry in a user's public hub list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicHubEntry {
@@ -365,4 +468,3 @@ impl PublicHubProfile {
         check_sig(&self.pubkey, &self.to_signing_bytes(), &self.signature)
     }
 }
-

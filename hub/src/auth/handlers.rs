@@ -9,9 +9,10 @@ use sqlx::AnyPool;
 use voxply_identity::SubkeyCert;
 
 use crate::auth::middleware::AuthUser;
-use crate::auth::models::{ChallengeRequest, ChallengeResponse, RenewResponse, VerifyRequest, VerifyResponse};
+use crate::auth::models::{
+    ChallengeRequest, ChallengeResponse, RenewResponse, VerifyRequest, VerifyResponse,
+};
 use crate::state::{AppState, PendingChallenge};
-
 
 /// Map an authenticating (subkey, optional cert) pair to a stable
 /// canonical user identity. Returns (canonical_pubkey, master_pubkey).
@@ -48,13 +49,12 @@ pub async fn resolve_canonical_identity(
     let master = cert.master_pubkey.clone();
 
     // Existing multi-device user?
-    if let Some(canonical) = sqlx::query_scalar::<_, String>(
-        "SELECT public_key FROM users WHERE master_pubkey = ?",
-    )
-    .bind(&master)
-    .fetch_optional(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    if let Some(canonical) =
+        sqlx::query_scalar::<_, String>("SELECT public_key FROM users WHERE master_pubkey = ?")
+            .bind(&master)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     {
         return Ok((canonical, Some(master)));
     }
@@ -79,7 +79,6 @@ pub async fn challenge(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<(StatusCode, Json<ChallengeResponse>), (StatusCode, String)> {
-
     let mut challenge_bytes = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut challenge_bytes);
     let challenge_hex = hex::encode(&challenge_bytes);
@@ -106,7 +105,6 @@ pub async fn verify(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, (StatusCode, String)> {
-
     let pending = state
         .pending_challenges
         .write()
@@ -138,8 +136,7 @@ pub async fn verify(
     // user identity (master or, for legacy upgrades, the existing
     // legacy pubkey). Without a cert, the auth pubkey IS the canonical.
     let (canonical_pubkey, master_pubkey) =
-        resolve_canonical_identity(&state.db, &req.public_key, req.subkey_cert.as_ref())
-            .await?;
+        resolve_canonical_identity(&state.db, &req.public_key, req.subkey_cert.as_ref()).await?;
 
     // External bot gate: when is_bot=true the hub requires a pre-existing
     // users row with approval_status='bot_pending' or 'approved'. Bots cannot
@@ -294,10 +291,12 @@ pub async fn verify(
                 if proof.level < min_pow_level {
                     return Err((StatusCode::FORBIDDEN, "pow_required".to_string()));
                 }
-                let nonce: u64 = proof
-                    .nonce
-                    .parse()
-                    .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid pow_proof nonce".to_string()))?;
+                let nonce: u64 = proof.nonce.parse().map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Invalid pow_proof nonce".to_string(),
+                    )
+                })?;
                 if !voxply_identity::verify_security_level(
                     &req.public_key,
                     nonce,
@@ -316,7 +315,8 @@ pub async fn verify(
         let cert_require = crate::routes::certs::load_cert_require(&state).await;
 
         // Resolve the master pubkey: with a subkey cert it's the master, otherwise the auth pubkey.
-        let master_pk = req.subkey_cert
+        let master_pk = req
+            .subkey_cert
             .as_ref()
             .map(|c| c.master_pubkey.clone())
             .unwrap_or_else(|| req.public_key.clone());
@@ -333,9 +333,15 @@ pub async fn verify(
                 .unwrap_or_default()
                 .as_secs() as i64;
 
-            if payload.subject_pubkey != master_pk { return false; }
-            if now_ts > payload.expires_at { return false; }
-            if payload.standing != "good" { return false; }
+            if payload.subject_pubkey != master_pk {
+                return false;
+            }
+            if now_ts > payload.expires_at {
+                return false;
+            }
+            if payload.standing != "good" {
+                return false;
+            }
 
             let sig_bytes = match hex::decode(&cert.signature) {
                 Ok(b) => b,
@@ -345,7 +351,13 @@ pub async fn verify(
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            if voxply_identity::verify_signature(&payload.issuer_pubkey, payload_json.as_bytes(), &sig_bytes).is_err() {
+            if voxply_identity::verify_signature(
+                &payload.issuer_pubkey,
+                payload_json.as_bytes(),
+                &sig_bytes,
+            )
+            .is_err()
+            {
                 return false;
             }
 
@@ -358,13 +370,17 @@ pub async fn verify(
             }
             if let Some(min_days) = cert_require.min_member_since_days {
                 let required_since = now_ts - (min_days as i64) * 86400;
-                if payload.member_since > required_since { return false; }
+                if payload.member_since > required_since {
+                    return false;
+                }
             }
 
             // trust check
             match cert_mode.as_str() {
                 "any" => true,
-                "trusted" => trusted_issuers.iter().any(|ti| ti.pubkey == payload.issuer_pubkey),
+                "trusted" => trusted_issuers
+                    .iter()
+                    .any(|ti| ti.pubkey == payload.issuer_pubkey),
                 _ => false,
             }
         });
@@ -388,11 +404,10 @@ pub async fn verify(
     .unwrap_or(false);
 
     // First-ever user on a hub is implicitly approved (they'll become Owner).
-    let existing_users: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users")
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let existing_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let initial_status = if require_approval && existing_users > 0 {
         "pending"
@@ -411,11 +426,11 @@ pub async fn verify(
             master_pubkey = COALESCE(users.master_pubkey, excluded.master_pubkey)",
     )
     .bind(&canonical_pubkey)
-    .bind(&now)
-    .bind(&now)
+    .bind(now)
+    .bind(now)
     .bind(initial_status)
     .bind(&master_pubkey)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -438,20 +453,19 @@ pub async fn verify(
     )
     .bind(&token)
     .bind(&canonical_pubkey)
-    .bind(&now)
-    .bind(&bot_expires_at)
+    .bind(now)
+    .bind(bot_expires_at)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Check invite requirement for new users
-    let has_roles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM user_roles WHERE user_public_key = ?",
-    )
-    .bind(&canonical_pubkey)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let has_roles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = ?")
+            .bind(&canonical_pubkey)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if has_roles == 0 {
         // New user — check if hub requires an invite
@@ -471,44 +485,15 @@ pub async fn verify(
     }
 
     // Assign roles for new users
-    let has_roles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM user_roles WHERE user_public_key = ?",
-    )
-    .bind(&canonical_pubkey)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let has_roles: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = ?")
+            .bind(&canonical_pubkey)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if has_roles == 0 {
-        // First user to connect on a fresh hub becomes the owner.
-        let owner_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-owner'",
-        )
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(1); // conservative: assume owner exists on error
-
-        if owner_count == 0 {
-            sqlx::query(
-                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-                 VALUES (?, 'builtin-owner', ?)
-                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
-            )
-            .bind(&canonical_pubkey)
-            .bind(&now)
-            .execute(&state.db)
-            .await
-            .ok();
-        }
-
-        sqlx::query(
-            "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-everyone', ?) ON CONFLICT (user_public_key, role_id) DO NOTHING",
-        )
-        .bind(&canonical_pubkey)
-        .bind(&now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        assign_initial_roles(&state.db, &canonical_pubkey, now).await?;
     }
 
     // Bot challenge gate: if challenge_mode != 'off', require a valid token.
@@ -524,7 +509,10 @@ pub async fn verify(
     if challenge_mode != "off" {
         match &req.challenge_token {
             None => {
-                return Err((StatusCode::FORBIDDEN, "Challenge token required".to_string()));
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Challenge token required".to_string(),
+                ));
             }
             Some(ct) => {
                 let ct_row: Option<(i64, i64, Option<i64>, String)> = sqlx::query_as(
@@ -536,26 +524,37 @@ pub async fn verify(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
                 match ct_row {
-                    None => return Err((StatusCode::FORBIDDEN, "Invalid challenge token".to_string())),
+                    None => {
+                        return Err((StatusCode::FORBIDDEN, "Invalid challenge token".to_string()))
+                    }
                     Some((_issued, expires, consumed, token_pubkey)) => {
                         if consumed.is_some() {
-                            return Err((StatusCode::FORBIDDEN, "Challenge token already used".to_string()));
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                "Challenge token already used".to_string(),
+                            ));
                         }
                         if now > expires {
-                            return Err((StatusCode::FORBIDDEN, "Challenge token expired".to_string()));
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                "Challenge token expired".to_string(),
+                            ));
                         }
                         if token_pubkey != req.public_key {
-                            return Err((StatusCode::FORBIDDEN, "Challenge token pubkey mismatch".to_string()));
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                "Challenge token pubkey mismatch".to_string(),
+                            ));
                         }
                         // Mark consumed
-                        sqlx::query(
-                            "UPDATE challenge_tokens SET consumed_at = ? WHERE token = ?",
-                        )
-                        .bind(now)
-                        .bind(ct)
-                        .execute(&state.db)
-                        .await
-                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+                        sqlx::query("UPDATE challenge_tokens SET consumed_at = ? WHERE token = ?")
+                            .bind(now)
+                            .bind(ct)
+                            .execute(&state.db)
+                            .await
+                            .map_err(|e| {
+                                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+                            })?;
                     }
                 }
             }
@@ -573,15 +572,14 @@ pub async fn verify(
     .map(|v| v == "1")
     .unwrap_or(true);
 
-    let pow_level: u32 = sqlx::query_scalar::<_, i64>(
-        "SELECT pow_level FROM users WHERE public_key = ?",
-    )
-    .bind(&canonical_pubkey)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(0) as u32;
+    let pow_level: u32 =
+        sqlx::query_scalar::<_, i64>("SELECT pow_level FROM users WHERE public_key = ?")
+            .bind(&canonical_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0) as u32;
 
     let scope = if lobby_enabled && pow_level < min_level {
         "lobby".to_string()
@@ -589,20 +587,181 @@ pub async fn verify(
         "member".to_string()
     };
 
-    tracing::info!(
-        "User authenticated: canonical={} (cert={}, scope={})",
-        &canonical_pubkey[..16],
-        master_pubkey.is_some(),
-        scope,
-    );
+    // Hub federation path: when is_hub=true, register the caller in the
+    // `peers` table so the `PeerHub` extractor can route hub sessions
+    // separately from human/bot sessions.  We still complete the full
+    // human-admission flow above (users row + roles) because the hub needs
+    // `send_messages` permission to proxy alliance messages.
+    //
+    // NOTE: this self-registration is NOT a security boundary for DM
+    // injection.  Any key can self-assert is_hub=true and land in `peers`.
+    // The real anti-spoofing gate is the Ed25519 sender signature checked in
+    // `receive_federated_dm`, which cannot be forged without the sender's key.
+    if req.is_hub == Some(true) {
+        let short_name = &canonical_pubkey[..16.min(canonical_pubkey.len())];
+        let _ = sqlx::query(
+            "INSERT INTO peers (public_key, name, url, added_at)
+             VALUES (?, ?, '', ?)
+             ON CONFLICT(public_key) DO NOTHING",
+        )
+        .bind(&canonical_pubkey)
+        .bind(short_name)
+        .bind(now)
+        .execute(&state.db)
+        .await;
+        tracing::info!(
+            "Hub authenticated: pubkey={} registered as peer",
+            &canonical_pubkey[..16],
+        );
+    } else {
+        tracing::info!(
+            "User authenticated: canonical={} (cert={}, scope={})",
+            &canonical_pubkey[..16],
+            master_pubkey.is_some(),
+            scope,
+        );
+    }
 
     Ok(Json(VerifyResponse { token, scope }))
+}
+
+/// Validate a hub session token for WebSocket connections.
+///
+/// Mirrors the checks in the HTTP `AuthUser` extractor so the two paths
+/// cannot drift:
+///   1. Session lookup + expiry (same query as the HTTP path)
+///   2. Subkey revocation check
+///   3. `approval_status` gate (bots are always "approved")
+///   4. Local ban check (bans table)
+///
+/// Returns the canonical public key on success.
+pub async fn validate_ws_token(
+    db: &AnyPool,
+    token: &str,
+) -> Result<String, (axum::http::StatusCode, String)> {
+    use axum::http::StatusCode;
+
+    // Try session table first.
+    let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT s.public_key, u.approval_status, s.expires_at
+         FROM sessions s
+         INNER JOIN users u ON s.public_key = u.public_key
+         WHERE s.token = ?",
+    )
+    .bind(token)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let (pk, approval_status) = if let Some((pk, status, expires_at)) = row {
+        if let Some(exp) = expires_at {
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            if exp < now_ts {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    r#"{"error":"token_expired"}"#.to_string(),
+                ));
+            }
+        }
+        (pk, status)
+    } else {
+        // Try bot tokens.
+        let bot_key: Option<String> =
+            sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = ?")
+                .bind(token)
+                .fetch_optional(db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        match bot_key {
+            Some(k) => (k, "approved".to_string()),
+            None => {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid or expired token".to_string(),
+                ))
+            }
+        }
+    };
+
+    // Subkey revocation check.
+    let revoked_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = ?")
+            .bind(&pk)
+            .fetch_one(db)
+            .await
+            .unwrap_or(0);
+    if revoked_count > 0 {
+        return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
+    }
+
+    // Approval gate.
+    if approval_status == "pending" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Account is pending admin approval".to_string(),
+        ));
+    }
+
+    // Local ban check.
+    if crate::routes::moderation::is_banned(db, &pk).await? {
+        return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
+    }
+
+    Ok(pk)
+}
+
+/// Assign builtin roles to a brand-new user who has none yet.
+///
+/// If no owner role assignment exists anywhere in the hub, the user becomes
+/// the first owner. The builtin-everyone role is always assigned (idempotent).
+/// Returns an error only for genuine DB failures so callers can propagate it.
+pub async fn assign_initial_roles(
+    db: &AnyPool,
+    public_key: &str,
+    now: i64,
+) -> Result<(), (StatusCode, String)> {
+    // First user on a fresh hub becomes the owner.
+    let owner_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-owner'")
+            .fetch_one(db)
+            .await
+            .unwrap_or(1); // conservative: assume owner exists on error
+
+    if owner_count == 0 {
+        sqlx::query(
+            "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+             VALUES (?, 'builtin-owner', ?)
+             ON CONFLICT (user_public_key, role_id) DO NOTHING",
+        )
+        .bind(public_key)
+        .bind(now)
+        .execute(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    sqlx::query(
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+         VALUES (?, 'builtin-everyone', ?)
+         ON CONFLICT (user_public_key, role_id) DO NOTHING",
+    )
+    .bind(public_key)
+    .bind(now)
+    .execute(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(())
 }
 
 pub fn unix_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_secs() as i64
 }
 
@@ -623,7 +782,7 @@ pub fn unix_timestamp_iso() -> String {
     let jdn = days + 2_440_588;
     let l = jdn + 68_569;
     let n = (4 * l) / 146_097;
-    let l = l - (146_097 * n + 3) / 4;
+    let l = l - (146_097 * n).div_ceil(4);
     let year_i = (4_000 * (l + 1)) / 1_461_001;
     let l = l - (1_461 * year_i) / 4 + 31;
     let month_i = (80 * l) / 2_447;
@@ -702,8 +861,8 @@ pub async fn renew(
     )
     .bind(&token)
     .bind(&user.public_key)
-    .bind(&now)
-    .bind(&expires_at)
+    .bind(now)
+    .bind(expires_at)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

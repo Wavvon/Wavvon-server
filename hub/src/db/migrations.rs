@@ -9,7 +9,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     if is_sqlite {
         sqlx::query("PRAGMA journal_mode=WAL").execute(pool).await?;
         sqlx::query("PRAGMA foreign_keys=ON").execute(pool).await?;
-        sqlx::query("PRAGMA synchronous=NORMAL").execute(pool).await?;
+        sqlx::query("PRAGMA synchronous=NORMAL")
+            .execute(pool)
+            .await?;
     }
 
     // ---- Core user / session tables ----
@@ -36,11 +38,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_master_pubkey ON users(master_pubkey)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS sessions (
@@ -963,17 +963,13 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_audit_seq ON hub_audit_log(seq)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_seq ON hub_audit_log(seq)")
+        .execute(pool)
+        .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_audit_event_type ON hub_audit_log(event_type)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_audit_event_type ON hub_audit_log(event_type)")
+        .execute(pool)
+        .await?;
 
     // ---- Incoming webhooks ----
 
@@ -1103,11 +1099,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_user_certs_master ON user_certs(master_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_user_certs_master ON user_certs(master_pubkey)")
+        .execute(pool)
+        .await?;
 
     // ---- Badge federation ----
 
@@ -1235,11 +1229,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_pubkey)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_posts_author ON posts (author_pubkey)")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS post_replies (
@@ -1420,11 +1412,9 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_post_reads_post ON post_reads(post_id)",
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_post_reads_post ON post_reads(post_id)")
+        .execute(pool)
+        .await?;
 
     // ---- File uploads ----
 
@@ -1462,9 +1452,58 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
     let _ = sqlx::query("ALTER TABLE channels ADD COLUMN banner_url TEXT")
         .execute(pool)
         .await;
-    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN banner_file_id TEXT REFERENCES upload_files(id)")
-        .execute(pool)
-        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE channels ADD COLUMN banner_file_id TEXT REFERENCES upload_files(id)",
+    )
+    .execute(pool)
+    .await;
+
+    // ---- Perf indexes (H12) ----
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_messages_channel_created
+         ON messages(channel_id, created_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_messages_reply_to
+         ON messages(reply_to)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_dm_messages_conversation_created
+         ON dm_messages(conversation_id, created_at)",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Federated bans target index (H13) ----
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_federated_bans_target
+         ON federated_bans(target_master_pubkey)",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Cleanup phantom zero-sender rows (H1) ----
+    // Removes the placeholder users row inserted by the old poll/event card
+    // code. The guard prevents deletion if any old card messages still
+    // reference it (FK would fail anyway, but this makes the intent explicit).
+    let _ = sqlx::query(
+        "DELETE FROM users
+         WHERE public_key = '00000000000000000000000000000000000000000000000000000000000000000000'
+           AND NOT EXISTS (
+               SELECT 1 FROM messages
+               WHERE sender = '00000000000000000000000000000000000000000000000000000000000000000000'
+           )",
+    )
+    .execute(pool)
+    .await;
 
     Ok(())
 }

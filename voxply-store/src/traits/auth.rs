@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::SubkeyCertRow;
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait AuthStore: Send + Sync {

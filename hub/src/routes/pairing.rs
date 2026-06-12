@@ -5,9 +5,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use sqlx::Row;
-use voxply_identity::{
-    PairingClaim, PairingComplete, PairingOffer, PairingStatus, SubkeyCert,
-};
+use voxply_identity::{PairingClaim, PairingComplete, PairingOffer, PairingStatus, SubkeyCert};
 
 use crate::state::AppState;
 
@@ -39,7 +37,9 @@ pub async fn post_offer(
     State(state): State<Arc<AppState>>,
     Json(offer): Json<PairingOffer>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    offer.verify().map_err(|e| bad(format!("Bad signature: {e}")))?;
+    offer
+        .verify()
+        .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
     if offer.expires_at <= offer.issued_at {
         return Err(bad("expires_at must exceed issued_at"));
@@ -90,14 +90,15 @@ pub async fn post_claim(
 
     prune_expired(&state.db).await;
 
-    let row = sqlx::query(
-        "SELECT state, expires_at FROM pairing_offers WHERE pairing_token = ?",
-    )
-    .bind(&claim.pairing_token)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(db_err)?
-    .ok_or((StatusCode::NOT_FOUND, "Unknown or expired token".to_string()))?;
+    let row = sqlx::query("SELECT state, expires_at FROM pairing_offers WHERE pairing_token = ?")
+        .bind(&claim.pairing_token)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(db_err)?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Unknown or expired token".to_string(),
+        ))?;
 
     let current_state: String = row.get("state");
     let expires_at: i64 = row.get("expires_at");
@@ -151,7 +152,10 @@ pub async fn post_complete(
     .fetch_optional(&state.db)
     .await
     .map_err(db_err)?
-    .ok_or((StatusCode::NOT_FOUND, "Unknown or expired token".to_string()))?;
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "Unknown or expired token".to_string(),
+    ))?;
 
     let current_state: String = row.get("state");
     let offer_master: String = row.get("master_pubkey");
@@ -253,14 +257,20 @@ pub async fn get_status(
         "claimed" => {
             let subkey_pubkey: String = row.get("subkey_pubkey");
             let device_label: String = row.get("device_label");
-            PairingStatus::Claimed { subkey_pubkey, device_label }
+            PairingStatus::Claimed {
+                subkey_pubkey,
+                device_label,
+            }
         }
         "complete" => {
             let cert_json: String = row.get("cert_json");
             let wrapped_blob_key_hex: String = row.get("wrapped_key_hex");
             let cert: SubkeyCert = serde_json::from_str(&cert_json)
                 .map_err(|e| db_err(format!("parse cert_json: {e}")))?;
-            PairingStatus::Complete { cert, wrapped_blob_key_hex }
+            PairingStatus::Complete {
+                cert,
+                wrapped_blob_key_hex,
+            }
         }
         other => {
             return Err(db_err(format!("unknown state: {other}")));

@@ -48,8 +48,18 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
     .unwrap();
 
     let farm_url = "https://farm.test";
-    let hub_manager = Arc::new(HubManager::new("voxply-hub".to_string(), farm_url.to_string(), 9100));
-    let state = Arc::new(FarmState::new(db, keypair, farm_url.to_string(), hub_manager, "/tmp/hubs-test".to_string()));
+    let hub_manager = Arc::new(HubManager::new(
+        "voxply-hub".to_string(),
+        farm_url.to_string(),
+        9100,
+    ));
+    let state = Arc::new(FarmState::new(
+        db,
+        keypair,
+        farm_url.to_string(),
+        hub_manager,
+        "/tmp/hubs-test".to_string(),
+    ));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state)
 }
@@ -68,7 +78,10 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
         .json(&json!({ "public_key": pubkey }))
         .await;
     cr.assert_status_ok();
-    let challenge_hex = cr.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let challenge_hex = cr.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
     let sig_hex = hex::encode(identity.sign(&challenge_bytes).to_bytes());
     let vr = server
@@ -541,7 +554,10 @@ async fn list_users_cursor_pagination() {
     let body: Value = resp.json();
     let page1 = body["users"].as_array().unwrap();
     assert_eq!(page1.len(), 2);
-    let cursor = page1.last().unwrap()["public_key"].as_str().unwrap().to_string();
+    let cursor = page1.last().unwrap()["public_key"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Get next page using cursor.
     let resp = server
@@ -554,7 +570,10 @@ async fn list_users_cursor_pagination() {
     // All subsequent pubkeys should be > cursor.
     for u in page2 {
         let pk = u["public_key"].as_str().unwrap();
-        assert!(pk > cursor.as_str(), "cursor pagination broken: {pk} not > {cursor}");
+        assert!(
+            pk > cursor.as_str(),
+            "cursor pagination broken: {pk} not > {cursor}"
+        );
     }
 }
 
@@ -571,7 +590,10 @@ async fn revoke_sessions_requires_admin() {
 
     let user_token = authenticate(&server, &state, &user).await;
     let resp = server
-        .post(&format!("/farm/users/{}/revoke-sessions", user.public_key_hex()))
+        .post(&format!(
+            "/farm/users/{}/revoke-sessions",
+            user.public_key_hex()
+        ))
         .add_header("Authorization", bearer(&user_token))
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
@@ -605,7 +627,10 @@ async fn revoke_sessions_marks_active_sessions_revoked() {
 
     let admin_token = authenticate(&server, &state, &admin).await;
     let resp = server
-        .post(&format!("/farm/users/{}/revoke-sessions", user.public_key_hex()))
+        .post(&format!(
+            "/farm/users/{}/revoke-sessions",
+            user.public_key_hex()
+        ))
         .add_header("Authorization", bearer(&admin_token))
         .await;
     resp.assert_status_ok();
@@ -678,5 +703,36 @@ async fn public_info_does_not_expose_admin_pubkey() {
     let resp = server.get("/farm/public-info").await;
     resp.assert_status_ok();
     let body: Value = resp.json();
-    assert!(body.get("admin_pubkey").is_none(), "admin_pubkey must not be exposed");
+    assert!(
+        body.get("admin_pubkey").is_none(),
+        "admin_pubkey must not be exposed"
+    );
+}
+
+#[tokio::test]
+async fn public_info_exposes_farm_public_key() {
+    let (server, state) = setup().await;
+    sqlx::query("UPDATE farms SET allow_discovery_listing = 1 WHERE id = 1")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = server.get("/farm/public-info").await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    let pk = body["public_key"]
+        .as_str()
+        .expect("public_key must be present");
+    // Must be 64-char lowercase hex (32-byte Ed25519 pubkey).
+    assert_eq!(pk.len(), 64, "public_key must be 64 hex chars");
+    assert!(
+        pk.chars().all(|c| c.is_ascii_hexdigit()),
+        "public_key must be hex"
+    );
+    // Must match the farm's actual keypair.
+    assert_eq!(
+        pk,
+        state.public_key_hex(),
+        "public_key must match farm keypair"
+    );
 }

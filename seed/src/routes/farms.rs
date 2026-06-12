@@ -237,7 +237,7 @@ pub async fn register(
     .bind(now)
     .execute(&state.db)
     .await
-    .map_err(|e| internal(e))?;
+    .map_err(internal)?;
 
     Ok(Json(RegisterResponse {
         registered: true,
@@ -275,8 +275,7 @@ pub async fn deregister(
     // The message signed is `farm_pubkey_bytes || nonce_bytes`.
     let pubkey_bytes =
         hex::decode(&req.farm_pubkey).map_err(|_| bad_request("invalid_farm_pubkey_hex"))?;
-    let nonce_bytes =
-        hex::decode(&req.nonce).map_err(|_| bad_request("invalid_nonce_hex"))?;
+    let nonce_bytes = hex::decode(&req.nonce).map_err(|_| bad_request("invalid_nonce_hex"))?;
 
     let mut message = Vec::with_capacity(pubkey_bytes.len() + nonce_bytes.len());
     message.extend_from_slice(&pubkey_bytes);
@@ -285,13 +284,12 @@ pub async fn deregister(
     ed25519_verify(&req.farm_pubkey, &message, &req.signature)?;
 
     // Verify the farm_url is actually in our DB with this pubkey.
-    let stored_pk: Option<String> = sqlx::query_scalar(
-        "SELECT farm_pubkey FROM registered_farms WHERE farm_url = ?",
-    )
-    .bind(&req.farm_url)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| internal(e))?;
+    let stored_pk: Option<String> =
+        sqlx::query_scalar("SELECT farm_pubkey FROM registered_farms WHERE farm_url = ?")
+            .bind(&req.farm_url)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(internal)?;
 
     match stored_pk {
         None => {
@@ -310,11 +308,9 @@ pub async fn deregister(
         .bind(&req.farm_url)
         .execute(&state.db)
         .await
-        .map_err(|e| internal(e))?;
+        .map_err(internal)?;
 
-    Ok(Json(DeregisterResponse {
-        deregistered: true,
-    }))
+    Ok(Json(DeregisterResponse { deregistered: true }))
 }
 
 // ---------------------------------------------------------------------------
@@ -390,9 +386,7 @@ fn extract_repeated_param(raw: Option<&str>, key: &str) -> Vec<String> {
         .filter_map(|pair| {
             let (k, v) = pair.split_once('=')?;
             if k == key {
-                Some(
-                    percent_decode(v)
-                )
+                Some(percent_decode(v))
             } else {
                 None
             }
@@ -575,7 +569,7 @@ pub async fn list_farms(
         .fetch_all(&state.db)
         .await
     }
-    .map_err(|e| internal(e))?;
+    .map_err(internal)?;
 
     // required_tags is already extracted above from the raw query string.
 
@@ -587,11 +581,7 @@ pub async fn list_farms(
                 serde_json::from_str(&row.tags).unwrap_or_else(|_| serde_json::json!([]));
             let tag_strs: Vec<&str> = tags_val
                 .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect()
-                })
+                .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
                 .unwrap_or_default();
 
             // All required tags must be present.
@@ -605,9 +595,9 @@ pub async fn list_farms(
                 serde_json::from_str(&row.languages).unwrap_or_else(|_| serde_json::json!(["en"]));
 
             // capacity_pct: omit when max_hubs_total is null/0 (unlimited).
-            let capacity_pct = row.capacity_pct.filter(|_| {
-                row.max_hubs_total.map(|v| v > 0).unwrap_or(false)
-            });
+            let capacity_pct = row
+                .capacity_pct
+                .filter(|_| row.max_hubs_total.map(|v| v > 0).unwrap_or(false));
 
             let stale = if row.last_verified_at < stale_threshold {
                 Some(true)

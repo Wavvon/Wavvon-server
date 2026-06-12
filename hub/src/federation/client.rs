@@ -11,6 +11,12 @@ pub struct FederationClient {
     http: reqwest::Client,
 }
 
+impl Default for FederationClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FederationClient {
     pub fn new() -> Self {
         Self {
@@ -43,8 +49,8 @@ impl FederationClient {
             .await
             .context("Invalid challenge response")?;
 
-        let challenge_bytes = hex::decode(&challenge.challenge)
-            .context("Invalid challenge hex from peer")?;
+        let challenge_bytes =
+            hex::decode(&challenge.challenge).context("Invalid challenge hex from peer")?;
         let signature = identity.sign(&challenge_bytes);
 
         let verify: VerifyResponse = self
@@ -54,6 +60,7 @@ impl FederationClient {
                 "public_key": pub_key,
                 "challenge": challenge.challenge,
                 "signature": hex::encode(signature.to_bytes()),
+                "is_hub": true,
             }))
             .send()
             .await

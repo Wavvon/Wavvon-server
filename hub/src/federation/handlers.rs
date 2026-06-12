@@ -47,7 +47,7 @@ pub async fn add_peer(
     .bind(&info.public_key)
     .bind(&info.name)
     .bind(&url)
-    .bind(&now)
+    .bind(now)
     .bind(&info.name)
     .bind(&url)
     .execute(&state.db)
@@ -61,7 +61,11 @@ pub async fn add_peer(
         .await
         .insert(info.public_key.clone(), token);
 
-    tracing::info!("Peered with hub '{}' ({})", info.name, &info.public_key[..16]);
+    tracing::info!(
+        "Peered with hub '{}' ({})",
+        info.name,
+        &info.public_key[..16]
+    );
 
     Ok((
         StatusCode::CREATED,
@@ -112,7 +116,12 @@ pub async fn peer_channels(
         .federation_client
         .get_channels(&peer.url, &token)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to fetch channels: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to fetch channels: {e}"),
+            )
+        })?;
 
     let now = crate::auth::handlers::unix_timestamp();
     let mut result = Vec::new();
@@ -130,10 +139,10 @@ pub async fn peer_channels(
         .bind(&peer_key)
         .bind(&ch.id)
         .bind(&ch.name)
-        .bind(&ch.created_at)
-        .bind(&now)
+        .bind(ch.created_at)
+        .bind(now)
         .bind(&ch.name)
-        .bind(&now)
+        .bind(now)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -198,7 +207,12 @@ pub async fn federated_messages(
         .federation_client
         .get_messages(&peer.url, &token, &fed_ch.remote_id)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to fetch messages: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to fetch messages: {e}"),
+            )
+        })?;
 
     // Cache in DB
     for msg in &messages {
@@ -212,7 +226,7 @@ pub async fn federated_messages(
         .bind(&msg.id)
         .bind(&msg.sender)
         .bind(&msg.content)
-        .bind(&msg.created_at)
+        .bind(msg.created_at)
         .execute(&state.db)
         .await;
     }
@@ -253,7 +267,12 @@ pub async fn send_federated_message(
         .federation_client
         .send_message(&peer.url, &token, &fed_ch.remote_id, &req.content)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Failed to send message: {e}")))?;
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to send message: {e}"),
+            )
+        })?;
 
     Ok((
         StatusCode::CREATED,
@@ -299,8 +318,12 @@ pub async fn receive_badge_offer(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // 1. Parse and validate payload shape.
     let payload: crate::routes::badges::BadgePayload =
-        serde_json::from_str(&req.payload)
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Malformed badge payload JSON".to_string()))?;
+        serde_json::from_str(&req.payload).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Malformed badge payload JSON".to_string(),
+            )
+        })?;
 
     // 2. Verify that the subject is this hub.
     let our_pubkey = state.hub_identity.public_key_hex();
@@ -315,7 +338,12 @@ pub async fn receive_badge_offer(
     let sig_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
     voxply_identity::verify_signature(&req.from_hub_pubkey, req.payload.as_bytes(), &sig_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Badge signature verification failed".to_string()))?;
+        .map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Badge signature verification failed".to_string(),
+            )
+        })?;
 
     // 4. Also validate that the issuer_pubkey in the payload matches from_hub_pubkey.
     if payload.issuer_pubkey != req.from_hub_pubkey {

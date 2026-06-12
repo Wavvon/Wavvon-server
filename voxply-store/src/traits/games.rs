@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
-use crate::row_types::{HubGameRow, GameSessionRow};
+use crate::row_types::{GameSessionRow, HubGameRow};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait GameStore: Send + Sync {
@@ -16,7 +16,12 @@ pub trait GameStore: Send + Sync {
 
     // ---- Enabled / disabled per-hub ----
 
-    async fn enable_game(&self, game_id: &str, enabled_at: &str, enabled_by: &str) -> Result<(), StoreError>;
+    async fn enable_game(
+        &self,
+        game_id: &str,
+        enabled_at: &str,
+        enabled_by: &str,
+    ) -> Result<(), StoreError>;
 
     async fn disable_game(&self, game_id: &str) -> Result<(), StoreError>;
 
@@ -24,9 +29,17 @@ pub trait GameStore: Send + Sync {
 
     // ---- Channel-game assignments ----
 
-    async fn assign_game_to_channel(&self, channel_id: &str, game_id: &str) -> Result<(), StoreError>;
+    async fn assign_game_to_channel(
+        &self,
+        channel_id: &str,
+        game_id: &str,
+    ) -> Result<(), StoreError>;
 
-    async fn remove_game_from_channel(&self, channel_id: &str, game_id: &str) -> Result<(), StoreError>;
+    async fn remove_game_from_channel(
+        &self,
+        channel_id: &str,
+        game_id: &str,
+    ) -> Result<(), StoreError>;
 
     async fn channel_games(&self, channel_id: &str) -> Result<Vec<String>, StoreError>;
 
@@ -63,11 +76,7 @@ pub trait GameStore: Send + Sync {
         updated_at: &str,
     ) -> Result<(), StoreError>;
 
-    async fn get_game_kv(
-        &self,
-        session_id: &str,
-        key: &str,
-    ) -> Result<Option<String>, StoreError>;
+    async fn get_game_kv(&self, session_id: &str, key: &str) -> Result<Option<String>, StoreError>;
 
     async fn delete_game_kv(&self, session_id: &str, key: &str) -> Result<(), StoreError>;
 

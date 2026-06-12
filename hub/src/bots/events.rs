@@ -88,9 +88,14 @@ pub async fn publish_hub_event(
     let sessions = state.bot_sessions.read().await;
 
     for sub in &subs {
-        let Some(tx) = sessions.get(&sub.bot_pubkey) else {
+        // A bot pubkey may have multiple concurrent WS sessions; skip if none
+        // are active.
+        let Some(per_bot) = sessions.get(&sub.bot_pubkey) else {
             continue;
         };
+        if per_bot.is_empty() {
+            continue;
+        }
 
         // Check bot_channel_scope: if the bot has any scope rows, the event's
         // channel_id must be in scope (or event has no channel).
@@ -133,9 +138,11 @@ pub async fn publish_hub_event(
         });
 
         let json = envelope.to_string();
-        // Non-blocking send; if the channel is full the event is dropped for
-        // this bot (back-pressure is acceptable for best-effort delivery).
-        let _ = tx.try_send(json);
+        // Deliver to all active sessions for this bot pubkey. Non-blocking
+        // send; a full channel drops the event for that session only.
+        for tx in per_bot.values() {
+            let _ = tx.try_send(json.clone());
+        }
     }
 }
 
@@ -155,13 +162,12 @@ pub async fn replay_events_for_bot(
     let window_start = now - 72 * 3600;
 
     // Find the earliest seq still in the window.
-    let earliest: Option<(i64, i64)> = sqlx::query_as(
-        "SELECT seq, at FROM hub_audit_log WHERE at >= ? ORDER BY seq ASC LIMIT 1",
-    )
-    .bind(window_start)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap_or(None);
+    let earliest: Option<(i64, i64)> =
+        sqlx::query_as("SELECT seq, at FROM hub_audit_log WHERE at >= ? ORDER BY seq ASC LIMIT 1")
+            .bind(window_start)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let (earliest_seq, earliest_at) = match earliest {
         Some((s, a)) => (s, a),
@@ -323,14 +329,13 @@ async fn maybe_redact_message_content(
     bot_pubkey: &str,
     mut payload: serde_json::Value,
 ) -> serde_json::Value {
-    let caps_json: Option<String> = sqlx::query_scalar(
-        "SELECT capabilities FROM bot_profiles WHERE pubkey = ?",
-    )
-    .bind(bot_pubkey)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let caps_json: Option<String> =
+        sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = ?")
+            .bind(bot_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
 
     let caps: Vec<String> = caps_json
         .as_deref()

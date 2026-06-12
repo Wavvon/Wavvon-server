@@ -214,6 +214,7 @@ pub async fn verify_challenge(
     let now = crate::auth::handlers::unix_timestamp();
 
     // Look up challenge
+    #[allow(clippy::type_complexity)]
     let row: Option<(String, String, Option<String>, i64, Option<i64>)> = sqlx::query_as(
         "SELECT kind, pubkey, expected_answer, expires_at, consumed_at FROM bot_challenges WHERE id = ?",
     )
@@ -286,8 +287,7 @@ pub async fn verify_challenge(
             }
 
             // click-only: issue token
-            let (token, token_expires) =
-                issue_challenge_token(&state.db, &req.pubkey, now).await?;
+            let (token, token_expires) = issue_challenge_token(&state.db, &req.pubkey, now).await?;
             Ok(Json(ChallengeVerifyResponse {
                 ok: true,
                 token: Some(token),
@@ -310,8 +310,10 @@ pub async fn verify_challenge(
                 Some(a) => sha256_hex(a.trim()),
             };
 
-            let expected = expected_answer
-                .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "Missing expected answer".to_string()))?;
+            let expected = expected_answer.ok_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Missing expected answer".to_string(),
+            ))?;
 
             if submitted != expected {
                 return Ok(Json(ChallengeVerifyResponse {
@@ -331,8 +333,7 @@ pub async fn verify_challenge(
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            let (token, token_expires) =
-                issue_challenge_token(&state.db, &req.pubkey, now).await?;
+            let (token, token_expires) = issue_challenge_token(&state.db, &req.pubkey, now).await?;
             Ok(Json(ChallengeVerifyResponse {
                 ok: true,
                 token: Some(token),
@@ -341,7 +342,10 @@ pub async fn verify_challenge(
                 attempts_remaining: None,
             }))
         }
-        _ => Err((StatusCode::INTERNAL_SERVER_ERROR, "Unknown challenge kind".to_string())),
+        _ => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Unknown challenge kind".to_string(),
+        )),
     }
 }
 
@@ -356,11 +360,17 @@ pub async fn update_challenge_settings(
 
     let valid_modes = ["off", "click", "puzzle", "both"];
     if !valid_modes.contains(&req.challenge_mode.as_str()) {
-        return Err((StatusCode::BAD_REQUEST, format!("Invalid challenge_mode: {}", req.challenge_mode)));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid challenge_mode: {}", req.challenge_mode),
+        ));
     }
     let valid_difficulties = ["easy", "medium"];
     if !valid_difficulties.contains(&req.challenge_difficulty.as_str()) {
-        return Err((StatusCode::BAD_REQUEST, format!("Invalid challenge_difficulty: {}", req.challenge_difficulty)));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Invalid challenge_difficulty: {}", req.challenge_difficulty),
+        ));
     }
 
     upsert_setting(&state.db, "challenge_mode", &req.challenge_mode).await?;

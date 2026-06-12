@@ -1,9 +1,9 @@
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 async fn create_channel(server: &TestServer, token: &str) -> String {
     let resp = server
@@ -134,6 +134,50 @@ async fn poll_rejects_too_many_choices() {
         .json(&json!({ "option_ids": ["a", "b"] }))
         .await;
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+/// Card message inserted by create_poll uses the creator's pubkey as sender,
+/// not the old zero-string phantom sender.
+#[tokio::test]
+async fn poll_card_sender_is_creator() {
+    let server = common::setup().await;
+    let id = Identity::generate();
+    let token = common::authenticate(&server, &id).await;
+    let channel_id = create_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "question": "Sender check?",
+            "options": [
+                { "id": "y", "text": "Yes" },
+                { "id": "n", "text": "No" },
+            ],
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let poll: Value = resp.json();
+    let creator_pubkey = poll["creator_pubkey"].as_str().unwrap().to_string();
+
+    // Fetch the channel's messages and verify the card is attributed to the
+    // creator, not the zero-string phantom sender.
+    let resp = server
+        .get(&format!("/channels/{channel_id}/messages"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    resp.assert_status_success();
+    let messages: Value = resp.json();
+    let msgs = messages.as_array().unwrap();
+    assert!(!msgs.is_empty(), "expected at least one card message");
+    let card = &msgs[0];
+    assert_eq!(
+        card["sender"].as_str().unwrap(),
+        creator_pubkey,
+        "poll card sender must be the creator, not the zero phantom"
+    );
+    let zero = "00000000000000000000000000000000000000000000000000000000000000000000";
+    assert_ne!(card["sender"].as_str().unwrap(), zero);
 }
 
 /// Non-creator without admin cannot delete a poll.

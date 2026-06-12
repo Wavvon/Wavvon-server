@@ -1,10 +1,10 @@
-
 use serde_json::json;
 use voxply_hub::routes::me::MeResponse;
 use voxply_hub::routes::role_models::RoleResponse;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn first_user_gets_owner_and_everyone() {

@@ -4,7 +4,8 @@ use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 // ---------------------------------------------------------------------------
 // Setup helpers
@@ -60,7 +61,10 @@ async fn create_session_happy_path() {
     let body: Value = resp.json();
     assert_eq!(body["game_id"].as_str().unwrap(), game_id);
     assert_eq!(body["channel_id"].as_str().unwrap(), channel_id);
-    assert_eq!(body["host_pubkey"].as_str().unwrap(), identity.public_key_hex());
+    assert_eq!(
+        body["host_pubkey"].as_str().unwrap(),
+        identity.public_key_hex()
+    );
     assert!(body["ended_at"].is_null());
 }
 
@@ -108,7 +112,10 @@ async fn join_session_happy_path() {
         .json(&json!({ "game_id": game_id, "channel_id": channel_id }))
         .await;
     create_resp.assert_status(axum::http::StatusCode::CREATED);
-    let session_id = create_resp.json::<Value>()["id"].as_str().unwrap().to_string();
+    let session_id = create_resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let join_resp = server
         .post(&format!("/game-sessions/{session_id}/join"))
@@ -140,7 +147,10 @@ async fn patch_state_by_host() {
         .authorization_bearer(&token)
         .json(&json!({ "game_id": game_id, "channel_id": channel_id }))
         .await;
-    let session_id = create_resp.json::<Value>()["id"].as_str().unwrap().to_string();
+    let session_id = create_resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let patch_resp = server
         .post(&format!("/game-sessions/{session_id}/state"))
@@ -164,11 +174,16 @@ async fn shared_kv_set_and_get() {
         .authorization_bearer(&token)
         .json(&json!({ "game_id": game_id, "channel_id": channel_id }))
         .await;
-    let session_id = create_resp.json::<Value>()["id"].as_str().unwrap().to_string();
+    let session_id = create_resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Set a key.
     let set_resp = server
-        .post(&format!("/game-sessions/{session_id}/shared-kv/leaderboard"))
+        .post(&format!(
+            "/game-sessions/{session_id}/shared-kv/leaderboard"
+        ))
         .authorization_bearer(&token)
         .json(&json!({ "value": "[{\"pubkey\":\"abc\",\"score\":100}]" }))
         .await;
@@ -176,7 +191,9 @@ async fn shared_kv_set_and_get() {
 
     // Get it back.
     let get_resp = server
-        .get(&format!("/game-sessions/{session_id}/shared-kv/leaderboard"))
+        .get(&format!(
+            "/game-sessions/{session_id}/shared-kv/leaderboard"
+        ))
         .authorization_bearer(&token)
         .await;
     get_resp.assert_status_ok();
@@ -199,7 +216,10 @@ async fn end_session_by_host() {
         .authorization_bearer(&token)
         .json(&json!({ "game_id": game_id, "channel_id": channel_id }))
         .await;
-    let session_id = create_resp.json::<Value>()["id"].as_str().unwrap().to_string();
+    let session_id = create_resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let del_resp = server
         .delete(&format!("/game-sessions/{session_id}"))
@@ -251,7 +271,10 @@ async fn patch_state_rejected_for_non_host() {
         .authorization_bearer(&host_token)
         .json(&json!({ "game_id": game_id, "channel_id": channel_id }))
         .await;
-    let session_id = create_resp.json::<Value>()["id"].as_str().unwrap().to_string();
+    let session_id = create_resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Other user (non-admin, non-host) tries to patch.
     let patch_resp = server
@@ -278,7 +301,10 @@ async fn end_session_rejected_for_non_host() {
         .authorization_bearer(&host_token)
         .json(&json!({ "game_id": game_id, "channel_id": channel_id }))
         .await;
-    let session_id = create_resp.json::<Value>()["id"].as_str().unwrap().to_string();
+    let session_id = create_resp.json::<Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let del_resp = server
         .delete(&format!("/game-sessions/{session_id}"))
@@ -310,7 +336,10 @@ async fn create_session_v2_happy_path() {
     let body: Value = resp.json();
     assert_eq!(body["game_id"].as_str().unwrap(), game_id);
     assert_eq!(body["channel_id"].as_str().unwrap(), channel_id);
-    assert_eq!(body["host_pubkey"].as_str().unwrap(), identity.public_key_hex());
+    assert_eq!(
+        body["host_pubkey"].as_str().unwrap(),
+        identity.public_key_hex()
+    );
     assert_eq!(body["status"].as_str().unwrap(), "lobby");
     assert!(body["session_id"].is_string());
 }

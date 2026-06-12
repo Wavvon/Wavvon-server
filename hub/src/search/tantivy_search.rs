@@ -30,7 +30,14 @@ impl TantivySearch {
                 let author_field = schema.get_field("author").unwrap();
                 let content_field = schema.get_field("content").unwrap();
                 let ts_field = schema.get_field("ts").unwrap();
-                (index, id_field, channel_field, author_field, content_field, ts_field)
+                (
+                    index,
+                    id_field,
+                    channel_field,
+                    author_field,
+                    content_field,
+                    ts_field,
+                )
             } else {
                 std::fs::create_dir_all(index_path)?;
                 let mut builder = Schema::builder();
@@ -41,13 +48,23 @@ impl TantivySearch {
                 let ts_field = builder.add_i64_field("ts", FAST | STORED);
                 let schema = builder.build();
                 let index = Index::create_in_dir(index_path, schema)?;
-                (index, id_field, channel_field, author_field, content_field, ts_field)
+                (
+                    index,
+                    id_field,
+                    channel_field,
+                    author_field,
+                    content_field,
+                    ts_field,
+                )
             };
 
         let writer = index.writer(64_000_000)?;
+        // Manual reload policy: the reader is explicitly refreshed inside
+        // query() just before each search so callers always see the latest
+        // committed segments without paying a background-thread polling cost.
         let reader = index
             .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .reload_policy(ReloadPolicy::Manual)
             .try_into()?;
 
         Ok(Self {
@@ -69,7 +86,6 @@ impl MessageSearch for TantivySearch {
         msg: &'a IndexedMessage,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
         let writer = self.writer.clone();
-        let reader = self.reader.clone();
         let id_field = self.id_field;
         let channel_field = self.channel_field;
         let author_field = self.author_field;
@@ -94,9 +110,10 @@ impl MessageSearch for TantivySearch {
                 );
                 let mut w = writer.lock().unwrap();
                 w.add_document(doc)?;
+                // Commit on every document. The reader is refreshed lazily
+                // inside query() instead of here, so this hot path does not
+                // block on a reader reload for every write.
                 w.commit()?;
-                drop(w);
-                reader.reload()?;
                 Ok::<_, tantivy::TantivyError>(())
             })
             .await
@@ -127,6 +144,41 @@ impl MessageSearch for TantivySearch {
         })
     }
 
+    fn reindex_all<'a>(
+        &'a self,
+        messages: Vec<IndexedMessage>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>> {
+        let writer = self.writer.clone();
+        let id_field = self.id_field;
+        let channel_field = self.channel_field;
+        let author_field = self.author_field;
+        let content_field = self.content_field;
+        let ts_field = self.ts_field;
+
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let mut w = writer.lock().unwrap();
+                // Delete all existing documents before rebuilding.
+                w.delete_all_documents()?;
+                for msg in messages {
+                    let d = doc!(
+                        id_field => msg.id.as_str(),
+                        channel_field => msg.channel_id.as_str(),
+                        author_field => msg.author_pubkey.as_str(),
+                        content_field => msg.content.as_str(),
+                        ts_field => msg.timestamp,
+                    );
+                    w.add_document(d)?;
+                }
+                w.commit()?;
+                Ok::<_, tantivy::TantivyError>(())
+            })
+            .await
+            .unwrap()
+            .map_err(anyhow::Error::from)
+        })
+    }
+
     fn query<'a>(
         &'a self,
         params: &'a SearchParams,
@@ -146,6 +198,10 @@ impl MessageSearch for TantivySearch {
 
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
+                // Refresh the reader so the searcher sees all committed segments.
+                // Reload is cheap (in-memory segment-list swap) and only happens
+                // on the read path, keeping the write path free of any reader cost.
+                reader.reload()?;
                 let searcher = reader.searcher();
                 let query_parser = QueryParser::for_index(&index, vec![content_field]);
                 let text_q = query_parser.parse_query(&q_str)?;
@@ -183,9 +239,8 @@ impl MessageSearch for TantivySearch {
                     .iter()
                     .filter_map(|(score, addr)| {
                         let doc: tantivy::TantivyDocument = searcher.doc(*addr).ok()?;
-                        let get_text = |f: Field| {
-                            doc.get_first(f)?.as_str().map(|s: &str| s.to_string())
-                        };
+                        let get_text =
+                            |f: Field| doc.get_first(f)?.as_str().map(|s: &str| s.to_string());
                         let get_i64 = |f: Field| doc.get_first(f)?.as_i64();
 
                         let content = get_text(content_field)?;

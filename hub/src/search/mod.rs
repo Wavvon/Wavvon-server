@@ -44,4 +44,13 @@ pub trait MessageSearch: Send + Sync {
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = anyhow::Result<Vec<SearchHit>>> + Send + 'a>,
     >;
+
+    /// Drop the entire index and re-index the provided messages from scratch.
+    ///
+    /// Used by the admin reindex endpoint. Implementations that don't support
+    /// reindexing (e.g. NullSearch) should return `Ok(())` silently.
+    fn reindex_all<'a>(
+        &'a self,
+        messages: Vec<IndexedMessage>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'a>>;
 }

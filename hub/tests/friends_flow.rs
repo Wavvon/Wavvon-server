@@ -1,8 +1,8 @@
-
 use serde_json::json;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn friend_request_accept_flow() {
@@ -30,7 +30,10 @@ async fn friend_request_accept_flow() {
     assert_eq!(pending.as_array().unwrap().len(), 1);
 
     // Alice's friends list is empty (request not yet accepted)
-    let resp = server.get("/friends").authorization_bearer(&alice_token).await;
+    let resp = server
+        .get("/friends")
+        .authorization_bearer(&alice_token)
+        .await;
     let friends: serde_json::Value = resp.json();
     assert_eq!(friends.as_array().unwrap().len(), 0);
 
@@ -42,11 +45,17 @@ async fn friend_request_accept_flow() {
         .assert_status_ok();
 
     // Both have each other in friends list
-    let resp = server.get("/friends").authorization_bearer(&alice_token).await;
+    let resp = server
+        .get("/friends")
+        .authorization_bearer(&alice_token)
+        .await;
     let friends: serde_json::Value = resp.json();
     assert_eq!(friends.as_array().unwrap().len(), 1);
 
-    let resp = server.get("/friends").authorization_bearer(&bob_token).await;
+    let resp = server
+        .get("/friends")
+        .authorization_bearer(&bob_token)
+        .await;
     let friends: serde_json::Value = resp.json();
     assert_eq!(friends.as_array().unwrap().len(), 1);
 }
@@ -92,11 +101,17 @@ async fn remove_friend() {
         .assert_status(axum::http::StatusCode::NO_CONTENT);
 
     // Both lists are empty
-    let resp = server.get("/friends").authorization_bearer(&alice_token).await;
+    let resp = server
+        .get("/friends")
+        .authorization_bearer(&alice_token)
+        .await;
     let friends: serde_json::Value = resp.json();
     assert_eq!(friends.as_array().unwrap().len(), 0);
 
-    let resp = server.get("/friends").authorization_bearer(&bob_token).await;
+    let resp = server
+        .get("/friends")
+        .authorization_bearer(&bob_token)
+        .await;
     let friends: serde_json::Value = resp.json();
     assert_eq!(friends.as_array().unwrap().len(), 0);
 }
@@ -130,7 +145,11 @@ async fn cross_hub_friend_add_skips_pending_and_caches_hub_url() {
         .authorization_bearer(&alice_token)
         .await;
     let pending: serde_json::Value = resp.json();
-    assert_eq!(pending.as_array().unwrap().len(), 0, "cross-hub adds shouldn't be pending");
+    assert_eq!(
+        pending.as_array().unwrap().len(),
+        0,
+        "cross-hub adds shouldn't be pending"
+    );
 
     // Bob should appear immediately in Alice's friends list, with hub_url
     // and the cached display_name surfaced.
@@ -169,12 +188,18 @@ async fn same_hub_friend_omits_hub_url_in_response() {
         .await
         .assert_status_ok();
 
-    let resp = server.get("/friends").authorization_bearer(&alice_token).await;
+    let resp = server
+        .get("/friends")
+        .authorization_bearer(&alice_token)
+        .await;
     let friends = resp.json::<serde_json::Value>();
     let arr = friends.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     // Same-hub friends don't carry a hub_url — the friend lives on this hub.
-    assert!(arr[0]["hub_url"].is_null(), "same-hub friend should have null hub_url");
+    assert!(
+        arr[0]["hub_url"].is_null(),
+        "same-hub friend should have null hub_url"
+    );
 }
 
 #[tokio::test]

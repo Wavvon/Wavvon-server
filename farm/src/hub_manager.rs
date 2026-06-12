@@ -11,7 +11,6 @@ use sqlx::SqlitePool;
 use tokio::process::Child;
 use tokio::sync::RwLock;
 
-
 struct HubProcess {
     port: u16,
     child: Child,
@@ -42,8 +41,7 @@ impl HubManager {
     pub async fn allocate_port(&self) -> u16 {
         let hubs = self.hubs.read().await;
         let mut port = self.base_port;
-        let occupied: std::collections::HashSet<u16> =
-            hubs.values().map(|h| h.port).collect();
+        let occupied: std::collections::HashSet<u16> = hubs.values().map(|h| h.port).collect();
         while occupied.contains(&port) {
             port += 1;
         }
@@ -57,7 +55,13 @@ impl HubManager {
     ///
     /// `owner_pubkey` is passed as `VOXPLY_OWNER_PUBKEY` so the hub seeds that key
     /// as the builtin-owner role on first boot.
-    pub async fn spawn_hub(&self, hub_id: &str, db_path: &str, port: u16, owner_pubkey: Option<&str>) -> Result<()> {
+    pub async fn spawn_hub(
+        &self,
+        hub_id: &str,
+        db_path: &str,
+        port: u16,
+        owner_pubkey: Option<&str>,
+    ) -> Result<()> {
         let bin = std::env::var("VOXPLY_HUB_BIN").unwrap_or_else(|_| self.hub_bin.clone());
 
         let mut cmd = tokio::process::Command::new(&bin);
@@ -67,12 +71,9 @@ impl HubManager {
         if let Some(pk) = owner_pubkey {
             cmd.env("VOXPLY_OWNER_PUBKEY", pk);
         }
-        let child = cmd.spawn()
-            .with_context(|| {
-                format!(
-                    "Failed to spawn hub process for {hub_id} (binary: {bin:?})"
-                )
-            })?;
+        let child = cmd.spawn().with_context(|| {
+            format!("Failed to spawn hub process for {hub_id} (binary: {bin:?})")
+        })?;
 
         let mut hubs = self.hubs.write().await;
         hubs.insert(hub_id.to_string(), HubProcess { port, child });
@@ -84,9 +85,10 @@ impl HubManager {
     pub async fn stop_hub(&self, hub_id: &str) -> Result<()> {
         let mut hubs = self.hubs.write().await;
         if let Some(mut proc) = hubs.remove(hub_id) {
-            proc.child.kill().await.with_context(|| {
-                format!("Failed to kill hub process {hub_id}")
-            })?;
+            proc.child
+                .kill()
+                .await
+                .with_context(|| format!("Failed to kill hub process {hub_id}"))?;
             tracing::info!(hub_id, "Hub process stopped");
         }
         Ok(())
@@ -121,7 +123,10 @@ impl HubManager {
 
         for (hub_id, db_path, port, owner_pubkey) in rows {
             let port = port as u16;
-            if let Err(e) = self.spawn_hub(&hub_id, &db_path, port, owner_pubkey.as_deref()).await {
+            if let Err(e) = self
+                .spawn_hub(&hub_id, &db_path, port, owner_pubkey.as_deref())
+                .await
+            {
                 tracing::warn!(hub_id, error = %e, "Failed to spawn hub on startup (skipping)");
             }
         }

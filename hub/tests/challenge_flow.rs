@@ -1,10 +1,10 @@
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_hub::auth::models::ChallengeResponse;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 async fn admin_set_challenge_mode(server: &TestServer, token: &str, mode: &str) {
     server
@@ -108,7 +108,10 @@ async fn puzzle_challenge_happy_path() {
     resp.assert_status_ok();
     let challenge: Value = resp.json();
     assert_eq!(challenge["mode"], "puzzle");
-    assert!(challenge["prompt_svg"].is_string(), "puzzle must have an SVG");
+    assert!(
+        challenge["prompt_svg"].is_string(),
+        "puzzle must have an SVG"
+    );
 
     let id = challenge["id"].as_str().unwrap().to_string();
 

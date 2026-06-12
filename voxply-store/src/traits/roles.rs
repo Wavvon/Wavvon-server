@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::{NewRole, RoleRow, UserPerms};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait RoleStore: Send + Sync {
@@ -29,11 +29,8 @@ pub trait RoleStore: Send + Sync {
     async fn role_permissions(&self, role_id: &str) -> Result<Vec<String>, StoreError>;
 
     /// Replace the permission set for a role (DELETE + INSERT).
-    async fn set_role_permissions(
-        &self,
-        role_id: &str,
-        perms: &[String],
-    ) -> Result<(), StoreError>;
+    async fn set_role_permissions(&self, role_id: &str, perms: &[String])
+        -> Result<(), StoreError>;
 
     /// Assign a role to a user (INSERT … ON CONFLICT DO NOTHING).
     async fn assign_role(&self, pubkey: &str, role_id: &str, now: i64) -> Result<(), StoreError>;

@@ -1,8 +1,8 @@
-
 use serde_json::json;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 // ---------------------------------------------------------------------------
 // Happy path: put contacts, read them back, delete one
@@ -77,7 +77,9 @@ async fn cannot_set_more_than_5_contacts() {
     let owner = Identity::generate();
     let token = common::authenticate(&server, &owner).await;
 
-    let six: Vec<String> = (0..6).map(|_| Identity::generate().public_key_hex()).collect();
+    let six: Vec<String> = (0..6)
+        .map(|_| Identity::generate().public_key_hex())
+        .collect();
     let resp = server
         .put("/recovery/contacts")
         .authorization_bearer(&token)

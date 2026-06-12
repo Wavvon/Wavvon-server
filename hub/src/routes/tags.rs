@@ -35,10 +35,7 @@ pub struct PatchTagsRequest {
 fn normalise_tag(raw: &str) -> Result<String, String> {
     let t = raw.trim().to_lowercase();
     if t.is_empty() || t.len() > 32 {
-        return Err(format!(
-            "Tag '{}' must be 1–32 characters",
-            raw.trim()
-        ));
+        return Err(format!("Tag '{}' must be 1–32 characters", raw.trim()));
     }
     // After normalisation only [a-z0-9-] are allowed.
     if !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
@@ -87,8 +84,7 @@ pub async fn patch_tags(
 
     let mut normalised = Vec::with_capacity(req.tags.len());
     for raw in &req.tags {
-        let t = normalise_tag(raw)
-            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+        let t = normalise_tag(raw).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         normalised.push(t);
     }
 
@@ -96,8 +92,12 @@ pub async fn patch_tags(
     let mut seen = std::collections::HashSet::new();
     normalised.retain(|t| seen.insert(t.clone()));
 
-    let json_val = serde_json::to_string(&normalised)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialise error: {e}")))?;
+    let json_val = serde_json::to_string(&normalised).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Serialise error: {e}"),
+        )
+    })?;
 
     sqlx::query(
         "INSERT INTO hub_settings (key, value) VALUES ('hub_tags', ?)
@@ -119,8 +119,11 @@ pub async fn patch_tags(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
 
-    let nsfw = req.nsfw.unwrap_or_else(|| false);
-    Ok(Json(TagsResponse { tags: normalised, nsfw }))
+    let nsfw = req.nsfw.unwrap_or(false);
+    Ok(Json(TagsResponse {
+        tags: normalised,
+        nsfw,
+    }))
 }
 
 /// Load the current self-tags from hub_settings. Returns an empty vec if

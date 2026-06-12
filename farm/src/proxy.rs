@@ -82,7 +82,10 @@ pub async fn proxy_handler(
         headers.insert("x-hub-id", hv);
     }
 
-    let body_bytes = match axum::body::to_bytes(req.into_body(), usize::MAX).await {
+    // Limit forwarded request body to 32 MiB; larger payloads are rejected before
+    // they reach the upstream hub process.
+    const MAX_BODY: usize = 32 * 1024 * 1024;
+    let body_bytes = match axum::body::to_bytes(req.into_body(), MAX_BODY).await {
         Ok(b) => b,
         Err(_) => {
             return json_error(StatusCode::BAD_REQUEST, "failed_to_read_body");
@@ -90,9 +93,7 @@ pub async fn proxy_handler(
     };
 
     // Build reqwest request.
-    let mut rb = state
-        .http_client
-        .request(method.clone(), &upstream_url);
+    let mut rb = state.http_client.request(method.clone(), &upstream_url);
 
     // Forward headers (skip hop-by-hop headers that reqwest manages).
     for (name, value) in &headers {

@@ -1,6 +1,6 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::{BanRow, MuteRow, NewReport};
+use async_trait::async_trait;
 
 #[async_trait]
 pub trait ModerationStore: Send + Sync {

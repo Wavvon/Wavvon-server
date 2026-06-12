@@ -364,12 +364,15 @@ pub async fn patch_game(
         if !VALID_CAPS.contains(&cap.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid_capability", "details": format!("unknown capability: {cap}")})),
+                Json(
+                    serde_json::json!({"error": "invalid_capability", "details": format!("unknown capability: {cap}")}),
+                ),
             ));
         }
     }
 
-    let grant_json = serde_json::to_string(&req.permission_grant).unwrap_or_else(|_| "[]".to_string());
+    let grant_json =
+        serde_json::to_string(&req.permission_grant).unwrap_or_else(|_| "[]".to_string());
 
     let rows_affected = sqlx::query("UPDATE games SET permission_grant = ? WHERE id = ?")
         .bind(&grant_json)

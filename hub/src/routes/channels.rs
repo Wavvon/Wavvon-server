@@ -42,8 +42,7 @@ pub async fn voice_channel_participants(
 
     // Collect every distinct pubkey first so we can look up display names
     // in one query. Avoids N round-trips for a hub with many in-voice users.
-    let mut all_keys: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut all_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for members in voice.values() {
         for pk in members.keys() {
             all_keys.insert(pk.clone());
@@ -55,14 +54,13 @@ pub async fn voice_channel_participants(
         // sqlx doesn't have great IN-clause helpers; this loop is cheap and
         // bounded by hub size. The lookup itself is one indexed PK fetch.
         for key in &all_keys {
-            let name: Option<String> = sqlx::query_scalar(
-                "SELECT display_name FROM users WHERE public_key = ?",
-            )
-            .bind(key)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-            .flatten();
+            let name: Option<String> =
+                sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+                    .bind(key)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                    .flatten();
             name_by_key.insert(key.clone(), name);
         }
     }
@@ -117,17 +115,26 @@ pub async fn create_channel(
 
     // Validate parent if specified
     if let Some(parent_id) = &req.parent_id {
-        let parent_is_category: Option<i64> = sqlx::query_scalar(
-            "SELECT is_category FROM channels WHERE id = ?",
-        )
-        .bind(parent_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        let parent_is_category: Option<i64> =
+            sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+                .bind(parent_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
         match parent_is_category {
-            None => return Err((StatusCode::NOT_FOUND, "Parent channel not found".to_string())),
-            Some(0) => return Err((StatusCode::BAD_REQUEST, "Parent must be a category".to_string())),
+            None => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    "Parent channel not found".to_string(),
+                ))
+            }
+            Some(0) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Parent must be a category".to_string(),
+                ))
+            }
             _ => {}
         }
     }
@@ -158,33 +165,44 @@ pub async fn create_channel(
             Some("forum") => "forum".to_string(),
             Some("banner") => "banner".to_string(),
             Some(other) => {
-                return Err((StatusCode::BAD_REQUEST, format!("unknown channel_type: {other}")))
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("unknown channel_type: {other}"),
+                ))
             }
         }
     };
 
     if channel_type == "banner" {
         if req.banner_url.is_some() && req.banner_file_id.is_some() {
-            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are mutually exclusive".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "banner_url and banner_file_id are mutually exclusive".to_string(),
+            ));
         }
         if let Some(ref url) = req.banner_url {
             if !url.starts_with("https://") {
-                return Err((StatusCode::BAD_REQUEST, "banner_url must be an https:// URL".to_string()));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "banner_url must be an https:// URL".to_string(),
+                ));
             }
         }
     } else {
         if req.banner_url.is_some() || req.banner_file_id.is_some() {
-            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are only valid for banner channels".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "banner_url and banner_file_id are only valid for banner channels".to_string(),
+            ));
         }
     }
 
     // Append at the end of the current order
-    let next_order: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(display_order), -1) + 1 FROM channels",
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let next_order: i64 =
+        sqlx::query_scalar("SELECT COALESCE(MAX(display_order), -1) + 1 FROM channels")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     sqlx::query(
         "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, channel_type, created_at, banner_url, banner_file_id)
@@ -242,7 +260,8 @@ pub async fn create_channel(
                 None,
                 Some(&ch_id),
                 serde_json::json!({ "channel_id": ch_id, "name": ch_name }),
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -263,12 +282,16 @@ pub async fn update_channel(
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let existing_type = existing_type
-        .ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
+    let existing_type =
+        existing_type.ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
 
-    let changing_structure = req.name.is_some() || req.description.is_some() || req.parent_id.is_some()
-        || req.banner_url.is_some() || req.banner_file_id.is_some();
-    let changing_appearance = req.icon.is_some() || req.color.is_some() || req.custom_icon_svg.is_some();
+    let changing_structure = req.name.is_some()
+        || req.description.is_some()
+        || req.parent_id.is_some()
+        || req.banner_url.is_some()
+        || req.banner_file_id.is_some();
+    let changing_appearance =
+        req.icon.is_some() || req.color.is_some() || req.custom_icon_svg.is_some();
     let changing_talk_power = req.min_talk_power.is_some();
     let changing_retention = req.retention_days.is_some();
 
@@ -282,59 +305,58 @@ pub async fn update_channel(
         perms.require(permissions::ADMIN)?;
     }
 
-    if let Some(parent_option) = &req.parent_id {
-        if let Some(parent_id) = parent_option {
-            if parent_id == &channel_id {
-                return Err((StatusCode::BAD_REQUEST, "A channel can't be its own parent".to_string()));
+    if let Some(Some(parent_id)) = &req.parent_id {
+        if parent_id == &channel_id {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "A channel can't be its own parent".to_string(),
+            ));
+        }
+        let parent_is_category: Option<i64> =
+            sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+                .bind(parent_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        match parent_is_category {
+            None => {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    "Parent channel not found".to_string(),
+                ))
             }
-            let parent_is_category: Option<i64> =
-                sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
-                    .bind(parent_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .map_err(|e| {
-                        (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-                    })?;
-            match parent_is_category {
-                None => {
-                    return Err((StatusCode::NOT_FOUND, "Parent channel not found".to_string()))
-                }
-                Some(0) => {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        "Parent must be a category".to_string(),
-                    ))
-                }
-                _ => {}
-            }
-
-            // Server-side cycle detection
-            if is_ancestor(&state.db, &channel_id, parent_id).await? {
+            Some(0) => {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    "Cannot move a channel into its own descendant".to_string(),
-                ));
+                    "Parent must be a category".to_string(),
+                ))
             }
-            // Depth enforcement
-            let max_depth = read_max_depth(&state.db).await;
-            if max_depth > 0 {
-                let parent_depth = node_depth(&state.db, Some(parent_id)).await?;
-                let moved_depth = parent_depth + 1;
-                let max_code_depth = max_depth - 1;
-                if moved_depth > max_code_depth {
-                    return Err((StatusCode::BAD_REQUEST, "depth_exceeded".to_string()));
-                }
-                let is_cat: i64 =
-                    sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
-                        .bind(&channel_id)
-                        .fetch_one(&state.db)
-                        .await
-                        .map_err(|e| {
-                            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-                        })?;
-                if is_cat == 1 && moved_depth >= max_code_depth {
-                    return Err((StatusCode::BAD_REQUEST, "category_at_max_depth".to_string()));
-                }
+            _ => {}
+        }
+
+        // Server-side cycle detection
+        if is_ancestor(&state.db, &channel_id, parent_id).await? {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Cannot move a channel into its own descendant".to_string(),
+            ));
+        }
+        // Depth enforcement
+        let max_depth = read_max_depth(&state.db).await;
+        if max_depth > 0 {
+            let parent_depth = node_depth(&state.db, Some(parent_id)).await?;
+            let moved_depth = parent_depth + 1;
+            let max_code_depth = max_depth - 1;
+            if moved_depth > max_code_depth {
+                return Err((StatusCode::BAD_REQUEST, "depth_exceeded".to_string()));
+            }
+            let is_cat: i64 = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+                .bind(&channel_id)
+                .fetch_one(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if is_cat == 1 && moved_depth >= max_code_depth {
+                return Err((StatusCode::BAD_REQUEST, "category_at_max_depth".to_string()));
             }
         }
     }
@@ -342,11 +364,17 @@ pub async fn update_channel(
     // Banner field validation
     if req.banner_url.is_some() || req.banner_file_id.is_some() {
         if existing_type != "banner" {
-            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are only valid for banner channels".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "banner_url and banner_file_id are only valid for banner channels".to_string(),
+            ));
         }
         if let Some(ref url) = req.banner_url {
             if !url.starts_with("https://") {
-                return Err((StatusCode::BAD_REQUEST, "banner_url must be an https:// URL".to_string()));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "banner_url must be an https:// URL".to_string(),
+                ));
             }
         }
         if let Some(ref fid) = req.banner_file_id {
@@ -359,11 +387,17 @@ pub async fn update_channel(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
             if valid.is_none() {
-                return Err((StatusCode::BAD_REQUEST, "banner_file_id must reference an image uploaded to this channel".to_string()));
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "banner_file_id must reference an image uploaded to this channel".to_string(),
+                ));
             }
         }
         if req.banner_url.is_some() && req.banner_file_id.is_some() {
-            return Err((StatusCode::BAD_REQUEST, "banner_url and banner_file_id are mutually exclusive".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "banner_url and banner_file_id are mutually exclusive".to_string(),
+            ));
         }
     }
 
@@ -448,12 +482,7 @@ pub async fn update_channel(
                     "A channel with that name already exists".to_string(),
                 ))
             }
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DB error: {e}"),
-                ))
-            }
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))),
         }
     }
 
@@ -532,26 +561,22 @@ pub async fn delete_channel(
     perms.require(permissions::MANAGE_CHANNELS)?;
 
     // Check if channel exists
-    let exists: Option<i64> = sqlx::query_scalar(
-        "SELECT is_category FROM channels WHERE id = ?",
-    )
-    .bind(&channel_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let exists: Option<i64> = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
     // Check for children (prevent deleting non-empty categories)
-    let child_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM channels WHERE parent_id = ?",
-    )
-    .bind(&channel_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let child_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE parent_id = ?")
+        .bind(&channel_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if child_count > 0 {
         return Err((
@@ -604,7 +629,8 @@ pub async fn delete_channel(
                 None,
                 Some(&ch_id),
                 serde_json::json!({ "channel_id": ch_id }),
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -718,12 +744,11 @@ pub async fn get_unread_counts(
     user: AuthUser,
 ) -> Result<Json<Vec<UnreadCount>>, (StatusCode, String)> {
     // All non-category channels (no per-channel ACL in the base model)
-    let channel_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT id FROM channels WHERE is_category = 0",
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let channel_ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM channels WHERE is_category = 0")
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let mut result = Vec::with_capacity(channel_ids.len());
     for channel_id in channel_ids {
@@ -747,7 +772,10 @@ pub async fn get_unread_counts(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-        result.push(UnreadCount { channel_id, unread_count });
+        result.push(UnreadCount {
+            channel_id,
+            unread_count,
+        });
     }
 
     Ok(Json(result))

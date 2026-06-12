@@ -133,14 +133,12 @@ impl PollStore for SqliteStore {
     }
 
     async fn delete_vote(&self, poll_id: &str, user_pubkey: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM poll_votes WHERE poll_id = ? AND user_pubkey = ?",
-        )
-        .bind(poll_id)
-        .bind(user_pubkey)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM poll_votes WHERE poll_id = ? AND user_pubkey = ?")
+            .bind(poll_id)
+            .bind(user_pubkey)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 }

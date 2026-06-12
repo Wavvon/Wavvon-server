@@ -92,13 +92,12 @@ impl EventStore for SqliteStore {
     }
 
     async fn list_rsvps(&self, event_id: &str) -> Result<Vec<EventRsvpRow>, StoreError> {
-        let rows = sqlx::query(
-            "SELECT event_id, user_pubkey, status FROM event_rsvps WHERE event_id = ?",
-        )
-        .bind(event_id)
-        .fetch_all(self.pool())
-        .await
-        .map_err(map_err)?;
+        let rows =
+            sqlx::query("SELECT event_id, user_pubkey, status FROM event_rsvps WHERE event_id = ?")
+                .bind(event_id)
+                .fetch_all(self.pool())
+                .await
+                .map_err(map_err)?;
         Ok(rows
             .into_iter()
             .map(|r| EventRsvpRow {
@@ -110,14 +109,12 @@ impl EventStore for SqliteStore {
     }
 
     async fn delete_rsvp(&self, event_id: &str, user_pubkey: &str) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM event_rsvps WHERE event_id = ? AND user_pubkey = ?",
-        )
-        .bind(event_id)
-        .bind(user_pubkey)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM event_rsvps WHERE event_id = ? AND user_pubkey = ?")
+            .bind(event_id)
+            .bind(user_pubkey)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 }

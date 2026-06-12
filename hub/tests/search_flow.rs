@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,7 +13,8 @@ use voxply_hub::server;
 use voxply_hub::state::AppState;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 /// Build a TestServer backed by a real TantivySearch on a temp directory.
 /// Returns the TempDir too — drop it after the test to clean up.
@@ -31,9 +31,8 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
     let tmp = tempfile::tempdir().unwrap();
-    let search = Arc::new(
-        voxply_hub::search::tantivy_search::TantivySearch::open(tmp.path()).unwrap(),
-    );
+    let search =
+        Arc::new(voxply_hub::search::tantivy_search::TantivySearch::open(tmp.path()).unwrap());
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
@@ -52,7 +51,7 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         voice_udp_port: 0,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashSet::new()),
+        online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         bot_sessions: RwLock::new(std::collections::HashMap::new()),
@@ -65,9 +64,11 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         started_at: std::time::Instant::now(),
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
+        reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     (TestServer::new(server::create_router(state)), tmp)
 }
@@ -154,10 +155,48 @@ async fn search_short_query_returns_empty() {
 async fn search_requires_auth() {
     let server = common::setup().await;
 
+    let resp = server.get("/search").add_query_param("q", "anything").await;
+    resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+}
+
+/// Admin reindex returns 202 Accepted and the status field.
+#[tokio::test]
+async fn admin_reindex_accepted_for_admin() {
+    let (server, _tmp) = setup_with_search().await;
+    let admin = Identity::generate();
+    let admin_token = authenticate(&server, &admin).await; // first user → owner → admin
+
     let resp = server
-        .get("/search")
-        .add_query_param("q", "anything")
+        .post("/admin/search/reindex")
+        .authorization_bearer(&admin_token)
         .await;
+    resp.assert_status(axum::http::StatusCode::ACCEPTED);
+    let body: serde_json::Value = resp.json();
+    assert_eq!(body["status"], "started");
+}
+
+/// Non-admin users must receive 403.
+#[tokio::test]
+async fn admin_reindex_forbidden_for_non_admin() {
+    let (server, _tmp) = setup_with_search().await;
+    // First user is admin; create a second non-admin user.
+    let admin = Identity::generate();
+    let _admin_token = authenticate(&server, &admin).await;
+    let user = Identity::generate();
+    let user_token = authenticate(&server, &user).await;
+
+    let resp = server
+        .post("/admin/search/reindex")
+        .authorization_bearer(&user_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+/// Unauthenticated access is rejected.
+#[tokio::test]
+async fn admin_reindex_requires_auth() {
+    let (server, _tmp) = setup_with_search().await;
+    let resp = server.post("/admin/search/reindex").await;
     resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 }
 
@@ -195,7 +234,11 @@ async fn search_respects_channel_ban() {
         .await;
     resp.assert_status_ok();
     let before: Vec<SearchResult> = resp.json();
-    assert_eq!(before.len(), 1, "watcher should find the message before ban");
+    assert_eq!(
+        before.len(),
+        1,
+        "watcher should find the message before ban"
+    );
 
     // Insert the ban directly into the DB via the server state (we can't
     // call the endpoint without setting up admin permissions). We use the

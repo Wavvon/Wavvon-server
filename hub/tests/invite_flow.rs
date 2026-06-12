@@ -1,11 +1,11 @@
-
 use axum_test::TestServer;
 use serde_json::json;
 use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use voxply_hub::routes::invite_models::InviteResponse;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[allow(dead_code)]
 async fn authenticate_with_invite(
@@ -55,10 +55,7 @@ async fn create_and_list_invites() {
     assert_eq!(invite.max_uses, Some(5));
     assert_eq!(invite.uses, 0);
 
-    let resp = server
-        .get("/invites")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/invites").authorization_bearer(&token).await;
     let invites: Vec<InviteResponse> = resp.json();
     assert_eq!(invites.len(), 1);
 }
@@ -120,10 +117,7 @@ async fn revoke_invite() {
         .await
         .assert_status(axum::http::StatusCode::NO_CONTENT);
 
-    let resp = server
-        .get("/invites")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/invites").authorization_bearer(&token).await;
     let invites: Vec<InviteResponse> = resp.json();
     assert_eq!(invites.len(), 0);
 }

@@ -79,7 +79,10 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
         .json(&json!({ "public_key": pubkey }))
         .await;
     cr.assert_status_ok();
-    let challenge_hex = cr.json::<Value>()["challenge"].as_str().unwrap().to_string();
+    let challenge_hex = cr.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
     let sig_hex = hex::encode(identity.sign(&challenge_bytes).to_bytes());
     let vr = server
@@ -143,8 +146,22 @@ async fn farm_info_hosted_hubs_zero_on_empty() {
 async fn farm_info_hosted_hubs_counts_active_only() {
     let (server, state) = setup().await;
     let owner = Identity::generate();
-    insert_hub(&state, "hub001", &owner.public_key_hex(), "Hub One", "public").await;
-    insert_hub(&state, "hub002", &owner.public_key_hex(), "Hub Two", "public").await;
+    insert_hub(
+        &state,
+        "hub001",
+        &owner.public_key_hex(),
+        "Hub One",
+        "public",
+    )
+    .await;
+    insert_hub(
+        &state,
+        "hub002",
+        &owner.public_key_hex(),
+        "Hub Two",
+        "public",
+    )
+    .await;
 
     // Suspend one.
     let now = std::time::SystemTime::now()
@@ -171,7 +188,14 @@ async fn farm_info_hosted_hubs_counts_active_only() {
 async fn list_hubs_unauthenticated_empty_when_directory_private() {
     let (server, state) = setup().await;
     let owner = Identity::generate();
-    insert_hub(&state, "hubpub", &owner.public_key_hex(), "Public Hub", "public").await;
+    insert_hub(
+        &state,
+        "hubpub",
+        &owner.public_key_hex(),
+        "Public Hub",
+        "public",
+    )
+    .await;
 
     // directory_public defaults to 0.
     let resp = server.get("/farm/hubs").await;
@@ -184,8 +208,22 @@ async fn list_hubs_unauthenticated_empty_when_directory_private() {
 async fn list_hubs_unauthenticated_returns_public_when_directory_public() {
     let (server, state) = setup().await;
     let owner = Identity::generate();
-    insert_hub(&state, "hubpub", &owner.public_key_hex(), "Public Hub", "public").await;
-    insert_hub(&state, "hubprv", &owner.public_key_hex(), "Private Hub", "private").await;
+    insert_hub(
+        &state,
+        "hubpub",
+        &owner.public_key_hex(),
+        "Public Hub",
+        "public",
+    )
+    .await;
+    insert_hub(
+        &state,
+        "hubprv",
+        &owner.public_key_hex(),
+        "Private Hub",
+        "private",
+    )
+    .await;
 
     sqlx::query("UPDATE farms SET directory_public = 1 WHERE id = 1")
         .execute(&state.db)
@@ -212,7 +250,14 @@ async fn list_hubs_authenticated_returns_owned_plus_public() {
         .await
         .unwrap();
 
-    insert_hub(&state, "hub_owner_pub", &owner.public_key_hex(), "Owner Public", "public").await;
+    insert_hub(
+        &state,
+        "hub_owner_pub",
+        &owner.public_key_hex(),
+        "Owner Public",
+        "public",
+    )
+    .await;
     insert_hub(
         &state,
         "hub_owner_prv",
@@ -258,9 +303,18 @@ async fn list_hubs_authenticated_returns_owned_plus_public() {
 
     // Should see: own public, own private, other public — NOT other private.
     assert!(ids.contains(&"hub_owner_pub"), "own public must be in list");
-    assert!(ids.contains(&"hub_owner_prv"), "own private must be in list");
-    assert!(ids.contains(&"hub_other_pub"), "other public must be in list");
-    assert!(!ids.contains(&"hub_other_prv"), "other private must NOT be in list");
+    assert!(
+        ids.contains(&"hub_owner_prv"),
+        "own private must be in list"
+    );
+    assert!(
+        ids.contains(&"hub_other_pub"),
+        "other public must be in list"
+    );
+    assert!(
+        !ids.contains(&"hub_other_prv"),
+        "other private must NOT be in list"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +413,14 @@ async fn create_hub_happy_path() {
 async fn get_hub_returns_correct_info() {
     let (server, state) = setup().await;
     let owner = Identity::generate();
-    insert_hub(&state, "hub123", &owner.public_key_hex(), "Test Hub", "public").await;
+    insert_hub(
+        &state,
+        "hub123",
+        &owner.public_key_hex(),
+        "Test Hub",
+        "public",
+    )
+    .await;
 
     let resp = server.get("/farm/hubs/hub123").await;
     resp.assert_status_ok();

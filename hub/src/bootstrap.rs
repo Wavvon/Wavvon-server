@@ -46,9 +46,7 @@ pub async fn maybe_bootstrap(
         {
             Ok(resp) if resp.status().is_success() => resp.json::<serde_json::Value>().await.ok(),
             _ => {
-                tracing::warn!(
-                    "Failed to redeem bootstrap token; falling through to template_url"
-                );
+                tracing::warn!("Failed to redeem bootstrap token; falling through to template_url");
                 fetch_template(&cfg.template_url, http).await
             }
         }
@@ -74,10 +72,7 @@ pub async fn maybe_bootstrap(
     Ok(())
 }
 
-async fn fetch_template(
-    url: &Option<String>,
-    http: &reqwest::Client,
-) -> Option<serde_json::Value> {
+async fn fetch_template(url: &Option<String>, http: &reqwest::Client) -> Option<serde_json::Value> {
     let url = url.as_ref()?;
     match http.get(url).send().await {
         Ok(resp) if resp.status().is_success() => resp.json().await.ok(),
@@ -106,10 +101,7 @@ async fn apply_template(db: &AnyPool, template: &serde_json::Value) -> anyhow::R
     // Create channels
     if let Some(channels) = template.get("channels").and_then(|v| v.as_array()) {
         for ch in channels {
-            let name = ch
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("general");
+            let name = ch.get("name").and_then(|v| v.as_str()).unwrap_or("general");
             let is_category = ch
                 .get("is_category")
                 .and_then(|v| v.as_bool())

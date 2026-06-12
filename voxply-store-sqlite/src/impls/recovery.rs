@@ -65,21 +65,16 @@ impl RecoveryStore for SqliteStore {
         owner_pubkey: &str,
         contact_pubkey: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "DELETE FROM recovery_contacts WHERE owner_pubkey = ? AND contact_pubkey = ?",
-        )
-        .bind(owner_pubkey)
-        .bind(contact_pubkey)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("DELETE FROM recovery_contacts WHERE owner_pubkey = ? AND contact_pubkey = ?")
+            .bind(owner_pubkey)
+            .bind(contact_pubkey)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
-    async fn list_recovery_contacts(
-        &self,
-        owner_pubkey: &str,
-    ) -> Result<Vec<String>, StoreError> {
+    async fn list_recovery_contacts(&self, owner_pubkey: &str) -> Result<Vec<String>, StoreError> {
         sqlx::query_scalar::<_, String>(
             "SELECT contact_pubkey FROM recovery_contacts WHERE owner_pubkey = ?",
         )

@@ -1,8 +1,9 @@
-use async_trait::async_trait;
 use crate::error::StoreError;
 use crate::row_types::{CertIssuanceRow, UserCertRow};
+use async_trait::async_trait;
 
 #[async_trait]
+#[allow(clippy::too_many_arguments)]
 pub trait CertStore: Send + Sync {
     // ---- Hub-issued certs ----
 
@@ -30,7 +31,10 @@ pub trait CertStore: Send + Sync {
 
     // ---- Pairing offers ----
 
-    async fn upsert_pairing_offer(&self, p: &crate::row_types::PairingOfferRow) -> Result<(), StoreError>;
+    async fn upsert_pairing_offer(
+        &self,
+        p: &crate::row_types::PairingOfferRow,
+    ) -> Result<(), StoreError>;
 
     async fn get_pairing_offer(
         &self,
@@ -51,7 +55,8 @@ pub trait CertStore: Send + Sync {
 
     // ---- Prefs blobs ----
 
-    async fn upsert_prefs_blob(&self, p: &crate::row_types::PrefsBlobRow) -> Result<(), StoreError>;
+    async fn upsert_prefs_blob(&self, p: &crate::row_types::PrefsBlobRow)
+        -> Result<(), StoreError>;
 
     async fn get_prefs_blob(
         &self,

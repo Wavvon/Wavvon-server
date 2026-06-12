@@ -1,10 +1,10 @@
-
 use serde_json::json;
 use voxply_hub::routes::chat_models::{ChannelResponse, MessageResponse};
 use voxply_hub::routes::me::MeResponse;
 use voxply_identity::Identity;
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn create_and_list_channels() {
@@ -32,10 +32,7 @@ async fn create_and_list_channels() {
     resp.assert_status(axum::http::StatusCode::CREATED);
 
     // List channels
-    let resp = server
-        .get("/channels")
-        .authorization_bearer(&token)
-        .await;
+    let resp = server.get("/channels").authorization_bearer(&token).await;
     resp.assert_status_ok();
     let channels: Vec<ChannelResponse> = resp.json();
     assert_eq!(channels.len(), 2);

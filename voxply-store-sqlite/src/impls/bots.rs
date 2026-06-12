@@ -209,7 +209,12 @@ impl BotStore for SqliteStore {
         .map_err(map_err)?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.get::<String, _>("event_type"), r.get::<String, _>("channel_id")))
+            .map(|r| {
+                (
+                    r.get::<String, _>("event_type"),
+                    r.get::<String, _>("channel_id"),
+                )
+            })
             .collect())
     }
 

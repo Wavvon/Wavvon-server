@@ -31,12 +31,12 @@ use crate::state::AppState;
 /// The canonical payload signed by the issuing hub.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CertPayload {
-    pub subject_kind: String,   // always "user"
+    pub subject_kind: String, // always "user"
     pub issuer_pubkey: String,
     pub issuer_url: String,
     pub subject_pubkey: String,
     pub member_since: i64,
-    pub standing: String,       // "good" | "revoked"
+    pub standing: String, // "good" | "revoked"
     pub pow_level: Option<u8>,
     pub issued_at: i64,
     pub expires_at: i64,
@@ -144,8 +144,12 @@ pub async fn list_user_certs(
 
     let out: Result<Vec<_>, _> = all_rows
         .map(|r| {
-            let payload: CertPayload = serde_json::from_str(&r.payload_json)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Payload parse error: {e}")))?;
+            let payload: CertPayload = serde_json::from_str(&r.payload_json).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Payload parse error: {e}"),
+                )
+            })?;
             if payload.standing == "revoked" {
                 return Ok(None);
             }
@@ -241,13 +245,12 @@ pub async fn get_cert_settings(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    let cert_mode: String = sqlx::query_scalar(
-        "SELECT value FROM hub_settings WHERE key = 'cert_mode'",
-    )
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?
-    .unwrap_or_else(|| "none".to_string());
+    let cert_mode: String =
+        sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'cert_mode'")
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?
+            .unwrap_or_else(|| "none".to_string());
 
     let cert_auto_issue: bool = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'cert_auto_issue'",
@@ -305,17 +308,30 @@ pub async fn patch_cert_settings(
     // Validate cert_mode if provided
     if let Some(ref mode) = body.cert_mode {
         if !["none", "any", "trusted"].contains(&mode.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, "cert_mode must be 'none', 'any', or 'trusted'".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cert_mode must be 'none', 'any', or 'trusted'".to_string(),
+            ));
         }
     }
 
     let mut kvs: Vec<(&'static str, String)> = Vec::new();
 
-    if let Some(v) = body.cert_auto_issue { kvs.push(("cert_auto_issue", v)); }
-    if let Some(v) = body.cert_standing_days { kvs.push(("cert_standing_days", v)); }
-    if let Some(v) = body.cert_validity_days { kvs.push(("cert_validity_days", v)); }
-    if let Some(v) = body.cert_mode { kvs.push(("cert_mode", v)); }
-    if let Some(v) = body.cert_min_pow_level { kvs.push(("cert_min_pow_level", v)); }
+    if let Some(v) = body.cert_auto_issue {
+        kvs.push(("cert_auto_issue", v));
+    }
+    if let Some(v) = body.cert_standing_days {
+        kvs.push(("cert_standing_days", v));
+    }
+    if let Some(v) = body.cert_validity_days {
+        kvs.push(("cert_validity_days", v));
+    }
+    if let Some(v) = body.cert_mode {
+        kvs.push(("cert_mode", v));
+    }
+    if let Some(v) = body.cert_min_pow_level {
+        kvs.push(("cert_min_pow_level", v));
+    }
     if let Some(v) = body.cert_trusted_issuers {
         kvs.push(("cert_trusted_issuers", v.to_string()));
     }
@@ -362,7 +378,11 @@ pub async fn issue_cert_for(
 
     let (first_seen_at, _last_seen_at, approval_status, _pow_col, pow_level_i64) =
         user_row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
-    let pow_level = if pow_level_i64 > 0 { Some(pow_level_i64 as u8) } else { None };
+    let pow_level = if pow_level_i64 > 0 {
+        Some(pow_level_i64 as u8)
+    } else {
+        None
+    };
 
     if approval_status != "approved" {
         return Err((StatusCode::FORBIDDEN, "User is not approved".to_string()));
@@ -392,8 +412,12 @@ pub async fn issue_cert_for(
         capabilities: vec![],
     };
 
-    let payload_json = serde_json::to_string(&payload)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialise error: {e}")))?;
+    let payload_json = serde_json::to_string(&payload).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Serialise error: {e}"),
+        )
+    })?;
 
     let sig = state.hub_identity.sign(payload_json.as_bytes());
     let sig_hex = hex::encode(sig.to_bytes());
@@ -423,7 +447,10 @@ pub async fn issue_cert_for(
         validity_days,
     );
 
-    Ok(Certification { payload, signature: sig_hex })
+    Ok(Certification {
+        payload,
+        signature: sig_hex,
+    })
 }
 
 /// Re-issue with standing="revoked" and mark the old row revoked_at.
@@ -445,13 +472,12 @@ pub async fn revoke_cert_for(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Re-issue a cert with standing=revoked so pull-path verifiers see it.
-    let user_row: Option<(i64,)> = sqlx::query_as(
-        "SELECT first_seen_at FROM users WHERE public_key = ?",
-    )
-    .bind(subject_pubkey)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let user_row: Option<(i64,)> =
+        sqlx::query_as("SELECT first_seen_at FROM users WHERE public_key = ?")
+            .bind(subject_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if let Some((first_seen_at,)) = user_row {
         let our_pubkey = state.hub_identity.public_key_hex();
@@ -471,8 +497,12 @@ pub async fn revoke_cert_for(
             expires_at,
             capabilities: vec![],
         };
-        let payload_json = serde_json::to_string(&payload)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialise error: {e}")))?;
+        let payload_json = serde_json::to_string(&payload).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Serialise error: {e}"),
+            )
+        })?;
         let sig = state.hub_identity.sign(payload_json.as_bytes());
         let sig_hex = hex::encode(sig.to_bytes());
         let id = Uuid::new_v4().to_string();
@@ -532,14 +562,12 @@ pub async fn load_cert_require(state: &AppState) -> CertRequire {
 
 /// Load the cert_mode setting: "none" | "any" | "trusted".
 pub async fn load_cert_mode(state: &AppState) -> String {
-    sqlx::query_scalar::<_, String>(
-        "SELECT value FROM hub_settings WHERE key = 'cert_mode'",
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| "none".to_string())
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'cert_mode'")
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "none".to_string())
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -601,7 +629,13 @@ pub async fn verify_certification(
         Ok(s) => s,
         Err(_) => return false,
     };
-    if voxply_identity::verify_signature(&payload.issuer_pubkey, payload_json.as_bytes(), &sig_bytes).is_err() {
+    if voxply_identity::verify_signature(
+        &payload.issuer_pubkey,
+        payload_json.as_bytes(),
+        &sig_bytes,
+    )
+    .is_err()
+    {
         return false;
     }
 
@@ -624,7 +658,9 @@ pub async fn verify_certification(
         "any" => true, // any valid cert satisfies
         "trusted" => {
             // issuer pubkey must be in the trusted list
-            trusted_issuers.iter().any(|ti| ti.pubkey == payload.issuer_pubkey)
+            trusted_issuers
+                .iter()
+                .any(|ti| ti.pubkey == payload.issuer_pubkey)
         }
         _ => false,
     }
@@ -669,16 +705,14 @@ async fn load_hub_url(state: &AppState) -> String {
 }
 
 async fn setting_i64(state: &AppState, key: &str, default: i64) -> i64 {
-    sqlx::query_scalar::<_, String>(
-        "SELECT value FROM hub_settings WHERE key = ?",
-    )
-    .bind(key)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .and_then(|v| v.parse().ok())
-    .unwrap_or(default)
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 // ---------------------------------------------------------------------------
@@ -716,8 +750,8 @@ pub struct IssuanceRow {
 
 impl From<IssuanceDbRow> for IssuanceRow {
     fn from(r: IssuanceDbRow) -> Self {
-        let payload: CertPayload = serde_json::from_str(&r.payload_json)
-            .unwrap_or_else(|_| CertPayload {
+        let payload: CertPayload =
+            serde_json::from_str(&r.payload_json).unwrap_or_else(|_| CertPayload {
                 subject_kind: "user".to_string(),
                 issuer_pubkey: String::new(),
                 issuer_url: String::new(),

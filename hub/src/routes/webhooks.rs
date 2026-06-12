@@ -28,7 +28,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -82,12 +85,11 @@ pub async fn create_webhook(
     perms.require(permissions::ADMIN)?;
 
     // Verify channel exists.
-    let ch_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
-            .bind(&req.channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+        .bind(&req.channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if ch_exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
@@ -208,12 +210,21 @@ pub async fn post_webhook_message(
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .ok_or((StatusCode::NOT_FOUND, "Webhook not found or inactive".to_string()))?;
+    .ok_or((
+        StatusCode::NOT_FOUND,
+        "Webhook not found or inactive".to_string(),
+    ))?;
 
     // Constant-time hash comparison.
     let presented_hash = sha256_hex(token.as_bytes());
-    if !constant_time_eq(presented_hash.as_bytes(), webhook.secret_token_hash.as_bytes()) {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid webhook token".to_string()));
+    if !constant_time_eq(
+        presented_hash.as_bytes(),
+        webhook.secret_token_hash.as_bytes(),
+    ) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Invalid webhook token".to_string(),
+        ));
     }
 
     // Optional HMAC-SHA256 body signature verification.
@@ -285,7 +296,13 @@ pub async fn post_webhook_message(
             message: message.clone(),
         };
         let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state.chat_tx.send((ChatEvent::New { channel_id: webhook.channel_id, message }, json));
+        let _ = state.chat_tx.send((
+            ChatEvent::New {
+                channel_id: webhook.channel_id,
+                message,
+            },
+            json,
+        ));
     }
 
     Ok(Json(WebhookPostResponse { id: msg_id }))

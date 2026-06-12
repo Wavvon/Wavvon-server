@@ -1,6 +1,6 @@
+use crate::error::StoreError;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use crate::error::StoreError;
 
 /// A closure-based transaction scope.
 ///
@@ -14,9 +14,7 @@ use crate::error::StoreError;
 pub trait Transactional: Send + Sync {
     async fn with_transaction<F, T>(&self, f: F) -> Result<T, StoreError>
     where
-        F: for<'tx> FnOnce(
-                &'tx dyn crate::HubStore,
-            ) -> BoxFuture<'tx, Result<T, StoreError>>
+        F: for<'tx> FnOnce(&'tx dyn crate::HubStore) -> BoxFuture<'tx, Result<T, StoreError>>
             + Send,
         T: Send + 'static;
 }

@@ -1,10 +1,10 @@
-
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use voxply_hub::auth::models::ChallengeResponse;
 use voxply_identity::{compute_security_level, Identity};
 
-#[path = "common.rs"] mod common;
+#[path = "common.rs"]
+mod common;
 
 async fn do_auth_with_pow(
     server: &TestServer,

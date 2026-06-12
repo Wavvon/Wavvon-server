@@ -42,23 +42,21 @@ pub async fn get_listing(
     let tags = crate::routes::tags::load_tags(&state).await?;
 
     // Round member count DOWN to the nearest 10 to avoid leaking exact churn.
-    let raw_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users WHERE approval_status = 'approved'",
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let raw_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE approval_status = 'approved'")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let member_count_approx = (raw_count / 10) * 10;
 
-    let listed: bool = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM hub_settings WHERE key = 'hub_listed'",
-    )
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .map(|v| v == "true")
-    .unwrap_or(false);
+    let listed: bool =
+        sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_listed'")
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .map(|v| v == "true")
+            .unwrap_or(false);
 
     Ok(Json(ListingResponse {
         name: branding.name,
@@ -83,7 +81,12 @@ pub async fn patch_listing(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    upsert_setting(&state.db, "hub_listed", if req.listed { "true" } else { "false" }).await?;
+    upsert_setting(
+        &state.db,
+        "hub_listed",
+        if req.listed { "true" } else { "false" },
+    )
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

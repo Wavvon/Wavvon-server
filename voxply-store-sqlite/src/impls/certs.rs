@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use sqlx::Row;
-use voxply_store::{CertIssuanceRow, CertStore, PairingOfferRow, PrefsBlobRow, StoreError, UserCertRow};
+use voxply_store::{
+    CertIssuanceRow, CertStore, PairingOfferRow, PrefsBlobRow, StoreError, UserCertRow,
+};
 
 use crate::error_map::map_err;
 use crate::SqliteStore;
@@ -82,14 +84,12 @@ impl CertStore for SqliteStore {
     }
 
     async fn revoke_cert(&self, id: &str, revoked_at: i64) -> Result<(), StoreError> {
-        sqlx::query(
-            "UPDATE cert_issuances SET revoked_at = ?, standing = 'revoked' WHERE id = ?",
-        )
-        .bind(revoked_at)
-        .bind(id)
-        .execute(self.pool())
-        .await
-        .map_err(map_err)?;
+        sqlx::query("UPDATE cert_issuances SET revoked_at = ?, standing = 'revoked' WHERE id = ?")
+            .bind(revoked_at)
+            .bind(id)
+            .execute(self.pool())
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
@@ -181,10 +181,7 @@ impl CertStore for SqliteStore {
         Ok(())
     }
 
-    async fn get_pairing_offer(
-        &self,
-        token: &str,
-    ) -> Result<Option<PairingOfferRow>, StoreError> {
+    async fn get_pairing_offer(&self, token: &str) -> Result<Option<PairingOfferRow>, StoreError> {
         let row = sqlx::query(
             "SELECT pairing_token, master_pubkey, home_hubs_json, issued_at, expires_at,
                     offer_signature, state, subkey_pubkey, device_label, claim_proof,
