@@ -943,7 +943,20 @@ async fn main() -> Result<()> {
         });
     }
 
-    let app = server::create_router_with_cors(state, &settings.cors_origins);
+    // Log whether the rate limiter will trust X-Forwarded-For.
+    if settings.trusted_proxy {
+        tracing::info!(
+            "Rate limiter: trusted-proxy mode ENABLED — real client IP derived from \
+             X-Forwarded-For (last entry). Assumes a single reverse proxy in front."
+        );
+    } else {
+        tracing::info!(
+            "Rate limiter: direct mode (socket peer address). \
+             Set VOXPLY_TRUSTED_PROXY=true when a reverse proxy terminates TLS in front."
+        );
+    }
+
+    let app = server::create_router_full(state, &settings.cors_origins, settings.trusted_proxy);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
     if let (Some(cert), Some(key)) = (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {

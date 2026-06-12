@@ -86,6 +86,15 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "(unset)",
         "Optional SFU URL for WebRTC video. Advertised in /info; clients connect there directly",
     ),
+    (
+        "VOXPLY_TRUSTED_PROXY",
+        "false",
+        "Set to `true` when a single reverse proxy (Caddy/nginx) terminates TLS in front of the hub. \
+         The rate limiter will derive the real client IP from the last X-Forwarded-For entry \
+         (the hop the proxy observed) instead of the raw socket address. \
+         NEVER set this if the hub is directly internet-facing — XFF is client-controlled and \
+         would allow limiter bypass.",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +148,16 @@ pub struct Settings {
     /// Read-replica URL. Only used when database_url is PostgreSQL.
     /// If unset, all queries go to the primary.
     pub database_read_url: Option<String>,
+    /// Enable trusted-proxy mode for the rate limiter.
+    ///
+    /// When `true`, the limiter derives the real client IP from the last
+    /// `X-Forwarded-For` entry (the hop the proxy observed) instead of
+    /// the raw socket address.  Set this only when a single reverse proxy
+    /// (Caddy, nginx, …) terminates TLS in front of the hub — never when
+    /// the hub is directly internet-facing.
+    ///
+    /// Env: VOXPLY_TRUSTED_PROXY
+    pub trusted_proxy: bool,
 }
 
 /// Load hub settings from (in priority order, highest last):
@@ -152,6 +171,7 @@ pub fn load() -> Result<Settings> {
         .set_default("cors_origins", "*")?
         .set_default("log_format", "text")?
         .set_default("discovery_url", "https://discovery.voxply.io")?
+        .set_default("trusted_proxy", false)?
         .add_source(config::File::with_name("hub").required(false))
         .add_source(config::Environment::with_prefix("VOXPLY"))
         .build()?

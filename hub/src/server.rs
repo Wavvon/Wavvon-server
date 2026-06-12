@@ -68,8 +68,13 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 }
 
 pub fn create_router_with_cors(state: Arc<AppState>, cors_origins: &str) -> Router {
-    let auth_limiter = RateLimiter::new(Config::AUTH);
-    let write_limiter = RateLimiter::new(Config::WRITE);
+    create_router_full(state, cors_origins, false)
+}
+
+/// Full constructor used by `main()` — exposes all knobs tests don't need.
+pub fn create_router_full(state: Arc<AppState>, cors_origins: &str, trusted_proxy: bool) -> Router {
+    let auth_limiter = RateLimiter::new(Config::AUTH, trusted_proxy);
+    let write_limiter = RateLimiter::new(Config::WRITE, trusted_proxy);
 
     // Rate-limited auth sub-router (strict, because anyone can hit these).
     let auth_routes = Router::new()
