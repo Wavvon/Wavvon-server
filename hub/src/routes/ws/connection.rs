@@ -600,8 +600,23 @@ pub(super) async fn leave_voice(state: &AppState, public_key: &str, channel_id: 
         }
         addr
     };
+    // Remove from voice_addr_map if this was a real bound address (not the sentinel 0.0.0.0:0).
     if let Some(addr) = removed_addr {
-        state.voice_addr_map.write().await.remove(&addr);
+        let sentinel: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();
+        if addr != sentinel {
+            state.voice_addr_map.write().await.remove(&addr);
+        }
+    }
+
+    // Remove any un-consumed pending bind for this pubkey.
+    {
+        let mut binds = state.voice_pending_binds.write().await;
+        binds.retain(|_, v| v.pubkey != public_key);
+    }
+    // Remove any consumed-token record whose bound address maps to this pubkey.
+    {
+        let mut consumed = state.voice_consumed_tokens.write().await;
+        consumed.retain(|_, v| v.pubkey != public_key);
     }
 
     let _ = state.voice_event_tx.send((

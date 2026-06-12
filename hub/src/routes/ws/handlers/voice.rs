@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use axum::extract::ws::Message;
 use futures_util::SinkExt;
+use rand::RngCore;
 
 use crate::routes::chat_models::{VoiceParticipantInfo, WsClientMessage, WsServerMessage};
-use crate::state::AppState;
+use crate::state::{AppState, PendingVoiceBind};
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 use crate::routes::ws::voice::{
@@ -21,7 +22,10 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     ws_tx: &mut WsTx,
     msg: WsClientMessage,
 ) -> DispatchResult {
-    let (channel_id, udp_port) = match msg {
+    // udp_port is kept for wire-format compatibility but is no longer used
+    // to fabricate a loopback address.  The real source address is learned
+    // via the VXRG UDP register packet after voice_join completes.
+    let (channel_id, _udp_port) = match msg {
         WsClientMessage::VoiceJoin {
             channel_id,
             udp_port,
@@ -124,20 +128,54 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         }
     }
 
-    let client_addr: SocketAddr = format!("127.0.0.1:{udp_port}").parse().unwrap();
+    // --- Token-gated source-address learning (Phase 1) ---
+    //
+    // We no longer fabricate a 127.0.0.1 address.  Instead:
+    // 1. Mint a 32-byte random single-use register token.
+    // 2. Store it in voice_pending_binds with a 30-second TTL.
+    // 3. Return it in the voice_joined reply; the client will send a VXRG
+    //    UDP packet carrying the token, at which point the relay loop
+    //    binds the real source address into voice_addr_map.
+    //
+    // Purge stale pending binds opportunistically (on each new mint).
+    let udp_register_token: String = {
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    };
 
+    let now = std::time::Instant::now();
+    let ttl = std::time::Duration::from_secs(30);
+
+    {
+        let mut binds = state.voice_pending_binds.write().await;
+        // Purge expired entries before inserting.
+        binds.retain(|_, v| v.expires_at > now);
+        // Remove any prior pending bind for this pubkey (re-join race).
+        binds.retain(|_, v| v.pubkey != cs.public_key);
+        binds.insert(
+            udp_register_token.clone(),
+            PendingVoiceBind {
+                channel_id: channel_id.clone(),
+                pubkey: cs.public_key.clone(),
+                expires_at: now + ttl,
+            },
+        );
+    }
+
+    // Register the pubkey in voice_channels (membership) using a sentinel
+    // address.  The real SocketAddr is filled in by the VXRG handler; until
+    // then the sentinel is never present in voice_addr_map, so no audio is
+    // ever relayed to it (the fan-out filters by voice_addr_map membership).
+    let sentinel: SocketAddr = "0.0.0.0:0".parse().unwrap();
     state
         .voice_channels
         .write()
         .await
         .entry(channel_id.clone())
         .or_default()
-        .insert(cs.public_key.clone(), client_addr);
-    state
-        .voice_addr_map
-        .write()
-        .await
-        .insert(client_addr, (channel_id.clone(), cs.public_key.clone()));
+        .insert(cs.public_key.clone(), sentinel);
+    // voice_addr_map is NOT updated here; it is updated by the VXRG handler.
     state
         .voice_relay_active
         .write()
@@ -167,6 +205,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         channel_id: channel_id.clone(),
         hub_udp_port: state.voice_udp_port,
         participants,
+        udp_register_token,
     };
     let json = serde_json::to_string(&reply).unwrap();
     let _ = ws_tx.send(Message::Text(json.into())).await;

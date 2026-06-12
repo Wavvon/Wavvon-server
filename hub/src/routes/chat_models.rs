@@ -535,6 +535,10 @@ pub enum WsServerMessage {
         channel_id: String,
         hub_udp_port: u16,
         participants: Vec<VoiceParticipantInfo>,
+        /// Single-use token the client sends in a UDP VXRG register packet so
+        /// the hub can learn the client's real public source address.  Delivered
+        /// confidentially over the authenticated TLS WebSocket; 30-second TTL.
+        udp_register_token: String,
     },
     #[serde(rename = "voice_participant_joined")]
     VoiceParticipantJoined {

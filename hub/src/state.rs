@@ -201,6 +201,28 @@ pub struct WhisperTargetDef {
     pub id: String,
 }
 
+/// A pending UDP address-bind for a voice participant.
+///
+/// Minted at `VoiceJoin` and consumed when the client sends a matching
+/// UDP register packet (VXRG) to the hub's voice port.  The token is
+/// single-use and expires after `expires_at`.
+pub struct PendingVoiceBind {
+    pub channel_id: String,
+    pub pubkey: String,
+    pub expires_at: Instant,
+}
+
+/// The source address and pubkey recorded after a token is consumed.
+///
+/// Stored so that an identical VXRG re-sent from the **same** address is
+/// answered with another ack (idempotent retry), while a VXRG from a
+/// **different** address is silently dropped.
+pub struct ConsumedVoiceToken {
+    pub bound_addr: SocketAddr,
+    pub channel_id: String,
+    pub pubkey: String,
+}
+
 pub struct RateLimiters {
     /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
     pub messages: Mutex<HashMap<String, (u32, Instant)>>,
@@ -319,6 +341,24 @@ pub struct AppState {
     /// O(1) read under a shared lock — intentionally kept as a plain
     /// `RwLock<HashSet>` to avoid adding a new crate dependency.
     pub voice_relay_active: RwLock<HashSet<String>>,
+
+    /// Pending UDP address-binds waiting for the client's VXRG register packet.
+    ///
+    /// Key is the hex register token (64 chars, 32 random bytes).
+    /// Entries are inserted at `VoiceJoin` and consumed on the first valid
+    /// VXRG packet.  Expired entries are purged opportunistically on each
+    /// new mint and on each register attempt.
+    pub voice_pending_binds: RwLock<HashMap<String, PendingVoiceBind>>,
+
+    /// Consumed register tokens, keyed by the bound SocketAddr.
+    ///
+    /// Allows the relay to answer a VXRG retry from the **same** source
+    /// with another ack without re-binding, while silently dropping a
+    /// VXRG from a **different** source for the same (now-consumed) token.
+    /// Also keyed by pubkey so cleanup on leave is O(1).
+    ///
+    /// Outer key: bound SocketAddr.  Inner value: ConsumedVoiceToken.
+    pub voice_consumed_tokens: RwLock<HashMap<SocketAddr, ConsumedVoiceToken>>,
 
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,

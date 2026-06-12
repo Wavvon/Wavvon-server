@@ -13,7 +13,7 @@ use voxply_hub::db;
 use voxply_hub::dm_worker;
 use voxply_hub::federation::client::FederationClient;
 use voxply_hub::server;
-use voxply_hub::state::AppState;
+use voxply_hub::state::{AppState, ConsumedVoiceToken};
 use voxply_identity::Identity;
 use voxply_store_sqlite::SqliteStore;
 
@@ -752,6 +752,8 @@ async fn main() -> Result<()> {
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_pending_binds: RwLock::new(HashMap::new()),
+        voice_consumed_tokens: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
@@ -764,11 +766,102 @@ async fn main() -> Result<()> {
 
     let voice_state = state.clone();
     tokio::spawn(async move {
+        // Register packet magic: b"VXRG" (4 bytes) followed by the 64 hex-char token.
+        // Total minimum length: 4 + 64 = 68 bytes.
+        // Cannot be confused with an audio packet: audio is raw Opus and never
+        // starts with the ASCII sequence 'V','X','R','G'.
+        const VXRG_MAGIC: &[u8] = b"VXRG";
+        const VXRG_TOKEN_LEN: usize = 64; // 32 bytes hex-encoded
+        const VXRG_MIN_LEN: usize = 4 + VXRG_TOKEN_LEN; // 68
+
+        // Ack packet sent back to a successfully registered source.
+        const VXRA: &[u8] = b"VXRA";
+
         let mut buf = [0u8; 2048];
         loop {
             match voice_socket.recv_from(&mut buf).await {
                 Ok((len, from_addr)) => {
-                    let packet_data = buf[..len].to_vec();
+                    let packet_data = &buf[..len];
+
+                    // ── VXRG register packet ──────────────────────────────────
+                    if len >= VXRG_MIN_LEN && &packet_data[..4] == VXRG_MAGIC {
+                        let token_bytes = &packet_data[4..4 + VXRG_TOKEN_LEN];
+                        let token = match std::str::from_utf8(token_bytes) {
+                            Ok(t) => t,
+                            Err(_) => continue, // not valid UTF-8 → drop
+                        };
+
+                        // Check consumed-token map first for idempotent re-ack.
+                        // If this source address is already bound (token was consumed
+                        // earlier), just ack again — the client may retry.
+                        {
+                            let already_bound = {
+                                let consumed = voice_state.voice_consumed_tokens.read().await;
+                                consumed.contains_key(&from_addr)
+                            };
+                            if already_bound {
+                                let _ = voice_socket.send_to(VXRA, from_addr).await;
+                                continue;
+                            }
+                        }
+
+                        // Look up the pending bind.
+                        let now = std::time::Instant::now();
+                        let bind_opt = {
+                            let mut binds = voice_state.voice_pending_binds.write().await;
+                            // Purge expired entries opportunistically.
+                            binds.retain(|_, v| v.expires_at > now);
+                            binds.remove(token)
+                        };
+
+                        let bind = match bind_opt {
+                            Some(b) if b.expires_at > now => b,
+                            _ => {
+                                // Unknown, expired, or already consumed from a
+                                // different address: drop silently (no reply).
+                                continue;
+                            }
+                        };
+
+                        // Bind the real source address.
+                        {
+                            let mut addr_map = voice_state.voice_addr_map.write().await;
+                            addr_map
+                                .insert(from_addr, (bind.channel_id.clone(), bind.pubkey.clone()));
+                        }
+                        // Update voice_channels to store the real address instead of the sentinel.
+                        {
+                            let mut channels = voice_state.voice_channels.write().await;
+                            if let Some(ch_map) = channels.get_mut(&bind.channel_id) {
+                                ch_map.insert(bind.pubkey.clone(), from_addr);
+                            }
+                        }
+                        // Record the consumed token so retries from the same address get re-acked.
+                        {
+                            let mut consumed = voice_state.voice_consumed_tokens.write().await;
+                            consumed.insert(
+                                from_addr,
+                                ConsumedVoiceToken {
+                                    bound_addr: from_addr,
+                                    channel_id: bind.channel_id.clone(),
+                                    pubkey: bind.pubkey.clone(),
+                                },
+                            );
+                        }
+
+                        tracing::debug!(
+                            "Voice VXRG: bound {} → channel {} pubkey {}",
+                            from_addr,
+                            &bind.channel_id[..8.min(bind.channel_id.len())],
+                            &bind.pubkey[..16.min(bind.pubkey.len())],
+                        );
+
+                        // Send ack.
+                        let _ = voice_socket.send_to(VXRA, from_addr).await;
+                        continue;
+                    }
+
+                    // ── Audio relay ───────────────────────────────────────────
                     // O(1) lookup: which channel+peer owns this SocketAddr?
                     let lookup = {
                         let map = voice_state.voice_addr_map.read().await;
@@ -800,19 +893,41 @@ async fn main() -> Result<()> {
                         // Determine destinations and packet_type:
                         //   0x01 = whisper (fan-out to resolved whisper target set only)
                         //   0x00 = normal channel voice
+                        //
+                        // Hard invariant: only emit to addresses that have completed
+                        // an authenticated UDP bind (i.e. present in voice_addr_map).
+                        // The sentinel 0.0.0.0:0 is never in voice_addr_map, so
+                        // unregistered participants are automatically excluded.
                         let (dests, packet_type): (Vec<SocketAddr>, u8) = {
                             let wt = voice_state.whisper_targets.read().await;
                             if let Some(whisper_addrs) = wt.get(&sender_pk) {
-                                (whisper_addrs.iter().copied().collect(), 0x01u8)
+                                // Filter whisper targets against voice_addr_map to enforce
+                                // the hard invariant: never emit to an unregistered address.
+                                // A participant who joined but hasn't sent VXRG yet has the
+                                // sentinel 0.0.0.0:0 in voice_channels but no entry in
+                                // voice_addr_map; the filter removes them.
+                                let addr_map = voice_state.voice_addr_map.read().await;
+                                let addrs: Vec<SocketAddr> = whisper_addrs
+                                    .iter()
+                                    .filter(|a| addr_map.contains_key(*a))
+                                    .copied()
+                                    .collect();
+                                drop(addr_map);
+                                (addrs, 0x01u8)
                             } else {
                                 drop(wt);
+                                // Fan-out to all registered (voice_addr_map-present)
+                                // participants in the channel, excluding the sender.
+                                let addr_map = voice_state.voice_addr_map.read().await;
                                 let channels = voice_state.voice_channels.read().await;
                                 let normal = channels
                                     .get(&channel_id)
                                     .map(|participants| {
                                         participants
                                             .values()
-                                            .filter(|a| **a != from_addr)
+                                            .filter(|a| {
+                                                **a != from_addr && addr_map.contains_key(*a)
+                                            })
                                             .copied()
                                             .collect()
                                     })
@@ -825,7 +940,7 @@ async fn main() -> Result<()> {
                         let mut outbound = Vec::with_capacity(3 + packet_data.len());
                         outbound.extend_from_slice(&sender_id_bytes);
                         outbound.push(packet_type);
-                        outbound.extend_from_slice(&packet_data);
+                        outbound.extend_from_slice(packet_data);
                         for addr in dests {
                             let _ = voice_socket.send_to(&outbound, addr).await;
                         }

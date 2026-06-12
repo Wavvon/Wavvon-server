@@ -70,6 +70,8 @@ async fn start_hub() -> (String, Arc<AppState>) {
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_pending_binds: RwLock::new(HashMap::new()),
+        voice_consumed_tokens: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(HashMap::new()),
         search: Arc::new(voxply_hub::search::null_search::NullSearch),
