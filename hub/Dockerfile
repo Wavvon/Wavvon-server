@@ -1,6 +1,6 @@
 # Build the hub binary (and optionally the web client).
 #
-# Normal CI/release build — Voxply-web checked out to web-client-src/:
+# Normal CI/release build — Voxply-clients checked out to web-client-src/:
 #
 #   docker build -f hub/Dockerfile -t ghcr.io/voxply/hub:latest .
 #
@@ -19,8 +19,8 @@
 # and only runs npm when it is present.  /web-client always exists in the
 # resulting layer so COPY --from=web-builder in the runtime stage never fails.
 #
-# CI/release: actions/checkout puts Voxply-web at web-client-src/ in the context
-#   → npm ci && npm run build → /web-client contains the built SPA.
+# CI/release: actions/checkout puts Voxply-clients at web-client-src/ in the context
+#   → pnpm install && pnpm run build → /web-client contains the built SPA.
 #   → ENV VOXPLY_WEB_CLIENT_DIR=/web-client activates serving.
 #
 # Local `docker build` without web-client-src/:
@@ -35,14 +35,16 @@ WORKDIR /build-web
 # Copy the entire build context so we get web-client-src/ when it exists.
 # COPY with a wildcard tolerates absence: `web-client-src*` copies the directory
 # when present and silently skips when absent (Docker copies matching entries only).
+# The web app lives at web-client-src/apps/web/web/ inside the Voxply-clients monorepo.
 COPY web-client-src* /build-web/web-client-src/
 
 RUN mkdir -p /web-client && \
-    if [ -f /build-web/web-client-src/web/package.json ]; then \
-        cd /build-web/web-client-src/web && \
-        npm ci --prefer-offline && \
-        npm run build && \
-        cp -r dist/. /web-client/; \
+    if [ -f /build-web/web-client-src/apps/web/web/package.json ]; then \
+        npm install -g pnpm && \
+        cd /build-web/web-client-src && \
+        pnpm install --frozen-lockfile && \
+        pnpm --filter "{apps/web/web}" run build && \
+        cp -r apps/web/web/dist/. /web-client/; \
     fi
 
 # ── Rust build stage ──────────────────────────────────────────────────────────
