@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use crate::routes::chat_models::{VoiceParticipantInfo, VoiceRosterEntry};
 use crate::state::AppState;
 
-pub(super) async fn get_voice_participants(
+pub async fn get_voice_participants(
     state: &AppState,
     channel_id: &str,
 ) -> Vec<VoiceParticipantInfo> {

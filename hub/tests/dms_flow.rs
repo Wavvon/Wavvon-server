@@ -69,10 +69,13 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
     let app = server::create_router(state);
     (TestServer::new(app), pool_handle)
@@ -279,10 +282,13 @@ async fn start_real_hub(name: &str) -> String {
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -399,10 +405,13 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -592,10 +601,13 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))

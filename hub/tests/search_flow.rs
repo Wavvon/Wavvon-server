@@ -67,10 +67,13 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
     (TestServer::new(server::create_router(state)), tmp)
 }
