@@ -71,7 +71,7 @@ docker run -d --name voxply-hub \
 ```
 
 Your hub is now serving HTTP on port 3000 and voice UDP on port 3001.
-Open a [Voxply client](https://github.com/Voxply/Voxply-desktop), click
+Open a [Voxply client](https://github.com/Voxply/Voxply-client), click
 **Add hub**, and enter `http://your-server:3000`.
 
 ### Prebuilt binary (Linux, static musl — no dependencies)
@@ -173,9 +173,7 @@ The full contract is documented in
 | Repo | What it is |
 |---|---|
 | **Voxply-server** *(this repo)* | Hub server, farm tooling, identity crate (Rust) |
-| [Voxply-desktop](https://github.com/Voxply/Voxply-desktop) | Desktop client — Windows / macOS / Linux (Tauri 2 + React) |
-| [Voxply-web](https://github.com/Voxply/Voxply-web) | Browser client (text + DMs) |
-| [Voxply-android](https://github.com/Voxply/Voxply-android) | Android client (Tauri 2) |
+| [Voxply-client](https://github.com/Voxply/Voxply-client) | All clients (desktop / web / Android) + shared packages |
 | [Voxply-discovery](https://github.com/Voxply/Voxply-discovery) | Optional public hub directory |
 | [Voxply](https://github.com/Voxply/Voxply) | Architecture wiki, roadmap, API spec |
 
