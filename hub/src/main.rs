@@ -787,6 +787,8 @@ async fn main() -> Result<()> {
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: RwLock::new(HashMap::new()),
         voice_consumed_tokens: RwLock::new(HashMap::new()),
+        voice_ws_senders: RwLock::new(HashMap::new()),
+        voice_udp_socket: Arc::new(RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
@@ -794,7 +796,8 @@ async fn main() -> Result<()> {
     });
 
     // Bind voice UDP socket and start forwarding task
-    let voice_socket = UdpSocket::bind(format!("0.0.0.0:{voice_udp_port}")).await?;
+    let voice_socket = Arc::new(UdpSocket::bind(format!("0.0.0.0:{voice_udp_port}")).await?);
+    *state.voice_udp_socket.write().await = Some(voice_socket.clone());
     tracing::info!("Voice UDP listening on port {voice_udp_port}");
 
     let voice_state = state.clone();
@@ -923,49 +926,15 @@ async fn main() -> Result<()> {
                         };
                         let sender_id_bytes = sender_id.to_be_bytes();
 
-                        // Determine destinations and packet_type:
+                        // Determine packet_type:
                         //   0x01 = whisper (fan-out to resolved whisper target set only)
                         //   0x00 = normal channel voice
-                        //
-                        // Hard invariant: only emit to addresses that have completed
-                        // an authenticated UDP bind (i.e. present in voice_addr_map).
-                        // The sentinel 0.0.0.0:0 is never in voice_addr_map, so
-                        // unregistered participants are automatically excluded.
-                        let (dests, packet_type): (Vec<SocketAddr>, u8) = {
+                        let packet_type: u8 = {
                             let wt = voice_state.whisper_targets.read().await;
-                            if let Some(whisper_addrs) = wt.get(&sender_pk) {
-                                // Filter whisper targets against voice_addr_map to enforce
-                                // the hard invariant: never emit to an unregistered address.
-                                // A participant who joined but hasn't sent VXRG yet has the
-                                // sentinel 0.0.0.0:0 in voice_channels but no entry in
-                                // voice_addr_map; the filter removes them.
-                                let addr_map = voice_state.voice_addr_map.read().await;
-                                let addrs: Vec<SocketAddr> = whisper_addrs
-                                    .iter()
-                                    .filter(|a| addr_map.contains_key(*a))
-                                    .copied()
-                                    .collect();
-                                drop(addr_map);
-                                (addrs, 0x01u8)
+                            if wt.contains_key(&sender_pk) {
+                                0x01u8
                             } else {
-                                drop(wt);
-                                // Fan-out to all registered (voice_addr_map-present)
-                                // participants in the channel, excluding the sender.
-                                let addr_map = voice_state.voice_addr_map.read().await;
-                                let channels = voice_state.voice_channels.read().await;
-                                let normal = channels
-                                    .get(&channel_id)
-                                    .map(|participants| {
-                                        participants
-                                            .values()
-                                            .filter(|a| {
-                                                **a != from_addr && addr_map.contains_key(*a)
-                                            })
-                                            .copied()
-                                            .collect()
-                                    })
-                                    .unwrap_or_default();
-                                (normal, 0x00u8)
+                                0x00u8
                             }
                         };
 
@@ -974,8 +943,49 @@ async fn main() -> Result<()> {
                         outbound.extend_from_slice(&sender_id_bytes);
                         outbound.push(packet_type);
                         outbound.extend_from_slice(packet_data);
-                        for addr in dests {
-                            let _ = voice_socket.send_to(&outbound, addr).await;
+
+                        // Fan-out to UDP and WS participants.
+                        //
+                        // Hard invariant for UDP: only emit to addresses that have completed
+                        // an authenticated UDP bind (i.e. present in voice_addr_map).
+                        // The sentinel 0.0.0.0:0 is never in voice_addr_map, so
+                        // unregistered UDP participants are automatically excluded.
+                        // WS clients are identified by presence in voice_ws_senders.
+                        let sentinel: SocketAddr = "0.0.0.0:0".parse().unwrap();
+                        {
+                            let addr_map = voice_state.voice_addr_map.read().await;
+                            let channels = voice_state.voice_channels.read().await;
+                            let ws_senders = voice_state.voice_ws_senders.read().await;
+
+                            if packet_type == 0x01 {
+                                // Whisper: deliver to resolved target set only.
+                                // WS clients are not yet supported as whisper targets.
+                                let wt = voice_state.whisper_targets.read().await;
+                                if let Some(whisper_addrs) = wt.get(&sender_pk) {
+                                    for addr in whisper_addrs {
+                                        if addr_map.contains_key(addr) {
+                                            let _ = voice_socket.send_to(&outbound, *addr).await;
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Normal: all channel participants except the sender.
+                                if let Some(participants) = channels.get(&channel_id) {
+                                    for (pk, addr) in participants {
+                                        if pk == &sender_pk {
+                                            continue;
+                                        }
+                                        if let Some(ws_tx) = ws_senders.get(pk.as_str()) {
+                                            let _ = ws_tx.send(outbound.clone());
+                                        } else if *addr != sentinel
+                                            && addr_map.contains_key(addr)
+                                            && *addr != from_addr
+                                        {
+                                            let _ = voice_socket.send_to(&outbound, *addr).await;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

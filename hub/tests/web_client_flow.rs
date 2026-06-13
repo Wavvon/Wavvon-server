@@ -65,6 +65,8 @@ async fn setup_with_web_client(cfg: Option<Arc<WebClientConfig>>) -> TestServer 
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: Arc::new(voxply_hub::search::null_search::NullSearch),

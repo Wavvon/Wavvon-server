@@ -275,6 +275,7 @@ pub fn create_router_full(
             "/voice/participants",
             get(routes::channels::voice_channel_participants),
         )
+        .route("/voice/ws", get(routes::voice_ws::handle_voice_ws))
         .route("/ws", get(routes::ws::ws_handler))
         .route("/conversations", get(routes::dms::list_conversations))
         .route(

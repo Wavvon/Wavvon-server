@@ -360,6 +360,14 @@ pub struct AppState {
     /// Outer key: bound SocketAddr.  Inner value: ConsumedVoiceToken.
     pub voice_consumed_tokens: RwLock<HashMap<SocketAddr, ConsumedVoiceToken>>,
 
+    /// WS voice clients (web browsers): pubkey → sender for forwarding
+    /// serialised ReceivedVoicePacket bytes. These clients bypass UDP.
+    pub voice_ws_senders: RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
+
+    /// The hub's UDP voice socket, shared so the voice_ws handler can
+    /// fan out WS-originated frames to UDP participants.
+    pub voice_udp_socket: Arc<RwLock<Option<Arc<tokio::net::UdpSocket>>>>,
+
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
 

@@ -14,7 +14,9 @@ use axum::response::IntoResponse;
 use crate::routes::chat_models::WsParams;
 use crate::state::AppState;
 
+pub use connection::leave_voice;
 pub use connection::leave_voice_for_test;
+pub use voice::get_voice_participants;
 
 pub async fn ws_handler(
     State(state): State<Arc<AppState>>,
