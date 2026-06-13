@@ -72,6 +72,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         preview_cache: std::sync::Mutex::new(HashMap::new()),
         search: Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
 
     let app = server::create_router(state.clone());
@@ -503,6 +504,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
         preview_cache: std::sync::Mutex::new(HashMap::new()),
         search: Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
 
     // Spawn the relay loop (mirrors main.rs).

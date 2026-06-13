@@ -387,6 +387,14 @@ pub struct AppState {
     /// reindex is in progress; callers that see `true` receive 202 with
     /// `{"status":"already_running"}` and do not start a second job.
     pub reindex_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    /// The operator-configured owner public key, if any (`VOXPLY_OWNER_PUBKEY`).
+    ///
+    /// When set, startup seeding already inserted a `builtin-owner` row before
+    /// the server accepted connections.  `assign_initial_roles` checks this to
+    /// decide whether the first-registrant auto-grant should run: if it is
+    /// `Some`, the auto-grant is skipped entirely.
+    pub owner_pubkey: Option<String>,
 }
 
 pub struct PendingChallenge {

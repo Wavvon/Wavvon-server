@@ -67,6 +67,7 @@ async fn start_real_hub() -> String {
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
 
     let app = server::create_router(state);
@@ -139,6 +140,7 @@ async fn setup_server() -> TestServer {
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
 
     let app = server::create_router(state);

@@ -367,7 +367,13 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                     .unwrap_or(0);
 
             if has_roles == 0 {
-                crate::auth::handlers::assign_initial_roles(&state.db, &public_key, now).await?;
+                crate::auth::handlers::assign_initial_roles(
+                    &state.db,
+                    &public_key,
+                    now,
+                    state.owner_pubkey.as_deref(),
+                )
+                .await?;
             }
 
             // Ban check (same as the legacy path in handlers.rs).

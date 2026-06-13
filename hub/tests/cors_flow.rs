@@ -74,6 +74,7 @@ async fn setup_with_cors(cors_origins: &str) -> TestServer {
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
     });
 
     let app = create_router_with_cors(state, cors_origins);

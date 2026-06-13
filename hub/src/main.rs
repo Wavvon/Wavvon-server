@@ -793,6 +793,7 @@ async fn main() -> Result<()> {
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
         search,
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: settings.owner_pubkey.clone(),
     });
 
     // Bind voice UDP socket and start forwarding task
