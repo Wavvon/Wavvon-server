@@ -48,10 +48,10 @@ jobs:
       - name: Checkout hub repo
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Checkout Voxply-web (for web client build)
+      - name: Checkout Voxply-client (for web client build)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          repository: Voxply/Voxply-web
+          repository: Voxply/Voxply-client
           path: web-client-src
 
       - name: Log in to GHCR
