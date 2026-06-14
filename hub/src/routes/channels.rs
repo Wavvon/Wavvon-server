@@ -8,7 +8,9 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
-use crate::routes::chat_models::{ChannelResponse, CreateChannelRequest, UpdateChannelRequest};
+use crate::routes::chat_models::{
+    ChannelResponse, ChatEvent, CreateChannelRequest, UpdateChannelRequest, WsServerMessage,
+};
 use crate::state::AppState;
 
 /// Returns a per-channel voice population snapshot. Channels with zero
@@ -265,6 +267,13 @@ pub async fn create_channel(
         });
     }
 
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+            .unwrap()
+            .as_str(),
+    );
+    let _ = state.chat_tx.send((ChatEvent::ChannelsUpdated, json));
+
     Ok((StatusCode::CREATED, Json(resp)))
 }
 
@@ -486,6 +495,13 @@ pub async fn update_channel(
         }
     }
 
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+            .unwrap()
+            .as_str(),
+    );
+    let _ = state.chat_tx.send((ChatEvent::ChannelsUpdated, json));
+
     Ok(StatusCode::OK)
 }
 
@@ -548,6 +564,13 @@ pub async fn reorder_channels(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
+
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+            .unwrap()
+            .as_str(),
+    );
+    let _ = state.chat_tx.send((ChatEvent::ChannelsUpdated, json));
 
     Ok(StatusCode::OK)
 }
@@ -633,6 +656,13 @@ pub async fn delete_channel(
             .await;
         });
     }
+
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+            .unwrap()
+            .as_str(),
+    );
+    let _ = state.chat_tx.send((ChatEvent::ChannelsUpdated, json));
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -143,6 +143,14 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
             result = chat_rx.recv() => {
                 match result {
                     Ok((event, pre_json)) => {
+                        // Hub-wide events bypass the per-channel subscription filter.
+                        if matches!(event, crate::routes::chat_models::ChatEvent::ChannelsUpdated) {
+                            let json = pre_json.to_string();
+                            if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         if cs.subscribed.contains(event.channel_id()) {
                             // Typing: filter own events.
                             if let crate::routes::chat_models::ChatEvent::Typing {
@@ -502,6 +510,14 @@ async fn dispatch_client_msg(
 
         // ── Voice core ─────────────────────────────────────────────────────
         WsClientMessage::VoiceJoin { .. } => voice::handle_voice_join(cs, state, ws_tx, msg).await,
+        WsClientMessage::VoiceWatch { channel_id } => {
+            cs.voice_channel = Some(channel_id);
+            DispatchResult::Continue
+        }
+        WsClientMessage::VoiceUnwatch => {
+            cs.voice_channel = None;
+            DispatchResult::Continue
+        }
         WsClientMessage::VoiceLeave { .. } => voice::handle_voice_leave(cs, state, msg).await,
         WsClientMessage::VoiceSpeaking { .. } => voice::handle_voice_speaking(cs, state, msg),
         WsClientMessage::VoiceWhisperStart { .. } => {

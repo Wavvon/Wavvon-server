@@ -250,6 +250,10 @@ pub enum ChatEvent {
         channel_id: String,
         to_pubkeys: Vec<String>,
     },
+    /// Hub-wide notification that the channel list changed (created/updated/deleted/reordered).
+    /// Returns "" from channel_id() so the subscription filter never matches; the WS
+    /// dispatch loop handles it as a special broadcast-to-all case.
+    ChannelsUpdated,
 }
 
 impl ChatEvent {
@@ -277,6 +281,9 @@ impl ChatEvent {
             ChatEvent::StreamSubscriptionEnded {
                 source_channel_id, ..
             } => source_channel_id,
+            // ChannelsUpdated is hub-wide; "" is never in any subscription set so the
+            // subscription filter doesn't fire — handled as a special broadcast-to-all case.
+            ChatEvent::ChannelsUpdated => "",
         }
     }
 }
@@ -307,6 +314,10 @@ pub enum WsClientMessage {
     Unsubscribe { channel_id: String },
     #[serde(rename = "voice_join")]
     VoiceJoin { channel_id: String, udp_port: u16 },
+    #[serde(rename = "voice_watch")]
+    VoiceWatch { channel_id: String },
+    #[serde(rename = "voice_unwatch")]
+    VoiceUnwatch,
     #[serde(rename = "voice_leave")]
     VoiceLeave { channel_id: String },
     #[serde(rename = "voice_speaking")]
@@ -855,6 +866,10 @@ pub enum WsServerMessage {
     /// Delivered only to the resolved whisper target set when a sender stops whispering.
     #[serde(rename = "voice_whisper_stopped")]
     VoiceWhisperStopped { sender_pubkey: String },
+
+    /// Hub-wide signal that the channel list changed; clients should re-fetch /channels.
+    #[serde(rename = "channels_updated")]
+    ChannelsUpdated,
 }
 
 /// Track metadata carried in `ScreenShareStart.tracks` (v2, additive).
