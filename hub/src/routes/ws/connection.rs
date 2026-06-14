@@ -257,24 +257,32 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
             // ── Voice channel events ──────────────────────────────────────
             voice_result = voice_rx.recv() => {
                 if let Ok((channel_id, msg)) = voice_result {
-                    if cs.voice_channel.as_deref() == Some(channel_id.as_str()) {
-                        let is_self = match &msg {
-                            WsServerMessage::VoiceParticipantSpeaking {
-                                public_key: pk, ..
-                            } => pk == &cs.public_key,
-                            WsServerMessage::VoiceParticipantJoined {
-                                participant, ..
-                            } => participant.public_key == cs.public_key,
-                            WsServerMessage::VoiceParticipantLeft {
-                                public_key: pk, ..
-                            } => pk == &cs.public_key,
-                            _ => false,
-                        };
-                        if !is_self {
-                            let json = serde_json::to_string(&msg).unwrap();
-                            if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
+                    let is_self = match &msg {
+                        WsServerMessage::VoiceParticipantSpeaking {
+                            public_key: pk, ..
+                        } => pk == &cs.public_key,
+                        WsServerMessage::VoiceParticipantJoined {
+                            participant, ..
+                        } => participant.public_key == cs.public_key,
+                        WsServerMessage::VoiceParticipantLeft {
+                            public_key: pk, ..
+                        } => pk == &cs.public_key,
+                        _ => false,
+                    };
+                    // Joined/Left go to every client so sidebar rosters stay
+                    // up-to-date even for clients not in any voice channel.
+                    // Speaking events stay scoped to same-channel clients only.
+                    let is_roster_event = matches!(
+                        &msg,
+                        WsServerMessage::VoiceParticipantJoined { .. }
+                            | WsServerMessage::VoiceParticipantLeft { .. }
+                    );
+                    let in_same_channel =
+                        cs.voice_channel.as_deref() == Some(channel_id.as_str());
+                    if (in_same_channel || is_roster_event) && !is_self {
+                        let json = serde_json::to_string(&msg).unwrap();
+                        if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                            break;
                         }
                     }
                 }
