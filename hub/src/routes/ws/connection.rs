@@ -52,6 +52,25 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     let mut chat_rx = state.chat_tx.subscribe();
     let chat_rx_since = std::time::Instant::now();
     let mut dm_rx = state.dm_tx.subscribe();
+
+    // Notify all clients (including this one, since chat_rx is now subscribed)
+    // that this user is online. Only fires on the first session (refcount == 1).
+    {
+        let online = state.online_users.read().await;
+        if online.get(&public_key).copied().unwrap_or(0) == 1 {
+            let ws_msg = WsServerMessage::MemberOnline {
+                public_key: public_key.clone(),
+            };
+            let json: std::sync::Arc<str> =
+                std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+            let _ = state.chat_tx.send((
+                crate::routes::chat_models::ChatEvent::MemberOnline {
+                    public_key: public_key.clone(),
+                },
+                json,
+            ));
+        }
+    }
     let mut voice_rx = state.voice_event_tx.subscribe();
     let mut screen_share_rx = state.screen_share_tx.subscribe();
 
@@ -144,7 +163,12 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                 match result {
                     Ok((event, pre_json)) => {
                         // Hub-wide events bypass the per-channel subscription filter.
-                        if matches!(event, crate::routes::chat_models::ChatEvent::ChannelsUpdated) {
+                        if matches!(
+                            event,
+                            crate::routes::chat_models::ChatEvent::ChannelsUpdated
+                                | crate::routes::chat_models::ChatEvent::MemberOnline { .. }
+                                | crate::routes::chat_models::ChatEvent::MemberOffline { .. }
+                        ) {
                             let json = pre_json.to_string();
                             if ws_tx.send(Message::Text(json.into())).await.is_err() {
                                 break;
@@ -478,15 +502,33 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     // Decrement the online-users refcount; remove the key only when it
     // reaches zero so that other concurrent sessions for the same pubkey
     // are not erroneously marked offline.
-    {
+    let went_offline = {
         let mut online = state.online_users.write().await;
         if let Some(count) = online.get_mut(&public_key) {
             if *count <= 1 {
                 online.remove(&public_key);
+                true
             } else {
                 *count -= 1;
+                false
             }
+        } else {
+            false
         }
+    };
+
+    if went_offline {
+        let ws_msg = WsServerMessage::MemberOffline {
+            public_key: public_key.clone(),
+        };
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((
+            crate::routes::chat_models::ChatEvent::MemberOffline {
+                public_key: public_key.clone(),
+            },
+            json,
+        ));
     }
 
     tracing::info!(

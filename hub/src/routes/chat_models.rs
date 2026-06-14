@@ -254,6 +254,10 @@ pub enum ChatEvent {
     /// Returns "" from channel_id() so the subscription filter never matches; the WS
     /// dispatch loop handles it as a special broadcast-to-all case.
     ChannelsUpdated,
+    /// A user's first WS session connected; delivered hub-wide.
+    MemberOnline { public_key: String },
+    /// A user's last WS session disconnected; delivered hub-wide.
+    MemberOffline { public_key: String },
 }
 
 impl ChatEvent {
@@ -281,9 +285,11 @@ impl ChatEvent {
             ChatEvent::StreamSubscriptionEnded {
                 source_channel_id, ..
             } => source_channel_id,
-            // ChannelsUpdated is hub-wide; "" is never in any subscription set so the
-            // subscription filter doesn't fire — handled as a special broadcast-to-all case.
-            ChatEvent::ChannelsUpdated => "",
+            // ChannelsUpdated, MemberOnline, MemberOffline are hub-wide; "" is never in any
+            // subscription set — handled as special broadcast-to-all cases.
+            ChatEvent::ChannelsUpdated
+            | ChatEvent::MemberOnline { .. }
+            | ChatEvent::MemberOffline { .. } => "",
         }
     }
 }
@@ -870,6 +876,12 @@ pub enum WsServerMessage {
     /// Hub-wide signal that the channel list changed; clients should re-fetch /channels.
     #[serde(rename = "channels_updated")]
     ChannelsUpdated,
+    /// A user just came online (their first WS session connected).
+    #[serde(rename = "member_online")]
+    MemberOnline { public_key: String },
+    /// A user just went offline (their last WS session disconnected).
+    #[serde(rename = "member_offline")]
+    MemberOffline { public_key: String },
 }
 
 /// Track metadata carried in `ScreenShareStart.tracks` (v2, additive).
