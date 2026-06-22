@@ -388,11 +388,17 @@ async fn ws_voice_join_and_recv(hub_url: &str, token: &str, channel_id: &str) ->
     ))
     .await
     .unwrap();
-    let frame = rx.next().await.unwrap().unwrap();
-    let WsMessage::Text(text) = frame else {
-        panic!("expected text frame, got {frame:?}")
-    };
-    serde_json::from_str(&text).unwrap()
+    loop {
+        let frame = rx.next().await.unwrap().unwrap();
+        let WsMessage::Text(text) = frame else {
+            panic!("expected text frame, got {frame:?}")
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        match v["type"].as_str() {
+            Some("member_online") | Some("member_offline") => continue,
+            _ => return v,
+        }
+    }
 }
 
 #[tokio::test]
