@@ -5,7 +5,7 @@ members = [
     "crates/seed",
     "crates/identity",
     "crates/farm",
-    "crates/server",
+    "crates/agent",
     "crates/voxply-store",
     "crates/voxply-store-sqlite",
     "crates/tools/demo-seed",

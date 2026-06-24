@@ -1,10 +1,10 @@
 [package]
-name = "voxply-server"
+name = "voxply-agent"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "voxply-server"
+name = "voxply-agent"
 path = "src/main.rs"
 
 [dependencies]
