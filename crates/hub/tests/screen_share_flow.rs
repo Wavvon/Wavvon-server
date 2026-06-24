@@ -182,9 +182,10 @@ async fn next_text(
             .unwrap();
         if let TsMessage::Text(t) = msg {
             let v: Value = serde_json::from_str(&t).unwrap();
-            // Skip the hello frame the hub sends on connect.
-            if v["type"] == "hello" {
-                continue;
+            // Skip hello and presence frames the hub broadcasts on connect/disconnect.
+            match v["type"].as_str() {
+                Some("hello") | Some("member_online") | Some("member_offline") => continue,
+                _ => {}
             }
             return v;
         }
