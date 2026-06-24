@@ -11,7 +11,7 @@ services:
     image: ghcr.io/voxply/farm:latest
     # build:
     #   context: .
-    #   dockerfile: farm/Dockerfile
+    #   dockerfile: crates/farm/Dockerfile
     ports:
       - "4000:4000"
     volumes:
@@ -28,7 +28,7 @@ services:
     image: ghcr.io/voxply/hub:latest
     # build:
     #   context: .
-    #   dockerfile: hub/Dockerfile
+    #   dockerfile: crates/hub/Dockerfile
     ports:
       - "3000:3000"
       - "3001:3001/udp"

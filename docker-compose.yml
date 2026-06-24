@@ -12,7 +12,7 @@ services:
     image: ghcr.io/voxply/hub:latest
     # build:
     #   context: .
-    #   dockerfile: hub/Dockerfile
+    #   dockerfile: crates/hub/Dockerfile
     ports:
       - "${VOXPLY_HTTP_PORT:-3000}:3000"
       - "${VOXPLY_VOICE_UDP_PORT:-3001}:3001/udp"

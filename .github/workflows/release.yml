@@ -85,7 +85,7 @@ jobs:
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
-          file: hub/Dockerfile
+          file: crates/hub/Dockerfile
           push: true
           tags: ${{ steps.hub-meta.outputs.tags }}
           labels: ${{ steps.hub-meta.outputs.labels }}
@@ -108,7 +108,7 @@ jobs:
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
         with:
           context: .
-          file: farm/Dockerfile
+          file: crates/farm/Dockerfile
           push: true
           tags: ${{ steps.farm-meta.outputs.tags }}
           labels: ${{ steps.farm-meta.outputs.labels }}

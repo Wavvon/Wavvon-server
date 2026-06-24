@@ -11,7 +11,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 ROOT="$(git rev-parse --show-toplevel)"
-HUB_CARGO="$ROOT/hub/Cargo.toml"
+HUB_CARGO="$ROOT/crates/hub/Cargo.toml"
 
 if ! command -v git-cliff >/dev/null 2>&1; then
   echo "git-cliff not found. Install with: cargo install git-cliff" >&2

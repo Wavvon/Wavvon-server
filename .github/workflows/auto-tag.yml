@@ -16,10 +16,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Read version from hub/Cargo.toml
+      - name: Read version from crates/hub/Cargo.toml
         id: ver
         run: |
-          VERSION=$(grep '^version' hub/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          VERSION=$(grep '^version' crates/hub/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "version=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "Detected version: v$VERSION"
 
