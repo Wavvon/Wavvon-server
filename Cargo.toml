@@ -8,7 +8,7 @@ members = [
     "crates/agent",
     "crates/voxply-store",
     "crates/voxply-store-sqlite",
-    "crates/tools/demo-seed",
+    "crates/demo-seed",
 ]
 
 [workspace.dependencies]
