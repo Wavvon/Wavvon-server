@@ -245,6 +245,8 @@ pub enum ChatEvent {
         channel_id: String,
         to_pubkeys: Vec<String>,
     },
+    /// Bot mini-app announce/dismiss event. Routed to channel subscribers.
+    BotApp { channel_id: String },
     /// Hub-wide notification that the channel list changed (created/updated/deleted/reordered).
     /// Returns "" from channel_id() so the subscription filter never matches; the WS
     /// dispatch loop handles it as a special broadcast-to-all case.
@@ -272,7 +274,8 @@ impl ChatEvent {
             | ChatEvent::Poll { channel_id }
             | ChatEvent::MessagePinned { channel_id }
             | ChatEvent::MessageUnpinned { channel_id }
-            | ChatEvent::WhisperSignal { channel_id, .. } => channel_id,
+            | ChatEvent::WhisperSignal { channel_id, .. }
+            | ChatEvent::BotApp { channel_id } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
             // (delivery is handled via the dedicated to_pubkey check below).
@@ -482,6 +485,25 @@ pub enum WsClientMessage {
 
     #[serde(rename = "voice_position_update")]
     VoicePositionUpdate { zone_id: String, position: Vec<f64> },
+
+    // ---- Bot mini-apps: client → hub ----
+    /// Bot announces a mini-app session in a channel. Hub fans to all
+    /// channel subscribers as BotAppLaunch. Only valid from bot connections.
+    #[serde(rename = "bot_app_announce")]
+    BotAppAnnounce {
+        title: String,
+        description: String,
+        channel_id: String,
+    },
+
+    /// User requests to join an announced mini-app session.
+    #[serde(rename = "bot_app_join")]
+    BotAppJoin { bot_id: String, channel_id: String },
+
+    /// Bot closes the mini-app session. Hub fans to all channel subscribers.
+    /// Only valid from bot connections.
+    #[serde(rename = "bot_app_dismiss")]
+    BotAppDismiss { channel_id: String },
 }
 
 #[derive(Serialize, Clone)]
@@ -783,6 +805,29 @@ pub enum WsServerMessage {
     /// A user just went offline (their last WS session disconnected).
     #[serde(rename = "member_offline")]
     MemberOffline { public_key: String },
+
+    // ---- Bot mini-apps: hub → client ----
+    /// Hub fans a bot's announce to all subscribers of that channel.
+    #[serde(rename = "bot_app_launch")]
+    BotAppLaunch {
+        bot_id: String,
+        title: String,
+        description: String,
+        channel_id: String,
+    },
+
+    /// Hub sends this only to the joining client after minting a scoped token.
+    #[serde(rename = "bot_app_open")]
+    BotAppOpen {
+        bot_id: String,
+        channel_id: String,
+        mini_app_url: String,
+        session_token: String,
+    },
+
+    /// Hub fans a bot's dismiss to all subscribers — clients close open webviews.
+    #[serde(rename = "bot_app_close")]
+    BotAppClose { bot_id: String, channel_id: String },
 }
 
 /// Track metadata carried in `ScreenShareStart.tracks` (v2, additive).

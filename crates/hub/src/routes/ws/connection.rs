@@ -8,7 +8,7 @@ use crate::routes::chat_models::{WsClientMessage, WsServerMessage};
 use crate::state::AppState;
 
 use super::conn_state::{ConnState, DispatchResult};
-use super::handlers::{bot, chat, screen, voice};
+use super::handlers::{bot, chat, mini_app, screen, voice};
 use super::voice::get_voice_roster;
 
 pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: String) {
@@ -626,6 +626,17 @@ async fn dispatch_client_msg(
         }
         WsClientMessage::StreamUnsubscribe { .. } => {
             screen::handle_stream_unsubscribe(cs, state, msg).await
+        }
+
+        // ── Bot mini-apps ──────────────────────────────────────────────────
+        WsClientMessage::BotAppAnnounce { .. } => {
+            mini_app::handle_bot_app_announce(cs, state, msg).await
+        }
+        WsClientMessage::BotAppJoin { .. } => {
+            mini_app::handle_bot_app_join(cs, state, ws_tx, msg).await
+        }
+        WsClientMessage::BotAppDismiss { .. } => {
+            mini_app::handle_bot_app_dismiss(cs, state, msg).await
         }
 
         // ── Bots ───────────────────────────────────────────────────────────
