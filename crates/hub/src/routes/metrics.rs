@@ -14,7 +14,6 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .values()
         .map(|c| c.len())
         .sum();
-    let active_game_sessions = state.active_game_sessions.lock().unwrap().len();
     let active_video_channels = state
         .video_channels
         .read()
@@ -36,8 +35,6 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
          # TYPE voxply_online_users gauge\nvoxply_online_users {online_users}\n\
          # HELP voxply_voice_participants Users in voice channels\n\
          # TYPE voxply_voice_participants gauge\nvoxply_voice_participants {voice_participants}\n\
-         # HELP voxply_active_game_sessions Live game sessions\n\
-         # TYPE voxply_active_game_sessions gauge\nvoxply_active_game_sessions {active_game_sessions}\n\
          # HELP voxply_active_video_channels Channels with video enabled\n\
          # TYPE voxply_active_video_channels gauge\nvoxply_active_video_channels {active_video_channels}\n\
          # HELP voxply_messages_total Total messages stored\n\

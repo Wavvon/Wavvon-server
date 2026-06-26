@@ -64,7 +64,6 @@ async fn start_hub() -> (String, Arc<AppState>) {
         farm_url: None,
         cached_farm_pubkey: Arc::new(RwLock::new(None)),
         last_farm_pubkey_fetch: Arc::new(RwLock::new(0)),
-        active_game_sessions: Arc::new(std::sync::Mutex::new(HashMap::new())),
         video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: RwLock::new(HashMap::new()),

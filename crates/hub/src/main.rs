@@ -777,9 +777,6 @@ async fn main() -> Result<()> {
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
         voice_zones: RwLock::new(HashMap::new()),
-        active_game_sessions: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
         video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_targets: RwLock::new(HashMap::new()),
@@ -1036,68 +1033,6 @@ async fn main() -> Result<()> {
                     .json(&payload)
                     .send()
                     .await;
-            }
-        });
-    }
-
-    // Sweep stale game sessions every 30 minutes. Any session with
-    // `last_event_at < now - 7200` (2-hour TTL) is ended with reason "timeout".
-    {
-        let reaper_state = state.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64;
-                let ttl_cutoff = now - 7200;
-
-                // Collect stale sessions under the lock.
-                let stale: Vec<(String, String)> = {
-                    let sessions = reaper_state.active_game_sessions.lock().unwrap();
-                    sessions
-                        .values()
-                        .filter(|s| s.last_event_at < ttl_cutoff)
-                        .map(|s| (s.id.clone(), s.channel_id.clone()))
-                        .collect()
-                };
-
-                for (session_id, channel_id) in stale {
-                    reaper_state
-                        .active_game_sessions
-                        .lock()
-                        .unwrap()
-                        .remove(&session_id);
-
-                    // Mark in DB.
-                    let now_str = now.to_string();
-                    let _ = sqlx::query(
-                        "UPDATE game_sessions SET ended_at = ?, status = 'ended' WHERE id = ?",
-                    )
-                    .bind(&now_str)
-                    .bind(&session_id)
-                    .execute(&reaper_state.db)
-                    .await;
-
-                    // Broadcast timeout to channel members.
-                    let ev = voxply_hub::routes::chat_models::ChatEvent::Game {
-                        channel_id: channel_id.clone(),
-                    };
-                    let msg = voxply_hub::routes::chat_models::WsServerMessage::GameSessionEnded {
-                        session_id: session_id.clone(),
-                        reason: Some("timeout".to_string()),
-                        result: None,
-                    };
-                    let json: std::sync::Arc<str> =
-                        std::sync::Arc::from(serde_json::to_string(&msg).unwrap().as_str());
-                    let _ = reaper_state.chat_tx.send((ev, json));
-
-                    tracing::info!(
-                        "Game session {} timed out and was reaped",
-                        &session_id[..8.min(session_id.len())]
-                    );
-                }
             }
         });
     }

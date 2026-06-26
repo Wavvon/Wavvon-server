@@ -154,44 +154,6 @@ pub struct VoiceZone {
     pub positions: HashMap<String, Vec<f64>>,
 }
 
-/// A single player in a live game session.
-#[derive(Clone, Debug)]
-pub struct GamePlayer {
-    pub pubkey: String,
-    pub display_name: Option<String>,
-    pub joined_at: i64,
-    pub connected: bool,
-}
-
-/// In-memory state for one live game session.
-///
-/// The hub is a pure relay for Tier 2: it tracks the roster and the last
-/// snapshot (if the game opted into durability), but never interprets the
-/// game's own state payload.
-#[derive(Clone, Debug)]
-pub struct GameSessionState {
-    pub id: String,
-    pub channel_id: String,
-    pub game_id: String,
-    pub host_pubkey: String,
-    /// Roster pubkeys for fast membership lookup.
-    pub players: HashSet<String>,
-    /// Full player metadata (display names, join order, connected flag).
-    pub player_details: Vec<GamePlayer>,
-    /// Session status: "lobby" | "in_progress" | "ended" | "abandoned"
-    pub status: String,
-    /// Maximum allowed players (from hub_games.max_players). None = unlimited.
-    pub max_players: Option<i64>,
-    /// Unix-seconds when the session was created.
-    pub created_at: i64,
-    /// Unix-seconds of the last event (used by the reaper for TTL).
-    pub last_event_at: i64,
-    /// Latest author-supplied durability snapshot. Opaque bytes.
-    pub snapshot: Option<bytes::Bytes>,
-    /// Opaque JSON state kept for patch_state backwards-compat.
-    pub in_memory_state: serde_json::Value,
-}
-
 /// One element of a whisper target specification.
 /// Carries the original descriptor so the hub can re-resolve on voice join/leave.
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -298,12 +260,6 @@ pub struct AppState {
     /// Active voice zones: (channel_id, zone_id) → VoiceZone.
     /// Ephemeral — cleared on hub restart.
     pub voice_zones: RwLock<HashMap<(String, String), VoiceZone>>,
-
-    // ---- Gaming Tier 2 ----
-    /// In-memory index of live game sessions: session_id → GameSessionState.
-    /// Cleared on restart; the DB `game_sessions` table holds durable
-    /// snapshots for games that opt into persistence.
-    pub active_game_sessions: Arc<Mutex<HashMap<String, GameSessionState>>>,
 
     /// channel_id → pubkeys currently with video enabled
     pub video_channels: RwLock<HashMap<String, HashSet<String>>>,

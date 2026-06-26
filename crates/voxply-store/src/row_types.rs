@@ -338,38 +338,6 @@ pub struct PollVoteRow {
     pub option_ids: String,
 }
 
-// ---- Games ----
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubGameRow {
-    pub id: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub version: String,
-    pub entry_url: String,
-    pub thumbnail_url: Option<String>,
-    pub author: Option<String>,
-    pub min_players: i64,
-    pub max_players: i64,
-    pub installed_by: String,
-    pub installed_at: i64,
-    pub manifest_url: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GameSessionRow {
-    pub id: String,
-    pub channel_id: String,
-    pub game_id: String,
-    pub host_pubkey: String,
-    pub state_json: String,
-    pub created_at: String,
-    pub ended_at: Option<String>,
-    pub status: String,
-    pub snapshot: Option<Vec<u8>>,
-    pub updated_at: i64,
-}
-
 // ---- Events / calendar ----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -498,17 +498,6 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
             .map(|p| p.has("manage_voice") || p.has("admin"))
             .unwrap_or(false)
     };
-    let can_create = can_create || {
-        if let Some(ref sid) = session_id {
-            let sessions = state.active_game_sessions.lock().unwrap();
-            sessions
-                .get(sid)
-                .map(|s| s.host_pubkey == cs.public_key)
-                .unwrap_or(false)
-        } else {
-            false
-        }
-    };
     if !can_create {
         let err = WsServerMessage::Error {
             context: "voice_zone_create".to_string(),
@@ -652,17 +641,7 @@ pub(in crate::routes::ws) async fn handle_voice_position_update(
         if let Some(z) = zones.get(&(ch_id.clone(), zone_id.clone())) {
             match z.auth_mode.as_str() {
                 "creator_only" => z.creator_pubkey == cs.public_key,
-                "session_roster" => {
-                    if let Some(ref sid) = z.session_id {
-                        let sessions = state.active_game_sessions.lock().unwrap();
-                        sessions
-                            .get(sid)
-                            .map(|s| s.players.contains(&cs.public_key))
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    }
-                }
+                "session_roster" => false,
                 _ => true,
             }
         } else {
