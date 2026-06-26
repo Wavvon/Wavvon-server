@@ -263,14 +263,15 @@ impl BotStore for SqliteStore {
 
     async fn create_bot(&self, b: &BotRow) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO bots (public_key, display_name, created_by, token_hash, webhook_url, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO bots (public_key, display_name, created_by, token_hash, webhook_url, mini_app_url, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&b.public_key)
         .bind(&b.display_name)
         .bind(&b.created_by)
         .bind(&b.token_hash)
         .bind(&b.webhook_url)
+        .bind(&b.mini_app_url)
         .bind(b.created_at)
         .execute(self.pool())
         .await
@@ -280,7 +281,7 @@ impl BotStore for SqliteStore {
 
     async fn get_bot_by_pubkey(&self, pubkey: &str) -> Result<Option<BotRow>, StoreError> {
         let row = sqlx::query(
-            "SELECT public_key, display_name, created_by, token_hash, webhook_url, created_at
+            "SELECT public_key, display_name, created_by, token_hash, webhook_url, mini_app_url, created_at
              FROM bots WHERE public_key = ?",
         )
         .bind(pubkey)
@@ -293,13 +294,14 @@ impl BotStore for SqliteStore {
             created_by: r.get("created_by"),
             token_hash: r.get("token_hash"),
             webhook_url: r.get("webhook_url"),
+            mini_app_url: r.get("mini_app_url"),
             created_at: r.get("created_at"),
         }))
     }
 
     async fn list_bots(&self) -> Result<Vec<BotRow>, StoreError> {
         let rows = sqlx::query(
-            "SELECT public_key, display_name, created_by, token_hash, webhook_url, created_at
+            "SELECT public_key, display_name, created_by, token_hash, webhook_url, mini_app_url, created_at
              FROM bots ORDER BY created_at DESC",
         )
         .fetch_all(self.pool())
@@ -313,6 +315,7 @@ impl BotStore for SqliteStore {
                 created_by: r.get("created_by"),
                 token_hash: r.get("token_hash"),
                 webhook_url: r.get("webhook_url"),
+                mini_app_url: r.get("mini_app_url"),
                 created_at: r.get("created_at"),
             })
             .collect())

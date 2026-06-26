@@ -766,11 +766,17 @@ pub async fn run(pool: &AnyPool) -> Result<()> {
             created_by   TEXT NOT NULL,
             token_hash   TEXT NOT NULL,
             webhook_url  TEXT,
+            mini_app_url TEXT,
             created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         )",
     )
     .execute(pool)
     .await?;
+
+    // Add mini_app_url to existing databases that predate this column.
+    let _ = sqlx::query("ALTER TABLE bots ADD COLUMN mini_app_url TEXT")
+        .execute(pool)
+        .await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bot_slash_commands (
