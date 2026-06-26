@@ -14,17 +14,23 @@ pub async fn get_voice_participants(
 
     let mut result = Vec::new();
     for pk in participants.keys() {
-        let display_name: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        let row: Option<(Option<String>, i64)> =
+            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = ?")
                 .bind(pk)
                 .fetch_optional(&state.db)
                 .await
                 .ok()
                 .flatten();
 
+        let (display_name, is_bot) = match row {
+            Some((dn, b)) => (dn, b != 0),
+            None => (None, false),
+        };
+
         result.push(VoiceParticipantInfo {
             public_key: pk.clone(),
             display_name,
+            is_bot,
         });
     }
     result

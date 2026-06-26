@@ -108,18 +108,25 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
     });
 
     // Broadcast VoiceParticipantJoined so other WS chat clients update their UI.
-    let display_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
-            .bind(&pubkey)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let (display_name, is_bot): (Option<String>, bool) = {
+        let row: Option<(Option<String>, i64)> =
+            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = ?")
+                .bind(&pubkey)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        match row {
+            Some((dn, b)) => (dn, b != 0),
+            None => (None, false),
+        }
+    };
     let join_broadcast = WsServerMessage::VoiceParticipantJoined {
         channel_id: channel_id.clone(),
         participant: VoiceParticipantInfo {
             public_key: pubkey.clone(),
             display_name,
+            is_bot,
         },
     };
     let _ = state

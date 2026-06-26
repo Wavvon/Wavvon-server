@@ -51,19 +51,32 @@ pub async fn voice_channel_participants(
         }
     }
 
-    let mut name_by_key: HashMap<String, Option<String>> = HashMap::new();
+    struct UserInfo {
+        display_name: Option<String>,
+        is_bot: bool,
+    }
+    let mut info_by_key: HashMap<String, UserInfo> = HashMap::new();
     if !all_keys.is_empty() {
         // sqlx doesn't have great IN-clause helpers; this loop is cheap and
         // bounded by hub size. The lookup itself is one indexed PK fetch.
         for key in &all_keys {
-            let name: Option<String> =
-                sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            let row: Option<(Option<String>, i64)> =
+                sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = ?")
                     .bind(key)
                     .fetch_optional(&state.db)
                     .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-                    .flatten();
-            name_by_key.insert(key.clone(), name);
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            let (display_name, is_bot) = match row {
+                Some((dn, b)) => (dn, b != 0),
+                None => (None, false),
+            };
+            info_by_key.insert(
+                key.clone(),
+                UserInfo {
+                    display_name,
+                    is_bot,
+                },
+            );
         }
     }
 
@@ -74,9 +87,13 @@ pub async fn voice_channel_participants(
         }
         let participants = members
             .keys()
-            .map(|pk| VoiceParticipantInfo {
-                public_key: pk.clone(),
-                display_name: name_by_key.get(pk).cloned().flatten(),
+            .map(|pk| {
+                let info = info_by_key.get(pk);
+                VoiceParticipantInfo {
+                    public_key: pk.clone(),
+                    display_name: info.and_then(|i| i.display_name.clone()),
+                    is_bot: info.map(|i| i.is_bot).unwrap_or(false),
+                }
             })
             .collect();
         out.insert(channel_id.clone(), participants);
@@ -88,6 +105,7 @@ pub async fn voice_channel_participants(
 pub struct VoiceParticipantInfo {
     pub public_key: String,
     pub display_name: Option<String>,
+    pub is_bot: bool,
 }
 
 /// Returns the set of public keys currently in any voice channel on this

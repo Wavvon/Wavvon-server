@@ -244,6 +244,15 @@ pub fn create_router_full(
             get(routes::bots::ext_list_bots).post(routes::bots::ext_invite_bot),
         )
         .route("/bots/{pubkey}", delete(routes::bots::ext_remove_bot))
+        // ---- Bot voice REST endpoints ----
+        .route(
+            "/bots/{id}/voice/join",
+            post(routes::bots::voice::bot_voice_join),
+        )
+        .route(
+            "/bots/{id}/voice/leave",
+            delete(routes::bots::voice::bot_voice_leave),
+        )
         // ---- Incoming webhooks ----
         .route("/admin/webhooks", post(routes::webhooks::create_webhook))
         .route(

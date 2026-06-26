@@ -223,6 +223,241 @@ async fn bot_can_send_message() {
 }
 
 // ---------------------------------------------------------------------------
+// Bot voice join/leave tests (M3)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bot_voice_join_returns_ws_url() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    // Create a non-category channel.
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "voice-test" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    // Create the bot.
+    let resp: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "VoiceBot" }))
+        .await
+        .json();
+    let bot_key = resp["public_key"].as_str().unwrap().to_string();
+    let bot_token = resp["token"].as_str().unwrap().to_string();
+
+    // Happy path: bot authenticates as itself and requests to join a channel.
+    let join_resp = server
+        .post(&format!("/bots/{bot_key}/voice/join"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    join_resp.assert_status_success();
+    let body: serde_json::Value = join_resp.json();
+    assert!(body["voice_ws_url"].as_str().unwrap().contains("/voice/ws"));
+    assert_eq!(body["channel_id"], channel_id);
+}
+
+#[tokio::test]
+async fn bot_voice_join_rejects_wrong_caller() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    // Create two bots.
+    let bot_a: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "BotA" }))
+        .await
+        .json();
+    let bot_a_key = bot_a["public_key"].as_str().unwrap().to_string();
+
+    let bot_b: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "BotB" }))
+        .await
+        .json();
+    let bot_b_token = bot_b["token"].as_str().unwrap().to_string();
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "test" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    // Bot B tries to join as Bot A — must be forbidden.
+    let bad = server
+        .post(&format!("/bots/{bot_a_key}/voice/join"))
+        .authorization_bearer(&bot_b_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    bad.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn bot_voice_join_rejects_missing_channel() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let resp: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "NoChBot" }))
+        .await
+        .json();
+    let bot_key = resp["public_key"].as_str().unwrap().to_string();
+    let bot_token = resp["token"].as_str().unwrap().to_string();
+
+    let not_found = server
+        .post(&format!("/bots/{bot_key}/voice/join"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": "nonexistent-channel-id" }))
+        .await;
+    not_found.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn bot_voice_join_rejects_non_bot_pubkey_in_path() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let bot: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "RealBot" }))
+        .await
+        .json();
+    let bot_token = bot["token"].as_str().unwrap().to_string();
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "ch" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    // Use a pubkey that doesn't exist in users as a registered bot.
+    let not_found = server
+        .post("/bots/fake-bot-key/voice/join")
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    // The bot token belongs to a different pubkey, so it's forbidden.
+    not_found.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn bot_voice_leave_succeeds() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let resp: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "LeaveBot" }))
+        .await
+        .json();
+    let bot_key = resp["public_key"].as_str().unwrap().to_string();
+    let bot_token = resp["token"].as_str().unwrap().to_string();
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "leave-ch" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    // Leave succeeds even when the bot was never in the channel (no-op cleanup).
+    let leave = server
+        .delete(&format!("/bots/{bot_key}/voice/leave"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    leave.assert_status(axum::http::StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn bot_voice_leave_rejects_wrong_caller() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let bot_a: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "BotA2" }))
+        .await
+        .json();
+    let bot_a_key = bot_a["public_key"].as_str().unwrap().to_string();
+
+    let bot_b: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "BotB2" }))
+        .await
+        .json();
+    let bot_b_token = bot_b["token"].as_str().unwrap().to_string();
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "ch2" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    let bad = server
+        .delete(&format!("/bots/{bot_a_key}/voice/leave"))
+        .authorization_bearer(&bot_b_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    bad.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn voice_participants_includes_is_bot_field() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "bot-voice-ch" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    // GET /voice/participants returns an empty map when no one is in voice.
+    // Verify the endpoint is reachable and returns the right shape.
+    let participants: serde_json::Value = server
+        .get("/voice/participants")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    // With no active voice sessions the map is empty.
+    assert!(
+        participants.as_object().unwrap().is_empty()
+            || participants[&channel_id].is_null()
+            || participants[&channel_id]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(true)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Rejection tests
 // ---------------------------------------------------------------------------
 

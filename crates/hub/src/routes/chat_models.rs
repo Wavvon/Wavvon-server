@@ -844,6 +844,8 @@ pub struct TrackMeta {
 pub struct VoiceParticipantInfo {
     pub public_key: String,
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub is_bot: bool,
 }
 
 #[derive(Serialize, Clone)]

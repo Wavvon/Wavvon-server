@@ -210,13 +210,19 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     let json = serde_json::to_string(&reply).unwrap();
     let _ = ws_tx.send(Message::Text(json.into())).await;
 
-    let display_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
-            .bind(&cs.public_key)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
+    let (display_name, is_bot): (Option<String>, bool) = {
+        let row: Option<(Option<String>, i64)> =
+            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = ?")
+                .bind(&cs.public_key)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        match row {
+            Some((dn, b)) => (dn, b != 0),
+            None => (None, false),
+        }
+    };
 
     let _ = state.voice_event_tx.send((
         channel_id.clone(),
@@ -225,6 +231,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             participant: VoiceParticipantInfo {
                 public_key: cs.public_key.clone(),
                 display_name: display_name.clone(),
+                is_bot,
             },
         },
     ));
