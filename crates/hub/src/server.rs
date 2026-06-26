@@ -253,6 +253,15 @@ pub fn create_router_full(
             "/bots/{id}/voice/leave",
             delete(routes::bots::voice::bot_voice_leave),
         )
+        // ---- Bot screenshare REST endpoints ----
+        .route(
+            "/bots/{id}/screenshare/start",
+            post(routes::bots::screenshare::bot_screenshare_start),
+        )
+        .route(
+            "/bots/{id}/screenshare/stop",
+            delete(routes::bots::screenshare::bot_screenshare_stop),
+        )
         // ---- Incoming webhooks ----
         .route("/admin/webhooks", post(routes::webhooks::create_webhook))
         .route(

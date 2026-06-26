@@ -2,6 +2,7 @@ mod admin;
 mod bot_api;
 mod external;
 mod models;
+pub mod screenshare;
 pub mod voice;
 
 // Re-export all public items so server.rs paths remain unchanged.

@@ -458,6 +458,153 @@ async fn voice_participants_includes_is_bot_field() {
 }
 
 // ---------------------------------------------------------------------------
+// Bot screenshare start/stop tests (M4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bot_screenshare_start_returns_stream_id() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "share-test" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    let resp: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "ShareBot" }))
+        .await
+        .json();
+    let bot_key = resp["public_key"].as_str().unwrap().to_string();
+    let bot_token = resp["token"].as_str().unwrap().to_string();
+
+    let start = server
+        .post(&format!("/bots/{bot_key}/screenshare/start"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    start.assert_status_success();
+    let body: serde_json::Value = start.json();
+    assert!(!body["stream_id"].as_str().unwrap().is_empty());
+    assert_eq!(body["channel_id"], channel_id);
+}
+
+#[tokio::test]
+async fn bot_screenshare_stop_removes_stream() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "share-stop" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    let resp: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "StopBot" }))
+        .await
+        .json();
+    let bot_key = resp["public_key"].as_str().unwrap().to_string();
+    let bot_token = resp["token"].as_str().unwrap().to_string();
+
+    // Start a stream.
+    let start_body: serde_json::Value = server
+        .post(&format!("/bots/{bot_key}/screenshare/start"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await
+        .json();
+    let stream_id = start_body["stream_id"].as_str().unwrap().to_string();
+
+    // Stop returns 204.
+    server
+        .delete(&format!("/bots/{bot_key}/screenshare/stop"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": channel_id, "stream_id": stream_id }))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // Stop again (idempotent) is still 204.
+    server
+        .delete(&format!("/bots/{bot_key}/screenshare/stop"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": channel_id, "stream_id": stream_id }))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn bot_screenshare_start_rejects_wrong_caller() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let bot_a: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "BotA3" }))
+        .await
+        .json();
+    let bot_a_key = bot_a["public_key"].as_str().unwrap().to_string();
+
+    let bot_b: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "BotB3" }))
+        .await
+        .json();
+    let bot_b_token = bot_b["token"].as_str().unwrap().to_string();
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "ch3" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    // Bot B tries to start a share as Bot A — must be forbidden.
+    let bad = server
+        .post(&format!("/bots/{bot_a_key}/screenshare/start"))
+        .authorization_bearer(&bot_b_token)
+        .json(&json!({ "channel_id": channel_id }))
+        .await;
+    bad.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn bot_screenshare_start_rejects_missing_channel() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let resp: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "NoChanShareBot" }))
+        .await
+        .json();
+    let bot_key = resp["public_key"].as_str().unwrap().to_string();
+    let bot_token = resp["token"].as_str().unwrap().to_string();
+
+    let not_found = server
+        .post(&format!("/bots/{bot_key}/screenshare/start"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "channel_id": "does-not-exist" }))
+        .await;
+    not_found.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
 // Rejection tests
 // ---------------------------------------------------------------------------
 
