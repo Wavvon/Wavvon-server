@@ -351,6 +351,11 @@ pub struct AppState {
     /// decide whether the first-registrant auto-grant should run: if it is
     /// `Some`, the auto-grant is skipped entirely.
     pub owner_pubkey: Option<String>,
+
+    /// Mirror of `Settings::bots_allow_camera`.
+    /// When true, bot mini-apps that declare `requires_camera` receive camera
+    /// access in the client webview/iframe sandbox.
+    pub bots_allow_camera: bool,
 }
 
 pub struct PendingChallenge {

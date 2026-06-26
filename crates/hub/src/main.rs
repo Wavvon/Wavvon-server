@@ -791,6 +791,7 @@ async fn main() -> Result<()> {
         search,
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
+        bots_allow_camera: settings.bots_allow_camera,
     });
 
     // Bind voice UDP socket and start forwarding task

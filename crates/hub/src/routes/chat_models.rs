@@ -823,6 +823,10 @@ pub enum WsServerMessage {
         channel_id: String,
         mini_app_url: String,
         session_token: String,
+        /// True when the bot declared `requires_camera` AND the hub operator
+        /// has set `bots_allow_camera = true`. Clients gate the webview camera
+        /// permission on this flag.
+        requires_camera: bool,
     },
 
     /// Hub fans a bot's dismiss to all subscribers — clients close open webviews.

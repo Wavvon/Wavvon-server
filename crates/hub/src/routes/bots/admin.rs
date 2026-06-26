@@ -49,14 +49,15 @@ pub async fn admin_create_bot(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO bots (public_key, display_name, created_by, token_hash, mini_app_url, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bots (public_key, display_name, created_by, token_hash, mini_app_url, requires_camera, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&public_key)
     .bind(&display_name)
     .bind(&user.public_key)
     .bind(&token_hash)
     .bind(&req.mini_app_url)
+    .bind(req.requires_camera)
     .bind(now)
     .execute(&state.db)
     .await
@@ -71,6 +72,7 @@ pub async fn admin_create_bot(
             created_at: now,
             token,
             mini_app_url: req.mini_app_url,
+            requires_camera: req.requires_camera,
         }),
     ))
 }
@@ -81,7 +83,7 @@ pub async fn admin_list_bots(
     _user: AuthUser,
 ) -> Result<Json<Vec<BotAdminInfo>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, BotRow>(
-        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url
+        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
          FROM bots ORDER BY created_at",
     )
     .fetch_all(&state.db)
@@ -108,7 +110,7 @@ pub async fn admin_get_bot(
     Path(pubkey): Path<String>,
 ) -> Result<Json<BotDetailResponse>, (StatusCode, String)> {
     let bot = sqlx::query_as::<_, BotRow>(
-        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url
+        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
          FROM bots WHERE public_key = ?",
     )
     .bind(&pubkey)
@@ -132,6 +134,7 @@ pub async fn admin_get_bot(
         created_at: bot.created_at,
         webhook_url: bot.webhook_url,
         mini_app_url: bot.mini_app_url,
+        requires_camera: bot.requires_camera,
         commands: cmds
             .into_iter()
             .map(|c| SlashCommandInfo {
@@ -149,7 +152,7 @@ pub async fn admin_delete_bot(
     Path(pubkey): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let bot = sqlx::query_as::<_, BotRow>(
-        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url
+        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
          FROM bots WHERE public_key = ?",
     )
     .bind(&pubkey)
@@ -189,7 +192,7 @@ pub async fn admin_set_webhook(
     Json(req): Json<SetWebhookRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let bot = sqlx::query_as::<_, BotRow>(
-        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url
+        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
          FROM bots WHERE public_key = ?",
     )
     .bind(&pubkey)

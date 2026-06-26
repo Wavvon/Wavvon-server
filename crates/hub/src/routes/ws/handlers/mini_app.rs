@@ -54,20 +54,30 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
         _ => return DispatchResult::Continue,
     };
 
-    // Look up the bot's mini_app_url.
-    let mini_app_url: Option<String> =
-        sqlx::query_scalar("SELECT mini_app_url FROM bots WHERE public_key = ?")
+    // Look up the bot's mini_app_url and requires_camera flag.
+    #[derive(sqlx::FromRow)]
+    struct BotAppRow {
+        mini_app_url: Option<String>,
+        requires_camera: bool,
+    }
+    let bot_row: Option<BotAppRow> =
+        sqlx::query_as("SELECT mini_app_url, requires_camera FROM bots WHERE public_key = ?")
             .bind(&bot_id)
             .fetch_optional(&state.db)
             .await
             .ok()
-            .flatten()
             .flatten();
 
-    let mini_app_url = match mini_app_url {
-        Some(url) => url,
-        None => return DispatchResult::Continue, // bot not found or no mini_app_url
+    let (mini_app_url, requires_camera) = match bot_row {
+        Some(r) => match r.mini_app_url {
+            Some(url) => (url, r.requires_camera),
+            None => return DispatchResult::Continue,
+        },
+        None => return DispatchResult::Continue,
     };
+
+    // Gate: camera is only granted when operator allows it hub-wide.
+    let grant_camera = requires_camera && state.bots_allow_camera;
 
     // Mint a 4-hour scoped session token for the joining user.
     let mut bytes = vec![0u8; 32];
@@ -100,6 +110,7 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
         channel_id,
         mini_app_url,
         session_token: token,
+        requires_camera: grant_camera,
     };
     let json = serde_json::to_string(&reply).unwrap();
     if ws_tx.send(Message::Text(json.into())).await.is_err() {

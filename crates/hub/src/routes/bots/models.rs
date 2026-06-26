@@ -64,7 +64,7 @@ pub async fn authenticate_bot(
     let hash = hash_token(raw);
 
     sqlx::query_as::<_, BotRow>(
-        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url
+        "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
          FROM bots WHERE token_hash = ?",
     )
     .bind(&hash)
@@ -86,6 +86,7 @@ pub struct BotRow {
     pub created_at: i64,
     pub webhook_url: Option<String>,
     pub mini_app_url: Option<String>,
+    pub requires_camera: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -111,6 +112,8 @@ pub struct CreateBotRequest {
     pub display_name: String,
     #[serde(default)]
     pub mini_app_url: Option<String>,
+    #[serde(default)]
+    pub requires_camera: bool,
 }
 
 #[derive(Serialize)]
@@ -132,6 +135,7 @@ pub struct BotCreatedResponse {
     pub token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mini_app_url: Option<String>,
+    pub requires_camera: bool,
 }
 
 #[derive(Serialize)]
@@ -150,6 +154,7 @@ pub struct BotDetailResponse {
     pub webhook_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mini_app_url: Option<String>,
+    pub requires_camera: bool,
     pub commands: Vec<SlashCommandInfo>,
 }
 

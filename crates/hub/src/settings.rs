@@ -103,6 +103,13 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          a plain 404). Unset = API-only, no static serving. The official Docker image sets \
          this to /web-client automatically.",
     ),
+    (
+        "VOXPLY_BOTS_ALLOW_CAMERA",
+        "false",
+        "Set to `true` to allow bot mini-apps that declare `requires_camera: true` to \
+         receive camera access in the client webview/iframe sandbox. Defaults to false; \
+         operators who trust all registered bots on this hub can enable it hub-wide.",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -175,6 +182,11 @@ pub struct Settings {
     ///
     /// Env: VOXPLY_WEB_CLIENT_DIR
     pub web_client_dir: Option<String>,
+    /// Allow bot mini-apps that declare `requires_camera: true` to receive
+    /// camera access in client webview/iframe sandboxes.
+    ///
+    /// Env: VOXPLY_BOTS_ALLOW_CAMERA
+    pub bots_allow_camera: bool,
 }
 
 /// Load hub settings from (in priority order, highest last):
@@ -189,6 +201,7 @@ pub fn load() -> Result<Settings> {
         .set_default("log_format", "text")?
         .set_default("discovery_url", "https://discovery.voxply.io")?
         .set_default("trusted_proxy", false)?
+        .set_default("bots_allow_camera", false)?
         .add_source(config::File::with_name("hub").required(false))
         .add_source(config::Environment::with_prefix("VOXPLY"))
         .build()?

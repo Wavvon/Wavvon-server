@@ -802,15 +802,19 @@ pub async fn run(pool: &AnyPool) -> anyhow::Result<()> {
             created_by   TEXT NOT NULL,
             token_hash   TEXT NOT NULL,
             webhook_url  TEXT,
-            mini_app_url TEXT,
-            created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            mini_app_url    TEXT,
+            requires_camera INTEGER NOT NULL DEFAULT 0,
+            created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now'))
         )",
     )
     .execute(pool)
     .await?;
 
-    // Add mini_app_url to existing databases that predate this column.
+    // Add columns to existing databases that predate them.
     let _ = sqlx::query("ALTER TABLE bots ADD COLUMN mini_app_url TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE bots ADD COLUMN requires_camera INTEGER NOT NULL DEFAULT 0")
         .execute(pool)
         .await;
 
