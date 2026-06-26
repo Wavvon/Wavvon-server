@@ -8,7 +8,7 @@ use crate::routes::chat_models::{WsClientMessage, WsServerMessage};
 use crate::state::AppState;
 
 use super::conn_state::{ConnState, DispatchResult};
-use super::handlers::{bot, chat, game, screen, voice};
+use super::handlers::{bot, chat, screen, voice};
 use super::voice::get_voice_roster;
 
 pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: String) {
@@ -627,14 +627,6 @@ async fn dispatch_client_msg(
         WsClientMessage::StreamUnsubscribe { .. } => {
             screen::handle_stream_unsubscribe(cs, state, msg).await
         }
-
-        // ── Game sessions ──────────────────────────────────────────────────
-        WsClientMessage::GameSend { .. } => game::handle_game_send(cs, state, ws_tx, msg).await,
-        WsClientMessage::GameSetStatus { .. } => {
-            game::handle_game_set_status(cs, state, ws_tx, msg).await
-        }
-        WsClientMessage::GameSnapshot { .. } => game::handle_game_snapshot(cs, state, msg),
-        WsClientMessage::GameEnd { .. } => game::handle_game_end(cs, state, ws_tx, msg).await,
 
         // ── Bots ───────────────────────────────────────────────────────────
         WsClientMessage::Resume { .. } => bot::handle_resume(cs, state, ws_tx, bot_tx, msg).await,

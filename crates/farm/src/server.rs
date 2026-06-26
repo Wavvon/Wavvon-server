@@ -73,21 +73,6 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         )
         // Farm admin fleet view — requires farm admin auth.
         .route("/farm/admin/fleet", get(routes::heartbeat::get_fleet))
-        // Gaming — farm-level game catalogue.
-        .route(
-            "/farm/games",
-            post(routes::games::install_game).get(routes::games::list_games),
-        )
-        .route(
-            "/farm/games/{id}",
-            get(routes::games::get_game)
-                .patch(routes::games::patch_game)
-                .delete(routes::games::uninstall_game),
-        )
-        .route(
-            "/farm/games/{id}/kv/{user_pubkey}/{key}",
-            get(routes::games::get_kv).put(routes::games::put_kv),
-        )
         // Proxy catch-all — must be last (fallback for all /hub/<id>/... requests).
         .route("/hub/{hub_id}/{*path}", any(crate::proxy::proxy_handler))
         .layer(TraceLayer::new_for_http())

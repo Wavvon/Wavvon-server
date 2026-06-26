@@ -6,7 +6,6 @@ pub mod channels;
 pub mod dms;
 pub mod events;
 pub mod federation;
-pub mod games;
 pub mod invites;
 pub mod messages;
 pub mod migrate;

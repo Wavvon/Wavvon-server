@@ -13,7 +13,6 @@ pub use traits::channels::ChannelStore;
 pub use traits::dms::DmStore;
 pub use traits::events::EventStore;
 pub use traits::federation::FederationStore;
-pub use traits::games::GameStore;
 pub use traits::invites::InviteStore;
 pub use traits::messages::MessageStore;
 pub use traits::migrate::Migrate;
@@ -49,7 +48,6 @@ pub trait HubStore:
     + DmStore
     + FederationStore
     + PollStore
-    + GameStore
     + EventStore
     + CertStore
     + BadgeStore
@@ -74,7 +72,6 @@ impl<T> HubStore for T where
         + DmStore
         + FederationStore
         + PollStore
-        + GameStore
         + EventStore
         + CertStore
         + BadgeStore

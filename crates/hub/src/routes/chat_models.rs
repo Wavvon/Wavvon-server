@@ -225,11 +225,6 @@ pub enum ChatEvent {
     /// reply_created, reply_updated, reply_deleted). The payload is the
     /// fully-serialised JSON value carried in the WS envelope.
     Forum { channel_id: String },
-    /// Any game-session event (created / joined / left / state-updated / ended).
-    /// We carry a single variant here because the WS dispatcher only needs to
-    /// match by channel_id for subscription filtering; the full typed envelope
-    /// is pre-serialised into the Arc<str> that travels alongside.
-    Game { channel_id: String },
     /// Voice zone lifecycle and position-update events (voice_zone_created,
     /// voice_zone_destroyed, voice_position_updated). Routing is by channel_id.
     VoiceZone { channel_id: String },
@@ -272,7 +267,6 @@ impl ChatEvent {
             | ChatEvent::ScreenShareStopped { channel_id, .. }
             | ChatEvent::ScreenShareSignal { channel_id, .. }
             | ChatEvent::Forum { channel_id }
-            | ChatEvent::Game { channel_id }
             | ChatEvent::VoiceZone { channel_id }
             | ChatEvent::Video { channel_id }
             | ChatEvent::Poll { channel_id }
@@ -488,32 +482,6 @@ pub enum WsClientMessage {
 
     #[serde(rename = "voice_position_update")]
     VoicePositionUpdate { zone_id: String, position: Vec<f64> },
-
-    // ---- Gaming Tier 2: client → hub ----
-    #[serde(rename = "game_send")]
-    GameSend {
-        session_id: String,
-        payload: serde_json::Value,
-        #[serde(default)]
-        to: Option<String>,
-    },
-
-    #[serde(rename = "game_set_status")]
-    GameSetStatus { session_id: String, status: String },
-
-    #[serde(rename = "game_snapshot")]
-    GameSnapshot {
-        session_id: String,
-        /// Base64 or hex-encoded snapshot blob; stored opaque in DB.
-        blob: String,
-    },
-
-    #[serde(rename = "game_end")]
-    GameEnd {
-        session_id: String,
-        #[serde(default)]
-        result: Option<serde_json::Value>,
-    },
 }
 
 #[derive(Serialize, Clone)]
@@ -774,73 +742,6 @@ pub enum WsServerMessage {
     VoiceZoneState {
         channel_id: String,
         zones: Vec<VoiceZoneSnapshot>,
-    },
-
-    // ---- Gaming Tier 2: game session envelopes ----
-    /// A new game session was created in a channel.
-    #[serde(rename = "game_session_created")]
-    GameSessionCreated {
-        session_id: String,
-        channel_id: String,
-        game_id: String,
-        host_pubkey: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        max_players: Option<i64>,
-    },
-
-    /// A player joined an existing game session.
-    #[serde(rename = "game_session_joined")]
-    GameSessionJoined {
-        session_id: String,
-        player_pubkey: String,
-    },
-
-    /// The host posted a state patch (opaque JSON). Relayed to all roster
-    /// members so clients can apply it to their local view.
-    #[serde(rename = "game_state_updated")]
-    GameStateUpdated {
-        session_id: String,
-        patch: serde_json::Value,
-    },
-
-    /// The session ended (normal completion, abandonment, or forced deletion).
-    #[serde(rename = "game_session_ended")]
-    GameSessionEnded {
-        session_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        result: Option<serde_json::Value>,
-    },
-
-    // ---- Spec Tier 2 hub→client additions ----
-    /// A player joined the session roster (spec variant with display_name).
-    #[serde(rename = "game_player_joined")]
-    GamePlayerJoined {
-        session_id: String,
-        pubkey: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        display_name: Option<String>,
-    },
-
-    /// A player left the session roster.
-    #[serde(rename = "game_player_left")]
-    GamePlayerLeft { session_id: String, pubkey: String },
-
-    /// The host role was transferred to a new player (after host disconnect).
-    #[serde(rename = "game_host_changed")]
-    GameHostChanged {
-        session_id: String,
-        new_host_pubkey: String,
-    },
-
-    /// A game move / event relayed from one player to the roster.
-    /// The payload is opaque; the hub never interprets it.
-    #[serde(rename = "game_event")]
-    GameEvent {
-        session_id: String,
-        from_pubkey: String,
-        payload: serde_json::Value,
     },
 
     /// A message was pinned in a channel.

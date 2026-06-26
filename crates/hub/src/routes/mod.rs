@@ -15,7 +15,6 @@ pub mod dms;
 pub mod emojis;
 pub mod events;
 pub mod friends;
-pub mod games;
 pub mod health;
 pub mod hub;
 pub mod hub_icons;
