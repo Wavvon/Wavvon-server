@@ -20,6 +20,19 @@ pub(in crate::routes::ws) async fn handle_typing(
         WsClientMessage::Typing { channel_id, typing } => (channel_id, typing),
         _ => return DispatchResult::Continue,
     };
+
+    // Silently drop typing events from users who are not subscribed to the
+    // channel or who have been banned from it.
+    if !cs.subscribed.contains(&channel_id) {
+        return DispatchResult::Continue;
+    }
+    if crate::routes::moderation::is_channel_banned(&state.db, &channel_id, &cs.public_key)
+        .await
+        .unwrap_or(false)
+    {
+        return DispatchResult::Continue;
+    }
+
     let display_name: Option<String> =
         sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(&cs.public_key)

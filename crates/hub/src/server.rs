@@ -49,12 +49,23 @@ pub fn build_cors_layer(cors_origins: &str) -> CorsLayer {
             .allow_headers(allow_headers)
             .max_age(std::time::Duration::from_secs(86400))
     } else {
-        let origins: Vec<axum::http::HeaderValue> = cors_origins
+        let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
+        for raw in cors_origins
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .collect();
+        {
+            match raw.parse::<axum::http::HeaderValue>() {
+                Ok(v) => origins.push(v),
+                Err(_) => tracing::warn!(origin = raw, "CORS: invalid origin string ignored"),
+            }
+        }
+        if origins.is_empty() {
+            tracing::warn!(
+                cors_origins,
+                "CORS: no valid origins parsed — all browser cross-origin requests will be blocked"
+            );
+        }
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(origins))
             .allow_methods(allow_methods)
