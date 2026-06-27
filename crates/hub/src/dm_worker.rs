@@ -132,13 +132,13 @@ async fn load_envelope(
         Option<String>,
         Option<String>,
         i64,
-        i64,
+        bool,
         Option<String>,
-        i64,
+        bool,
     )> = sqlx::query_as(
         "SELECT id, conversation_id, sender, content, attachments, signature, created_at,
-                COALESCE(is_encrypted, 0), ciphertext_json,
-                COALESCE(is_group_encrypted, 0)
+                COALESCE(is_encrypted, FALSE), ciphertext_json,
+                COALESCE(is_group_encrypted, FALSE)
          FROM dm_messages WHERE id = $1",
     )
     .bind(message_id)
@@ -167,8 +167,8 @@ async fn load_envelope(
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
 
-    let is_encrypted = msg.7 != 0;
-    let is_group_encrypted = msg.9 != 0;
+    let is_encrypted = msg.7;
+    let is_group_encrypted = msg.9;
 
     let encrypted_envelope = if is_encrypted {
         msg.8

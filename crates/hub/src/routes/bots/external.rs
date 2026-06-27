@@ -43,7 +43,7 @@ pub async fn ext_invite_bot(
     // Create the pending users row (idempotent so re-inviting is safe).
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
-         VALUES ($1, $2, $3, 'bot_pending', 1) ON CONFLICT (public_key) DO NOTHING",
+         VALUES ($1, $2, $3, 'bot_pending', TRUE) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&req.pubkey)
     .bind(now)
@@ -83,7 +83,7 @@ pub async fn ext_accept_invite(
     Json(req): Json<AcceptInviteRequest>,
 ) -> Result<Json<AcceptInviteResponse>, (StatusCode, String)> {
     let row: Option<(Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT bot_invite_token, bot_invite_expires FROM users WHERE public_key = $1 AND is_bot = 1",
+        "SELECT bot_invite_token, bot_invite_expires FROM users WHERE public_key = $1 AND is_bot = TRUE",
     )
     .bind(&req.pubkey)
     .fetch_optional(&state.db)
@@ -168,7 +168,7 @@ pub async fn ext_accept_invite(
             .bind(&cmd.description)
             .bind(&cmd.args)
             .bind(cmd.scope.as_deref().unwrap_or("channel"))
-            .bind(if cmd.privileged.unwrap_or(false) { 1i64 } else { 0 })
+            .bind(cmd.privileged.unwrap_or(false))
             .bind(cmd.cooldown_seconds.unwrap_or(3))
             .execute(&state.db)
             .await
@@ -191,7 +191,7 @@ pub async fn ext_remove_bot(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::ADMIN)?;
 
-    sqlx::query("UPDATE users SET is_bot_removed = 1 WHERE public_key = $1 AND is_bot = 1")
+    sqlx::query("UPDATE users SET is_bot_removed = TRUE WHERE public_key = $1 AND is_bot = TRUE")
         .bind(&pubkey)
         .execute(&state.db)
         .await
@@ -221,7 +221,7 @@ pub async fn ext_list_bots(
                 u.last_seen_at, bp.webhook_url
          FROM users u
          JOIN bot_profiles bp ON bp.pubkey = u.public_key
-         WHERE u.is_bot = 1 AND u.is_bot_removed = 0",
+         WHERE u.is_bot = TRUE AND u.is_bot_removed = FALSE",
     )
     .fetch_all(&state.db)
     .await
@@ -261,14 +261,14 @@ pub async fn ext_bot_me(
     user: AuthUser,
 ) -> Result<Json<BotMeResponse>, (StatusCode, String)> {
     // Verify caller is a bot.
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+    let is_bot: Option<bool> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
         .flatten();
 
-    if is_bot != Some(1) {
+    if is_bot != Some(true) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
     }
 
@@ -308,7 +308,7 @@ pub async fn ext_bot_me(
                 description: c.description,
                 args: c.args,
                 scope: Some(c.scope),
-                privileged: Some(c.privileged != 0),
+                privileged: Some(c.privileged),
                 cooldown_seconds: Some(c.cooldown_seconds),
             })
             .collect(),
@@ -322,14 +322,14 @@ pub async fn ext_update_bot_profile(
     user: AuthUser,
     Json(meta): Json<crate::routes::bot_models::BotMeta>,
 ) -> Result<Json<BotMeResponse>, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+    let is_bot: Option<bool> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
         .flatten();
 
-    if is_bot != Some(1) {
+    if is_bot != Some(true) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
     }
 
@@ -366,14 +366,14 @@ pub async fn ext_update_bot_commands(
     user: AuthUser,
     Json(req): Json<UpdateCommandsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+    let is_bot: Option<bool> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
         .flatten();
 
-    if is_bot != Some(1) {
+    if is_bot != Some(true) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
     }
 
@@ -393,7 +393,7 @@ pub async fn ext_update_bot_commands(
         .bind(&cmd.description)
         .bind(&cmd.args)
         .bind(cmd.scope.as_deref().unwrap_or("channel"))
-        .bind(if cmd.privileged.unwrap_or(false) { 1i64 } else { 0 })
+        .bind(cmd.privileged.unwrap_or(false))
         .bind(cmd.cooldown_seconds.unwrap_or(3))
         .execute(&state.db)
         .await
@@ -410,14 +410,14 @@ pub async fn ext_update_bot_subscriptions(
     user: AuthUser,
     Json(req): Json<UpdateSubscriptionsRequest>,
 ) -> Result<Json<SetSubscriptionsResponse>, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+    let is_bot: Option<bool> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
         .flatten();
 
-    if is_bot != Some(1) {
+    if is_bot != Some(true) {
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
     }
 

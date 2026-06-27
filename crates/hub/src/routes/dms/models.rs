@@ -23,12 +23,11 @@ pub(super) struct DmMessageRow {
     pub content: Option<String>,
     pub attachments: Option<String>,
     pub created_at: i64,
-    pub is_encrypted: i64,
+    pub is_encrypted: bool,
     pub ciphertext_json: Option<String>,
-    pub is_group_encrypted: i64,
-    /// 0 or 1 from SQLite EXISTS — there's no native bool, so we cast at
-    /// the boundary in list_dm_messages.
-    pub delivery_failed: i64,
+    pub is_group_encrypted: bool,
+    /// PostgreSQL EXISTS returns a native bool.
+    pub delivery_failed: bool,
 }
 
 pub(super) struct ConvMember {

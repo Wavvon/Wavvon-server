@@ -127,7 +127,7 @@ pub async fn create_webhook(
     // parallel auth path (documented in bots.md §9).
     sqlx::query(
         "INSERT INTO users(public_key, display_name, first_seen_at, last_seen_at, approval_status, is_bot, is_webhook)
-         VALUES($1,$2,$3,$4,'approved',1,1) ON CONFLICT (public_key) DO NOTHING",
+         VALUES($1,$2,$3,$4,'approved',TRUE,TRUE) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&id)
     .bind(&req.display_name)
@@ -168,7 +168,7 @@ pub async fn delete_webhook(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::ADMIN)?;
 
-    let rows = sqlx::query("UPDATE webhooks SET active = 0 WHERE id = $1")
+    let rows = sqlx::query("UPDATE webhooks SET active = FALSE WHERE id = $1")
         .bind(&webhook_id)
         .execute(&state.db)
         .await
@@ -204,7 +204,7 @@ pub async fn post_webhook_message(
 
     let webhook = sqlx::query_as::<_, WebhookRow>(
         "SELECT channel_id, secret_token_hash, display_name
-         FROM webhooks WHERE id = $1 AND active = 1",
+         FROM webhooks WHERE id = $1 AND active = TRUE",
     )
     .bind(&webhook_id)
     .fetch_optional(&state.db)

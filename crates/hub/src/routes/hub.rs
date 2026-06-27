@@ -360,7 +360,7 @@ pub async fn list_members(
     let user_keys: Vec<String> = users.iter().map(|u| u.public_key.clone()).collect();
 
     // One query for all user-role associations + role metadata.
-    let user_role_rows: Vec<(String, String, String, i64, i64, i64)> = sqlx::query_as(
+    let user_role_rows: Vec<(String, String, String, i64, bool, i64)> = sqlx::query_as(
         "SELECT ur.user_public_key, r.id, r.name, r.priority, r.display_separately, r.created_at
          FROM user_roles ur
          INNER JOIN roles r ON r.id = ur.role_id
@@ -405,7 +405,7 @@ pub async fn list_members(
                 id: role_id,
                 name: role_name,
                 priority,
-                display_separately: display_separately != 0,
+                display_separately,
                 created_at,
                 permissions,
             });
@@ -423,7 +423,7 @@ pub async fn list_members(
                 first_seen_at: u.first_seen_at,
                 last_seen_at: u.last_seen_at,
                 roles,
-                is_bot: u.is_bot != 0,
+                is_bot: u.is_bot,
             }
         })
         .collect();
@@ -449,5 +449,5 @@ struct UserAdminRow {
     display_name: Option<String>,
     first_seen_at: i64,
     last_seen_at: i64,
-    is_bot: i64,
+    is_bot: bool,
 }

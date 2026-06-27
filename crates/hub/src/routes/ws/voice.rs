@@ -14,7 +14,7 @@ pub async fn get_voice_participants(
 
     let mut result = Vec::new();
     for pk in participants.keys() {
-        let row: Option<(Option<String>, i64)> =
+        let row: Option<(Option<String>, bool)> =
             sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                 .bind(pk)
                 .fetch_optional(&state.db)
@@ -23,7 +23,7 @@ pub async fn get_voice_participants(
                 .flatten();
 
         let (display_name, is_bot) = match row {
-            Some((dn, b)) => (dn, b != 0),
+            Some((dn, b)) => (dn, b),
             None => (None, false),
         };
 

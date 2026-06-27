@@ -23,7 +23,7 @@ async fn require_forum_channel(
     db: &sqlx::PgPool,
     channel_id: &str,
 ) -> Result<(), (StatusCode, String)> {
-    let row: Option<(i64, String)> =
+    let row: Option<(bool, String)> =
         sqlx::query_as("SELECT is_category, channel_type FROM channels WHERE id = $1")
             .bind(channel_id)
             .fetch_optional(db)
@@ -32,7 +32,7 @@ async fn require_forum_channel(
 
     match row {
         None => Err((StatusCode::NOT_FOUND, "channel_not_found".to_string())),
-        Some((1, _)) => Err((StatusCode::NOT_FOUND, "not_a_forum".to_string())),
+        Some((true, _)) => Err((StatusCode::NOT_FOUND, "not_a_forum".to_string())),
         Some((_, t)) if t != "forum" => Err((StatusCode::CONFLICT, "not_a_forum".to_string())),
         _ => Ok(()),
     }
@@ -479,7 +479,7 @@ pub async fn create_reply(
     if row.deleted_at.is_some() {
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
-    if row.is_locked != 0 && !perms.has(permissions::MANAGE_POSTS) {
+    if row.is_locked && !perms.has(permissions::MANAGE_POSTS) {
         return Err((StatusCode::FORBIDDEN, "post_locked".to_string()));
     }
 
@@ -666,7 +666,7 @@ pub async fn pin_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_pinned = 1 WHERE id = $1")
+    sqlx::query("UPDATE posts SET is_pinned = TRUE WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -702,7 +702,7 @@ pub async fn unpin_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_pinned = 0 WHERE id = $1")
+    sqlx::query("UPDATE posts SET is_pinned = FALSE WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -738,7 +738,7 @@ pub async fn lock_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_locked = 1 WHERE id = $1")
+    sqlx::query("UPDATE posts SET is_locked = TRUE WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -774,7 +774,7 @@ pub async fn unlock_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_locked = 0 WHERE id = $1")
+    sqlx::query("UPDATE posts SET is_locked = FALSE WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await

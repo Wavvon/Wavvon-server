@@ -344,7 +344,7 @@ async fn main() -> Result<()> {
                     .await
                     .unwrap_or(0);
                 let channels: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE is_category=0")
+                    sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE is_category=false")
                         .fetch_one(&db)
                         .await
                         .unwrap_or(0);
@@ -469,7 +469,7 @@ async fn main() -> Result<()> {
                 match action.as_str() {
                     "list" => {
                         let rows: Vec<(String, String)> = sqlx::query_as(
-                            "SELECT id, name FROM channels WHERE is_category=0 ORDER BY display_order",
+                            "SELECT id, name FROM channels WHERE is_category=false ORDER BY display_order",
                         )
                         .fetch_all(&db)
                         .await

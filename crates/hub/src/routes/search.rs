@@ -44,7 +44,7 @@ pub async fn search_messages(
     // Channels the user is not banned from (text channels only).
     let visible_channels: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM channels
-         WHERE is_category = 0
+         WHERE is_category = false
            AND channel_type = 'text'
            AND id NOT IN (
                SELECT channel_id FROM channel_bans WHERE target_public_key = $1

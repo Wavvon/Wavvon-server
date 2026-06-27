@@ -143,7 +143,7 @@ pub async fn verify(
     // self-register — the invite flow creates the row first.
     if req.is_bot == Some(true) {
         let status: Option<String> = sqlx::query_scalar::<_, String>(
-            "SELECT approval_status FROM users WHERE public_key = $1 AND is_bot = 1",
+            "SELECT approval_status FROM users WHERE public_key = $1 AND is_bot = TRUE",
         )
         .bind(&canonical_pubkey)
         .fetch_optional(&state.db)
@@ -157,7 +157,7 @@ pub async fn verify(
         }
 
         // Ensure is_bot flag is set (idempotent).
-        sqlx::query("UPDATE users SET is_bot = 1 WHERE public_key = $1")
+        sqlx::query("UPDATE users SET is_bot = TRUE WHERE public_key = $1")
             .bind(&canonical_pubkey)
             .execute(&state.db)
             .await
@@ -203,7 +203,7 @@ pub async fn verify(
                     .bind(&cmd.description)
                     .bind(&cmd.args)
                     .bind(cmd.scope.as_deref().unwrap_or("channel"))
-                    .bind(if cmd.privileged.unwrap_or(false) { 1i64 } else { 0 })
+                    .bind(cmd.privileged.unwrap_or(false))
                     .bind(cmd.cooldown_seconds.unwrap_or(3))
                     .execute(&state.db)
                     .await

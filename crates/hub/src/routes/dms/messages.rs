@@ -208,7 +208,7 @@ pub async fn send_dm(
         })?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, NULL, $4, NULL, $5, 1, $6, 0)",
+             VALUES ($1, $2, $3, NULL, $4, NULL, $5, TRUE, $6, FALSE)",
         )
         .bind(&message_id)
         .bind(&conversation_id)
@@ -232,7 +232,7 @@ pub async fn send_dm(
         })?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, NULL, $4, NULL, $5, 0, $6, 1)",
+             VALUES ($1, $2, $3, NULL, $4, NULL, $5, FALSE, $6, TRUE)",
         )
         .bind(&message_id)
         .bind(&conversation_id)
@@ -275,7 +275,7 @@ pub async fn send_dm(
 
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NULL, 0)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL, FALSE)",
         )
         .bind(&message_id)
         .bind(&conversation_id)
@@ -475,9 +475,9 @@ pub async fn list_dm_messages(
     let rows = sqlx::query_as::<_, DmMessageRow>(
         "SELECT m.id, m.conversation_id, m.sender, u.display_name as sender_name,
                 m.content, m.attachments, m.created_at,
-                COALESCE(m.is_encrypted, 0) AS is_encrypted,
+                COALESCE(m.is_encrypted, FALSE) AS is_encrypted,
                 m.ciphertext_json,
-                COALESCE(m.is_group_encrypted, 0) AS is_group_encrypted,
+                COALESCE(m.is_group_encrypted, FALSE) AS is_group_encrypted,
                 EXISTS (
                     SELECT 1 FROM dm_outbox o
                     WHERE o.message_id = m.id AND o.bounced_at IS NOT NULL
@@ -494,8 +494,8 @@ pub async fn list_dm_messages(
 
     let mut responses = Vec::with_capacity(rows.len());
     for r in rows {
-        let is_enc = r.is_encrypted != 0;
-        let is_group_enc = r.is_group_encrypted != 0;
+        let is_enc = r.is_encrypted;
+        let is_group_enc = r.is_group_encrypted;
         let encrypted_envelope = if is_enc {
             r.ciphertext_json
                 .as_deref()
@@ -518,7 +518,7 @@ pub async fn list_dm_messages(
             content: r.content,
             created_at: r.created_at,
             attachments: parse_dm_attachments(r.attachments),
-            delivery_failed: r.delivery_failed != 0,
+            delivery_failed: r.delivery_failed,
             is_encrypted: is_enc,
             encrypted_envelope,
             group_encrypted_envelope,
@@ -634,7 +634,7 @@ pub async fn receive_federated_dm(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, NULL, $4, $5, $6, 1, $7, 0)",
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, TRUE, $7, FALSE)",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -675,7 +675,7 @@ pub async fn receive_federated_dm(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, NULL, $4, $5, $6, 0, $7, 1)",
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, FALSE, $7, TRUE)",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -717,7 +717,7 @@ pub async fn receive_federated_dm(
 
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NULL, 0)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL, FALSE)",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)

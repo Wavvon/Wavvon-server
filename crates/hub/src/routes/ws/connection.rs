@@ -15,14 +15,13 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     // ── Connection setup ─────────────────────────────────────────────────────
 
     let is_bot: bool =
-        sqlx::query_scalar::<_, i64>("SELECT is_bot FROM users WHERE public_key = $1")
+        sqlx::query_scalar::<_, bool>("SELECT is_bot FROM users WHERE public_key = $1")
             .bind(&public_key)
             .fetch_optional(&state.db)
             .await
             .ok()
             .flatten()
-            .unwrap_or(0)
-            != 0;
+            .unwrap_or(false);
 
     // Increment the online-users refcount for this pubkey.
     {
@@ -88,7 +87,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     // Auto-subscribe to non-banned channels.
     let subscribed: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT id FROM channels
-         WHERE is_category = 0
+         WHERE is_category = false
            AND id NOT IN (
                SELECT channel_id FROM channel_bans WHERE target_public_key = $1
            )",

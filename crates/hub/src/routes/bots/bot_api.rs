@@ -126,7 +126,7 @@ pub async fn bot_poll(
     let rows = if let Some(since) = params.since {
         sqlx::query_as::<_, EventRow>(
             "SELECT id, event_type, payload, created_at FROM bot_event_queue
-             WHERE bot_pubkey = $1 AND delivered = 0 AND created_at > $2
+             WHERE bot_pubkey = $1 AND delivered = FALSE AND created_at > $2
              ORDER BY created_at ASC LIMIT 100",
         )
         .bind(&bot.public_key)
@@ -136,7 +136,7 @@ pub async fn bot_poll(
     } else {
         sqlx::query_as::<_, EventRow>(
             "SELECT id, event_type, payload, created_at FROM bot_event_queue
-             WHERE bot_pubkey = $1 AND delivered = 0
+             WHERE bot_pubkey = $1 AND delivered = FALSE
              ORDER BY created_at ASC LIMIT 100",
         )
         .bind(&bot.public_key)
@@ -168,7 +168,7 @@ pub async fn bot_ack_events(
 
     for id in &req.ids {
         let _ = sqlx::query(
-            "UPDATE bot_event_queue SET delivered = 1
+            "UPDATE bot_event_queue SET delivered = TRUE
              WHERE id = $1 AND bot_pubkey = $2",
         )
         .bind(id)

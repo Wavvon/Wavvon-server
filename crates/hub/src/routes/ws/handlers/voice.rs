@@ -211,7 +211,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     let _ = ws_tx.send(Message::Text(json.into())).await;
 
     let (display_name, is_bot): (Option<String>, bool) = {
-        let row: Option<(Option<String>, i64)> =
+        let row: Option<(Option<String>, bool)> =
             sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                 .bind(&cs.public_key)
                 .fetch_optional(&state.db)
@@ -219,7 +219,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                 .ok()
                 .flatten();
         match row {
-            Some((dn, b)) => (dn, b != 0),
+            Some((dn, b)) => (dn, b),
             None => (None, false),
         }
     };

@@ -37,7 +37,7 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
 
     // Verify the channel exists.
     let channel_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = $1 AND is_category = 0")
+        sqlx::query_scalar("SELECT id FROM channels WHERE id = $1 AND is_category = false")
             .bind(&channel_id)
             .fetch_optional(&state.db)
             .await
@@ -109,7 +109,7 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
 
     // Broadcast VoiceParticipantJoined so other WS chat clients update their UI.
     let (display_name, is_bot): (Option<String>, bool) = {
-        let row: Option<(Option<String>, i64)> =
+        let row: Option<(Option<String>, bool)> =
             sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                 .bind(&pubkey)
                 .fetch_optional(&state.db)
@@ -117,7 +117,7 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
                 .ok()
                 .flatten();
         match row {
-            Some((dn, b)) => (dn, b != 0),
+            Some((dn, b)) => (dn, b),
             None => (None, false),
         }
     };

@@ -116,7 +116,7 @@ async fn fetch_user_roles(
             name: role.name,
             permissions: perms,
             priority: role.priority,
-            display_separately: role.display_separately != 0,
+            display_separately: role.display_separately,
             created_at: role.created_at,
         });
     }
@@ -152,6 +152,6 @@ struct RoleRow {
     id: String,
     name: String,
     priority: i64,
-    display_separately: i64,
+    display_separately: bool,
     created_at: i64,
 }

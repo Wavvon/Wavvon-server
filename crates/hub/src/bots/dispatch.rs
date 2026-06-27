@@ -66,7 +66,7 @@ pub async fn dispatch_slash(
         bot_pubkey: String,
         bot_name: String,
         webhook_url: Option<String>,
-        privileged: i64,
+        privileged: bool,
         // Reserved for per-user cooldown enforcement (spec §6). Not yet
         // wired into the in-memory cooldown store.
         #[allow(dead_code)]
@@ -80,8 +80,8 @@ pub async fn dispatch_slash(
          JOIN bot_profiles bp ON bp.pubkey = bc.pubkey
          JOIN users u ON u.public_key = bc.pubkey
          WHERE bc.name = $1
-           AND u.is_bot = 1
-           AND u.is_bot_removed = 0
+           AND u.is_bot = TRUE
+           AND u.is_bot_removed = FALSE
            AND (
              -- Either no channel scope restriction for this bot...
              NOT EXISTS (
@@ -103,7 +103,7 @@ pub async fn dispatch_slash(
     .flatten()?; // None = no bot matched, fall through to normal message storage
 
     // Privileged command: check invoker's permissions.
-    if matched.privileged != 0 {
+    if matched.privileged {
         let perms = crate::permissions::user_permissions(&state.db, invoker_pubkey)
             .await
             .ok()?;
@@ -379,15 +379,14 @@ pub async fn dispatch_component(
     };
 
     // Verify the sender is a bot.
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+    let is_bot: Option<bool> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&msg_info.sender)
         .fetch_optional(&state.db)
         .await
         .ok()
-        .flatten()
         .flatten();
 
-    if is_bot != Some(1) {
+    if is_bot != Some(true) {
         // Message not from a bot — components shouldn't fire on normal messages.
         return;
     }

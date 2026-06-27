@@ -62,7 +62,7 @@ async fn sweep_warnings(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
         "SELECT s.token, s.public_key, s.expires_at
          FROM sessions s
          JOIN users u ON u.public_key = s.public_key
-         WHERE u.is_bot = 1
+         WHERE u.is_bot = TRUE
            AND s.expires_at IS NOT NULL
            AND s.expires_at > $1
            AND s.expires_at <= $2
@@ -119,7 +119,7 @@ async fn sweep_expired(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
         "SELECT s.token, s.public_key
          FROM sessions s
          JOIN users u ON u.public_key = s.public_key
-         WHERE u.is_bot = 1
+         WHERE u.is_bot = TRUE
            AND s.expires_at IS NOT NULL
            AND s.expires_at < $1",
     )

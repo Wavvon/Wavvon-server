@@ -141,7 +141,7 @@ fn default_limit() -> i64 {
 #[derive(sqlx::FromRow)]
 struct SurveyRow {
     id: String,
-    enabled: i64,
+    enabled: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -149,7 +149,7 @@ struct QuestionRow {
     id: String,
     prompt: String,
     kind: String,
-    required: i64,
+    required: bool,
     display_order: i64,
 }
 
@@ -186,7 +186,7 @@ async fn load_active_survey_public(
     db: &sqlx::PgPool,
 ) -> Result<Option<SurveyPublic>, (StatusCode, String)> {
     let survey: Option<SurveyRow> =
-        sqlx::query_as("SELECT id, enabled FROM surveys WHERE enabled = 1 LIMIT 1")
+        sqlx::query_as("SELECT id, enabled FROM surveys WHERE enabled = TRUE LIMIT 1")
             .fetch_optional(db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -232,7 +232,7 @@ async fn load_active_survey_public(
             id: q.id,
             prompt: q.prompt,
             kind: q.kind,
-            required: q.required != 0,
+            required: q.required,
             display_order: q.display_order,
             choices,
         });
@@ -305,7 +305,7 @@ async fn load_survey_admin(
             id: q.id,
             prompt: q.prompt,
             kind: q.kind,
-            required: q.required != 0,
+            required: q.required,
             display_order: q.display_order,
             choices,
         });
@@ -313,7 +313,7 @@ async fn load_survey_admin(
 
     Ok(Some(SurveyAdmin {
         id: survey.id,
-        enabled: survey.enabled != 0,
+        enabled: survey.enabled,
         questions: qout,
     }))
 }
@@ -514,7 +514,7 @@ pub async fn admin_put_survey(
 
     // If enabling this survey, disable all others first
     if req.enabled {
-        sqlx::query("UPDATE surveys SET enabled = 0")
+        sqlx::query("UPDATE surveys SET enabled = FALSE")
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

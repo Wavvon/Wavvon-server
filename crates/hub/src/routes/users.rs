@@ -49,7 +49,7 @@ pub async fn list_users(
             "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
                     (SELECT r.name FROM roles r
                      INNER JOIN user_roles ur ON r.id = ur.role_id
-                     WHERE ur.user_public_key = u.public_key AND r.display_separately = 1
+                     WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
                      ORDER BY r.priority DESC LIMIT 1) AS group_role
              FROM users u
              WHERE u.display_name LIKE $1 OR u.public_key LIKE $2
@@ -64,7 +64,7 @@ pub async fn list_users(
             "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
                     (SELECT r.name FROM roles r
                      INNER JOIN user_roles ur ON r.id = ur.role_id
-                     WHERE ur.user_public_key = u.public_key AND r.display_separately = 1
+                     WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
                      ORDER BY r.priority DESC LIMIT 1) AS group_role
              FROM users u
              ORDER BY u.display_name, u.public_key LIMIT 50",
@@ -82,7 +82,7 @@ pub async fn list_users(
             display_name: r.display_name,
             avatar: r.avatar,
             group_role: r.group_role,
-            is_bot: r.is_bot != 0,
+            is_bot: r.is_bot,
         })
         .collect();
 
@@ -119,7 +119,7 @@ pub async fn channel_members(
                 display_name: r.display_name,
                 avatar: r.avatar,
                 group_role: None,
-                is_bot: r.is_bot != 0,
+                is_bot: r.is_bot,
             })
             .collect(),
     ))
@@ -130,7 +130,7 @@ struct UserRow {
     public_key: String,
     display_name: Option<String>,
     avatar: Option<String>,
-    is_bot: i64,
+    is_bot: bool,
 }
 
 /// Like UserRow but includes the pre-joined group_role column.
@@ -139,7 +139,7 @@ struct UserRowWithRole {
     public_key: String,
     display_name: Option<String>,
     avatar: Option<String>,
-    is_bot: i64,
+    is_bot: bool,
     group_role: Option<String>,
 }
 

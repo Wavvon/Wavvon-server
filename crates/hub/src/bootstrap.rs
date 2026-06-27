@@ -113,7 +113,7 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> anyhow::Re
             )
             .bind(&id)
             .bind(name)
-            .bind(is_category as i64)
+            .bind(is_category)
             .bind(now)
             .execute(db)
             .await

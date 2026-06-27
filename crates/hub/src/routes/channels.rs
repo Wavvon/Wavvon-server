@@ -60,14 +60,14 @@ pub async fn voice_channel_participants(
         // sqlx doesn't have great IN-clause helpers; this loop is cheap and
         // bounded by hub size. The lookup itself is one indexed PK fetch.
         for key in &all_keys {
-            let row: Option<(Option<String>, i64)> =
+            let row: Option<(Option<String>, bool)> =
                 sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                     .bind(key)
                     .fetch_optional(&state.db)
                     .await
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
             let (display_name, is_bot) = match row {
-                Some((dn, b)) => (dn, b != 0),
+                Some((dn, b)) => (dn, b),
                 None => (None, false),
             };
             info_by_key.insert(
@@ -135,7 +135,7 @@ pub async fn create_channel(
 
     // Validate parent if specified
     if let Some(parent_id) = &req.parent_id {
-        let parent_is_category: Option<i64> =
+        let parent_is_category: Option<bool> =
             sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
                 .bind(parent_id)
                 .fetch_optional(&state.db)
@@ -149,7 +149,7 @@ pub async fn create_channel(
                     "Parent channel not found".to_string(),
                 ))
             }
-            Some(0) => {
+            Some(false) => {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "Parent must be a category".to_string(),
@@ -174,7 +174,6 @@ pub async fn create_channel(
 
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
-    let is_category_int = if req.is_category { 1i64 } else { 0 };
 
     // Validate channel_type: "text", "forum", or "banner" on leaf channels.
     let channel_type = if req.is_category {
@@ -232,7 +231,7 @@ pub async fn create_channel(
     .bind(&req.name)
     .bind(&user.public_key)
     .bind(&req.parent_id)
-    .bind(is_category_int)
+    .bind(req.is_category)
     .bind(next_order)
     .bind(&req.description)
     .bind(&channel_type)
@@ -339,7 +338,7 @@ pub async fn update_channel(
                 "A channel can't be its own parent".to_string(),
             ));
         }
-        let parent_is_category: Option<i64> =
+        let parent_is_category: Option<bool> =
             sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
                 .bind(parent_id)
                 .fetch_optional(&state.db)
@@ -352,7 +351,7 @@ pub async fn update_channel(
                     "Parent channel not found".to_string(),
                 ))
             }
-            Some(0) => {
+            Some(false) => {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "Parent must be a category".to_string(),
@@ -377,12 +376,12 @@ pub async fn update_channel(
             if moved_depth > max_code_depth {
                 return Err((StatusCode::BAD_REQUEST, "depth_exceeded".to_string()));
             }
-            let is_cat: i64 = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
+            let is_cat: bool = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
                 .bind(&channel_id)
                 .fetch_one(&state.db)
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-            if is_cat == 1 && moved_depth >= max_code_depth {
+            if is_cat && moved_depth >= max_code_depth {
                 return Err((StatusCode::BAD_REQUEST, "category_at_max_depth".to_string()));
             }
         }
@@ -543,7 +542,7 @@ pub async fn list_channels(
             name: r.name,
             created_by: r.created_by,
             parent_id: r.parent_id,
-            is_category: r.is_category != 0,
+            is_category: r.is_category,
             display_order: r.display_order,
             description: r.description,
             icon: r.icon,
@@ -602,7 +601,7 @@ pub async fn delete_channel(
     perms.require(permissions::MANAGE_CHANNELS)?;
 
     // Check if channel exists
-    let exists: Option<i64> = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
+    let exists: Option<bool> = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
         .bind(&channel_id)
         .fetch_optional(&state.db)
         .await
@@ -691,7 +690,7 @@ struct ChannelRow {
     name: String,
     created_by: String,
     parent_id: Option<String>,
-    is_category: i64,
+    is_category: bool,
     display_order: i64,
     description: Option<String>,
     icon: Option<String>,
@@ -793,7 +792,7 @@ pub async fn get_unread_counts(
 ) -> Result<Json<Vec<UnreadCount>>, (StatusCode, String)> {
     // All non-category channels (no per-channel ACL in the base model)
     let channel_ids: Vec<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE is_category = 0")
+        sqlx::query_scalar("SELECT id FROM channels WHERE is_category = false")
             .fetch_all(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

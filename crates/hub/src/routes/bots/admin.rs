@@ -38,7 +38,7 @@ pub async fn admin_create_bot(
     // Insert into users so messages and member listing work with the existing FK.
     sqlx::query(
         "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at, approval_status, is_bot)
-         VALUES ($1, $2, $3, $4, 'approved', 1)",
+         VALUES ($1, $2, $3, $4, 'approved', TRUE)",
     )
     .bind(&public_key)
     .bind(&display_name)

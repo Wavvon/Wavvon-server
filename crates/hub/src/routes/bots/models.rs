@@ -303,6 +303,6 @@ pub struct BotCommandRow {
     pub description: String,
     pub args: Option<String>,
     pub scope: String,
-    pub privileged: i64,
+    pub privileged: bool,
     pub cooldown_seconds: i64,
 }

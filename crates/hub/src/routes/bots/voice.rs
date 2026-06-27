@@ -48,7 +48,7 @@ pub async fn bot_voice_join(
 
     // Verify channel exists and is not a category.
     let channel_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = $1 AND is_category = 0")
+        sqlx::query_scalar("SELECT id FROM channels WHERE id = $1 AND is_category = false")
             .bind(&req.channel_id)
             .fetch_optional(&state.db)
             .await

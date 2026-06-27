@@ -29,7 +29,7 @@ pub async fn list_roles(
             name: role.name,
             permissions: perms,
             priority: role.priority,
-            display_separately: role.display_separately != 0,
+            display_separately: role.display_separately,
             created_at: role.created_at,
         });
     }
@@ -61,7 +61,7 @@ pub async fn create_role(
         .bind(&id)
         .bind(&req.name)
         .bind(req.priority)
-        .bind(if req.display_separately { 1i64 } else { 0 })
+        .bind(req.display_separately)
         .bind(now)
         .execute(&state.db)
         .await
@@ -156,7 +156,7 @@ pub async fn update_role(
 
     if let Some(flag) = req.display_separately {
         sqlx::query("UPDATE roles SET display_separately = $1 WHERE id = $2")
-            .bind(if flag { 1i64 } else { 0 })
+            .bind(flag)
             .bind(&role_id)
             .execute(&state.db)
             .await
@@ -171,7 +171,7 @@ pub async fn update_role(
         name: updated.name,
         permissions: role_perms,
         priority: updated.priority,
-        display_separately: updated.display_separately != 0,
+        display_separately: updated.display_separately,
         created_at: updated.created_at,
     }))
 }
@@ -382,7 +382,7 @@ async fn fetch_user_roles_response(
             name: role.name,
             permissions: perms,
             priority: role.priority,
-            display_separately: role.display_separately != 0,
+            display_separately: role.display_separately,
             created_at: role.created_at,
         });
     }
@@ -394,6 +394,6 @@ struct RoleRow {
     id: String,
     name: String,
     priority: i64,
-    display_separately: i64,
+    display_separately: bool,
     created_at: i64,
 }
