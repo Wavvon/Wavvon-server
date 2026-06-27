@@ -1,4 +1,4 @@
-name: Release
+﻿name: Release
 
 on:
   push:
@@ -53,10 +53,10 @@ jobs:
       - name: Checkout hub repo
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
-      - name: Checkout Voxply-clients (for web client build)
+      - name: Checkout Wavvon-clients (for web client build)
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          repository: Voxply/Voxply-clients
+          repository: Wavvon/Wavvon-clients
           path: web-client-src
 
       - name: Log in to GHCR
@@ -135,33 +135,35 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Install cross-compilation tools
+      - name: Install musl tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+          sudo apt-get install -y musl-tools
+
+      - name: Install Zig + cargo-zigbuild (aarch64 musl cross-compiler)
+        run: |
+          pip install ziglang
+          cargo install cargo-zigbuild --locked
 
       - name: Build hub (x86_64 musl)
-        run: cargo build --release -p voxply-hub --target x86_64-unknown-linux-musl
+        run: cargo build --release -p wavvon-hub --target x86_64-unknown-linux-musl
 
       - name: Build farm (x86_64 musl)
-        run: cargo build --release -p voxply-farm --target x86_64-unknown-linux-musl
+        run: cargo build --release -p wavvon-farm --target x86_64-unknown-linux-musl
 
       - name: Build hub (aarch64 musl)
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
-          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
-        run: cargo build --release -p voxply-hub --target aarch64-unknown-linux-musl
+        run: cargo zigbuild --release -p wavvon-hub --target aarch64-unknown-linux-musl
 
       - name: Rename artifacts
         run: |
-          cp target/x86_64-unknown-linux-musl/release/voxply-hub  voxply-hub-linux-x86_64
-          cp target/x86_64-unknown-linux-musl/release/voxply-farm voxply-farm-linux-x86_64
-          cp target/aarch64-unknown-linux-musl/release/voxply-hub voxply-hub-linux-aarch64
+          cp target/x86_64-unknown-linux-musl/release/wavvon-hub  wavvon-hub-linux-x86_64
+          cp target/x86_64-unknown-linux-musl/release/wavvon-farm wavvon-farm-linux-x86_64
+          cp target/aarch64-unknown-linux-musl/release/wavvon-hub wavvon-hub-linux-aarch64
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           files: |
-            voxply-hub-linux-x86_64
-            voxply-farm-linux-x86_64
-            voxply-hub-linux-aarch64
+            wavvon-hub-linux-x86_64
+            wavvon-farm-linux-x86_64
+            wavvon-hub-linux-aarch64
