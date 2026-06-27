@@ -2,7 +2,7 @@ use axum::http::StatusCode;
 
 /// Returns true when the user has an active hub-level ban.
 pub async fn is_banned(db: &sqlx::PgPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = ?")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = $1")
         .bind(public_key)
         .fetch_one(db)
         .await
@@ -16,7 +16,7 @@ pub async fn is_muted(db: &sqlx::PgPool, public_key: &str) -> Result<bool, (Stat
 
     // Check for permanent mute (no expires_at) or active timeout (expires_at > now)
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM mutes WHERE target_public_key = ? AND (expires_at IS NULL OR expires_at > ?)",
+        "SELECT COUNT(*) FROM mutes WHERE target_public_key = $1 AND (expires_at IS NULL OR expires_at > $2)",
     )
     .bind(public_key)
     .bind(now)
@@ -33,7 +33,7 @@ pub async fn is_channel_banned(
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM channel_bans WHERE channel_id = ? AND target_public_key = ?",
+        "SELECT COUNT(*) FROM channel_bans WHERE channel_id = $1 AND target_public_key = $2",
     )
     .bind(channel_id)
     .bind(public_key)
@@ -49,7 +49,7 @@ pub async fn is_voice_muted(
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = $1")
             .bind(public_key)
             .fetch_one(db)
             .await
@@ -64,7 +64,7 @@ pub async fn is_channel_voice_muted(
     pubkey: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM channel_voice_mutes WHERE channel_id = ? AND pubkey = ?",
+        "SELECT COUNT(*) FROM channel_voice_mutes WHERE channel_id = $1 AND pubkey = $2",
     )
     .bind(channel_id)
     .bind(pubkey)
@@ -76,7 +76,7 @@ pub async fn is_channel_voice_muted(
 
 pub async fn has_raised_hand(db: &sqlx::PgPool, channel_id: &str, pubkey: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM raise_hand_requests WHERE channel_id = ? AND pubkey = ?",
+        "SELECT COUNT(*) FROM raise_hand_requests WHERE channel_id = $1 AND pubkey = $2",
     )
     .bind(channel_id)
     .bind(pubkey)
@@ -97,7 +97,7 @@ pub async fn is_federated_banned(
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let master_pk: Option<String> =
-        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
             .bind(public_key)
             .fetch_optional(db)
             .await
@@ -107,7 +107,7 @@ pub async fn is_federated_banned(
     let check_key = master_pk.as_deref().unwrap_or(public_key);
 
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = $1")
             .bind(check_key)
             .fetch_one(db)
             .await

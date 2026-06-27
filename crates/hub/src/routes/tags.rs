@@ -100,7 +100,7 @@ pub async fn patch_tags(
     })?;
 
     sqlx::query(
-        "INSERT INTO hub_settings (key, value) VALUES ('hub_tags', ?)
+        "INSERT INTO hub_settings (key, value) VALUES ('hub_tags', $1)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .bind(&json_val)
@@ -110,7 +110,7 @@ pub async fn patch_tags(
 
     if let Some(nsfw_val) = req.nsfw {
         sqlx::query(
-            "INSERT INTO hub_settings (key, value) VALUES ('hub_nsfw', ?)
+            "INSERT INTO hub_settings (key, value) VALUES ('hub_nsfw', $1)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )
         .bind(if nsfw_val { "true" } else { "false" })

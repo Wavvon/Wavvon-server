@@ -56,7 +56,7 @@ pub async fn ensure_user_stub(
 ) -> Result<(), (StatusCode, String)> {
     sqlx::query(
         "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at)
-         VALUES (?, NULL, ?, ?) ON CONFLICT (public_key) DO NOTHING",
+         VALUES ($1, NULL, $2, $3) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(public_key)
     .bind(now)
@@ -72,7 +72,7 @@ pub async fn load_members(
     conversation_id: &str,
 ) -> Result<Vec<ConvMember>, (StatusCode, String)> {
     let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT public_key, hub_url FROM conversation_members WHERE conversation_id = ?",
+        "SELECT public_key, hub_url FROM conversation_members WHERE conversation_id = $1",
     )
     .bind(conversation_id)
     .fetch_all(&state.db)
@@ -99,7 +99,7 @@ pub async fn find_existing_dm(
         "SELECT cm1.conversation_id FROM conversation_members cm1
          INNER JOIN conversation_members cm2 ON cm1.conversation_id = cm2.conversation_id
          INNER JOIN conversations c ON c.id = cm1.conversation_id
-         WHERE cm1.public_key = ? AND cm2.public_key = ? AND c.conv_type = 'dm'",
+         WHERE cm1.public_key = $1 AND cm2.public_key = $2 AND c.conv_type = 'dm'",
     )
     .bind(user_a)
     .bind(user_b)
@@ -109,7 +109,7 @@ pub async fn find_existing_dm(
 
     for conv_id in convs {
         let member_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ?",
+            "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = $1",
         )
         .bind(&conv_id)
         .fetch_one(&state.db)
@@ -118,7 +118,7 @@ pub async fn find_existing_dm(
 
         if member_count == 2 {
             let conv = sqlx::query_as::<_, ConvRow>(
-                "SELECT id, conv_type, created_at FROM conversations WHERE id = ?",
+                "SELECT id, conv_type, created_at FROM conversations WHERE id = $1",
             )
             .bind(&conv_id)
             .fetch_one(&state.db)

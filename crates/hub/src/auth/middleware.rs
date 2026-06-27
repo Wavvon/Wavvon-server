@@ -40,7 +40,7 @@ impl FromRequestParts<Arc<AppState>> for PeerHub {
         let auth_user = AuthUser::from_request_parts(parts, state).await?;
 
         // The authenticated pubkey must be in the `peers` table.
-        let is_peer: Option<i64> = sqlx::query_scalar("SELECT 1 FROM peers WHERE public_key = ?")
+        let is_peer: Option<i64> = sqlx::query_scalar("SELECT 1 FROM peers WHERE public_key = $1")
             .bind(&auth_user.public_key)
             .fetch_optional(&state.db)
             .await
@@ -256,7 +256,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 "SELECT s.public_key, u.approval_status, s.expires_at
                  FROM sessions s
                  INNER JOIN users u ON s.public_key = u.public_key
-                 WHERE s.token = ?",
+                 WHERE s.token = $1",
             )
             .bind(token)
             .fetch_optional(&state.db)
@@ -283,7 +283,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             } else {
                 // Try bot tokens.
                 let bot_key: Option<String> =
-                    sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = ?")
+                    sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = $1")
                         .bind(token)
                         .fetch_optional(&state.db)
                         .await
@@ -304,7 +304,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
             // Reject revoked keys.
             let revoked_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = ?",
+                "SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = $1",
             )
             .bind(&pk)
             .fetch_one(&state.db)
@@ -348,7 +348,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             // Lazy upsert: insert if not present, update last_seen otherwise.
             sqlx::query(
                 "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status)
-                 VALUES (?, ?, ?, 'approved')
+                 VALUES ($1, $2, $3, 'approved')
                  ON CONFLICT(public_key) DO UPDATE SET last_seen_at = excluded.last_seen_at",
             )
             .bind(&public_key)
@@ -360,7 +360,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
             // Assign builtin-everyone role if this user has no roles yet.
             let has_roles: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = ?")
+                sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = $1")
                     .bind(&public_key)
                     .fetch_one(&state.db)
                     .await
@@ -387,7 +387,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             // users who have not paired a separate master key.
             {
                 let master_pk: Option<String> =
-                    sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+                    sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
                         .bind(&public_key)
                         .fetch_optional(&state.db)
                         .await
@@ -395,7 +395,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                         .flatten();
                 let check_key = master_pk.as_deref().unwrap_or(&public_key);
                 let fed_ban_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = ?",
+                    "SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = $1",
                 )
                 .bind(check_key)
                 .fetch_one(&state.db)
@@ -408,7 +408,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
             // Pending approval check.
             let approval_status: String =
-                sqlx::query_scalar("SELECT approval_status FROM users WHERE public_key = ?")
+                sqlx::query_scalar("SELECT approval_status FROM users WHERE public_key = $1")
                     .bind(&public_key)
                     .fetch_optional(&state.db)
                     .await

@@ -16,7 +16,7 @@ impl ModerationStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO bans (target_public_key, banned_by, reason, created_at)
-             VALUES (?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT(target_public_key) DO UPDATE SET
                banned_by = excluded.banned_by,
                reason = excluded.reason,
@@ -33,7 +33,7 @@ impl ModerationStore for PostgresStore {
     }
 
     async fn unban_user(&self, target: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM bans WHERE target_public_key = ?")
+        sqlx::query("DELETE FROM bans WHERE target_public_key = $1")
             .bind(target)
             .execute(self.pool())
             .await
@@ -43,7 +43,7 @@ impl ModerationStore for PostgresStore {
 
     async fn is_banned(&self, target: &str) -> Result<bool, StoreError> {
         let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = $1")
                 .bind(target)
                 .fetch_one(self.pool())
                 .await
@@ -77,7 +77,7 @@ impl ModerationStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO mutes (target_public_key, muted_by, reason, expires_at, created_at)
-             VALUES (?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT(target_public_key) DO UPDATE SET
                muted_by = excluded.muted_by,
                reason = excluded.reason,
@@ -95,7 +95,7 @@ impl ModerationStore for PostgresStore {
     }
 
     async fn unmute_user(&self, target: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM mutes WHERE target_public_key = ?")
+        sqlx::query("DELETE FROM mutes WHERE target_public_key = $1")
             .bind(target)
             .execute(self.pool())
             .await
@@ -108,7 +108,7 @@ impl ModerationStore for PostgresStore {
         // PostgreSQL equivalent of SQLite strftime('%s','now') is EXTRACT(EPOCH FROM NOW())::BIGINT
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM mutes
-             WHERE target_public_key = ?
+             WHERE target_public_key = $1
                AND (expires_at IS NULL OR expires_at > EXTRACT(EPOCH FROM NOW())::BIGINT)",
         )
         .bind(target)
@@ -146,7 +146,7 @@ impl ModerationStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO voice_mutes (target_public_key, muted_by, reason, created_at)
-             VALUES (?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT(target_public_key) DO UPDATE SET
                muted_by = excluded.muted_by,
                reason = excluded.reason",
@@ -162,7 +162,7 @@ impl ModerationStore for PostgresStore {
     }
 
     async fn voice_unmute(&self, target: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM voice_mutes WHERE target_public_key = ?")
+        sqlx::query("DELETE FROM voice_mutes WHERE target_public_key = $1")
             .bind(target)
             .execute(self.pool())
             .await
@@ -172,7 +172,7 @@ impl ModerationStore for PostgresStore {
 
     async fn is_voice_muted(&self, target: &str) -> Result<bool, StoreError> {
         let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = ?")
+            sqlx::query_scalar("SELECT COUNT(*) FROM voice_mutes WHERE target_public_key = $1")
                 .bind(target)
                 .fetch_one(self.pool())
                 .await
@@ -190,7 +190,7 @@ impl ModerationStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at)
-             VALUES (?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT(channel_id, target_public_key) DO UPDATE SET
                banned_by = excluded.banned_by,
                reason = excluded.reason",
@@ -207,7 +207,7 @@ impl ModerationStore for PostgresStore {
     }
 
     async fn channel_unban(&self, channel_id: &str, target: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM channel_bans WHERE channel_id = ? AND target_public_key = ?")
+        sqlx::query("DELETE FROM channel_bans WHERE channel_id = $1 AND target_public_key = $2")
             .bind(channel_id)
             .bind(target)
             .execute(self.pool())
@@ -219,7 +219,7 @@ impl ModerationStore for PostgresStore {
     async fn is_channel_banned(&self, channel_id: &str, target: &str) -> Result<bool, StoreError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM channel_bans
-             WHERE channel_id = ? AND target_public_key = ?",
+             WHERE channel_id = $1 AND target_public_key = $2",
         )
         .bind(channel_id)
         .bind(target)
@@ -233,7 +233,7 @@ impl ModerationStore for PostgresStore {
         sqlx::query(
             "INSERT INTO message_reports
              (id, message_id, reporter_pubkey, reason, reported_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&r.id)
         .bind(&r.message_id)
@@ -255,7 +255,7 @@ impl ModerationStore for PostgresStore {
         let rows = if let Some(s) = status {
             sqlx::query(
                 "SELECT id, message_id, reporter_pubkey, reason, reported_at
-                 FROM message_reports WHERE status = ? ORDER BY reported_at DESC LIMIT ? OFFSET ?",
+                 FROM message_reports WHERE status = $1 ORDER BY reported_at DESC LIMIT $2 OFFSET $3",
             )
             .bind(s)
             .bind(limit)
@@ -266,7 +266,7 @@ impl ModerationStore for PostgresStore {
         } else {
             sqlx::query(
                 "SELECT id, message_id, reporter_pubkey, reason, reported_at
-                 FROM message_reports ORDER BY reported_at DESC LIMIT ? OFFSET ?",
+                 FROM message_reports ORDER BY reported_at DESC LIMIT $1 OFFSET $2",
             )
             .bind(limit)
             .bind(offset)

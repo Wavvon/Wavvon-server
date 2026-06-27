@@ -10,7 +10,7 @@ use crate::PostgresStore;
 #[async_trait]
 impl SettingsStore for PostgresStore {
     async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
-        sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
+        sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
             .bind(key)
             .fetch_optional(self.pool())
             .await
@@ -19,7 +19,7 @@ impl SettingsStore for PostgresStore {
 
     async fn set_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO hub_settings (key, value) VALUES (?, ?)
+            "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )
         .bind(key)
@@ -43,7 +43,7 @@ impl SettingsStore for PostgresStore {
 
     async fn seed_default(&self, key: &str, value: &str) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO hub_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+            "INSERT INTO hub_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
         )
         .bind(key)
         .bind(value)

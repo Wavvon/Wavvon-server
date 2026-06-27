@@ -41,7 +41,7 @@ pub async fn get_emoji_image(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let row: Option<(String, String)> =
-        sqlx::query_as("SELECT mime, data_b64 FROM hub_emojis WHERE id = ?")
+        sqlx::query_as("SELECT mime, data_b64 FROM hub_emojis WHERE id = $1")
             .bind(&id)
             .fetch_optional(&state.db)
             .await
@@ -87,7 +87,7 @@ pub async fn create_emoji(
         .as_secs() as i64;
 
     sqlx::query(
-        "INSERT INTO hub_emojis(id, name, uploader, mime, data_b64, created_at) VALUES(?,?,?,?,?,?)",
+        "INSERT INTO hub_emojis(id, name, uploader, mime, data_b64, created_at) VALUES($1,$2,$3,$4,$5,$6)",
     )
     .bind(&id)
     .bind(&req.name)
@@ -110,7 +110,7 @@ pub async fn delete_emoji(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    sqlx::query("DELETE FROM hub_emojis WHERE id = ?")
+    sqlx::query("DELETE FROM hub_emojis WHERE id = $1")
         .bind(&id)
         .execute(&state.db)
         .await

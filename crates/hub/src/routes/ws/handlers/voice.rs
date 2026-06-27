@@ -66,7 +66,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
 
     // Talk-power check.
     let min_talk_power: i64 =
-        sqlx::query_scalar("SELECT COALESCE(min_talk_power, 0) FROM channels WHERE id = ?")
+        sqlx::query_scalar("SELECT COALESCE(min_talk_power, 0) FROM channels WHERE id = $1")
             .bind(&channel_id)
             .fetch_optional(&state.db)
             .await
@@ -75,7 +75,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             .unwrap_or(0);
     let min_talk_power = if min_talk_power == 0 {
         sqlx::query_scalar::<_, i64>(
-            "SELECT min_talk_power FROM channel_settings WHERE channel_id = ?",
+            "SELECT min_talk_power FROM channel_settings WHERE channel_id = $1",
         )
         .bind(&channel_id)
         .fetch_optional(&state.db)
@@ -92,7 +92,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             "SELECT COALESCE(MAX(r.talk_power), 0)
              FROM roles r
              INNER JOIN user_roles ur ON r.id = ur.role_id
-             WHERE ur.user_public_key = ?",
+             WHERE ur.user_public_key = $1",
         )
         .bind(&cs.public_key)
         .fetch_optional(&state.db)
@@ -212,7 +212,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
 
     let (display_name, is_bot): (Option<String>, bool) = {
         let row: Option<(Option<String>, i64)> =
-            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = ?")
+            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                 .bind(&cs.public_key)
                 .fetch_optional(&state.db)
                 .await

@@ -15,7 +15,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     // ── Connection setup ─────────────────────────────────────────────────────
 
     let is_bot: bool =
-        sqlx::query_scalar::<_, i64>("SELECT is_bot FROM users WHERE public_key = ?")
+        sqlx::query_scalar::<_, i64>("SELECT is_bot FROM users WHERE public_key = $1")
             .bind(&public_key)
             .fetch_optional(&state.db)
             .await
@@ -76,7 +76,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
 
     // Load DM conversation memberships (once at connect time).
     let my_conversations: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
-        "SELECT conversation_id FROM conversation_members WHERE public_key = ?",
+        "SELECT conversation_id FROM conversation_members WHERE public_key = $1",
     )
     .bind(&public_key)
     .fetch_all(&state.db)
@@ -90,7 +90,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
         "SELECT id FROM channels
          WHERE is_category = 0
            AND id NOT IN (
-               SELECT channel_id FROM channel_bans WHERE target_public_key = ?
+               SELECT channel_id FROM channel_bans WHERE target_public_key = $1
            )",
     )
     .bind(&public_key)

@@ -80,7 +80,7 @@ pub async fn send_dm(
         }
     }
 
-    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = $1")
         .bind(&conversation_id)
         .fetch_optional(&state.db)
         .await
@@ -208,7 +208,7 @@ pub async fn send_dm(
         })?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, NULL, ?, NULL, ?, 1, ?, 0)",
+             VALUES ($1, $2, $3, NULL, $4, NULL, $5, 1, $6, 0)",
         )
         .bind(&message_id)
         .bind(&conversation_id)
@@ -232,7 +232,7 @@ pub async fn send_dm(
         })?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, NULL, ?, NULL, ?, 0, ?, 1)",
+             VALUES ($1, $2, $3, NULL, $4, NULL, $5, 0, $6, 1)",
         )
         .bind(&message_id)
         .bind(&conversation_id)
@@ -275,7 +275,7 @@ pub async fn send_dm(
 
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NULL, 0)",
         )
         .bind(&message_id)
         .bind(&conversation_id)
@@ -291,7 +291,7 @@ pub async fn send_dm(
 
     // Broadcast to local WS subscribers (other members on this same hub).
     let sender_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(&user.public_key)
             .fetch_optional(&state.db)
             .await
@@ -328,7 +328,7 @@ pub async fn send_dm(
         let delivery_urls: Vec<String> = {
             // Step 1: look up master_pubkey for this member.
             let master_pubkey: Option<String> =
-                sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+                sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
                     .bind(&m.public_key)
                     .fetch_optional(&state.db)
                     .await
@@ -338,7 +338,7 @@ pub async fn send_dm(
             // Step 2: if a master is known, try the designation table.
             let designation_urls: Option<Vec<String>> = if let Some(ref mpk) = master_pubkey {
                 let hubs_json: Option<String> = sqlx::query_scalar(
-                    "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = ?",
+                    "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = $1",
                 )
                 .bind(mpk)
                 .fetch_optional(&state.db)
@@ -382,7 +382,7 @@ pub async fn send_dm(
             sqlx::query(
                 "INSERT INTO dm_outbox
                  (message_id, recipient_hub_url, attempts, next_attempt_at)
-                 VALUES (?, ?, 0, ?) ON CONFLICT (message_id, recipient_hub_url) DO NOTHING",
+                 VALUES ($1, $2, 0, $3) ON CONFLICT (message_id, recipient_hub_url) DO NOTHING",
             )
             .bind(&message_id)
             .bind(hub_url)
@@ -394,7 +394,7 @@ pub async fn send_dm(
             match deliver_federated_dm(&state, hub_url, &envelope).await {
                 Ok(()) => {
                     let _ = sqlx::query(
-                        "DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?",
+                        "DELETE FROM dm_outbox WHERE message_id = $1 AND recipient_hub_url = $2",
                     )
                     .bind(&message_id)
                     .bind(hub_url)
@@ -408,8 +408,8 @@ pub async fn send_dm(
                         hub_url
                     );
                     let _ = sqlx::query(
-                        "UPDATE dm_outbox SET attempts = 1, next_attempt_at = ?, last_error = ?
-                         WHERE message_id = ? AND recipient_hub_url = ?",
+                        "UPDATE dm_outbox SET attempts = 1, next_attempt_at = $1, last_error = $2
+                         WHERE message_id = $3 AND recipient_hub_url = $4",
                     )
                     .bind(now + 10)
                     .bind(&e)
@@ -446,7 +446,7 @@ pub async fn list_dm_messages(
     Path(conversation_id): Path<String>,
 ) -> Result<Json<Vec<DmMessageResponse>>, (StatusCode, String)> {
     let is_member: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ? AND public_key = ?",
+        "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = $1 AND public_key = $2",
     )
     .bind(&conversation_id)
     .bind(&user.public_key)
@@ -473,7 +473,7 @@ pub async fn list_dm_messages(
                 ) AS delivery_failed
          FROM dm_messages m
          LEFT JOIN users u ON u.public_key = m.sender
-         WHERE m.conversation_id = ?
+         WHERE m.conversation_id = $1
          ORDER BY m.created_at ASC",
     )
     .bind(&conversation_id)
@@ -539,7 +539,7 @@ pub async fn receive_federated_dm(
     let now = crate::auth::handlers::unix_timestamp();
 
     // Idempotent: if we've already stored this message, succeed without double-broadcast.
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM dm_messages WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM dm_messages WHERE id = $1")
         .bind(&req.message_id)
         .fetch_optional(&state.db)
         .await
@@ -561,14 +561,14 @@ pub async fn receive_federated_dm(
 
     // Auto-create the conversation on this hub if this is the first time we've seen it.
     let conv_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM conversations WHERE id = ?")
+        sqlx::query_scalar("SELECT id FROM conversations WHERE id = $1")
             .bind(&req.conversation_id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if conv_exists.is_none() {
-        sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES ($1, $2, $3)")
             .bind(&req.conversation_id)
             .bind(&req.conv_type)
             .bind(req.created_at)
@@ -580,7 +580,7 @@ pub async fn receive_federated_dm(
             ensure_user_stub(&state.db, member, req.created_at).await?;
             sqlx::query(
                 "INSERT INTO conversation_members
-                 (conversation_id, public_key, joined_at, hub_url) VALUES (?, ?, ?, NULL)
+                 (conversation_id, public_key, joined_at, hub_url) VALUES ($1, $2, $3, NULL)
                  ON CONFLICT (conversation_id, public_key) DO NOTHING",
             )
             .bind(&req.conversation_id)
@@ -623,7 +623,7 @@ pub async fn receive_federated_dm(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, NULL, ?, ?, ?, 1, ?, 0)",
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, 1, $7, 0)",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -664,7 +664,7 @@ pub async fn receive_federated_dm(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, NULL, ?, ?, ?, 0, ?, 1)",
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, 0, $7, 1)",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -706,7 +706,7 @@ pub async fn receive_federated_dm(
 
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 0)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 0, NULL, 0)",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -722,7 +722,7 @@ pub async fn receive_federated_dm(
 
     // Broadcast to any local members connected via WS.
     let sender_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(&req.sender)
             .fetch_optional(&state.db)
             .await
@@ -763,7 +763,7 @@ async fn deliver_federated_dm(
     // Ensure we have a session token for this remote hub — authenticate once if not cached.
     let token = {
         let peer_key: Option<String> =
-            sqlx::query_scalar("SELECT public_key FROM peers WHERE url = ?")
+            sqlx::query_scalar("SELECT public_key FROM peers WHERE url = $1")
                 .bind(hub_url)
                 .fetch_optional(&state.db)
                 .await
@@ -791,8 +791,8 @@ async fn deliver_federated_dm(
                 .map_err(|e| format!("get_info: {e}"))?;
             let now = crate::auth::handlers::unix_timestamp();
             let _ = sqlx::query(
-                "INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)
-                 ON CONFLICT(public_key) DO UPDATE SET name = ?, url = ?",
+                "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
+                 ON CONFLICT(public_key) DO UPDATE SET name = $5, url = $6",
             )
             .bind(&info.public_key)
             .bind(&info.name)

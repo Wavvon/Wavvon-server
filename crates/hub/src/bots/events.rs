@@ -43,7 +43,7 @@ pub async fn publish_hub_event(
 
     if let Err(e) = sqlx::query(
         "INSERT INTO hub_audit_log(id, seq, event_type, at, actor_pubkey, target_pubkey, channel_id, payload_json)
-         VALUES(?,?,?,?,?,?,?,?)",
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
     )
     .bind(&id)
     .bind(seq)
@@ -72,8 +72,8 @@ pub async fn publish_hub_event(
 
     let subs: Vec<SubRow> = sqlx::query_as::<_, SubRow>(
         "SELECT DISTINCT bot_pubkey FROM bot_subscriptions
-         WHERE event_type = ?
-           AND (channel_id = '' OR channel_id = ?)",
+         WHERE event_type = $1
+           AND (channel_id = '' OR channel_id = $2)",
     )
     .bind(event_type)
     .bind(channel_id.unwrap_or(""))
@@ -103,9 +103,9 @@ pub async fn publish_hub_event(
             let in_scope: bool = sqlx::query_scalar::<_, i64>(
                 "SELECT
                    CASE
-                     WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = ?)
+                     WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = $1)
                      THEN 1
-                     ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = ? AND channel_id = ?)
+                     ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = $2 AND channel_id = $3)
                    END",
             )
             .bind(&sub.bot_pubkey)
@@ -163,7 +163,7 @@ pub async fn replay_events_for_bot(
 
     // Find the earliest seq still in the window.
     let earliest: Option<(i64, i64)> =
-        sqlx::query_as("SELECT seq, at FROM hub_audit_log WHERE at >= ? ORDER BY seq ASC LIMIT 1")
+        sqlx::query_as("SELECT seq, at FROM hub_audit_log WHERE at >= $1 ORDER BY seq ASC LIMIT 1")
             .bind(window_start)
             .fetch_optional(&state.db)
             .await
@@ -187,7 +187,7 @@ pub async fn replay_events_for_bot(
 
     // Collect the bot's subscribed event_types.
     let sub_events: Vec<String> = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT event_type FROM bot_subscriptions WHERE bot_pubkey = ?",
+        "SELECT DISTINCT event_type FROM bot_subscriptions WHERE bot_pubkey = $1",
     )
     .bind(bot_pubkey)
     .fetch_all(&state.db)
@@ -215,7 +215,7 @@ pub async fn replay_events_for_bot(
     let rows: Vec<AuditRow> = sqlx::query_as::<_, AuditRow>(
         "SELECT seq, event_type, at, actor_pubkey, target_pubkey, channel_id, payload_json
          FROM hub_audit_log
-         WHERE seq > ? AND at >= ?
+         WHERE seq > $1 AND at >= $2
          ORDER BY seq ASC",
     )
     .bind(since_seq)
@@ -239,9 +239,9 @@ pub async fn replay_events_for_bot(
         if let Some(ref ch_id) = row.channel_id {
             let in_scope: bool = sqlx::query_scalar::<_, i64>(
                 "SELECT CASE
-                   WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = ?)
+                   WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = $1)
                    THEN 1
-                   ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = ? AND channel_id = ?)
+                   ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = $2 AND channel_id = $3)
                  END",
             )
             .bind(bot_pubkey)
@@ -330,7 +330,7 @@ async fn maybe_redact_message_content(
     mut payload: serde_json::Value,
 ) -> serde_json::Value {
     let caps_json: Option<String> =
-        sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = ?")
+        sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = $1")
             .bind(bot_pubkey)
             .fetch_optional(&state.db)
             .await

@@ -14,7 +14,7 @@ pub async fn me(
     user: AuthUser,
 ) -> Result<Json<MeResponse>, (StatusCode, String)> {
     let row: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT display_name, approval_status, avatar FROM users WHERE public_key = ?",
+        "SELECT display_name, approval_status, avatar FROM users WHERE public_key = $1",
     )
     .bind(&user.public_key)
     .fetch_optional(&state.db)
@@ -41,7 +41,7 @@ pub async fn update_me(
     Json(req): Json<UpdateMeRequest>,
 ) -> Result<Json<MeResponse>, (StatusCode, String)> {
     if let Some(ref name) = req.display_name {
-        sqlx::query("UPDATE users SET display_name = ? WHERE public_key = ?")
+        sqlx::query("UPDATE users SET display_name = $1 WHERE public_key = $2")
             .bind(name)
             .bind(&user.public_key)
             .execute(&state.db)
@@ -55,7 +55,7 @@ pub async fn update_me(
         } else {
             Some(avatar.as_str())
         };
-        sqlx::query("UPDATE users SET avatar = ? WHERE public_key = ?")
+        sqlx::query("UPDATE users SET avatar = $1 WHERE public_key = $2")
             .bind(stored)
             .bind(&user.public_key)
             .execute(&state.db)
@@ -65,7 +65,7 @@ pub async fn update_me(
 
     // Return fresh me
     let row: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT display_name, approval_status, avatar FROM users WHERE public_key = ?",
+        "SELECT display_name, approval_status, avatar FROM users WHERE public_key = $1",
     )
     .bind(&user.public_key)
     .fetch_optional(&state.db)
@@ -94,7 +94,7 @@ async fn fetch_user_roles(
         "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at
          FROM roles r
          INNER JOIN user_roles ur ON r.id = ur.role_id
-         WHERE ur.user_public_key = ?
+         WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )
     .bind(public_key)
@@ -105,7 +105,7 @@ async fn fetch_user_roles(
     let mut result = Vec::new();
     for role in roles {
         let perms: Vec<String> =
-            sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = ?")
+            sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
                 .bind(&role.id)
                 .fetch_all(db)
                 .await

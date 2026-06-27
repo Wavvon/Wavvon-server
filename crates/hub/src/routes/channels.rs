@@ -61,7 +61,7 @@ pub async fn voice_channel_participants(
         // bounded by hub size. The lookup itself is one indexed PK fetch.
         for key in &all_keys {
             let row: Option<(Option<String>, i64)> =
-                sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = ?")
+                sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                     .bind(key)
                     .fetch_optional(&state.db)
                     .await
@@ -136,7 +136,7 @@ pub async fn create_channel(
     // Validate parent if specified
     if let Some(parent_id) = &req.parent_id {
         let parent_is_category: Option<i64> =
-            sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+            sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
                 .bind(parent_id)
                 .fetch_optional(&state.db)
                 .await
@@ -226,7 +226,7 @@ pub async fn create_channel(
 
     sqlx::query(
         "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, channel_type, created_at, banner_url, banner_file_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(&id)
     .bind(&req.name)
@@ -304,7 +304,7 @@ pub async fn update_channel(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
 
     let existing_type: Option<String> =
-        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = ?")
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = $1")
             .bind(&channel_id)
             .fetch_optional(&state.db)
             .await
@@ -340,7 +340,7 @@ pub async fn update_channel(
             ));
         }
         let parent_is_category: Option<i64> =
-            sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+            sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
                 .bind(parent_id)
                 .fetch_optional(&state.db)
                 .await
@@ -377,7 +377,7 @@ pub async fn update_channel(
             if moved_depth > max_code_depth {
                 return Err((StatusCode::BAD_REQUEST, "depth_exceeded".to_string()));
             }
-            let is_cat: i64 = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+            let is_cat: i64 = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
                 .bind(&channel_id)
                 .fetch_one(&state.db)
                 .await
@@ -406,7 +406,7 @@ pub async fn update_channel(
         }
         if let Some(ref fid) = req.banner_file_id {
             let valid: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM upload_files WHERE id = ? AND channel_id = ? AND mime_type IN ('image/png','image/jpeg','image/gif','image/webp')",
+                "SELECT id FROM upload_files WHERE id = $1 AND channel_id = $2 AND mime_type IN ('image/png','image/jpeg','image/gif','image/webp')",
             )
             .bind(fid)
             .bind(&channel_id)
@@ -496,7 +496,7 @@ pub async fn update_channel(
         // The channels.name column has a UNIQUE constraint, so collisions
         // surface as a constraint error -- map to 409 for a clearer
         // client-side message than "DB error: ...".
-        match sqlx::query("UPDATE channels SET name = ? WHERE id = ?")
+        match sqlx::query("UPDATE channels SET name = $1 WHERE id = $2")
             .bind(trimmed)
             .bind(&channel_id)
             .execute(&state.db)
@@ -575,7 +575,7 @@ pub async fn reorder_channels(
 
     // Assign sequential display_order values
     for (index, channel_id) in req.channel_ids.iter().enumerate() {
-        sqlx::query("UPDATE channels SET display_order = ? WHERE id = ?")
+        sqlx::query("UPDATE channels SET display_order = $1 WHERE id = $2")
             .bind(index as i64)
             .bind(channel_id)
             .execute(&state.db)
@@ -602,7 +602,7 @@ pub async fn delete_channel(
     perms.require(permissions::MANAGE_CHANNELS)?;
 
     // Check if channel exists
-    let exists: Option<i64> = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = ?")
+    let exists: Option<i64> = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
         .bind(&channel_id)
         .fetch_optional(&state.db)
         .await
@@ -613,7 +613,7 @@ pub async fn delete_channel(
     }
 
     // Check for children (prevent deleting non-empty categories)
-    let child_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE parent_id = ?")
+    let child_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE parent_id = $1")
         .bind(&channel_id)
         .fetch_one(&state.db)
         .await
@@ -627,31 +627,31 @@ pub async fn delete_channel(
     }
 
     // Clean up related data
-    sqlx::query("DELETE FROM messages WHERE channel_id = ?")
+    sqlx::query("DELETE FROM messages WHERE channel_id = $1")
         .bind(&channel_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    sqlx::query("DELETE FROM channel_bans WHERE channel_id = ?")
+    sqlx::query("DELETE FROM channel_bans WHERE channel_id = $1")
         .bind(&channel_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    sqlx::query("DELETE FROM channel_settings WHERE channel_id = ?")
+    sqlx::query("DELETE FROM channel_settings WHERE channel_id = $1")
         .bind(&channel_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    sqlx::query("DELETE FROM alliance_shared_channels WHERE channel_id = ?")
+    sqlx::query("DELETE FROM alliance_shared_channels WHERE channel_id = $1")
         .bind(&channel_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    sqlx::query("DELETE FROM channels WHERE id = ?")
+    sqlx::query("DELETE FROM channels WHERE id = $1")
         .bind(&channel_id)
         .execute(&state.db)
         .await
@@ -714,7 +714,7 @@ async fn node_depth(
     let mut current = pid.to_string();
     loop {
         let parent: Option<String> =
-            sqlx::query_scalar("SELECT parent_id FROM channels WHERE id = ?")
+            sqlx::query_scalar("SELECT parent_id FROM channels WHERE id = $1")
                 .bind(&current)
                 .fetch_optional(db)
                 .await
@@ -748,7 +748,7 @@ async fn is_ancestor(
     let mut current = start.to_string();
     for _ in 0..50 {
         let parent: Option<String> =
-            sqlx::query_scalar("SELECT parent_id FROM channels WHERE id = ?")
+            sqlx::query_scalar("SELECT parent_id FROM channels WHERE id = $1")
                 .bind(&current)
                 .fetch_optional(db)
                 .await
@@ -802,7 +802,7 @@ pub async fn get_unread_counts(
     for channel_id in channel_ids {
         // Look up last_read_at for this user/channel; default to 0 (never read).
         let last_read_at: i64 = sqlx::query_scalar(
-            "SELECT last_read_at FROM channel_last_read WHERE user_pubkey = ? AND channel_id = ?",
+            "SELECT last_read_at FROM channel_last_read WHERE user_pubkey = $1 AND channel_id = $2",
         )
         .bind(&user.public_key)
         .bind(&channel_id)
@@ -812,7 +812,7 @@ pub async fn get_unread_counts(
         .unwrap_or(0);
 
         let unread_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages WHERE channel_id = ? AND created_at > ?",
+            "SELECT COUNT(*) FROM messages WHERE channel_id = $1 AND created_at > $2",
         )
         .bind(&channel_id)
         .bind(last_read_at)
@@ -836,7 +836,7 @@ pub async fn mark_channel_read(
     Path(channel_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Verify the channel exists
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
         .fetch_optional(&state.db)
         .await
@@ -848,7 +848,7 @@ pub async fn mark_channel_read(
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO channel_last_read (user_pubkey, channel_id, last_read_at)
-         VALUES (?, ?, ?)
+         VALUES ($1, $2, $3)
          ON CONFLICT(user_pubkey, channel_id) DO UPDATE SET last_read_at = excluded.last_read_at",
     )
     .bind(&user.public_key)

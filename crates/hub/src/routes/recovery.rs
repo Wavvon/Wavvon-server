@@ -112,7 +112,7 @@ pub async fn put_contacts(
     // Upsert the settings row.
     sqlx::query(
         "INSERT INTO recovery_settings (owner_pubkey, threshold, created_at)
-         VALUES (?, ?, ?)
+         VALUES ($1, $2, $3)
          ON CONFLICT(owner_pubkey) DO UPDATE SET threshold = excluded.threshold",
     )
     .bind(&user.public_key)
@@ -123,7 +123,7 @@ pub async fn put_contacts(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Replace the contact list atomically: delete old, insert new.
-    sqlx::query("DELETE FROM recovery_contacts WHERE owner_pubkey = ?")
+    sqlx::query("DELETE FROM recovery_contacts WHERE owner_pubkey = $1")
         .bind(&user.public_key)
         .execute(&state.db)
         .await
@@ -132,7 +132,7 @@ pub async fn put_contacts(
     for contact in &req.contacts {
         sqlx::query(
             "INSERT INTO recovery_contacts (owner_pubkey, contact_pubkey, created_at)
-             VALUES (?, ?, ?) ON CONFLICT (owner_pubkey, contact_pubkey) DO NOTHING",
+             VALUES ($1, $2, $3) ON CONFLICT (owner_pubkey, contact_pubkey) DO NOTHING",
         )
         .bind(&user.public_key)
         .bind(contact)
@@ -151,7 +151,7 @@ pub async fn get_contacts(
     user: AuthUser,
 ) -> Result<Json<ContactsResponse>, (StatusCode, String)> {
     let threshold: Option<i64> =
-        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = ?")
+        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = $1")
             .bind(&user.public_key)
             .fetch_optional(&state.db)
             .await
@@ -164,7 +164,7 @@ pub async fn get_contacts(
     }
 
     let contact_rows = sqlx::query_as::<_, ContactRow>(
-        "SELECT contact_pubkey, created_at FROM recovery_contacts WHERE owner_pubkey = ? ORDER BY created_at",
+        "SELECT contact_pubkey, created_at FROM recovery_contacts WHERE owner_pubkey = $1 ORDER BY created_at",
     )
     .bind(&user.public_key)
     .fetch_all(&state.db)
@@ -192,7 +192,7 @@ pub async fn delete_contact(
     user: AuthUser,
     Path(pubkey): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    sqlx::query("DELETE FROM recovery_contacts WHERE owner_pubkey = ? AND contact_pubkey = ?")
+    sqlx::query("DELETE FROM recovery_contacts WHERE owner_pubkey = $1 AND contact_pubkey = $2")
         .bind(&user.public_key)
         .bind(&pubkey)
         .execute(&state.db)
@@ -218,7 +218,7 @@ pub async fn post_rotate_key(
 ) -> Result<(StatusCode, Json<RotationRequestResponse>), (StatusCode, String)> {
     // Validate that old_pubkey has contacts configured on this hub.
     let threshold: Option<i64> =
-        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = ?")
+        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = $1")
             .bind(&req.old_pubkey)
             .fetch_optional(&state.db)
             .await
@@ -246,7 +246,7 @@ pub async fn post_rotate_key(
     sqlx::query(
         "INSERT INTO key_rotation_requests
             (id, old_pubkey, new_pubkey, reason, status, created_at)
-         VALUES (?, ?, ?, ?, 'pending', ?)",
+         VALUES ($1, $2, $3, $4, 'pending', $5)",
     )
     .bind(&request_id)
     .bind(&req.old_pubkey)
@@ -267,7 +267,7 @@ pub async fn post_rotate_key(
         // Attester must be in the contact set for old_pubkey.
         let is_contact: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM recovery_contacts
-             WHERE owner_pubkey = ? AND contact_pubkey = ?",
+             WHERE owner_pubkey = $1 AND contact_pubkey = $2",
         )
         .bind(&req.old_pubkey)
         .bind(&att.attester)
@@ -283,7 +283,7 @@ pub async fn post_rotate_key(
         sqlx::query(
             "INSERT INTO rotation_attestations
                 (id, request_id, attester_pubkey, signature, attested_at)
-             VALUES (?, ?, ?, ?, ?) ON CONFLICT (request_id, attester_pubkey) DO NOTHING",
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (request_id, attester_pubkey) DO NOTHING",
         )
         .bind(Uuid::new_v4().to_string())
         .bind(&request_id)
@@ -299,7 +299,7 @@ pub async fn post_rotate_key(
 
     // Flip to ready_for_review if threshold reached.
     let status = if valid_count >= threshold {
-        sqlx::query("UPDATE key_rotation_requests SET status = 'ready_for_review' WHERE id = ?")
+        sqlx::query("UPDATE key_rotation_requests SET status = 'ready_for_review' WHERE id = $1")
             .bind(&request_id)
             .execute(&state.db)
             .await
@@ -346,7 +346,7 @@ pub async fn get_my_requests(
                 COUNT(a.id) AS attestation_count
          FROM key_rotation_requests r
          LEFT JOIN rotation_attestations a ON a.request_id = r.id
-         WHERE r.old_pubkey = ?
+         WHERE r.old_pubkey = $1
          GROUP BY r.id
          ORDER BY r.created_at DESC",
     )
@@ -356,7 +356,7 @@ pub async fn get_my_requests(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let threshold: i64 =
-        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = ?")
+        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = $1")
             .bind(&user.public_key)
             .fetch_optional(&state.db)
             .await
@@ -444,7 +444,7 @@ pub async fn admin_approve(
     // Insert new user row if it doesn't exist yet (new key may not have authed before).
     sqlx::query(
         "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at)
-         VALUES (?, NULL, ?, ?) ON CONFLICT (public_key) DO NOTHING",
+         VALUES ($1, NULL, $2, $3) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&row.new_pubkey)
     .bind(now)
@@ -456,8 +456,8 @@ pub async fn admin_approve(
     // Transfer roles from old key to new key.
     sqlx::query(
         "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-         SELECT ?, role_id, ?
-         FROM user_roles WHERE user_public_key = ?
+         SELECT $1, role_id, $2
+         FROM user_roles WHERE user_public_key = $3
          ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(&row.new_pubkey)
@@ -468,7 +468,7 @@ pub async fn admin_approve(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Revoke all sessions for the old key.
-    sqlx::query("DELETE FROM sessions WHERE public_key = ?")
+    sqlx::query("DELETE FROM sessions WHERE public_key = $1")
         .bind(&row.old_pubkey)
         .execute(&state.db)
         .await
@@ -477,8 +477,8 @@ pub async fn admin_approve(
     // Mark request as approved.
     sqlx::query(
         "UPDATE key_rotation_requests
-         SET status = 'approved', decided_at = ?, decided_by = ?
-         WHERE id = ?",
+         SET status = 'approved', decided_at = $1, decided_by = $2
+         WHERE id = $3",
     )
     .bind(now)
     .bind(&user.public_key)
@@ -511,8 +511,8 @@ pub async fn admin_deny(
 
     sqlx::query(
         "UPDATE key_rotation_requests
-         SET status = 'rejected', decided_at = ?, decided_by = ?
-         WHERE id = ?",
+         SET status = 'rejected', decided_at = $1, decided_by = $2
+         WHERE id = $3",
     )
     .bind(now)
     .bind(&user.public_key)
@@ -537,7 +537,7 @@ async fn fetch_rotation_request(
                 COUNT(a.id) AS attestation_count
          FROM key_rotation_requests r
          LEFT JOIN rotation_attestations a ON a.request_id = r.id
-         WHERE r.id = ?
+         WHERE r.id = $1
          GROUP BY r.id",
     )
     .bind(id)

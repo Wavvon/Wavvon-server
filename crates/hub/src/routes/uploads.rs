@@ -48,7 +48,7 @@ pub async fn upload_file(
 ) -> Result<(StatusCode, Json<UploadResponse>), (StatusCode, String)> {
     // Verify channel exists and fetch its type.
     let channel_type: Option<String> =
-        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = ?")
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = $1")
             .bind(&channel_id)
             .fetch_optional(&state.db)
             .await
@@ -165,7 +165,7 @@ pub async fn upload_file(
 
     sqlx::query(
         "INSERT INTO upload_files (id, filename, original_name, mime_type, size_bytes, uploader_pubkey, channel_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(&stored_filename)

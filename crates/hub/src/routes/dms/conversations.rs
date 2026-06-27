@@ -41,7 +41,7 @@ pub async fn create_conversation(
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
 
-    sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES ($1, $2, $3)")
         .bind(&id)
         .bind(conv_type)
         .bind(now)
@@ -50,7 +50,7 @@ pub async fn create_conversation(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Add the creator (always local)
-    sqlx::query("INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url) VALUES (?, ?, ?, NULL)")
+    sqlx::query("INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url) VALUES ($1, $2, $3, NULL)")
         .bind(&id)
         .bind(&user.public_key)
         .bind(now)
@@ -64,7 +64,7 @@ pub async fn create_conversation(
     for member_key in &req.members {
         let hub_url = req.member_hubs.get(member_key).cloned();
         ensure_user_stub(&state.db, member_key, now).await?;
-        sqlx::query("INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url) VALUES (?, ?, ?, ?)")
+        sqlx::query("INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url) VALUES ($1, $2, $3, $4)")
             .bind(&id)
             .bind(member_key)
             .bind(now)
@@ -97,7 +97,7 @@ pub async fn list_conversations(
         "SELECT c.id, c.conv_type, c.created_at
          FROM conversations c
          INNER JOIN conversation_members cm ON c.id = cm.conversation_id
-         WHERE cm.public_key = ?
+         WHERE cm.public_key = $1
          ORDER BY c.created_at DESC",
     )
     .bind(&user.public_key)
@@ -108,7 +108,7 @@ pub async fn list_conversations(
     let mut result = Vec::new();
     for row in rows {
         let members: Vec<String> = sqlx::query_scalar(
-            "SELECT public_key FROM conversation_members WHERE conversation_id = ?",
+            "SELECT public_key FROM conversation_members WHERE conversation_id = $1",
         )
         .bind(&row.id)
         .fetch_all(&state.db)
@@ -117,13 +117,14 @@ pub async fn list_conversations(
 
         // Last activity = most recent dm_message in this conversation, or
         // the conversation creation time if there are no messages yet.
-        let last_msg: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(created_at) FROM dm_messages WHERE conversation_id = ?")
-                .bind(&row.id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
+        let last_msg: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(created_at) FROM dm_messages WHERE conversation_id = $1",
+        )
+        .bind(&row.id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
 
         result.push(ConversationResponse {
             id: row.id,
@@ -163,7 +164,7 @@ pub async fn add_conversation_member(
     }
 
     // Only group conversations allow member management.
-    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = $1")
         .bind(&conversation_id)
         .fetch_optional(&state.db)
         .await
@@ -185,7 +186,7 @@ pub async fn add_conversation_member(
     ensure_user_stub(&state.db, &req.public_key, now).await?;
     sqlx::query(
         "INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url)
-         VALUES (?, ?, ?, NULL)
+         VALUES ($1, $2, $3, NULL)
          ON CONFLICT DO NOTHING",
     )
     .bind(&conversation_id)
@@ -230,7 +231,7 @@ pub async fn remove_conversation_member(
         ));
     }
 
-    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = $1")
         .bind(&conversation_id)
         .fetch_optional(&state.db)
         .await
@@ -243,7 +244,7 @@ pub async fn remove_conversation_member(
         ));
     }
 
-    sqlx::query("DELETE FROM conversation_members WHERE conversation_id = ? AND public_key = ?")
+    sqlx::query("DELETE FROM conversation_members WHERE conversation_id = $1 AND public_key = $2")
         .bind(&conversation_id)
         .bind(&pubkey)
         .execute(&state.db)

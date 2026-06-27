@@ -11,7 +11,7 @@ impl BadgeStore for PostgresStore {
         sqlx::query(
             "INSERT INTO badge_offers
              (id, from_hub_pubkey, from_hub_url, label, note, payload, signature, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(&b.id)
@@ -52,7 +52,7 @@ impl BadgeStore for PostgresStore {
     }
 
     async fn delete_badge_offer(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM badge_offers WHERE id = ?")
+        sqlx::query("DELETE FROM badge_offers WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -64,7 +64,7 @@ impl BadgeStore for PostgresStore {
         sqlx::query(
             "INSERT INTO hub_badges
              (id, issuer_pubkey, issuer_url, label, payload, signature, accepted_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(&b.id)
@@ -103,7 +103,7 @@ impl BadgeStore for PostgresStore {
     }
 
     async fn revoke_hub_badge(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM hub_badges WHERE id = ?")
+        sqlx::query("DELETE FROM hub_badges WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -116,7 +116,7 @@ impl BadgeStore for PostgresStore {
             "INSERT INTO issued_badges
              (id, recipient_hub_url, recipient_hub_pubkey, label, payload,
               signature, issued_at, expires_at, revoked_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(&b.id)
@@ -160,7 +160,7 @@ impl BadgeStore for PostgresStore {
     }
 
     async fn revoke_issued_badge(&self, id: &str, revoked_at: &str) -> Result<(), StoreError> {
-        sqlx::query("UPDATE issued_badges SET revoked_at = ? WHERE id = ?")
+        sqlx::query("UPDATE issued_badges SET revoked_at = $1 WHERE id = $2")
             .bind(revoked_at)
             .bind(id)
             .execute(self.pool())

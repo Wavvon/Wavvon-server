@@ -37,7 +37,7 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
     let due: Vec<OutboxRow> = sqlx::query_as::<_, OutboxRow>(
         "SELECT message_id, recipient_hub_url, attempts
          FROM dm_outbox
-         WHERE bounced_at IS NULL AND next_attempt_at <= ?
+         WHERE bounced_at IS NULL AND next_attempt_at <= $1
          LIMIT 100",
     )
     .bind(now)
@@ -47,7 +47,7 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
     for row in due {
         let Some(envelope) = load_envelope(state, &row.message_id).await? else {
             // Message was deleted from dm_messages — drop the orphan.
-            sqlx::query("DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?")
+            sqlx::query("DELETE FROM dm_outbox WHERE message_id = $1 AND recipient_hub_url = $2")
                 .bind(&row.message_id)
                 .bind(&row.recipient_hub_url)
                 .execute(&state.db)
@@ -63,11 +63,13 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
         .await
         {
             Ok(()) => {
-                sqlx::query("DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?")
-                    .bind(&row.message_id)
-                    .bind(&row.recipient_hub_url)
-                    .execute(&state.db)
-                    .await?;
+                sqlx::query(
+                    "DELETE FROM dm_outbox WHERE message_id = $1 AND recipient_hub_url = $2",
+                )
+                .bind(&row.message_id)
+                .bind(&row.recipient_hub_url)
+                .execute(&state.db)
+                .await?;
                 tracing::info!(
                     "DM {} delivered to {} after {} retries",
                     &row.message_id[..8],
@@ -80,8 +82,8 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
                 let backoff_idx = row.attempts as usize;
                 if backoff_idx >= BACKOFF_SECS.len() {
                     sqlx::query(
-                        "UPDATE dm_outbox SET attempts = ?, last_error = ?, bounced_at = ?
-                         WHERE message_id = ? AND recipient_hub_url = ?",
+                        "UPDATE dm_outbox SET attempts = $1, last_error = $2, bounced_at = $3
+                         WHERE message_id = $4 AND recipient_hub_url = $5",
                     )
                     .bind(next_attempts)
                     .bind(&err)
@@ -98,8 +100,8 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
                 } else {
                     let next_at = now + BACKOFF_SECS[backoff_idx];
                     sqlx::query(
-                        "UPDATE dm_outbox SET attempts = ?, next_attempt_at = ?, last_error = ?
-                         WHERE message_id = ? AND recipient_hub_url = ?",
+                        "UPDATE dm_outbox SET attempts = $1, next_attempt_at = $2, last_error = $3
+                         WHERE message_id = $4 AND recipient_hub_url = $5",
                     )
                     .bind(next_attempts)
                     .bind(next_at)
@@ -137,7 +139,7 @@ async fn load_envelope(
         "SELECT id, conversation_id, sender, content, attachments, signature, created_at,
                 COALESCE(is_encrypted, 0), ciphertext_json,
                 COALESCE(is_group_encrypted, 0)
-         FROM dm_messages WHERE id = ?",
+         FROM dm_messages WHERE id = $1",
     )
     .bind(message_id)
     .fetch_optional(&state.db)
@@ -146,16 +148,17 @@ async fn load_envelope(
         return Ok(None);
     };
 
-    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = $1")
         .bind(&msg.1)
         .fetch_one(&state.db)
         .await?;
 
-    let members: Vec<String> =
-        sqlx::query_scalar("SELECT public_key FROM conversation_members WHERE conversation_id = ?")
-            .bind(&msg.1)
-            .fetch_all(&state.db)
-            .await?;
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT public_key FROM conversation_members WHERE conversation_id = $1",
+    )
+    .bind(&msg.1)
+    .fetch_all(&state.db)
+    .await?;
 
     let attachments = msg
         .4

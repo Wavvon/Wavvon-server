@@ -21,7 +21,7 @@ pub async fn share_channel(
     perms.require(ADMIN)?;
 
     // Verify alliance exists
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM alliances WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM alliances WHERE id = $1")
         .bind(&alliance_id)
         .fetch_optional(&state.db)
         .await
@@ -31,7 +31,7 @@ pub async fn share_channel(
     }
 
     // Verify channel exists
-    let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&req.channel_id)
         .fetch_optional(&state.db)
         .await
@@ -43,7 +43,7 @@ pub async fn share_channel(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO alliance_shared_channels (alliance_id, channel_id, shared_at) VALUES (?, ?, ?)
+        "INSERT INTO alliance_shared_channels (alliance_id, channel_id, shared_at) VALUES ($1, $2, $3)
          ON CONFLICT (alliance_id, channel_id) DO NOTHING",
     )
     .bind(&alliance_id)
@@ -64,7 +64,7 @@ pub async fn unshare_channel(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    sqlx::query("DELETE FROM alliance_shared_channels WHERE alliance_id = ? AND channel_id = ?")
+    sqlx::query("DELETE FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2")
         .bind(&alliance_id)
         .bind(&channel_id)
         .execute(&state.db)
@@ -86,7 +86,7 @@ pub async fn list_shared_channels(
         "SELECT asc_.channel_id, c.name as channel_name
          FROM alliance_shared_channels asc_
          INNER JOIN channels c ON asc_.channel_id = c.id
-         WHERE asc_.alliance_id = ?",
+         WHERE asc_.alliance_id = $1",
     )
     .bind(&alliance_id)
     .fetch_all(&state.db)
@@ -108,7 +108,7 @@ pub async fn list_shared_channels(
     //    peer is unreachable or auth fails, drop them silently — the user gets
     //    a partial view rather than a hard error.
     let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = ? AND hub_public_key != ?",
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
     )
     .bind(&alliance_id)
     .bind(&hub_key)
@@ -193,7 +193,7 @@ pub async fn post_alliance_channel_message(
 
     // Locally-owned alliance channel: reuse the regular send path.
     let is_local: Option<String> = sqlx::query_scalar(
-        "SELECT channel_id FROM alliance_shared_channels WHERE alliance_id = ? AND channel_id = ?",
+        "SELECT channel_id FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2",
     )
     .bind(&alliance_id)
     .bind(&channel_id)
@@ -213,7 +213,7 @@ pub async fn post_alliance_channel_message(
 
     // Otherwise, find the peer that owns this channel and proxy.
     let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = ? AND hub_public_key != ?",
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
     )
     .bind(&alliance_id)
     .bind(&hub_key)
@@ -260,7 +260,7 @@ pub async fn post_alliance_channel_message(
         // Found the owner. Prefix the user's name so attribution survives the
         // hub-as-sender hop. e.g. "[alice via wavvon.example] hello".
         let user_label: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
                 .bind(&user.public_key)
                 .fetch_optional(&state.db)
                 .await
@@ -301,7 +301,7 @@ pub async fn get_alliance_channel_messages(
 
     // Locally-owned alliance channel? Just read directly.
     let is_local: Option<String> = sqlx::query_scalar(
-        "SELECT channel_id FROM alliance_shared_channels WHERE alliance_id = ? AND channel_id = ?",
+        "SELECT channel_id FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2",
     )
     .bind(&alliance_id)
     .bind(&channel_id)
@@ -314,7 +314,7 @@ pub async fn get_alliance_channel_messages(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
                     m.content, m.attachments, m.created_at, m.edited_at
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-             WHERE m.channel_id = ?
+             WHERE m.channel_id = $1
              ORDER BY m.created_at DESC, m.rowid DESC LIMIT 50",
         )
         .bind(&channel_id)
@@ -355,7 +355,7 @@ pub async fn get_alliance_channel_messages(
     // Otherwise the channel must belong to a peer member of this alliance.
     // Walk members and ask each one if they own this channel.
     let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = ? AND hub_public_key != ?",
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
     )
     .bind(&alliance_id)
     .bind(&hub_key)

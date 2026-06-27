@@ -508,7 +508,7 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
     };
 
     let can_view: bool = cs.subscribed.contains(&source_channel_id)
-        || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE id = ?")
+        || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE id = $1")
             .bind(&source_channel_id)
             .fetch_optional(&state.db)
             .await

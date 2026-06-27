@@ -21,7 +21,7 @@ pub(in crate::routes::ws) async fn handle_typing(
         _ => return DispatchResult::Continue,
     };
     let display_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(&cs.public_key)
             .fetch_optional(&state.db)
             .await
@@ -59,7 +59,7 @@ pub(in crate::routes::ws) async fn handle_dm_typing(
         _ => return DispatchResult::Continue,
     };
     let display_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(&cs.public_key)
             .fetch_optional(&state.db)
             .await

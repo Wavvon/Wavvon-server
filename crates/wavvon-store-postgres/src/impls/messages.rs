@@ -34,7 +34,7 @@ impl MessageStore for PostgresStore {
         sqlx::query(
             "INSERT INTO messages
              (id, channel_id, sender, content, attachments, reply_to, created_at, visible_to_pubkey)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&m.id)
         .bind(&m.channel_id)
@@ -70,12 +70,12 @@ impl MessageStore for PostgresStore {
         let rows = if let Some(before_id) = before {
             let sql = format!(
                 "{MSG_SELECT}
-                 WHERE m.channel_id = ?
+                 WHERE m.channel_id = $1
                    AND (m.created_at, m.id) < (
-                     (SELECT created_at FROM messages WHERE id = ?),
-                     ?
+                     (SELECT created_at FROM messages WHERE id = $2),
+                     $3
                    )
-                 ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
+                 ORDER BY m.created_at DESC, m.id DESC LIMIT $4"
             );
             sqlx::query(&sql)
                 .bind(channel_id)
@@ -146,7 +146,7 @@ impl MessageStore for PostgresStore {
         content: &str,
         edited_at: i64,
     ) -> Result<(), StoreError> {
-        sqlx::query("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?")
+        sqlx::query("UPDATE messages SET content = $1, edited_at = $2 WHERE id = $3")
             .bind(content)
             .bind(edited_at)
             .bind(id)
@@ -157,7 +157,7 @@ impl MessageStore for PostgresStore {
     }
 
     async fn delete_message(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM messages WHERE id = ?")
+        sqlx::query("DELETE FROM messages WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -166,7 +166,7 @@ impl MessageStore for PostgresStore {
     }
 
     async fn increment_reply_count(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = ?")
+        sqlx::query("UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -176,7 +176,7 @@ impl MessageStore for PostgresStore {
 
     async fn decrement_reply_count(&self, id: &str) -> Result<(), StoreError> {
         sqlx::query(
-            "UPDATE messages SET reply_count = GREATEST(0, COALESCE(reply_count, 0) - 1) WHERE id = ?",
+            "UPDATE messages SET reply_count = GREATEST(0, COALESCE(reply_count, 0) - 1) WHERE id = $1",
         )
         .bind(id)
         .execute(self.pool())
@@ -194,7 +194,7 @@ impl MessageStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO message_reactions (message_id, emoji, user_key, created_at)
-             VALUES (?, ?, ?, ?) ON CONFLICT (message_id, emoji, user_key) DO NOTHING",
+             VALUES ($1, $2, $3, $4) ON CONFLICT (message_id, emoji, user_key) DO NOTHING",
         )
         .bind(message_id)
         .bind(emoji)
@@ -213,7 +213,7 @@ impl MessageStore for PostgresStore {
         user: &str,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "DELETE FROM message_reactions WHERE message_id = ? AND emoji = ? AND user_key = ?",
+            "DELETE FROM message_reactions WHERE message_id = $1 AND emoji = $2 AND user_key = $3",
         )
         .bind(message_id)
         .bind(emoji)
@@ -232,9 +232,9 @@ impl MessageStore for PostgresStore {
         // PostgreSQL: MAX(CASE WHEN ... THEN 1 ELSE 0 END) returns BIGINT.
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(
             "SELECT emoji, COUNT(*) as cnt,
-                    MAX(CASE WHEN user_key = ? THEN 1 ELSE 0 END) as mine
+                    MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
              FROM message_reactions
-             WHERE message_id = ?
+             WHERE message_id = $2
              GROUP BY emoji
              ORDER BY MIN(created_at) ASC",
         )
@@ -253,7 +253,7 @@ impl MessageStore for PostgresStore {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             "SELECT emoji, COUNT(*) as cnt
              FROM message_reactions
-             WHERE message_id = ?
+             WHERE message_id = $1
              GROUP BY emoji
              ORDER BY MIN(created_at) ASC",
         )
@@ -273,7 +273,7 @@ impl MessageStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO channel_pins (channel_id, message_id, pinned_by, pinned_at)
-             VALUES (?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT(channel_id, message_id) DO NOTHING",
         )
         .bind(channel_id)
@@ -287,7 +287,7 @@ impl MessageStore for PostgresStore {
     }
 
     async fn unpin_message(&self, channel_id: &str, message_id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM channel_pins WHERE channel_id = ? AND message_id = ?")
+        sqlx::query("DELETE FROM channel_pins WHERE channel_id = $1 AND message_id = $2")
             .bind(channel_id)
             .bind(message_id)
             .execute(self.pool())
@@ -299,7 +299,7 @@ impl MessageStore for PostgresStore {
     async fn list_pins(&self, channel_id: &str) -> Result<Vec<PinRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT channel_id, message_id, pinned_by, pinned_at
-             FROM channel_pins WHERE channel_id = ? ORDER BY pinned_at DESC",
+             FROM channel_pins WHERE channel_id = $1 ORDER BY pinned_at DESC",
         )
         .bind(channel_id)
         .fetch_all(self.pool())

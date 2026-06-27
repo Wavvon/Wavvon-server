@@ -72,14 +72,14 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
          FROM users u
          WHERE u.approval_status = 'approved'
            AND COALESCE(u.is_bot, 0) = 0
-           AND u.first_seen_at <= ?
-           AND COALESCE(u.pow_level, 0) >= ?
+           AND u.first_seen_at <= $1
+           AND COALESCE(u.pow_level, 0) >= $2
            AND NOT EXISTS (
                SELECT 1 FROM cert_issuances ci
                WHERE ci.subject_pubkey = u.public_key
                  AND ci.standing = 'good'
                  AND ci.revoked_at IS NULL
-                 AND ci.expires_at > ?
+                 AND ci.expires_at > $3
            )
          LIMIT 500",
     )

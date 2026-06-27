@@ -39,7 +39,7 @@ pub async fn report_message(
     let id = uuid::Uuid::new_v4().to_string();
     let result = sqlx::query(
         "INSERT INTO message_reports(id, message_id, reporter_pubkey, reason, reported_at, status)
-         VALUES(?,?,?,?,?,'pending') ON CONFLICT (message_id, reporter_pubkey) DO NOTHING",
+         VALUES($1,$2,$3,$4,$5,'pending') ON CONFLICT (message_id, reporter_pubkey) DO NOTHING",
     )
     .bind(&id)
     .bind(&message_id)
@@ -70,7 +70,7 @@ pub async fn list_reports(
                 r.reporter_pubkey, r.reason, r.reported_at, r.status
          FROM message_reports r
          JOIN messages m ON m.id = r.message_id
-         WHERE r.status = ?
+         WHERE r.status = $1
          ORDER BY r.reported_at DESC LIMIT 50",
     )
     .bind(&status)
@@ -107,7 +107,7 @@ pub async fn review_report(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    let row = sqlx::query("SELECT message_id, reporter_pubkey FROM message_reports WHERE id = ?")
+    let row = sqlx::query("SELECT message_id, reporter_pubkey FROM message_reports WHERE id = $1")
         .bind(&report_id)
         .fetch_optional(&state.db)
         .await
@@ -119,7 +119,7 @@ pub async fn review_report(
 
     match req.action.as_str() {
         "delete_message" => {
-            sqlx::query("UPDATE messages SET content = '[deleted]' WHERE id = ?")
+            sqlx::query("UPDATE messages SET content = '[deleted]' WHERE id = $1")
                 .bind(&message_id)
                 .execute(&state.db)
                 .await
@@ -127,7 +127,7 @@ pub async fn review_report(
         }
         "ban_user" => {
             let sender: Option<String> =
-                sqlx::query_scalar("SELECT sender FROM messages WHERE id = ?")
+                sqlx::query_scalar("SELECT sender FROM messages WHERE id = $1")
                     .bind(&message_id)
                     .fetch_optional(&state.db)
                     .await
@@ -140,7 +140,7 @@ pub async fn review_report(
                     .as_secs() as i64;
                 sqlx::query(
                     "INSERT INTO bans(target_public_key, banned_by, reason, created_at)
-                     VALUES(?,?,?,?) ON CONFLICT (target_public_key) DO NOTHING",
+                     VALUES($1,$2,$3,$4) ON CONFLICT (target_public_key) DO NOTHING",
                 )
                 .bind(&pk)
                 .bind(&user.public_key)
@@ -155,7 +155,7 @@ pub async fn review_report(
     }
 
     sqlx::query(
-        "UPDATE message_reports SET status='reviewed', reviewed_by=?, review_note=? WHERE id=?",
+        "UPDATE message_reports SET status='reviewed', reviewed_by=$1, review_note=$2 WHERE id=$3",
     )
     .bind(&user.public_key)
     .bind(req.note.as_deref())

@@ -22,7 +22,7 @@ pub async fn create_invite(
     perms.require(ADMIN)?;
 
     let alliance = sqlx::query_as::<_, AllianceRow>(
-        "SELECT id, name, created_by, created_at FROM alliances WHERE id = ?",
+        "SELECT id, name, created_by, created_at FROM alliances WHERE id = $1",
     )
     .bind(&alliance_id)
     .fetch_optional(&state.db)
@@ -139,7 +139,7 @@ pub(super) async fn do_join_alliance(
     // Mirror locally
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT INTO alliances (id, name, created_by, created_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO alliances (id, name, created_by, created_at) VALUES ($1, $2, $3, $4)
          ON CONFLICT (id) DO NOTHING",
     )
     .bind(&detail.id)
@@ -152,7 +152,7 @@ pub(super) async fn do_join_alliance(
 
     for m in &detail.members {
         sqlx::query(
-            "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES (?, ?, ?, ?, ?)
+            "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (alliance_id, hub_public_key) DO NOTHING",
         )
         .bind(&detail.id)
@@ -171,7 +171,7 @@ pub(super) async fn do_join_alliance(
 
     // Cache the inviter's session token for future federation calls.
     let inviter_pubkey: Option<String> = sqlx::query_scalar(
-        "SELECT hub_public_key FROM alliance_members WHERE alliance_id = ? AND hub_url = ?",
+        "SELECT hub_public_key FROM alliance_members WHERE alliance_id = $1 AND hub_url = $2",
     )
     .bind(&detail.id)
     .bind(inviter_url)
@@ -187,7 +187,7 @@ pub(super) async fn do_join_alliance(
             .insert(pk.clone(), token.clone());
 
         let exists: Option<String> =
-            sqlx::query_scalar("SELECT public_key FROM peers WHERE public_key = ?")
+            sqlx::query_scalar("SELECT public_key FROM peers WHERE public_key = $1")
                 .bind(&pk)
                 .fetch_optional(&state.db)
                 .await
@@ -196,7 +196,7 @@ pub(super) async fn do_join_alliance(
             for m in &detail.members {
                 if m.hub_url != "self" && m.hub_url == inviter_url {
                     let _ = sqlx::query(
-                        "INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)
+                        "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
                          ON CONFLICT (public_key) DO NOTHING",
                     )
                     .bind(&m.hub_public_key)
@@ -227,7 +227,7 @@ pub async fn push_invite_handler(
 
     // Verify alliance exists
     let alliance = sqlx::query_as::<_, AllianceRow>(
-        "SELECT id, name, created_by, created_at FROM alliances WHERE id = ?",
+        "SELECT id, name, created_by, created_at FROM alliances WHERE id = $1",
     )
     .bind(&alliance_id)
     .fetch_optional(&state.db)
@@ -294,7 +294,7 @@ pub async fn receive_federation_alliance_invite(
     sqlx::query(
         "INSERT INTO pending_alliance_invites
          (id, alliance_id, alliance_name, from_hub_url, from_hub_name, from_hub_public_key, invite_token, created_at, message)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (id) DO NOTHING",
     )
     .bind(&payload.id)
     .bind(&payload.alliance_id)
@@ -371,7 +371,7 @@ pub async fn accept_pending_invite(
 
     let invite = sqlx::query_as::<_, PendingInviteRow>(
         "SELECT id, alliance_id, alliance_name, from_hub_url, from_hub_name, from_hub_public_key, invite_token, created_at, message
-         FROM pending_alliance_invites WHERE id = ?",
+         FROM pending_alliance_invites WHERE id = $1",
     )
     .bind(&invite_id)
     .fetch_optional(&state.db)
@@ -391,7 +391,7 @@ pub async fn accept_pending_invite(
     .await?;
 
     // Remove the pending invite now that we've successfully joined.
-    sqlx::query("DELETE FROM pending_alliance_invites WHERE id = ?")
+    sqlx::query("DELETE FROM pending_alliance_invites WHERE id = $1")
         .bind(&invite_id)
         .execute(&state.db)
         .await
@@ -410,7 +410,7 @@ pub async fn decline_pending_invite(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    sqlx::query("DELETE FROM pending_alliance_invites WHERE id = ?")
+    sqlx::query("DELETE FROM pending_alliance_invites WHERE id = $1")
         .bind(&invite_id)
         .execute(&state.db)
         .await
@@ -450,7 +450,7 @@ pub async fn join_alliance(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (alliance_id, hub_public_key) DO NOTHING",
     )
     .bind(&alliance_id)
@@ -464,14 +464,14 @@ pub async fn join_alliance(
 
     // Also peer with them if not already peered
     let peer_exists: Option<String> =
-        sqlx::query_scalar("SELECT public_key FROM peers WHERE public_key = ?")
+        sqlx::query_scalar("SELECT public_key FROM peers WHERE public_key = $1")
             .bind(&hub_info.public_key)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if peer_exists.is_none() {
-        sqlx::query("INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)")
+        sqlx::query("INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)")
             .bind(&hub_info.public_key)
             .bind(&hub_info.name)
             .bind(&req.hub_url)

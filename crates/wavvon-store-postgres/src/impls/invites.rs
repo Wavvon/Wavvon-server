@@ -28,7 +28,7 @@ impl InviteStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at)
-             VALUES (?, ?, ?, 0, ?, ?)",
+             VALUES ($1, $2, $3, 0, $4, $5)",
         )
         .bind(code)
         .bind(by)
@@ -44,7 +44,7 @@ impl InviteStore for PostgresStore {
     async fn get_invite(&self, code: &str) -> Result<Option<InviteRow>, StoreError> {
         let row = sqlx::query(
             "SELECT code, created_by, max_uses, uses, expires_at, created_at
-             FROM invites WHERE code = ?",
+             FROM invites WHERE code = $1",
         )
         .bind(code)
         .fetch_optional(self.pool())
@@ -65,7 +65,7 @@ impl InviteStore for PostgresStore {
     }
 
     async fn consume_invite(&self, code: &str) -> Result<(), StoreError> {
-        sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = ?")
+        sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1")
             .bind(code)
             .execute(self.pool())
             .await
@@ -74,7 +74,7 @@ impl InviteStore for PostgresStore {
     }
 
     async fn delete_invite(&self, code: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM invites WHERE code = ?")
+        sqlx::query("DELETE FROM invites WHERE code = $1")
             .bind(code)
             .execute(self.pool())
             .await

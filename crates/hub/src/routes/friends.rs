@@ -33,7 +33,7 @@ pub async fn send_friend_request(
 
     sqlx::query(
         "INSERT INTO friends (user_a, user_b, status, created_at, hub_url, display_name)
-         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user_a, user_b) DO NOTHING",
+         VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (user_a, user_b) DO NOTHING",
     )
     .bind(&user.public_key)
     .bind(&req.target_public_key)
@@ -55,7 +55,7 @@ pub async fn accept_friend_request(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // The request was from `from_key` → `user.public_key`, update to accepted
     let result = sqlx::query(
-        "UPDATE friends SET status = 'accepted' WHERE user_a = ? AND user_b = ? AND status = 'pending'",
+        "UPDATE friends SET status = 'accepted' WHERE user_a = $1 AND user_b = $2 AND status = 'pending'",
     )
     .bind(&from_key)
     .bind(&user.public_key)
@@ -80,7 +80,7 @@ pub async fn remove_friend(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Remove in both directions
     sqlx::query(
-        "DELETE FROM friends WHERE (user_a = ? AND user_b = ?) OR (user_a = ? AND user_b = ?)",
+        "DELETE FROM friends WHERE (user_a = $1 AND user_b = $2) OR (user_a = $3 AND user_b = $4)",
     )
     .bind(&user.public_key)
     .bind(&target_key)
@@ -105,12 +105,12 @@ pub async fn list_friends(
     // user_a if both exist.
     let rows = sqlx::query_as::<_, FriendRow>(
         "SELECT
-            CASE WHEN user_a = ? THEN user_b ELSE user_a END AS friend_key,
-            CASE WHEN user_a = ? THEN hub_url ELSE NULL END AS friend_hub_url,
-            CASE WHEN user_a = ? THEN display_name ELSE NULL END AS cached_name,
+            CASE WHEN user_a = $1 THEN user_b ELSE user_a END AS friend_key,
+            CASE WHEN user_a = $2 THEN hub_url ELSE NULL END AS friend_hub_url,
+            CASE WHEN user_a = $3 THEN display_name ELSE NULL END AS cached_name,
             created_at
          FROM friends
-         WHERE (user_a = ? OR user_b = ?) AND status = 'accepted'",
+         WHERE (user_a = $4 OR user_b = $5) AND status = 'accepted'",
     )
     .bind(&user.public_key)
     .bind(&user.public_key)
@@ -128,7 +128,7 @@ pub async fn list_friends(
         let display_name = match row.cached_name {
             Some(n) if !n.is_empty() => Some(n),
             _ => sqlx::query_scalar::<_, Option<String>>(
-                "SELECT display_name FROM users WHERE public_key = ?",
+                "SELECT display_name FROM users WHERE public_key = $1",
             )
             .bind(&row.friend_key)
             .fetch_optional(&state.db)
@@ -158,7 +158,7 @@ pub async fn list_pending_requests(
     let rows = sqlx::query_as::<_, FriendRow>(
         "SELECT user_a AS friend_key, NULL AS friend_hub_url, NULL AS cached_name, created_at
          FROM friends
-         WHERE user_b = ? AND status = 'pending'",
+         WHERE user_b = $1 AND status = 'pending'",
     )
     .bind(&user.public_key)
     .fetch_all(&state.db)
@@ -168,7 +168,7 @@ pub async fn list_pending_requests(
     let mut result = Vec::new();
     for row in rows {
         let display_name: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
                 .bind(&row.friend_key)
                 .fetch_optional(&state.db)
                 .await

@@ -27,7 +27,7 @@ fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
 }
 
 async fn prune_expired(pool: &sqlx::PgPool) {
-    let _ = sqlx::query("DELETE FROM pairing_offers WHERE expires_at < ?")
+    let _ = sqlx::query("DELETE FROM pairing_offers WHERE expires_at < $1")
         .bind(now_secs())
         .execute(pool)
         .await;
@@ -64,7 +64,7 @@ pub async fn post_offer(
         "INSERT INTO pairing_offers
             (pairing_token, master_pubkey, home_hubs_json, issued_at, expires_at,
              offer_signature, state, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+         VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8)
          ON CONFLICT(pairing_token) DO NOTHING",
     )
     .bind(&offer.pairing_token)
@@ -90,7 +90,7 @@ pub async fn post_claim(
 
     prune_expired(&state.db).await;
 
-    let row = sqlx::query("SELECT state, expires_at FROM pairing_offers WHERE pairing_token = ?")
+    let row = sqlx::query("SELECT state, expires_at FROM pairing_offers WHERE pairing_token = $1")
         .bind(&claim.pairing_token)
         .fetch_optional(&state.db)
         .await
@@ -115,11 +115,11 @@ pub async fn post_claim(
     sqlx::query(
         "UPDATE pairing_offers SET
             state = 'claimed',
-            subkey_pubkey = ?,
-            device_label = ?,
-            claim_proof = ?,
-            updated_at = ?
-         WHERE pairing_token = ? AND state = 'pending'",
+            subkey_pubkey = $1,
+            device_label = $2,
+            claim_proof = $3,
+            updated_at = $4
+         WHERE pairing_token = $5 AND state = 'pending'",
     )
     .bind(&claim.subkey_pubkey)
     .bind(&claim.device_label)
@@ -146,7 +146,7 @@ pub async fn post_complete(
 
     let row = sqlx::query(
         "SELECT state, master_pubkey, subkey_pubkey, expires_at
-         FROM pairing_offers WHERE pairing_token = ?",
+         FROM pairing_offers WHERE pairing_token = $1",
     )
     .bind(&complete.pairing_token)
     .fetch_optional(&state.db)
@@ -190,7 +190,7 @@ pub async fn post_complete(
         "INSERT INTO subkey_certs
             (master_pubkey, subkey_pubkey, device_label, issued_at,
              not_after, fallback_hubs_json, signature, registered_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT(master_pubkey, subkey_pubkey) DO UPDATE SET
             device_label = excluded.device_label,
             issued_at = excluded.issued_at,
@@ -213,10 +213,10 @@ pub async fn post_complete(
     sqlx::query(
         "UPDATE pairing_offers SET
             state = 'complete',
-            cert_json = ?,
-            wrapped_key_hex = ?,
-            updated_at = ?
-         WHERE pairing_token = ? AND state = 'claimed'",
+            cert_json = $1,
+            wrapped_key_hex = $2,
+            updated_at = $3
+         WHERE pairing_token = $4 AND state = 'claimed'",
     )
     .bind(&cert_json)
     .bind(&complete.wrapped_blob_key_hex)
@@ -237,7 +237,7 @@ pub async fn get_status(
 ) -> Result<Json<PairingStatus>, (StatusCode, String)> {
     let row = sqlx::query(
         "SELECT state, expires_at, subkey_pubkey, device_label, cert_json, wrapped_key_hex
-         FROM pairing_offers WHERE pairing_token = ?",
+         FROM pairing_offers WHERE pairing_token = $1",
     )
     .bind(&token)
     .fetch_optional(&state.db)

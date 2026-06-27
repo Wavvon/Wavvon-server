@@ -18,7 +18,7 @@ pub async fn bot_set_commands(
     let bot = authenticate_bot(&state.db, &headers).await?;
 
     // Replace atomically: delete all, insert new.
-    sqlx::query("DELETE FROM bot_slash_commands WHERE bot_pubkey = ?")
+    sqlx::query("DELETE FROM bot_slash_commands WHERE bot_pubkey = $1")
         .bind(&bot.public_key)
         .execute(&state.db)
         .await
@@ -33,7 +33,7 @@ pub async fn bot_set_commands(
         let id = Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO bot_slash_commands (id, bot_pubkey, command, description, created_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&id)
         .bind(&bot.public_key)
@@ -57,7 +57,7 @@ pub async fn bot_send_message(
     let bot = authenticate_bot(&state.db, &headers).await?;
 
     // Verify channel exists.
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&req.channel_id)
         .fetch_optional(&state.db)
         .await
@@ -70,7 +70,7 @@ pub async fn bot_send_message(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&id)
     .bind(&req.channel_id)
@@ -126,7 +126,7 @@ pub async fn bot_poll(
     let rows = if let Some(since) = params.since {
         sqlx::query_as::<_, EventRow>(
             "SELECT id, event_type, payload, created_at FROM bot_event_queue
-             WHERE bot_pubkey = ? AND delivered = 0 AND created_at > ?
+             WHERE bot_pubkey = $1 AND delivered = 0 AND created_at > $2
              ORDER BY created_at ASC LIMIT 100",
         )
         .bind(&bot.public_key)
@@ -136,7 +136,7 @@ pub async fn bot_poll(
     } else {
         sqlx::query_as::<_, EventRow>(
             "SELECT id, event_type, payload, created_at FROM bot_event_queue
-             WHERE bot_pubkey = ? AND delivered = 0
+             WHERE bot_pubkey = $1 AND delivered = 0
              ORDER BY created_at ASC LIMIT 100",
         )
         .bind(&bot.public_key)
@@ -169,7 +169,7 @@ pub async fn bot_ack_events(
     for id in &req.ids {
         let _ = sqlx::query(
             "UPDATE bot_event_queue SET delivered = 1
-             WHERE id = ? AND bot_pubkey = ?",
+             WHERE id = $1 AND bot_pubkey = $2",
         )
         .bind(id)
         .bind(&bot.public_key)

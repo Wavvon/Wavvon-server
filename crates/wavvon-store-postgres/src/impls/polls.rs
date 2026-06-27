@@ -24,7 +24,7 @@ impl PollStore for PostgresStore {
         sqlx::query(
             "INSERT INTO polls
              (id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&p.id)
         .bind(&p.channel_id)
@@ -43,7 +43,7 @@ impl PollStore for PostgresStore {
     async fn get_poll(&self, id: &str) -> Result<Option<PollRow>, StoreError> {
         let row = sqlx::query(
             "SELECT id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at
-             FROM polls WHERE id = ?",
+             FROM polls WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.pool())
@@ -55,7 +55,7 @@ impl PollStore for PostgresStore {
     async fn list_polls(&self, channel_id: &str) -> Result<Vec<PollRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at
-             FROM polls WHERE channel_id = ? ORDER BY created_at DESC",
+             FROM polls WHERE channel_id = $1 ORDER BY created_at DESC",
         )
         .bind(channel_id)
         .fetch_all(self.pool())
@@ -65,7 +65,7 @@ impl PollStore for PostgresStore {
     }
 
     async fn delete_poll(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM polls WHERE id = ?")
+        sqlx::query("DELETE FROM polls WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -81,7 +81,7 @@ impl PollStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO poll_votes (poll_id, user_pubkey, option_ids)
-             VALUES (?, ?, ?)
+             VALUES ($1, $2, $3)
              ON CONFLICT(poll_id, user_pubkey) DO UPDATE SET option_ids = excluded.option_ids",
         )
         .bind(poll_id)
@@ -100,7 +100,7 @@ impl PollStore for PostgresStore {
     ) -> Result<Option<PollVoteRow>, StoreError> {
         let row = sqlx::query(
             "SELECT poll_id, user_pubkey, option_ids FROM poll_votes
-             WHERE poll_id = ? AND user_pubkey = ?",
+             WHERE poll_id = $1 AND user_pubkey = $2",
         )
         .bind(poll_id)
         .bind(user_pubkey)
@@ -116,7 +116,7 @@ impl PollStore for PostgresStore {
 
     async fn list_votes(&self, poll_id: &str) -> Result<Vec<PollVoteRow>, StoreError> {
         let rows = sqlx::query(
-            "SELECT poll_id, user_pubkey, option_ids FROM poll_votes WHERE poll_id = ?",
+            "SELECT poll_id, user_pubkey, option_ids FROM poll_votes WHERE poll_id = $1",
         )
         .bind(poll_id)
         .fetch_all(self.pool())
@@ -133,7 +133,7 @@ impl PollStore for PostgresStore {
     }
 
     async fn delete_vote(&self, poll_id: &str, user_pubkey: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM poll_votes WHERE poll_id = ? AND user_pubkey = ?")
+        sqlx::query("DELETE FROM poll_votes WHERE poll_id = $1 AND user_pubkey = $2")
             .bind(poll_id)
             .bind(user_pubkey)
             .execute(self.pool())

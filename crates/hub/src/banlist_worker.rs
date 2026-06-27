@@ -63,7 +63,7 @@ async fn sync_banlists(state: &AppState) {
                             // current set, so first delete existing rows for
                             // this source and replace with what came back.
                             let _ = sqlx::query(
-                                "DELETE FROM federated_bans WHERE source_hub_pubkey = ?",
+                                "DELETE FROM federated_bans WHERE source_hub_pubkey = $1",
                             )
                             .bind(&issuer)
                             .execute(&state.db)
@@ -85,7 +85,7 @@ async fn sync_banlists(state: &AppState) {
                                     let result = sqlx::query(
                                         "INSERT INTO federated_bans \
                                          (source_hub_pubkey, target_master_pubkey, reason, added_at, synced_at) \
-                                         VALUES(?,?,?,?,?) \
+                                         VALUES($1,$2,$3,$4,$5) \
                                          ON CONFLICT (source_hub_pubkey, target_master_pubkey) \
                                          DO UPDATE SET reason = excluded.reason, added_at = excluded.added_at, synced_at = excluded.synced_at",
                                     )

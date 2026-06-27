@@ -34,7 +34,7 @@ pub async fn get_designation(
 ) -> Result<Json<HomeHubList>, (StatusCode, String)> {
     let row = sqlx::query(
         "SELECT master_pubkey, hubs_json, issued_at, sequence, signature
-         FROM home_hub_designations WHERE master_pubkey = ?",
+         FROM home_hub_designations WHERE master_pubkey = $1",
     )
     .bind(&master)
     .fetch_optional(&state.db)
@@ -67,7 +67,7 @@ pub async fn put_designation(
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
     let current: Option<i64> =
-        sqlx::query_scalar("SELECT sequence FROM home_hub_designations WHERE master_pubkey = ?")
+        sqlx::query_scalar("SELECT sequence FROM home_hub_designations WHERE master_pubkey = $1")
             .bind(&master)
             .fetch_optional(&state.db)
             .await
@@ -88,7 +88,7 @@ pub async fn put_designation(
     sqlx::query(
         "INSERT INTO home_hub_designations
             (master_pubkey, hubs_json, issued_at, sequence, signature, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5, $6)
          ON CONFLICT(master_pubkey) DO UPDATE SET
             hubs_json = excluded.hubs_json,
             issued_at = excluded.issued_at,
@@ -118,7 +118,7 @@ pub async fn list_devices(
     let rows = sqlx::query(
         "SELECT master_pubkey, subkey_pubkey, device_label, issued_at,
                 not_after, fallback_hubs_json, signature
-         FROM subkey_certs WHERE master_pubkey = ?
+         FROM subkey_certs WHERE master_pubkey = $1
          ORDER BY issued_at",
     )
     .bind(&master)
@@ -163,7 +163,7 @@ pub async fn post_device(
         "INSERT INTO subkey_certs
             (master_pubkey, subkey_pubkey, device_label, issued_at,
              not_after, fallback_hubs_json, signature, registered_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT(master_pubkey, subkey_pubkey) DO UPDATE SET
             device_label = excluded.device_label,
             issued_at = excluded.issued_at,
@@ -194,7 +194,7 @@ pub async fn list_revocations(
 ) -> Result<Json<Vec<RevocationEntry>>, (StatusCode, String)> {
     let rows = sqlx::query(
         "SELECT master_pubkey, subkey_pubkey, revoked_at, signature
-         FROM subkey_revocations WHERE master_pubkey = ?
+         FROM subkey_revocations WHERE master_pubkey = $1
          ORDER BY revoked_at",
     )
     .bind(&master)
@@ -229,7 +229,7 @@ pub async fn post_revocation(
     sqlx::query(
         "INSERT INTO subkey_revocations
             (master_pubkey, subkey_pubkey, revoked_at, signature, registered_at)
-         VALUES (?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT(master_pubkey, subkey_pubkey) DO NOTHING",
     )
     .bind(&entry.master_pubkey)
@@ -252,7 +252,7 @@ pub async fn get_prefs(
 ) -> Result<Json<SignedPrefsBlob>, (StatusCode, String)> {
     let row = sqlx::query(
         "SELECT master_pubkey, blob_version, ciphertext_hex, signature
-         FROM prefs_blobs WHERE master_pubkey = ?",
+         FROM prefs_blobs WHERE master_pubkey = $1",
     )
     .bind(&master)
     .fetch_optional(&state.db)
@@ -280,7 +280,7 @@ pub async fn put_prefs(
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
     let current: Option<i64> =
-        sqlx::query_scalar("SELECT blob_version FROM prefs_blobs WHERE master_pubkey = ?")
+        sqlx::query_scalar("SELECT blob_version FROM prefs_blobs WHERE master_pubkey = $1")
             .bind(&master)
             .fetch_optional(&state.db)
             .await
@@ -298,7 +298,7 @@ pub async fn put_prefs(
     sqlx::query(
         "INSERT INTO prefs_blobs
             (master_pubkey, blob_version, ciphertext_hex, signature, updated_at)
-         VALUES (?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT(master_pubkey) DO UPDATE SET
             blob_version = excluded.blob_version,
             ciphertext_hex = excluded.ciphertext_hex,
@@ -337,7 +337,7 @@ pub async fn put_dm_blocks(
     user: AuthUser,
     Json(req): Json<DmBlocksRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    sqlx::query("DELETE FROM dm_blocks WHERE owner_pubkey = ?")
+    sqlx::query("DELETE FROM dm_blocks WHERE owner_pubkey = $1")
         .bind(&user.public_key)
         .execute(&state.db)
         .await
@@ -345,7 +345,7 @@ pub async fn put_dm_blocks(
 
     for pk in &req.pubkeys {
         sqlx::query(
-            "INSERT INTO dm_blocks (owner_pubkey, blocked_pubkey) VALUES (?, ?)
+            "INSERT INTO dm_blocks (owner_pubkey, blocked_pubkey) VALUES ($1, $2)
              ON CONFLICT (owner_pubkey, blocked_pubkey) DO NOTHING",
         )
         .bind(&user.public_key)
@@ -364,7 +364,7 @@ pub async fn get_dm_blocks(
     user: AuthUser,
 ) -> Result<Json<DmBlocksResponse>, (StatusCode, String)> {
     let pubkeys: Vec<String> =
-        sqlx::query_scalar("SELECT blocked_pubkey FROM dm_blocks WHERE owner_pubkey = ?")
+        sqlx::query_scalar("SELECT blocked_pubkey FROM dm_blocks WHERE owner_pubkey = $1")
             .bind(&user.public_key)
             .fetch_all(&state.db)
             .await
@@ -377,7 +377,7 @@ pub async fn get_dm_blocks(
 /// Returns false on any DB error so the caller degrades safely.
 pub async fn is_dm_blocked(db: &sqlx::PgPool, recipient: &str, sender: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM dm_blocks WHERE owner_pubkey = ? AND blocked_pubkey = ?",
+        "SELECT COUNT(*) FROM dm_blocks WHERE owner_pubkey = $1 AND blocked_pubkey = $2",
     )
     .bind(recipient)
     .bind(sender)

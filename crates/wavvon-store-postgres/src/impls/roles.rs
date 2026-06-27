@@ -28,7 +28,7 @@ impl RoleStore for PostgresStore {
     async fn create_role(&self, r: &NewRole) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO roles (id, name, priority, display_separately, created_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(&r.id)
         .bind(&r.name)
@@ -40,7 +40,7 @@ impl RoleStore for PostgresStore {
         .map_err(map_err)?;
 
         for perm in &r.permissions {
-            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)")
+            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
                 .bind(&r.id)
                 .bind(perm)
                 .execute(self.pool())
@@ -64,7 +64,7 @@ impl RoleStore for PostgresStore {
     async fn get_role(&self, role_id: &str) -> Result<Option<RoleRow>, StoreError> {
         let row = sqlx::query(
             "SELECT id, name, priority, display_separately, created_at, talk_power
-             FROM roles WHERE id = ?",
+             FROM roles WHERE id = $1",
         )
         .bind(role_id)
         .fetch_optional(self.pool())
@@ -74,7 +74,7 @@ impl RoleStore for PostgresStore {
     }
 
     async fn delete_role(&self, role_id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM roles WHERE id = ?")
+        sqlx::query("DELETE FROM roles WHERE id = $1")
             .bind(role_id)
             .execute(self.pool())
             .await
@@ -83,7 +83,7 @@ impl RoleStore for PostgresStore {
     }
 
     async fn set_role_name(&self, role_id: &str, name: &str) -> Result<(), StoreError> {
-        sqlx::query("UPDATE roles SET name = ? WHERE id = ?")
+        sqlx::query("UPDATE roles SET name = $1 WHERE id = $2")
             .bind(name)
             .bind(role_id)
             .execute(self.pool())
@@ -93,7 +93,7 @@ impl RoleStore for PostgresStore {
     }
 
     async fn set_role_priority(&self, role_id: &str, priority: i64) -> Result<(), StoreError> {
-        sqlx::query("UPDATE roles SET priority = ? WHERE id = ?")
+        sqlx::query("UPDATE roles SET priority = $1 WHERE id = $2")
             .bind(priority)
             .bind(role_id)
             .execute(self.pool())
@@ -103,7 +103,7 @@ impl RoleStore for PostgresStore {
     }
 
     async fn set_display_separately(&self, role_id: &str, flag: bool) -> Result<(), StoreError> {
-        sqlx::query("UPDATE roles SET display_separately = ? WHERE id = ?")
+        sqlx::query("UPDATE roles SET display_separately = $1 WHERE id = $2")
             .bind(flag)
             .bind(role_id)
             .execute(self.pool())
@@ -113,11 +113,13 @@ impl RoleStore for PostgresStore {
     }
 
     async fn role_permissions(&self, role_id: &str) -> Result<Vec<String>, StoreError> {
-        sqlx::query_scalar::<_, String>("SELECT permission FROM role_permissions WHERE role_id = ?")
-            .bind(role_id)
-            .fetch_all(self.pool())
-            .await
-            .map_err(map_err)
+        sqlx::query_scalar::<_, String>(
+            "SELECT permission FROM role_permissions WHERE role_id = $1",
+        )
+        .bind(role_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_err)
     }
 
     async fn set_role_permissions(
@@ -125,13 +127,13 @@ impl RoleStore for PostgresStore {
         role_id: &str,
         perms: &[String],
     ) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM role_permissions WHERE role_id = ?")
+        sqlx::query("DELETE FROM role_permissions WHERE role_id = $1")
             .bind(role_id)
             .execute(self.pool())
             .await
             .map_err(map_err)?;
         for perm in perms {
-            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)")
+            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
                 .bind(role_id)
                 .bind(perm)
                 .execute(self.pool())
@@ -144,7 +146,7 @@ impl RoleStore for PostgresStore {
     async fn assign_role(&self, pubkey: &str, role_id: &str, now: i64) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-             VALUES (?, ?, ?) ON CONFLICT (user_public_key, role_id) DO NOTHING",
+             VALUES ($1, $2, $3) ON CONFLICT (user_public_key, role_id) DO NOTHING",
         )
         .bind(pubkey)
         .bind(role_id)
@@ -156,7 +158,7 @@ impl RoleStore for PostgresStore {
     }
 
     async fn remove_role(&self, pubkey: &str, role_id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM user_roles WHERE user_public_key = ? AND role_id = ?")
+        sqlx::query("DELETE FROM user_roles WHERE user_public_key = $1 AND role_id = $2")
             .bind(pubkey)
             .bind(role_id)
             .execute(self.pool())
@@ -170,7 +172,7 @@ impl RoleStore for PostgresStore {
             "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at, r.talk_power
              FROM roles r
              INNER JOIN user_roles ur ON r.id = ur.role_id
-             WHERE ur.user_public_key = ?
+             WHERE ur.user_public_key = $1
              ORDER BY r.priority DESC",
         )
         .bind(pubkey)
@@ -181,7 +183,7 @@ impl RoleStore for PostgresStore {
     }
 
     async fn role_members(&self, role_id: &str) -> Result<Vec<String>, StoreError> {
-        sqlx::query_scalar::<_, String>("SELECT user_public_key FROM user_roles WHERE role_id = ?")
+        sqlx::query_scalar::<_, String>("SELECT user_public_key FROM user_roles WHERE role_id = $1")
             .bind(role_id)
             .fetch_all(self.pool())
             .await
@@ -189,7 +191,7 @@ impl RoleStore for PostgresStore {
     }
 
     async fn role_member_count(&self, role_id: &str) -> Result<i64, StoreError> {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user_roles WHERE role_id = ?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM user_roles WHERE role_id = $1")
             .bind(role_id)
             .fetch_one(self.pool())
             .await

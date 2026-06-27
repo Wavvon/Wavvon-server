@@ -43,7 +43,7 @@ pub async fn ext_invite_bot(
     // Create the pending users row (idempotent so re-inviting is safe).
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
-         VALUES (?, ?, ?, 'bot_pending', 1) ON CONFLICT (public_key) DO NOTHING",
+         VALUES ($1, $2, $3, 'bot_pending', 1) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&req.pubkey)
     .bind(now)
@@ -62,7 +62,7 @@ pub async fn ext_invite_bot(
     let expires = now + 86400; // 24 hours
 
     sqlx::query(
-        "UPDATE users SET bot_invite_token = ?, bot_invite_expires = ? WHERE public_key = ?",
+        "UPDATE users SET bot_invite_token = $1, bot_invite_expires = $2 WHERE public_key = $3",
     )
     .bind(&token)
     .bind(expires)
@@ -83,7 +83,7 @@ pub async fn ext_accept_invite(
     Json(req): Json<AcceptInviteRequest>,
 ) -> Result<Json<AcceptInviteResponse>, (StatusCode, String)> {
     let row: Option<(Option<String>, Option<i64>)> = sqlx::query_as(
-        "SELECT bot_invite_token, bot_invite_expires FROM users WHERE public_key = ? AND is_bot = 1",
+        "SELECT bot_invite_token, bot_invite_expires FROM users WHERE public_key = $1 AND is_bot = 1",
     )
     .bind(&req.pubkey)
     .fetch_optional(&state.db)
@@ -121,7 +121,7 @@ pub async fn ext_accept_invite(
     // Approve and clear the invite token.
     sqlx::query(
         "UPDATE users SET approval_status = 'approved', bot_invite_token = NULL, bot_invite_expires = NULL
-         WHERE public_key = ?",
+         WHERE public_key = $1",
     )
     .bind(&req.pubkey)
     .execute(&state.db)
@@ -132,7 +132,7 @@ pub async fn ext_accept_invite(
     let meta = &req.bot_meta;
     sqlx::query(
         "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
-         VALUES(?,?,?,?,?,?,?,?)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT(pubkey) DO UPDATE SET
            name=excluded.name, avatar_url=excluded.avatar_url,
            description=excluded.description, webhook_url=excluded.webhook_url,
@@ -153,7 +153,7 @@ pub async fn ext_accept_invite(
 
     // Replace commands if provided.
     if let Some(cmds) = &meta.commands {
-        sqlx::query("DELETE FROM bot_commands WHERE pubkey = ?")
+        sqlx::query("DELETE FROM bot_commands WHERE pubkey = $1")
             .bind(&req.pubkey)
             .execute(&state.db)
             .await
@@ -161,7 +161,7 @@ pub async fn ext_accept_invite(
         for cmd in cmds {
             sqlx::query(
                 "INSERT INTO bot_commands(pubkey,name,description,args,scope,privileged,cooldown_seconds)
-                 VALUES(?,?,?,?,?,?,?)",
+                 VALUES($1,$2,$3,$4,$5,$6,$7)",
             )
             .bind(&req.pubkey)
             .bind(&cmd.name)
@@ -191,7 +191,7 @@ pub async fn ext_remove_bot(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::ADMIN)?;
 
-    sqlx::query("UPDATE users SET is_bot_removed = 1 WHERE public_key = ? AND is_bot = 1")
+    sqlx::query("UPDATE users SET is_bot_removed = 1 WHERE public_key = $1 AND is_bot = 1")
         .bind(&pubkey)
         .execute(&state.db)
         .await
@@ -230,7 +230,7 @@ pub async fn ext_list_bots(
     let mut entries = Vec::with_capacity(rows.len());
     for row in rows {
         let cmds = sqlx::query_as::<_, (String, String)>(
-            "SELECT name, description FROM bot_commands WHERE pubkey = ? ORDER BY name",
+            "SELECT name, description FROM bot_commands WHERE pubkey = $1 ORDER BY name",
         )
         .bind(&row.pubkey)
         .fetch_all(&state.db)
@@ -261,7 +261,7 @@ pub async fn ext_bot_me(
     user: AuthUser,
 ) -> Result<Json<BotMeResponse>, (StatusCode, String)> {
     // Verify caller is a bot.
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
@@ -274,7 +274,7 @@ pub async fn ext_bot_me(
 
     let profile = sqlx::query_as::<_, BotProfileRow>(
         "SELECT pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities
-         FROM bot_profiles WHERE pubkey = ?",
+         FROM bot_profiles WHERE pubkey = $1",
     )
     .bind(&user.public_key)
     .fetch_optional(&state.db)
@@ -284,7 +284,7 @@ pub async fn ext_bot_me(
 
     let cmds = sqlx::query_as::<_, BotCommandRow>(
         "SELECT name, description, args, scope, privileged, cooldown_seconds
-         FROM bot_commands WHERE pubkey = ? ORDER BY name",
+         FROM bot_commands WHERE pubkey = $1 ORDER BY name",
     )
     .bind(&user.public_key)
     .fetch_all(&state.db)
@@ -322,7 +322,7 @@ pub async fn ext_update_bot_profile(
     user: AuthUser,
     Json(meta): Json<crate::routes::bot_models::BotMeta>,
 ) -> Result<Json<BotMeResponse>, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
@@ -336,7 +336,7 @@ pub async fn ext_update_bot_profile(
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
-         VALUES(?,?,?,?,?,?,?,?)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT(pubkey) DO UPDATE SET
            name=excluded.name, avatar_url=excluded.avatar_url,
            description=excluded.description, webhook_url=excluded.webhook_url,
@@ -366,7 +366,7 @@ pub async fn ext_update_bot_commands(
     user: AuthUser,
     Json(req): Json<UpdateCommandsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
@@ -377,7 +377,7 @@ pub async fn ext_update_bot_commands(
         return Err((StatusCode::FORBIDDEN, "Not a bot identity".to_string()));
     }
 
-    sqlx::query("DELETE FROM bot_commands WHERE pubkey = ?")
+    sqlx::query("DELETE FROM bot_commands WHERE pubkey = $1")
         .bind(&user.public_key)
         .execute(&state.db)
         .await
@@ -386,7 +386,7 @@ pub async fn ext_update_bot_commands(
     for cmd in &req.commands {
         sqlx::query(
             "INSERT INTO bot_commands(pubkey,name,description,args,scope,privileged,cooldown_seconds)
-             VALUES(?,?,?,?,?,?,?)",
+             VALUES($1,$2,$3,$4,$5,$6,$7)",
         )
         .bind(&user.public_key)
         .bind(&cmd.name)
@@ -410,7 +410,7 @@ pub async fn ext_update_bot_subscriptions(
     user: AuthUser,
     Json(req): Json<UpdateSubscriptionsRequest>,
 ) -> Result<Json<SetSubscriptionsResponse>, (StatusCode, String)> {
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
@@ -437,7 +437,7 @@ pub async fn ext_update_bot_subscriptions(
     }
 
     // Replace atomically: delete all, insert new.
-    sqlx::query("DELETE FROM bot_subscriptions WHERE bot_pubkey = ?")
+    sqlx::query("DELETE FROM bot_subscriptions WHERE bot_pubkey = $1")
         .bind(&user.public_key)
         .execute(&state.db)
         .await
@@ -450,7 +450,7 @@ pub async fn ext_update_bot_subscriptions(
                 for channel_id in channels {
                     sqlx::query(
                         "INSERT INTO bot_subscriptions(bot_pubkey, event_type, channel_id)
-                         VALUES(?,?,?) ON CONFLICT (bot_pubkey, event_type, channel_id) DO NOTHING",
+                         VALUES($1,$2,$3) ON CONFLICT (bot_pubkey, event_type, channel_id) DO NOTHING",
                     )
                     .bind(&user.public_key)
                     .bind(&sub.event)
@@ -465,7 +465,7 @@ pub async fn ext_update_bot_subscriptions(
                 // Hub-scoped subscription: use '' as sentinel for "no channel filter".
                 sqlx::query(
                     "INSERT INTO bot_subscriptions(bot_pubkey, event_type, channel_id)
-                     VALUES(?,?,'') ON CONFLICT (bot_pubkey, event_type, channel_id) DO NOTHING",
+                     VALUES($1,$2,'') ON CONFLICT (bot_pubkey, event_type, channel_id) DO NOTHING",
                 )
                 .bind(&user.public_key)
                 .bind(&sub.event)

@@ -15,7 +15,7 @@ impl RecoveryStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO recovery_settings (owner_pubkey, threshold, created_at)
-             VALUES (?, ?, ?)
+             VALUES ($1, $2, $3)
              ON CONFLICT(owner_pubkey) DO UPDATE SET threshold = excluded.threshold",
         )
         .bind(owner_pubkey)
@@ -32,7 +32,7 @@ impl RecoveryStore for PostgresStore {
         owner_pubkey: &str,
     ) -> Result<Option<(i64, i64)>, StoreError> {
         let row = sqlx::query(
-            "SELECT threshold, created_at FROM recovery_settings WHERE owner_pubkey = ?",
+            "SELECT threshold, created_at FROM recovery_settings WHERE owner_pubkey = $1",
         )
         .bind(owner_pubkey)
         .fetch_optional(self.pool())
@@ -49,7 +49,7 @@ impl RecoveryStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO recovery_contacts (owner_pubkey, contact_pubkey, created_at)
-             VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
         )
         .bind(owner_pubkey)
         .bind(contact_pubkey)
@@ -65,18 +65,20 @@ impl RecoveryStore for PostgresStore {
         owner_pubkey: &str,
         contact_pubkey: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM recovery_contacts WHERE owner_pubkey = ? AND contact_pubkey = ?")
-            .bind(owner_pubkey)
-            .bind(contact_pubkey)
-            .execute(self.pool())
-            .await
-            .map_err(map_err)?;
+        sqlx::query(
+            "DELETE FROM recovery_contacts WHERE owner_pubkey = $1 AND contact_pubkey = $2",
+        )
+        .bind(owner_pubkey)
+        .bind(contact_pubkey)
+        .execute(self.pool())
+        .await
+        .map_err(map_err)?;
         Ok(())
     }
 
     async fn list_recovery_contacts(&self, owner_pubkey: &str) -> Result<Vec<String>, StoreError> {
         sqlx::query_scalar::<_, String>(
-            "SELECT contact_pubkey FROM recovery_contacts WHERE owner_pubkey = ?",
+            "SELECT contact_pubkey FROM recovery_contacts WHERE owner_pubkey = $1",
         )
         .bind(owner_pubkey)
         .fetch_all(self.pool())
@@ -91,7 +93,7 @@ impl RecoveryStore for PostgresStore {
         sqlx::query(
             "INSERT INTO key_rotation_requests
              (id, old_pubkey, new_pubkey, reason, status, created_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&r.id)
         .bind(&r.old_pubkey)
@@ -111,7 +113,7 @@ impl RecoveryStore for PostgresStore {
     ) -> Result<Option<KeyRotationRequestRow>, StoreError> {
         let row = sqlx::query(
             "SELECT id, old_pubkey, new_pubkey, reason, status, created_at, decided_at, decided_by
-             FROM key_rotation_requests WHERE id = ?",
+             FROM key_rotation_requests WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.pool())
@@ -138,8 +140,8 @@ impl RecoveryStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "UPDATE key_rotation_requests
-             SET status = ?, decided_at = ?, decided_by = ?
-             WHERE id = ?",
+             SET status = $1, decided_at = $2, decided_by = $3
+             WHERE id = $4",
         )
         .bind(status)
         .bind(decided_at)
@@ -162,7 +164,7 @@ impl RecoveryStore for PostgresStore {
         sqlx::query(
             "INSERT INTO rotation_attestations
              (id, request_id, attester_pubkey, signature, attested_at)
-             VALUES (?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT(request_id, attester_pubkey) DO NOTHING",
         )
         .bind(id)
@@ -178,7 +180,7 @@ impl RecoveryStore for PostgresStore {
 
     async fn attestation_count(&self, request_id: &str) -> Result<i64, StoreError> {
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM rotation_attestations WHERE request_id = ?",
+            "SELECT COUNT(*) FROM rotation_attestations WHERE request_id = $1",
         )
         .bind(request_id)
         .fetch_one(self.pool())

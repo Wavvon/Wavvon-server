@@ -38,7 +38,7 @@ pub async fn admin_create_bot(
     // Insert into users so messages and member listing work with the existing FK.
     sqlx::query(
         "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at, approval_status, is_bot)
-         VALUES (?, ?, ?, ?, 'approved', 1)",
+         VALUES ($1, $2, $3, $4, 'approved', 1)",
     )
     .bind(&public_key)
     .bind(&display_name)
@@ -50,7 +50,7 @@ pub async fn admin_create_bot(
 
     sqlx::query(
         "INSERT INTO bots (public_key, display_name, created_by, token_hash, mini_app_url, requires_camera, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&public_key)
     .bind(&display_name)
@@ -111,7 +111,7 @@ pub async fn admin_get_bot(
 ) -> Result<Json<BotDetailResponse>, (StatusCode, String)> {
     let bot = sqlx::query_as::<_, BotRow>(
         "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
-         FROM bots WHERE public_key = ?",
+         FROM bots WHERE public_key = $1",
     )
     .bind(&pubkey)
     .fetch_optional(&state.db)
@@ -120,7 +120,7 @@ pub async fn admin_get_bot(
     .ok_or((StatusCode::NOT_FOUND, "Bot not found".to_string()))?;
 
     let cmds = sqlx::query_as::<_, SlashCommandRow>(
-        "SELECT command, description FROM bot_slash_commands WHERE bot_pubkey = ? ORDER BY command",
+        "SELECT command, description FROM bot_slash_commands WHERE bot_pubkey = $1 ORDER BY command",
     )
     .bind(&pubkey)
     .fetch_all(&state.db)
@@ -153,7 +153,7 @@ pub async fn admin_delete_bot(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let bot = sqlx::query_as::<_, BotRow>(
         "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
-         FROM bots WHERE public_key = ?",
+         FROM bots WHERE public_key = $1",
     )
     .bind(&pubkey)
     .fetch_optional(&state.db)
@@ -168,14 +168,14 @@ pub async fn admin_delete_bot(
     }
 
     // Cascade deletes slash_commands and event_queue via FK.
-    sqlx::query("DELETE FROM bots WHERE public_key = ?")
+    sqlx::query("DELETE FROM bots WHERE public_key = $1")
         .bind(&pubkey)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Clean up the users row so the bot disappears from member lists.
-    sqlx::query("DELETE FROM users WHERE public_key = ?")
+    sqlx::query("DELETE FROM users WHERE public_key = $1")
         .bind(&pubkey)
         .execute(&state.db)
         .await
@@ -193,7 +193,7 @@ pub async fn admin_set_webhook(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let bot = sqlx::query_as::<_, BotRow>(
         "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
-         FROM bots WHERE public_key = ?",
+         FROM bots WHERE public_key = $1",
     )
     .bind(&pubkey)
     .fetch_optional(&state.db)
@@ -206,7 +206,7 @@ pub async fn admin_set_webhook(
         perms.require(permissions::ADMIN)?;
     }
 
-    sqlx::query("UPDATE bots SET webhook_url = ? WHERE public_key = ?")
+    sqlx::query("UPDATE bots SET webhook_url = $1 WHERE public_key = $2")
         .bind(&req.webhook_url)
         .bind(&pubkey)
         .execute(&state.db)
@@ -256,9 +256,9 @@ pub async fn admin_audit_log(
         sqlx::query_as::<_, AuditRow>(
             "SELECT seq, event_type, at, actor_pubkey, target_pubkey, channel_id, payload_json
              FROM hub_audit_log
-             WHERE seq > ? AND at >= ? AND at <= ?
+             WHERE seq > $1 AND at >= $2 AND at <= $3
              ORDER BY seq ASC
-             LIMIT ?",
+             LIMIT $4",
         )
         .bind(cursor_seq)
         .bind(since)
@@ -270,9 +270,9 @@ pub async fn admin_audit_log(
         sqlx::query_as::<_, AuditRow>(
             "SELECT seq, event_type, at, actor_pubkey, target_pubkey, channel_id, payload_json
              FROM hub_audit_log
-             WHERE seq > ? AND at >= ? AND at <= ? AND event_type = ?
+             WHERE seq > $1 AND at >= $2 AND at <= $3 AND event_type = $4
              ORDER BY seq ASC
-             LIMIT ?",
+             LIMIT $5",
         )
         .bind(cursor_seq)
         .bind(since)

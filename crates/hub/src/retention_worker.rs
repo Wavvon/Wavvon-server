@@ -25,7 +25,7 @@ async fn run_sweep(state: &AppState) {
             SELECT m.id FROM messages m
             JOIN channels c ON c.id = m.channel_id
             WHERE c.retention_days IS NOT NULL
-              AND m.created_at < ? - (c.retention_days * 86400)
+              AND m.created_at < $1 - (c.retention_days * 86400)
         )",
     )
     .bind(now)
@@ -38,7 +38,7 @@ async fn run_sweep(state: &AppState) {
             SELECT p.id FROM posts p
             JOIN channels c ON c.id = p.channel_id
             WHERE c.retention_days IS NOT NULL
-              AND p.created_at < ? - (c.retention_days * 86400)
+              AND p.created_at < $1 - (c.retention_days * 86400)
         )",
     )
     .bind(now)

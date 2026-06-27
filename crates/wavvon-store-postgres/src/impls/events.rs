@@ -25,7 +25,7 @@ impl EventStore for PostgresStore {
         sqlx::query(
             "INSERT INTO hub_events
              (id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(&e.id)
         .bind(&e.channel_id)
@@ -46,7 +46,7 @@ impl EventStore for PostgresStore {
         let row = sqlx::query(
             "SELECT id, channel_id, creator_pubkey, title, description,
                     starts_at, ends_at, location, created_at
-             FROM hub_events WHERE id = ?",
+             FROM hub_events WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.pool())
@@ -59,7 +59,7 @@ impl EventStore for PostgresStore {
         let rows = sqlx::query(
             "SELECT id, channel_id, creator_pubkey, title, description,
                     starts_at, ends_at, location, created_at
-             FROM hub_events WHERE channel_id = ? ORDER BY starts_at ASC",
+             FROM hub_events WHERE channel_id = $1 ORDER BY starts_at ASC",
         )
         .bind(channel_id)
         .fetch_all(self.pool())
@@ -69,7 +69,7 @@ impl EventStore for PostgresStore {
     }
 
     async fn delete_event(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM hub_events WHERE id = ?")
+        sqlx::query("DELETE FROM hub_events WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -79,7 +79,7 @@ impl EventStore for PostgresStore {
 
     async fn upsert_rsvp(&self, r: &EventRsvpRow) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO event_rsvps (event_id, user_pubkey, status) VALUES (?, ?, ?)
+            "INSERT INTO event_rsvps (event_id, user_pubkey, status) VALUES ($1, $2, $3)
              ON CONFLICT(event_id, user_pubkey) DO UPDATE SET status = excluded.status",
         )
         .bind(&r.event_id)
@@ -92,12 +92,13 @@ impl EventStore for PostgresStore {
     }
 
     async fn list_rsvps(&self, event_id: &str) -> Result<Vec<EventRsvpRow>, StoreError> {
-        let rows =
-            sqlx::query("SELECT event_id, user_pubkey, status FROM event_rsvps WHERE event_id = ?")
-                .bind(event_id)
-                .fetch_all(self.pool())
-                .await
-                .map_err(map_err)?;
+        let rows = sqlx::query(
+            "SELECT event_id, user_pubkey, status FROM event_rsvps WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(map_err)?;
         Ok(rows
             .into_iter()
             .map(|r| EventRsvpRow {
@@ -109,7 +110,7 @@ impl EventStore for PostgresStore {
     }
 
     async fn delete_rsvp(&self, event_id: &str, user_pubkey: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM event_rsvps WHERE event_id = ? AND user_pubkey = ?")
+        sqlx::query("DELETE FROM event_rsvps WHERE event_id = $1 AND user_pubkey = $2")
             .bind(event_id)
             .bind(user_pubkey)
             .execute(self.pool())

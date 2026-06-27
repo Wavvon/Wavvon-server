@@ -41,8 +41,8 @@ pub async fn add_peer(
 
     // Store the peer in DB
     sqlx::query(
-        "INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(public_key) DO UPDATE SET name = ?, url = ?",
+        "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT(public_key) DO UPDATE SET name = $5, url = $6",
     )
     .bind(&info.public_key)
     .bind(&info.name)
@@ -132,8 +132,8 @@ pub async fn peer_channels(
         // Cache in DB (upsert)
         sqlx::query(
             "INSERT INTO federated_channels (id, peer_public_key, remote_id, name, created_at, last_synced_at)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(peer_public_key, remote_id) DO UPDATE SET name = ?, last_synced_at = ?",
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT(peer_public_key, remote_id) DO UPDATE SET name = $7, last_synced_at = $8",
         )
         .bind(&fed_id)
         .bind(&peer_key)
@@ -191,7 +191,7 @@ pub async fn federated_messages(
 ) -> Result<Json<Vec<FederatedMessageResponse>>, (StatusCode, String)> {
     // Look up the federated channel to find peer + remote channel ID
     let fed_ch = sqlx::query_as::<_, FedChannelRow>(
-        "SELECT id, peer_public_key, remote_id, name, created_at FROM federated_channels WHERE id = ?",
+        "SELECT id, peer_public_key, remote_id, name, created_at FROM federated_channels WHERE id = $1",
     )
     .bind(&fed_channel_id)
     .fetch_optional(&state.db)
@@ -219,7 +219,7 @@ pub async fn federated_messages(
         let local_id = Uuid::new_v4().to_string();
         let _ = sqlx::query(
             "INSERT INTO federated_messages (id, fed_channel_id, remote_id, sender, content, created_at)
-             VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+             VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (id) DO NOTHING",
         )
         .bind(&local_id)
         .bind(&fed_channel_id)
@@ -252,7 +252,7 @@ pub async fn send_federated_message(
     Json(req): Json<crate::routes::chat_models::SendMessageRequest>,
 ) -> Result<(StatusCode, Json<FederatedMessageResponse>), (StatusCode, String)> {
     let fed_ch = sqlx::query_as::<_, FedChannelRow>(
-        "SELECT id, peer_public_key, remote_id, name, created_at FROM federated_channels WHERE id = ?",
+        "SELECT id, peer_public_key, remote_id, name, created_at FROM federated_channels WHERE id = $1",
     )
     .bind(&fed_channel_id)
     .fetch_optional(&state.db)
@@ -359,7 +359,7 @@ pub async fn receive_badge_offer(
     sqlx::query(
         "INSERT INTO badge_offers
          (id, from_hub_pubkey, from_hub_url, label, note, payload, signature, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(&req.from_hub_pubkey)
@@ -387,7 +387,7 @@ pub async fn receive_badge_offer(
 
 async fn get_peer(state: &AppState, peer_key: &str) -> Result<PeerRow, (StatusCode, String)> {
     sqlx::query_as::<_, PeerRow>(
-        "SELECT public_key, name, url, added_at FROM peers WHERE public_key = ?",
+        "SELECT public_key, name, url, added_at FROM peers WHERE public_key = $1",
     )
     .bind(peer_key)
     .fetch_optional(&state.db)

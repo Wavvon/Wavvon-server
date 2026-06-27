@@ -29,7 +29,7 @@ impl CertStore for PostgresStore {
             "INSERT INTO cert_issuances
              (id, subject_pubkey, pow_level, member_since, issued_at, expires_at,
               revoked_at, standing, payload_json, signature)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(&c.id)
         .bind(&c.subject_pubkey)
@@ -55,7 +55,7 @@ impl CertStore for PostgresStore {
             "SELECT id, subject_pubkey, pow_level, member_since, issued_at, expires_at,
                     revoked_at, standing, payload_json, signature
              FROM cert_issuances
-             WHERE subject_pubkey = ?
+             WHERE subject_pubkey = $1
              ORDER BY issued_at DESC LIMIT 1",
         )
         .bind(subject_pubkey)
@@ -73,7 +73,7 @@ impl CertStore for PostgresStore {
             "SELECT id, subject_pubkey, pow_level, member_since, issued_at, expires_at,
                     revoked_at, standing, payload_json, signature
              FROM cert_issuances
-             WHERE subject_pubkey = ?
+             WHERE subject_pubkey = $1
              ORDER BY issued_at DESC",
         )
         .bind(subject_pubkey)
@@ -84,12 +84,14 @@ impl CertStore for PostgresStore {
     }
 
     async fn revoke_cert(&self, id: &str, revoked_at: i64) -> Result<(), StoreError> {
-        sqlx::query("UPDATE cert_issuances SET revoked_at = ?, standing = 'revoked' WHERE id = ?")
-            .bind(revoked_at)
-            .bind(id)
-            .execute(self.pool())
-            .await
-            .map_err(map_err)?;
+        sqlx::query(
+            "UPDATE cert_issuances SET revoked_at = $1, standing = 'revoked' WHERE id = $2",
+        )
+        .bind(revoked_at)
+        .bind(id)
+        .execute(self.pool())
+        .await
+        .map_err(map_err)?;
         Ok(())
     }
 
@@ -97,7 +99,7 @@ impl CertStore for PostgresStore {
         sqlx::query(
             "INSERT INTO user_certs
              (id, master_pubkey, issuer_pubkey, issuer_url, payload_json, signature, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(&c.id)
@@ -116,7 +118,7 @@ impl CertStore for PostgresStore {
     async fn list_user_certs(&self, master_pubkey: &str) -> Result<Vec<UserCertRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, master_pubkey, issuer_pubkey, issuer_url, payload_json, signature, expires_at
-             FROM user_certs WHERE master_pubkey = ?",
+             FROM user_certs WHERE master_pubkey = $1",
         )
         .bind(master_pubkey)
         .fetch_all(self.pool())
@@ -137,7 +139,7 @@ impl CertStore for PostgresStore {
     }
 
     async fn delete_expired_user_certs(&self, now: i64) -> Result<u64, StoreError> {
-        let result = sqlx::query("DELETE FROM user_certs WHERE expires_at < ?")
+        let result = sqlx::query("DELETE FROM user_certs WHERE expires_at < $1")
             .bind(now)
             .execute(self.pool())
             .await
@@ -151,7 +153,7 @@ impl CertStore for PostgresStore {
              (pairing_token, master_pubkey, home_hubs_json, issued_at, expires_at,
               offer_signature, state, subkey_pubkey, device_label, claim_proof,
               cert_json, wrapped_key_hex, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT(pairing_token) DO UPDATE SET
                state = excluded.state,
                subkey_pubkey = excluded.subkey_pubkey,
@@ -186,7 +188,7 @@ impl CertStore for PostgresStore {
             "SELECT pairing_token, master_pubkey, home_hubs_json, issued_at, expires_at,
                     offer_signature, state, subkey_pubkey, device_label, claim_proof,
                     cert_json, wrapped_key_hex, created_at, updated_at
-             FROM pairing_offers WHERE pairing_token = ?",
+             FROM pairing_offers WHERE pairing_token = $1",
         )
         .bind(token)
         .fetch_optional(self.pool())
@@ -223,13 +225,13 @@ impl CertStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "UPDATE pairing_offers SET
-               state = ?, updated_at = ?,
-               subkey_pubkey = COALESCE(?, subkey_pubkey),
-               device_label = COALESCE(?, device_label),
-               claim_proof = COALESCE(?, claim_proof),
-               cert_json = COALESCE(?, cert_json),
-               wrapped_key_hex = COALESCE(?, wrapped_key_hex)
-             WHERE pairing_token = ?",
+               state = $1, updated_at = $2,
+               subkey_pubkey = COALESCE($3, subkey_pubkey),
+               device_label = COALESCE($4, device_label),
+               claim_proof = COALESCE($5, claim_proof),
+               cert_json = COALESCE($6, cert_json),
+               wrapped_key_hex = COALESCE($7, wrapped_key_hex)
+             WHERE pairing_token = $8",
         )
         .bind(state)
         .bind(updated_at)
@@ -249,7 +251,7 @@ impl CertStore for PostgresStore {
         sqlx::query(
             "INSERT INTO prefs_blobs
              (master_pubkey, blob_version, ciphertext_hex, signature, updated_at)
-             VALUES (?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT(master_pubkey) DO UPDATE SET
                blob_version = excluded.blob_version,
                ciphertext_hex = excluded.ciphertext_hex,
@@ -273,7 +275,7 @@ impl CertStore for PostgresStore {
     ) -> Result<Option<PrefsBlobRow>, StoreError> {
         let row = sqlx::query(
             "SELECT master_pubkey, blob_version, ciphertext_hex, signature, updated_at
-             FROM prefs_blobs WHERE master_pubkey = ?",
+             FROM prefs_blobs WHERE master_pubkey = $1",
         )
         .bind(master_pubkey)
         .fetch_optional(self.pool())

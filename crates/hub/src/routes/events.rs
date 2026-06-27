@@ -124,7 +124,7 @@ async fn load_rsvp_counts(
     event_id: &str,
 ) -> Result<RsvpCounts, (StatusCode, String)> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT status, COUNT(*) as cnt FROM event_rsvps WHERE event_id = ? GROUP BY status",
+        "SELECT status, COUNT(*) as cnt FROM event_rsvps WHERE event_id = $1 GROUP BY status",
     )
     .bind(event_id)
     .fetch_all(db)
@@ -160,7 +160,7 @@ async fn post_event_card(
     let sender = &event.creator_pubkey;
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&msg_id)
     .bind(channel_id)
@@ -216,7 +216,7 @@ pub async fn create_event(
     perms.require(permissions::CREATE_EVENTS)?;
 
     // Verify channel exists.
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&req.channel_id)
         .fetch_optional(&state.db)
         .await
@@ -235,7 +235,7 @@ pub async fn create_event(
 
     sqlx::query(
         "INSERT INTO hub_events (id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&id)
     .bind(&req.channel_id)
@@ -280,7 +280,7 @@ pub async fn list_events(
     let rows: Vec<EventResponse> = if upcoming {
         sqlx::query_as(
             "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
-             FROM hub_events WHERE starts_at >= ? ORDER BY starts_at ASC LIMIT ?",
+             FROM hub_events WHERE starts_at >= $1 ORDER BY starts_at ASC LIMIT $2",
         )
         .bind(now)
         .bind(limit)
@@ -289,7 +289,7 @@ pub async fn list_events(
     } else {
         sqlx::query_as(
             "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
-             FROM hub_events ORDER BY starts_at ASC LIMIT ?",
+             FROM hub_events ORDER BY starts_at ASC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&state.db)
@@ -313,7 +313,7 @@ pub async fn get_event(
 ) -> Result<Json<EventWithRsvps>, (StatusCode, String)> {
     let event: Option<EventResponse> = sqlx::query_as(
         "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
-         FROM hub_events WHERE id = ?",
+         FROM hub_events WHERE id = $1",
     )
     .bind(&event_id)
     .fetch_optional(&state.db)
@@ -333,7 +333,7 @@ pub async fn update_event(
     Json(req): Json<UpdateEventRequest>,
 ) -> Result<Json<EventResponse>, (StatusCode, String)> {
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT creator_pubkey FROM hub_events WHERE id = ?")
+        sqlx::query_as("SELECT creator_pubkey FROM hub_events WHERE id = $1")
             .bind(&event_id)
             .fetch_optional(&state.db)
             .await
@@ -347,7 +347,7 @@ pub async fn update_event(
     }
 
     if let Some(title) = &req.title {
-        sqlx::query("UPDATE hub_events SET title = ? WHERE id = ?")
+        sqlx::query("UPDATE hub_events SET title = $1 WHERE id = $2")
             .bind(title)
             .bind(&event_id)
             .execute(&state.db)
@@ -355,7 +355,7 @@ pub async fn update_event(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
     if let Some(desc) = &req.description {
-        sqlx::query("UPDATE hub_events SET description = ? WHERE id = ?")
+        sqlx::query("UPDATE hub_events SET description = $1 WHERE id = $2")
             .bind(desc)
             .bind(&event_id)
             .execute(&state.db)
@@ -363,7 +363,7 @@ pub async fn update_event(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
     if let Some(starts) = req.starts_at {
-        sqlx::query("UPDATE hub_events SET starts_at = ? WHERE id = ?")
+        sqlx::query("UPDATE hub_events SET starts_at = $1 WHERE id = $2")
             .bind(starts)
             .bind(&event_id)
             .execute(&state.db)
@@ -371,7 +371,7 @@ pub async fn update_event(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
     if let Some(ends) = req.ends_at {
-        sqlx::query("UPDATE hub_events SET ends_at = ? WHERE id = ?")
+        sqlx::query("UPDATE hub_events SET ends_at = $1 WHERE id = $2")
             .bind(ends)
             .bind(&event_id)
             .execute(&state.db)
@@ -379,7 +379,7 @@ pub async fn update_event(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
     if let Some(loc) = &req.location {
-        sqlx::query("UPDATE hub_events SET location = ? WHERE id = ?")
+        sqlx::query("UPDATE hub_events SET location = $1 WHERE id = $2")
             .bind(loc)
             .bind(&event_id)
             .execute(&state.db)
@@ -389,7 +389,7 @@ pub async fn update_event(
 
     let updated: EventResponse = sqlx::query_as(
         "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
-         FROM hub_events WHERE id = ?",
+         FROM hub_events WHERE id = $1",
     )
     .bind(&event_id)
     .fetch_one(&state.db)
@@ -406,7 +406,7 @@ pub async fn delete_event(
     Path(event_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT creator_pubkey FROM hub_events WHERE id = ?")
+        sqlx::query_as("SELECT creator_pubkey FROM hub_events WHERE id = $1")
             .bind(&event_id)
             .fetch_optional(&state.db)
             .await
@@ -419,7 +419,7 @@ pub async fn delete_event(
         perms.require(permissions::ADMIN)?;
     }
 
-    sqlx::query("DELETE FROM hub_events WHERE id = ?")
+    sqlx::query("DELETE FROM hub_events WHERE id = $1")
         .bind(&event_id)
         .execute(&state.db)
         .await
@@ -446,7 +446,7 @@ pub async fn rsvp_event(
         }
     }
 
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = $1")
         .bind(&event_id)
         .fetch_optional(&state.db)
         .await
@@ -457,7 +457,7 @@ pub async fn rsvp_event(
 
     sqlx::query(
         "INSERT INTO event_rsvps (event_id, user_pubkey, status)
-         VALUES (?, ?, ?)
+         VALUES ($1, $2, $3)
          ON CONFLICT(event_id, user_pubkey) DO UPDATE SET status = excluded.status",
     )
     .bind(&event_id)
@@ -476,7 +476,7 @@ pub async fn list_rsvps(
     _user: AuthUser,
     Path(event_id): Path<String>,
 ) -> Result<Json<Vec<RsvpEntry>>, (StatusCode, String)> {
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = $1")
         .bind(&event_id)
         .fetch_optional(&state.db)
         .await
@@ -486,7 +486,7 @@ pub async fn list_rsvps(
     }
 
     let entries: Vec<RsvpEntry> =
-        sqlx::query_as("SELECT user_pubkey, status FROM event_rsvps WHERE event_id = ?")
+        sqlx::query_as("SELECT user_pubkey, status FROM event_rsvps WHERE event_id = $1")
             .bind(&event_id)
             .fetch_all(&state.db)
             .await

@@ -60,7 +60,7 @@ pub async fn user_permissions(
         "SELECT r.id, r.name, r.priority, r.created_at
          FROM roles r
          INNER JOIN user_roles ur ON r.id = ur.role_id
-         WHERE ur.user_public_key = ?",
+         WHERE ur.user_public_key = $1",
     )
     .bind(public_key)
     .fetch_all(db)

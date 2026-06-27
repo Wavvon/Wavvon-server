@@ -18,7 +18,7 @@ pub async fn get_profile(
     State(state): State<Arc<AppState>>,
     Path(pubkey): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let row = sqlx::query("SELECT profile_json FROM public_hub_profiles WHERE pubkey = ?")
+    let row = sqlx::query("SELECT profile_json FROM public_hub_profiles WHERE pubkey = $1")
         .bind(&pubkey)
         .fetch_optional(&state.db)
         .await
@@ -62,7 +62,7 @@ pub async fn put_profile(
 
     sqlx::query(
         "INSERT INTO public_hub_profiles (pubkey, profile_json, updated_at)
-         VALUES (?, ?, ?)
+         VALUES ($1, $2, $3)
          ON CONFLICT(pubkey) DO UPDATE SET
             profile_json = excluded.profile_json,
             updated_at   = excluded.updated_at",

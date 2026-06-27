@@ -38,7 +38,7 @@ impl ChannelStore for PostgresStore {
             "INSERT INTO channels
              (id, name, created_by, parent_id, is_category, display_order,
               description, channel_type, created_at, banner_url, banner_file_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(&ch.id)
         .bind(&ch.name)
@@ -62,7 +62,7 @@ impl ChannelStore for PostgresStore {
             "SELECT id, name, created_by, parent_id, is_category, display_order,
                     description, icon, color, custom_icon_svg, created_at, channel_type,
                     banner_url, banner_file_id, min_talk_power, retention_days
-             FROM channels WHERE id = ?",
+             FROM channels WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.pool())
@@ -87,7 +87,7 @@ impl ChannelStore for PostgresStore {
     async fn update_channel(&self, id: &str, patch: &ChannelPatch) -> Result<(), StoreError> {
         let mut parts: Vec<&str> = Vec::new();
         if let Some(opt) = &patch.description {
-            sqlx::query("UPDATE channels SET description = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET description = $1 WHERE id = $2")
                 .bind(opt.as_deref())
                 .bind(id)
                 .execute(self.pool())
@@ -96,7 +96,7 @@ impl ChannelStore for PostgresStore {
             parts.push("description");
         }
         if let Some(opt) = &patch.icon {
-            sqlx::query("UPDATE channels SET icon = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET icon = $1 WHERE id = $2")
                 .bind(opt.as_deref())
                 .bind(id)
                 .execute(self.pool())
@@ -105,7 +105,7 @@ impl ChannelStore for PostgresStore {
             parts.push("icon");
         }
         if let Some(opt) = &patch.color {
-            sqlx::query("UPDATE channels SET color = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET color = $1 WHERE id = $2")
                 .bind(opt.as_deref())
                 .bind(id)
                 .execute(self.pool())
@@ -114,7 +114,7 @@ impl ChannelStore for PostgresStore {
             parts.push("color");
         }
         if let Some(opt) = &patch.custom_icon_svg {
-            sqlx::query("UPDATE channels SET custom_icon_svg = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET custom_icon_svg = $1 WHERE id = $2")
                 .bind(opt.as_deref())
                 .bind(id)
                 .execute(self.pool())
@@ -123,7 +123,7 @@ impl ChannelStore for PostgresStore {
             parts.push("custom_icon_svg");
         }
         if let Some(opt) = &patch.parent_id {
-            sqlx::query("UPDATE channels SET parent_id = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET parent_id = $1 WHERE id = $2")
                 .bind(opt.as_deref())
                 .bind(id)
                 .execute(self.pool())
@@ -132,7 +132,7 @@ impl ChannelStore for PostgresStore {
             parts.push("parent_id");
         }
         if let Some(mtp) = patch.min_talk_power {
-            sqlx::query("UPDATE channels SET min_talk_power = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET min_talk_power = $1 WHERE id = $2")
                 .bind(mtp)
                 .bind(id)
                 .execute(self.pool())
@@ -141,7 +141,7 @@ impl ChannelStore for PostgresStore {
             parts.push("min_talk_power");
         }
         if let Some(opt) = &patch.retention_days {
-            sqlx::query("UPDATE channels SET retention_days = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET retention_days = $1 WHERE id = $2")
                 .bind(*opt)
                 .bind(id)
                 .execute(self.pool())
@@ -150,7 +150,7 @@ impl ChannelStore for PostgresStore {
             parts.push("retention_days");
         }
         if let Some(opt) = &patch.banner_url {
-            sqlx::query("UPDATE channels SET banner_url = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET banner_url = $1 WHERE id = $2")
                 .bind(opt.as_deref())
                 .bind(id)
                 .execute(self.pool())
@@ -159,7 +159,7 @@ impl ChannelStore for PostgresStore {
             parts.push("banner_url");
         }
         if let Some(opt) = &patch.banner_file_id {
-            sqlx::query("UPDATE channels SET banner_file_id = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET banner_file_id = $1 WHERE id = $2")
                 .bind(opt.as_deref())
                 .bind(id)
                 .execute(self.pool())
@@ -168,7 +168,7 @@ impl ChannelStore for PostgresStore {
             parts.push("banner_file_id");
         }
         if let Some(name) = &patch.name {
-            sqlx::query("UPDATE channels SET name = ? WHERE id = ?")
+            sqlx::query("UPDATE channels SET name = $1 WHERE id = $2")
                 .bind(name.as_str())
                 .bind(id)
                 .execute(self.pool())
@@ -181,7 +181,7 @@ impl ChannelStore for PostgresStore {
     }
 
     async fn delete_channel(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM channels WHERE id = ?")
+        sqlx::query("DELETE FROM channels WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -190,7 +190,7 @@ impl ChannelStore for PostgresStore {
     }
 
     async fn set_channel_order(&self, id: &str, order: i64) -> Result<(), StoreError> {
-        sqlx::query("UPDATE channels SET display_order = ? WHERE id = ?")
+        sqlx::query("UPDATE channels SET display_order = $1 WHERE id = $2")
             .bind(order)
             .bind(id)
             .execute(self.pool())
@@ -207,7 +207,7 @@ impl ChannelStore for PostgresStore {
     }
 
     async fn child_count(&self, parent_id: &str) -> Result<i64, StoreError> {
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE parent_id = ?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE parent_id = $1")
             .bind(parent_id)
             .fetch_one(self.pool())
             .await
@@ -215,7 +215,7 @@ impl ChannelStore for PostgresStore {
     }
 
     async fn parent_id_of(&self, channel_id: &str) -> Result<Option<String>, StoreError> {
-        sqlx::query_scalar::<_, Option<String>>("SELECT parent_id FROM channels WHERE id = ?")
+        sqlx::query_scalar::<_, Option<String>>("SELECT parent_id FROM channels WHERE id = $1")
             .bind(channel_id)
             .fetch_optional(self.pool())
             .await
@@ -233,7 +233,7 @@ impl ChannelStore for PostgresStore {
     async fn mark_read(&self, pubkey: &str, channel_id: &str, at: i64) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO channel_last_read (user_pubkey, channel_id, last_read_at)
-             VALUES (?, ?, ?)
+             VALUES ($1, $2, $3)
              ON CONFLICT(user_pubkey, channel_id) DO UPDATE SET last_read_at = excluded.last_read_at",
         )
         .bind(pubkey)
@@ -251,7 +251,7 @@ impl ChannelStore for PostgresStore {
         channel_id: &str,
     ) -> Result<Option<i64>, StoreError> {
         sqlx::query_scalar::<_, i64>(
-            "SELECT last_read_at FROM channel_last_read WHERE user_pubkey = ? AND channel_id = ?",
+            "SELECT last_read_at FROM channel_last_read WHERE user_pubkey = $1 AND channel_id = $2",
         )
         .bind(pubkey)
         .bind(channel_id)
@@ -262,7 +262,7 @@ impl ChannelStore for PostgresStore {
 
     async fn unread_count(&self, channel_id: &str, after: i64) -> Result<i64, StoreError> {
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM messages WHERE channel_id = ? AND created_at > ?",
+            "SELECT COUNT(*) FROM messages WHERE channel_id = $1 AND created_at > $2",
         )
         .bind(channel_id)
         .bind(after)

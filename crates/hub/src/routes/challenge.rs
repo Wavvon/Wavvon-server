@@ -58,7 +58,7 @@ pub struct UpdateChallengeSettingsRequest {
 // ---------------------------------------------------------------------------
 
 async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
         .bind(key)
         .fetch_optional(db)
         .await
@@ -72,8 +72,8 @@ async fn upsert_setting(
     value: &str,
 ) -> Result<(), (StatusCode, String)> {
     sqlx::query(
-        "INSERT INTO hub_settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = ?",
+        "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
+         ON CONFLICT(key) DO UPDATE SET value = $3",
     )
     .bind(key)
     .bind(value)
@@ -134,7 +134,7 @@ async fn issue_challenge_token(
     let expires_at = now + 300; // 5 minutes
 
     sqlx::query(
-        "INSERT INTO challenge_tokens (token, pubkey, issued_at, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO challenge_tokens (token, pubkey, issued_at, expires_at) VALUES ($1, $2, $3, $4)",
     )
     .bind(&token)
     .bind(pubkey)
@@ -186,7 +186,7 @@ pub async fn new_challenge(
     };
 
     sqlx::query(
-        "INSERT INTO bot_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO bot_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&id)
     .bind(&q.pubkey)
@@ -216,7 +216,7 @@ pub async fn verify_challenge(
     // Look up challenge
     #[allow(clippy::type_complexity)]
     let row: Option<(String, String, Option<String>, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT kind, pubkey, expected_answer, expires_at, consumed_at FROM bot_challenges WHERE id = ?",
+        "SELECT kind, pubkey, expected_answer, expires_at, consumed_at FROM bot_challenges WHERE id = $1",
     )
     .bind(&req.id)
     .fetch_optional(&state.db)
@@ -246,7 +246,7 @@ pub async fn verify_challenge(
     match kind.as_str() {
         "click" => {
             // Mark consumed
-            sqlx::query("UPDATE bot_challenges SET consumed_at = ? WHERE id = ?")
+            sqlx::query("UPDATE bot_challenges SET consumed_at = $1 WHERE id = $2")
                 .bind(now)
                 .bind(&req.id)
                 .execute(&state.db)
@@ -261,7 +261,7 @@ pub async fn verify_challenge(
                 let hashed = sha256_hex(&answer);
 
                 sqlx::query(
-                    "INSERT INTO bot_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES (?, ?, 'puzzle', ?, ?, ?)",
+                    "INSERT INTO bot_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES ($1, $2, 'puzzle', $3, $4, $5)",
                 )
                 .bind(&puzzle_id)
                 .bind(&req.pubkey)
@@ -326,7 +326,7 @@ pub async fn verify_challenge(
             }
 
             // Correct — mark consumed and issue token
-            sqlx::query("UPDATE bot_challenges SET consumed_at = ? WHERE id = ?")
+            sqlx::query("UPDATE bot_challenges SET consumed_at = $1 WHERE id = $2")
                 .bind(now)
                 .bind(&req.id)
                 .execute(&state.db)

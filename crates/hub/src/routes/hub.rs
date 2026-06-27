@@ -89,7 +89,7 @@ pub async fn approve_user(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = ?")
+    sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
         .bind(&target_key)
         .execute(&state.db)
         .await
@@ -244,8 +244,8 @@ pub async fn upsert_setting(
     value: &str,
 ) -> Result<(), (StatusCode, String)> {
     sqlx::query(
-        "INSERT INTO hub_settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = ?",
+        "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
+         ON CONFLICT(key) DO UPDATE SET value = $3",
     )
     .bind(key)
     .bind(value)
@@ -328,7 +328,7 @@ pub async fn current_hub_name(state: &AppState) -> String {
 }
 
 async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
         .bind(key)
         .fetch_optional(db)
         .await
@@ -360,7 +360,7 @@ pub async fn list_members(
             "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at
              FROM roles r
              INNER JOIN user_roles ur ON r.id = ur.role_id
-             WHERE ur.user_public_key = ?
+             WHERE ur.user_public_key = $1
              ORDER BY r.priority DESC",
         )
         .bind(&u.public_key)
@@ -371,7 +371,7 @@ pub async fn list_members(
         let mut role_summaries = Vec::with_capacity(roles.len());
         for r in roles {
             let perms_for_role: Vec<String> =
-                sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = ?")
+                sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
                     .bind(&r.id)
                     .fetch_all(&state.db)
                     .await

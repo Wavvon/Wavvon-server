@@ -65,7 +65,7 @@ pub async fn authenticate_bot(
 
     sqlx::query_as::<_, BotRow>(
         "SELECT public_key, display_name, created_by, created_at, webhook_url, mini_app_url, requires_camera
-         FROM bots WHERE token_hash = ?",
+         FROM bots WHERE token_hash = $1",
     )
     .bind(&hash)
     .fetch_optional(db)

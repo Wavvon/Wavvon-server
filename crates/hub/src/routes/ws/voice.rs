@@ -15,7 +15,7 @@ pub async fn get_voice_participants(
     let mut result = Vec::new();
     for pk in participants.keys() {
         let row: Option<(Option<String>, i64)> =
-            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = ?")
+            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                 .bind(pk)
                 .fetch_optional(&state.db)
                 .await
@@ -79,7 +79,7 @@ pub(super) async fn resolve_role_addrs(
     exclude_addr: std::net::SocketAddr,
 ) -> HashSet<std::net::SocketAddr> {
     let role_users: Vec<String> =
-        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = ?")
+        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
             .bind(role_id)
             .fetch_all(&state.db)
             .await
@@ -150,7 +150,7 @@ pub(super) async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<
     let mut result = Vec::new();
     for (pk, sid) in ch_map {
         let display_name: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
                 .bind(&pk)
                 .fetch_optional(&state.db)
                 .await

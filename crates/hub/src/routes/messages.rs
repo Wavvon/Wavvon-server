@@ -74,7 +74,7 @@ pub async fn send_message(
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
 
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
         .fetch_optional(&state.db)
         .await
@@ -113,7 +113,7 @@ pub async fn send_message(
     // same channel. Cross-channel replies would surprise everyone.
     if let Some(parent_id) = &req.reply_to {
         let parent_channel: Option<String> =
-            sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ?")
+            sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = $1")
                 .bind(parent_id)
                 .fetch_optional(&state.db)
                 .await
@@ -258,7 +258,7 @@ pub async fn send_message(
     }
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -287,7 +287,7 @@ pub async fn send_message(
     // Increment reply_count on the parent message when this is a reply.
     if let Some(parent_id) = &req.reply_to {
         let _ = sqlx::query(
-            "UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = ?",
+            "UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = $1",
         )
         .bind(parent_id)
         .execute(&state.db)
@@ -301,7 +301,7 @@ pub async fn send_message(
     };
 
     let sender_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(&user.public_key)
             .fetch_optional(&state.db)
             .await
@@ -374,7 +374,7 @@ pub async fn edit_message(
     Json(req): Json<EditMessageRequest>,
 ) -> Result<Json<MessageResponse>, (StatusCode, String)> {
     let row: Option<(String, String)> =
-        sqlx::query_as("SELECT sender, channel_id FROM messages WHERE id = ?")
+        sqlx::query_as("SELECT sender, channel_id FROM messages WHERE id = $1")
             .bind(&message_id)
             .fetch_optional(&state.db)
             .await
@@ -396,7 +396,7 @@ pub async fn edit_message(
     }
 
     let now = crate::auth::handlers::unix_timestamp();
-    sqlx::query("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?")
+    sqlx::query("UPDATE messages SET content = $1, edited_at = $2 WHERE id = $3")
         .bind(&req.content)
         .bind(now)
         .bind(&message_id)
@@ -429,7 +429,7 @@ pub async fn delete_message(
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let row: Option<(String, String, Option<String>)> =
-        sqlx::query_as("SELECT sender, channel_id, reply_to FROM messages WHERE id = ?")
+        sqlx::query_as("SELECT sender, channel_id, reply_to FROM messages WHERE id = $1")
             .bind(&message_id)
             .fetch_optional(&state.db)
             .await
@@ -450,7 +450,7 @@ pub async fn delete_message(
         perms.require(permissions::MANAGE_MESSAGES)?;
     }
 
-    sqlx::query("DELETE FROM messages WHERE id = ?")
+    sqlx::query("DELETE FROM messages WHERE id = $1")
         .bind(&message_id)
         .execute(&state.db)
         .await
@@ -469,7 +469,7 @@ pub async fn delete_message(
     // Decrement reply_count on the parent when a reply is removed.
     if let Some(parent_id) = reply_to {
         let _ = sqlx::query(
-            "UPDATE messages SET reply_count = MAX(0, COALESCE(reply_count, 0) - 1) WHERE id = ?",
+            "UPDATE messages SET reply_count = MAX(0, COALESCE(reply_count, 0) - 1) WHERE id = $1",
         )
         .bind(&parent_id)
         .execute(&state.db)
@@ -511,7 +511,7 @@ async fn load_message(
                 m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
                 COALESCE(m.reply_count, 0) as reply_count
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-         WHERE m.id = ?",
+         WHERE m.id = $1",
     )
     .bind(message_id)
     .fetch_one(&state.db)
@@ -558,8 +558,8 @@ pub async fn get_messages(
         sqlx::query_as::<_, MessageRow>(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-             WHERE m.channel_id = ? AND m.reply_to = ?
-             ORDER BY m.created_at ASC, m.rowid ASC LIMIT ?",
+             WHERE m.channel_id = $1 AND m.reply_to = $2
+             ORDER BY m.created_at ASC, m.rowid ASC LIMIT $3",
         )
         .bind(&channel_id)
         .bind(root_id)
@@ -606,8 +606,8 @@ pub async fn get_messages(
                 sqlx::query_as::<_, MessageRow>(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                     WHERE m.channel_id = ? AND m.rowid < (SELECT rowid FROM messages WHERE id = ?)
-                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+                     WHERE m.channel_id = $1 AND m.rowid < (SELECT rowid FROM messages WHERE id = $2)
+                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT $3",
                 )
                 .bind(&channel_id)
                 .bind(before_id)
@@ -619,8 +619,8 @@ pub async fn get_messages(
                 sqlx::query_as::<_, MessageRow>(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                     WHERE m.channel_id = ?
-                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?",
+                     WHERE m.channel_id = $1
+                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT $2",
                 )
                 .bind(&channel_id)
                 .bind(limit)
@@ -681,7 +681,7 @@ async fn load_reply_context(
     let row: Option<(String, Option<String>, String)> = sqlx::query_as(
         "SELECT m.sender, u.display_name as sender_name, m.content
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-         WHERE m.id = ?",
+         WHERE m.id = $1",
     )
     .bind(parent_id)
     .fetch_optional(db)
@@ -708,9 +708,9 @@ pub(crate) async fn load_reactions(
     viewer: &str,
 ) -> Result<Vec<ReactionSummary>, (StatusCode, String)> {
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT emoji, COUNT(*) as cnt, MAX(CASE WHEN user_key = ? THEN 1 ELSE 0 END) as mine
+        "SELECT emoji, COUNT(*) as cnt, MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
          FROM message_reactions
-         WHERE message_id = ?
+         WHERE message_id = $2
          GROUP BY emoji
          ORDER BY MIN(created_at) ASC",
     )
@@ -739,7 +739,7 @@ async fn load_reactions_anon(
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT emoji, COUNT(*) as cnt
          FROM message_reactions
-         WHERE message_id = ?
+         WHERE message_id = $1
          GROUP BY emoji
          ORDER BY MIN(created_at) ASC",
     )
@@ -776,7 +776,7 @@ pub async fn add_reaction(
     }
 
     // Sanity-check the message belongs to the channel claimed in the path.
-    let row: Option<String> = sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ?")
+    let row: Option<String> = sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = $1")
         .bind(&message_id)
         .fetch_optional(&state.db)
         .await
@@ -792,7 +792,7 @@ pub async fn add_reaction(
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO message_reactions (message_id, emoji, user_key, created_at)
-         VALUES (?, ?, ?, ?) ON CONFLICT (message_id, emoji, user_key) DO NOTHING",
+         VALUES ($1, $2, $3, $4) ON CONFLICT (message_id, emoji, user_key) DO NOTHING",
     )
     .bind(&message_id)
     .bind(emoji)
@@ -830,7 +830,7 @@ pub async fn remove_reaction(
     Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     sqlx::query(
-        "DELETE FROM message_reactions WHERE message_id = ? AND emoji = ? AND user_key = ?",
+        "DELETE FROM message_reactions WHERE message_id = $1 AND emoji = $2 AND user_key = $3",
     )
     .bind(&message_id)
     .bind(&emoji)

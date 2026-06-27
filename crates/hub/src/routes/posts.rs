@@ -24,7 +24,7 @@ async fn require_forum_channel(
     channel_id: &str,
 ) -> Result<(), (StatusCode, String)> {
     let row: Option<(i64, String)> =
-        sqlx::query_as("SELECT is_category, channel_type FROM channels WHERE id = ?")
+        sqlx::query_as("SELECT is_category, channel_type FROM channels WHERE id = $1")
             .bind(channel_id)
             .fetch_optional(db)
             .await
@@ -48,7 +48,7 @@ async fn require_post(
         "SELECT id, channel_id, author_pubkey, title, body,
                 created_at, edited_at, is_pinned, is_locked,
                 reply_count, last_activity_at, deleted_at
-         FROM posts WHERE id = ?",
+         FROM posts WHERE id = $1",
     )
     .bind(post_id)
     .fetch_optional(db)
@@ -71,7 +71,7 @@ async fn require_reply(
     let row = sqlx::query_as::<_, ReplyRow>(
         "SELECT id, post_id, author_pubkey, body,
                 created_at, edited_at, reply_to_id, deleted_at
-         FROM post_replies WHERE id = ?",
+         FROM post_replies WHERE id = $1",
     )
     .bind(reply_id)
     .fetch_optional(db)
@@ -140,11 +140,11 @@ pub async fn list_posts(
                     created_at, edited_at, is_pinned, is_locked,
                     reply_count, last_activity_at, deleted_at
              FROM posts
-             WHERE channel_id = ?
-               AND (last_activity_at < ? OR (last_activity_at = ? AND id < ?))
+             WHERE channel_id = $1
+               AND (last_activity_at < $2 OR (last_activity_at = $3 AND id < $4))
                AND deleted_at IS NULL
              ORDER BY is_pinned DESC, last_activity_at DESC, id DESC
-             LIMIT ?",
+             LIMIT $5",
         )
         .bind(&channel_id)
         .bind(cursor_ts)
@@ -160,9 +160,9 @@ pub async fn list_posts(
                     created_at, edited_at, is_pinned, is_locked,
                     reply_count, last_activity_at, deleted_at
              FROM posts
-             WHERE channel_id = ? AND deleted_at IS NULL
+             WHERE channel_id = $1 AND deleted_at IS NULL
              ORDER BY is_pinned DESC, last_activity_at DESC, id DESC
-             LIMIT ?",
+             LIMIT $2",
         )
         .bind(&channel_id)
         .bind(limit + 1)
@@ -189,8 +189,8 @@ pub async fn list_posts(
     for (summary, row) in posts.iter_mut().zip(rows.iter()) {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM post_replies
-             WHERE post_id = ? AND created_at > COALESCE(
-                 (SELECT read_at FROM post_reads WHERE user_pubkey = ? AND post_id = ?),
+             WHERE post_id = $1 AND created_at > COALESCE(
+                 (SELECT read_at FROM post_reads WHERE user_pubkey = $2 AND post_id = $3),
                  0
              )",
         )
@@ -233,7 +233,7 @@ pub async fn create_post(
 
     sqlx::query(
         "INSERT INTO posts (id, channel_id, author_pubkey, title, body, created_at, last_activity_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -288,8 +288,8 @@ pub async fn get_post(
     // Populate unread_reply_count using the caller's read cursor.
     let unread: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM post_replies
-         WHERE post_id = ? AND created_at > COALESCE(
-             (SELECT read_at FROM post_reads WHERE user_pubkey = ? AND post_id = ?),
+         WHERE post_id = $1 AND created_at > COALESCE(
+             (SELECT read_at FROM post_reads WHERE user_pubkey = $2 AND post_id = $3),
              0
          )",
     )
@@ -307,10 +307,10 @@ pub async fn get_post(
         sqlx::query_as::<_, ReplyRow>(
             "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at
              FROM post_replies
-             WHERE post_id = ?
-               AND created_at > (SELECT created_at FROM post_replies WHERE id = ?)
+             WHERE post_id = $1
+               AND created_at > (SELECT created_at FROM post_replies WHERE id = $2)
              ORDER BY created_at ASC, id ASC
-             LIMIT ?",
+             LIMIT $3",
         )
         .bind(&post_id)
         .bind(after_id)
@@ -322,9 +322,9 @@ pub async fn get_post(
         sqlx::query_as::<_, ReplyRow>(
             "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at
              FROM post_replies
-             WHERE post_id = ?
+             WHERE post_id = $1
              ORDER BY created_at ASC, id ASC
-             LIMIT ?",
+             LIMIT $2",
         )
         .bind(&post_id)
         .bind(limit + 1)
@@ -391,7 +391,7 @@ pub async fn edit_post(
     }
 
     let now = unix_now();
-    sqlx::query("UPDATE posts SET title = ?, body = ?, edited_at = ? WHERE id = ?")
+    sqlx::query("UPDATE posts SET title = $1, body = $2, edited_at = $3 WHERE id = $4")
         .bind(&new_title)
         .bind(&new_body)
         .bind(now)
@@ -442,7 +442,7 @@ pub async fn delete_post(
     }
 
     let now = unix_now();
-    sqlx::query("UPDATE posts SET deleted_at = ? WHERE id = ?")
+    sqlx::query("UPDATE posts SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&post_id)
         .execute(&state.db)
@@ -491,7 +491,7 @@ pub async fn create_reply(
     // Validate reply_to_id belongs to this post.
     if let Some(ref rto) = req.reply_to_id {
         let belongs: Option<String> =
-            sqlx::query_scalar("SELECT id FROM post_replies WHERE id = ? AND post_id = ?")
+            sqlx::query_scalar("SELECT id FROM post_replies WHERE id = $1 AND post_id = $2")
                 .bind(rto)
                 .bind(&post_id)
                 .fetch_optional(&state.db)
@@ -507,7 +507,7 @@ pub async fn create_reply(
 
     sqlx::query(
         "INSERT INTO post_replies (id, post_id, author_pubkey, body, created_at, reply_to_id)
-         VALUES (?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&id)
     .bind(&post_id)
@@ -521,7 +521,7 @@ pub async fn create_reply(
 
     // Update denormalized counters on the parent post.
     sqlx::query(
-        "UPDATE posts SET reply_count = reply_count + 1, last_activity_at = ? WHERE id = ?",
+        "UPDATE posts SET reply_count = reply_count + 1, last_activity_at = $1 WHERE id = $2",
     )
     .bind(now)
     .bind(&post_id)
@@ -575,7 +575,7 @@ pub async fn edit_reply(
     }
 
     let now = unix_now();
-    sqlx::query("UPDATE post_replies SET body = ?, edited_at = ? WHERE id = ?")
+    sqlx::query("UPDATE post_replies SET body = $1, edited_at = $2 WHERE id = $3")
         .bind(&body)
         .bind(now)
         .bind(&reply_id)
@@ -621,7 +621,7 @@ pub async fn delete_reply(
     }
 
     let now = unix_now();
-    sqlx::query("UPDATE post_replies SET deleted_at = ? WHERE id = ?")
+    sqlx::query("UPDATE post_replies SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&reply_id)
         .execute(&state.db)
@@ -629,7 +629,7 @@ pub async fn delete_reply(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Decrement reply_count (don't go below 0).
-    sqlx::query("UPDATE posts SET reply_count = MAX(0, reply_count - 1) WHERE id = ?")
+    sqlx::query("UPDATE posts SET reply_count = MAX(0, reply_count - 1) WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -666,7 +666,7 @@ pub async fn pin_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_pinned = 1 WHERE id = ?")
+    sqlx::query("UPDATE posts SET is_pinned = 1 WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -702,7 +702,7 @@ pub async fn unpin_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_pinned = 0 WHERE id = ?")
+    sqlx::query("UPDATE posts SET is_pinned = 0 WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -738,7 +738,7 @@ pub async fn lock_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_locked = 1 WHERE id = ?")
+    sqlx::query("UPDATE posts SET is_locked = 1 WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -774,7 +774,7 @@ pub async fn unlock_post(
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
 
-    sqlx::query("UPDATE posts SET is_locked = 0 WHERE id = ?")
+    sqlx::query("UPDATE posts SET is_locked = 0 WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -806,7 +806,7 @@ pub async fn mark_post_read(
 
     let now = unix_now();
     sqlx::query(
-        "INSERT OR REPLACE INTO post_reads (user_pubkey, post_id, read_at) VALUES (?, ?, ?)",
+        "INSERT OR REPLACE INTO post_reads (user_pubkey, post_id, read_at) VALUES ($1, $2, $3)",
     )
     .bind(&user.public_key)
     .bind(&post_id)
@@ -849,8 +849,8 @@ pub async fn search_posts(
                 snippet(posts_fts, 1, '<b>', '</b>', '...', 20) AS body_snippet
          FROM posts_fts f
          INNER JOIN posts p ON p.id = f.post_id
-         WHERE posts_fts MATCH ?
-           AND f.channel_id = ?
+         WHERE posts_fts MATCH $1
+           AND f.channel_id = $2
            AND p.deleted_at IS NULL
          LIMIT 50",
     )

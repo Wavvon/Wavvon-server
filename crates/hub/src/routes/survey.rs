@@ -197,7 +197,7 @@ async fn load_active_survey_public(
     };
 
     let questions: Vec<QuestionRow> = sqlx::query_as(
-        "SELECT id, prompt, kind, required, display_order FROM survey_questions WHERE survey_id = ? ORDER BY display_order",
+        "SELECT id, prompt, kind, required, display_order FROM survey_questions WHERE survey_id = $1 ORDER BY display_order",
     )
     .bind(&survey.id)
     .fetch_all(db)
@@ -208,7 +208,7 @@ async fn load_active_survey_public(
     for q in questions {
         let choices: Option<Vec<SurveyChoicePublic>> = if q.kind == "choice" {
             let rows: Vec<ChoiceRow> = sqlx::query_as(
-                "SELECT id, label, display_order FROM survey_choices WHERE question_id = ? ORDER BY display_order",
+                "SELECT id, label, display_order FROM survey_choices WHERE question_id = $1 ORDER BY display_order",
             )
             .bind(&q.id)
             .fetch_all(db)
@@ -249,7 +249,7 @@ async fn load_survey_admin(
     db: &sqlx::PgPool,
     survey_id: &str,
 ) -> Result<Option<SurveyAdmin>, (StatusCode, String)> {
-    let survey: Option<SurveyRow> = sqlx::query_as("SELECT id, enabled FROM surveys WHERE id = ?")
+    let survey: Option<SurveyRow> = sqlx::query_as("SELECT id, enabled FROM surveys WHERE id = $1")
         .bind(survey_id)
         .fetch_optional(db)
         .await
@@ -261,7 +261,7 @@ async fn load_survey_admin(
     };
 
     let questions: Vec<QuestionRow> = sqlx::query_as(
-        "SELECT id, prompt, kind, required, display_order FROM survey_questions WHERE survey_id = ? ORDER BY display_order",
+        "SELECT id, prompt, kind, required, display_order FROM survey_questions WHERE survey_id = $1 ORDER BY display_order",
     )
     .bind(&survey.id)
     .fetch_all(db)
@@ -272,7 +272,7 @@ async fn load_survey_admin(
     for q in questions {
         let choices: Option<Vec<SurveyChoiceAdmin>> = if q.kind == "choice" {
             let rows: Vec<ChoiceRow> = sqlx::query_as(
-                "SELECT id, label, display_order FROM survey_choices WHERE question_id = ? ORDER BY display_order",
+                "SELECT id, label, display_order FROM survey_choices WHERE question_id = $1 ORDER BY display_order",
             )
             .bind(&q.id)
             .fetch_all(db)
@@ -282,7 +282,7 @@ async fn load_survey_admin(
             let mut cout = Vec::with_capacity(rows.len());
             for c in rows {
                 let role_ids: Vec<String> = sqlx::query_scalar(
-                    "SELECT role_id FROM survey_choice_roles WHERE choice_id = ?",
+                    "SELECT role_id FROM survey_choice_roles WHERE choice_id = $1",
                 )
                 .bind(&c.id)
                 .fetch_all(db)
@@ -374,7 +374,7 @@ pub async fn submit_survey(
 
     // Insert response (UNIQUE(pubkey, survey_id) — upsert not needed, return error on re-submit)
     let result = sqlx::query(
-        "INSERT INTO survey_responses (id, pubkey, survey_id, submitted_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO survey_responses (id, pubkey, survey_id, submitted_at) VALUES ($1, $2, $3, $4)",
     )
     .bind(&response_id)
     .bind(&user.public_key)
@@ -397,7 +397,7 @@ pub async fn submit_survey(
 
     for a in &req.answers {
         sqlx::query(
-            "INSERT INTO survey_answers (response_id, question_id, choice_id, text_answer) VALUES (?, ?, ?, ?)",
+            "INSERT INTO survey_answers (response_id, question_id, choice_id, text_answer) VALUES ($1, $2, $3, $4)",
         )
         .bind(&response_id)
         .bind(&a.question_id)
@@ -418,7 +418,7 @@ pub async fn submit_survey(
         // Apply role mappings for choice answers
         if let Some(choice_id) = &a.choice_id {
             let role_ids: Vec<String> =
-                sqlx::query_scalar("SELECT role_id FROM survey_choice_roles WHERE choice_id = ?")
+                sqlx::query_scalar("SELECT role_id FROM survey_choice_roles WHERE choice_id = $1")
                     .bind(choice_id)
                     .fetch_all(&state.db)
                     .await
@@ -426,7 +426,7 @@ pub async fn submit_survey(
 
             for role_id in role_ids {
                 sqlx::query(
-                    "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, ?, ?)
+                    "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES ($1, $2, $3)
                      ON CONFLICT (user_public_key, role_id) DO NOTHING",
                 )
                 .bind(&user.public_key)
@@ -443,14 +443,14 @@ pub async fn submit_survey(
 
     // Set approval status based on whether there are text answers
     let next_state = if has_text {
-        sqlx::query("UPDATE users SET approval_status = 'pending' WHERE public_key = ?")
+        sqlx::query("UPDATE users SET approval_status = 'pending' WHERE public_key = $1")
             .bind(&user.public_key)
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         "pending".to_string()
     } else {
-        sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = ?")
+        sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
             .bind(&user.public_key)
             .execute(&state.db)
             .await
@@ -506,7 +506,7 @@ pub async fn admin_put_survey(
     // SQLite doesn't have a clean BEGIN TRANSACTION in sqlx without a transaction object.
     // We delete by id and rely on CASCADE for child rows.
     // First, delete any existing survey with this id (or if id is new, just insert).
-    sqlx::query("DELETE FROM surveys WHERE id = ?")
+    sqlx::query("DELETE FROM surveys WHERE id = $1")
         .bind(&req.id)
         .execute(&state.db)
         .await
@@ -520,7 +520,7 @@ pub async fn admin_put_survey(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
 
-    sqlx::query("INSERT INTO surveys (id, enabled, updated_at) VALUES (?, ?, ?)")
+    sqlx::query("INSERT INTO surveys (id, enabled, updated_at) VALUES ($1, $2, $3)")
         .bind(&req.id)
         .bind(if req.enabled { 1i64 } else { 0i64 })
         .bind(now)
@@ -530,7 +530,7 @@ pub async fn admin_put_survey(
 
     for q in &req.questions {
         sqlx::query(
-            "INSERT INTO survey_questions (id, survey_id, prompt, kind, required, display_order) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO survey_questions (id, survey_id, prompt, kind, required, display_order) VALUES ($1, $2, $3, $4, $5, $6)",
         )
         .bind(&q.id)
         .bind(&req.id)
@@ -545,7 +545,7 @@ pub async fn admin_put_survey(
         if let Some(choices) = &q.choices {
             for c in choices {
                 sqlx::query(
-                    "INSERT INTO survey_choices (id, question_id, label, display_order) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO survey_choices (id, question_id, label, display_order) VALUES ($1, $2, $3, $4)",
                 )
                 .bind(&c.id)
                 .bind(&q.id)
@@ -557,7 +557,7 @@ pub async fn admin_put_survey(
 
                 for role_id in &c.role_ids {
                     sqlx::query(
-                        "INSERT INTO survey_choice_roles (choice_id, role_id) VALUES (?, ?)
+                        "INSERT INTO survey_choice_roles (choice_id, role_id) VALUES ($1, $2)
                          ON CONFLICT (choice_id, role_id) DO NOTHING",
                     )
                     .bind(&c.id)
@@ -588,7 +588,7 @@ pub async fn admin_list_responses(
              FROM survey_responses sr
              LEFT JOIN users u ON sr.pubkey = u.public_key
              ORDER BY sr.submitted_at DESC
-             LIMIT ?",
+             LIMIT $1",
         )
         .bind(q.limit)
         .fetch_all(&state.db)
@@ -602,7 +602,7 @@ pub async fn admin_list_responses(
              LEFT JOIN users u ON sr.pubkey = u.public_key
              WHERE u.approval_status = 'pending'
              ORDER BY sr.submitted_at DESC
-             LIMIT ?",
+             LIMIT $1",
         )
         .bind(q.limit)
         .fetch_all(&state.db)
@@ -638,7 +638,7 @@ pub async fn admin_get_response_for_pubkey(
         "SELECT sr.id, sr.pubkey, u.display_name, sr.submitted_at
          FROM survey_responses sr
          LEFT JOIN users u ON sr.pubkey = u.public_key
-         WHERE sr.pubkey = ?
+         WHERE sr.pubkey = $1
          ORDER BY sr.submitted_at DESC
          LIMIT 1",
     )
@@ -671,7 +671,7 @@ async fn load_response_answers(
          FROM survey_answers sa
          LEFT JOIN survey_questions sq ON sa.question_id = sq.id
          LEFT JOIN survey_choices sc ON sa.choice_id = sc.id
-         WHERE sa.response_id = ?",
+         WHERE sa.response_id = $1",
     )
     .bind(response_id)
     .fetch_all(db)

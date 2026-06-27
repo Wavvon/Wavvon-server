@@ -64,7 +64,7 @@ pub async fn push_sender_keys(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Membership check
     let is_member: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ? AND public_key = ?",
+        "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = $1 AND public_key = $2",
     )
     .bind(&conversation_id)
     .bind(&user.public_key)
@@ -80,7 +80,7 @@ pub async fn push_sender_keys(
     }
 
     // Only group conversations support sender-key distribution
-    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = ?")
+    let conv_type: String = sqlx::query_scalar("SELECT conv_type FROM conversations WHERE id = $1")
         .bind(&conversation_id)
         .fetch_optional(&state.db)
         .await
@@ -113,7 +113,7 @@ pub async fn push_sender_keys(
         sqlx::query(
             "INSERT INTO group_sender_key_distributions
              (id, conv_id, sender_pubkey, recipient_pubkey, sender_key_version, iteration, wrapped_key_hex, wrap_nonce_hex, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT(conv_id, sender_pubkey, recipient_pubkey, sender_key_version)
              DO UPDATE SET
                iteration       = excluded.iteration,
@@ -155,7 +155,7 @@ pub async fn get_sender_keys(
 ) -> Result<Json<Vec<GroupSenderKeyEntry>>, (StatusCode, String)> {
     // Membership check
     let is_member: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = ? AND public_key = ?",
+        "SELECT COUNT(*) FROM conversation_members WHERE conversation_id = $1 AND public_key = $2",
     )
     .bind(&conversation_id)
     .bind(&user.public_key)
@@ -173,7 +173,7 @@ pub async fn get_sender_keys(
     let rows = sqlx::query_as::<_, SenderKeyRow>(
         "SELECT sender_pubkey, sender_key_version, iteration, wrapped_key_hex, wrap_nonce_hex, created_at
          FROM group_sender_key_distributions
-         WHERE conv_id = ? AND recipient_pubkey = ?
+         WHERE conv_id = $1 AND recipient_pubkey = $2
          ORDER BY sender_pubkey, sender_key_version",
     )
     .bind(&conversation_id)

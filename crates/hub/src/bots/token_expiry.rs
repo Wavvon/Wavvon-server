@@ -64,9 +64,9 @@ async fn sweep_warnings(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
          JOIN users u ON u.public_key = s.public_key
          WHERE u.is_bot = 1
            AND s.expires_at IS NOT NULL
-           AND s.expires_at > ?
-           AND s.expires_at <= ?
-           AND (s.expiry_warned_at IS NULL OR s.expiry_warned_at < ?)",
+           AND s.expires_at > $1
+           AND s.expires_at <= $2
+           AND (s.expiry_warned_at IS NULL OR s.expiry_warned_at < $3)",
     )
     .bind(now) // not yet expired
     .bind(warn_before) // but within the 72-hour window
@@ -94,7 +94,7 @@ async fn sweep_warnings(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
         }
 
         // Mark warned regardless of whether the bot is currently connected.
-        let _ = sqlx::query("UPDATE sessions SET expiry_warned_at = ? WHERE token = ?")
+        let _ = sqlx::query("UPDATE sessions SET expiry_warned_at = $1 WHERE token = $2")
             .bind(now)
             .bind(&row.token)
             .execute(&state.db)
@@ -121,7 +121,7 @@ async fn sweep_expired(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
          JOIN users u ON u.public_key = s.public_key
          WHERE u.is_bot = 1
            AND s.expires_at IS NOT NULL
-           AND s.expires_at < ?",
+           AND s.expires_at < $1",
     )
     .bind(now)
     .fetch_all(&state.db)
@@ -152,7 +152,7 @@ async fn sweep_expired(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
         }
 
         // Delete the expired session row.
-        let _ = sqlx::query("DELETE FROM sessions WHERE token = ?")
+        let _ = sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(&row.token)
             .execute(&state.db)
             .await;

@@ -61,7 +61,7 @@ pub async fn maybe_bootstrap(
             .unwrap_or_default()
             .as_secs()
             .to_string();
-        sqlx::query("UPDATE hub_settings SET value = ? WHERE key = 'bootstrapped_at'")
+        sqlx::query("UPDATE hub_settings SET value = $1 WHERE key = 'bootstrapped_at'")
             .bind(&now)
             .execute(db)
             .await
@@ -91,7 +91,7 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> anyhow::Re
 
     // Apply hub name if present
     if let Some(name) = template.get("name").and_then(|v| v.as_str()) {
-        sqlx::query("UPDATE hub_settings SET value = ? WHERE key = 'hub_name'")
+        sqlx::query("UPDATE hub_settings SET value = $1 WHERE key = 'hub_name'")
             .bind(name)
             .execute(db)
             .await
@@ -109,7 +109,7 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> anyhow::Re
             let id = uuid::Uuid::new_v4().to_string();
             sqlx::query(
                 "INSERT INTO channels(id, name, created_by, is_category, display_order, created_at)
-                 VALUES(?, ?, 'system', ?, 0, ?) ON CONFLICT (id) DO NOTHING",
+                 VALUES($1, $2, 'system', $3, 0, $4) ON CONFLICT (id) DO NOTHING",
             )
             .bind(&id)
             .bind(name)
@@ -130,7 +130,7 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> anyhow::Re
                 .unwrap_or("Member");
             let id = uuid::Uuid::new_v4().to_string();
             sqlx::query(
-                "INSERT INTO roles(id, name, priority, created_at) VALUES(?,?,0,?) ON CONFLICT (id) DO NOTHING",
+                "INSERT INTO roles(id, name, priority, created_at) VALUES($1,$2,0,$3) ON CONFLICT (id) DO NOTHING",
             )
             .bind(&id)
             .bind(name)
@@ -142,7 +142,7 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> anyhow::Re
                 for p in perms {
                     if let Some(perm) = p.as_str() {
                         sqlx::query(
-                            "INSERT INTO role_permissions(role_id, permission) VALUES(?,?) ON CONFLICT (role_id, permission) DO NOTHING",
+                            "INSERT INTO role_permissions(role_id, permission) VALUES($1,$2) ON CONFLICT (role_id, permission) DO NOTHING",
                         )
                         .bind(&id)
                         .bind(perm)

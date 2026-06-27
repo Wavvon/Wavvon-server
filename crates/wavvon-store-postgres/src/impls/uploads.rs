@@ -24,7 +24,7 @@ impl UploadStore for PostgresStore {
         sqlx::query(
             "INSERT INTO upload_files
              (id, filename, original_name, mime_type, size_bytes, uploader_pubkey, channel_id, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(&f.id)
         .bind(&f.filename)
@@ -44,7 +44,7 @@ impl UploadStore for PostgresStore {
         let row = sqlx::query(
             "SELECT id, filename, original_name, mime_type, size_bytes,
                     uploader_pubkey, channel_id, created_at
-             FROM upload_files WHERE id = ?",
+             FROM upload_files WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(self.pool())
@@ -57,7 +57,7 @@ impl UploadStore for PostgresStore {
         let rows = sqlx::query(
             "SELECT id, filename, original_name, mime_type, size_bytes,
                     uploader_pubkey, channel_id, created_at
-             FROM upload_files WHERE channel_id = ? ORDER BY created_at DESC",
+             FROM upload_files WHERE channel_id = $1 ORDER BY created_at DESC",
         )
         .bind(channel_id)
         .fetch_all(self.pool())
@@ -67,7 +67,7 @@ impl UploadStore for PostgresStore {
     }
 
     async fn delete_upload(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM upload_files WHERE id = ?")
+        sqlx::query("DELETE FROM upload_files WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -78,7 +78,7 @@ impl UploadStore for PostgresStore {
     async fn is_valid_image_upload(&self, id: &str, channel_id: &str) -> Result<bool, StoreError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM upload_files
-             WHERE id = ? AND channel_id = ?
+             WHERE id = $1 AND channel_id = $2
                AND mime_type IN ('image/png','image/jpeg','image/gif','image/webp')",
         )
         .bind(id)

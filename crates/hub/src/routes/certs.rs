@@ -121,7 +121,7 @@ pub async fn list_user_certs(
     // 1. Certs this hub issued for the user (from cert_issuances ledger).
     let issued = sqlx::query_as::<_, UserCertRow>(
         "SELECT payload_json, signature FROM cert_issuances
-         WHERE subject_pubkey = ? AND standing = 'good' AND revoked_at IS NULL AND expires_at > ?",
+         WHERE subject_pubkey = $1 AND standing = 'good' AND revoked_at IS NULL AND expires_at > $2",
     )
     .bind(&pubkey)
     .bind(now)
@@ -132,7 +132,7 @@ pub async fn list_user_certs(
     // 2. Cross-hub certs deposited into the portfolio (user_certs).
     let deposited = sqlx::query_as::<_, UserCertRow>(
         "SELECT payload_json, signature FROM user_certs
-         WHERE master_pubkey = ? AND expires_at > ?",
+         WHERE master_pubkey = $1 AND expires_at > $2",
     )
     .bind(&pubkey)
     .bind(now)
@@ -205,7 +205,7 @@ pub async fn get_revocations(
     let rows = sqlx::query_as::<_, RevocationDbRow>(
         "SELECT id, subject_pubkey, revoked_at
          FROM cert_issuances
-         WHERE revoked_at IS NOT NULL AND revoked_at >= ?
+         WHERE revoked_at IS NOT NULL AND revoked_at >= $1
          ORDER BY revoked_at DESC",
     )
     .bind(since)
@@ -341,7 +341,7 @@ pub async fn patch_cert_settings(
 
     for (key, value) in kvs {
         sqlx::query(
-            "INSERT INTO hub_settings (key, value) VALUES (?, ?)
+            "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )
         .bind(key)
@@ -369,7 +369,7 @@ pub async fn issue_cert_for(
     // Load user row
     let user_row: Option<(i64, i64, String, Option<i64>, i64)> = sqlx::query_as(
         "SELECT first_seen_at, last_seen_at, approval_status, pow_level, COALESCE(pow_level,0)
-         FROM users WHERE public_key = ?",
+         FROM users WHERE public_key = $1",
     )
     .bind(subject_pubkey)
     .fetch_optional(&state.db)
@@ -426,7 +426,7 @@ pub async fn issue_cert_for(
     sqlx::query(
         "INSERT INTO cert_issuances
          (id, subject_pubkey, pow_level, member_since, issued_at, expires_at, standing, payload_json, signature)
-         VALUES (?, ?, ?, ?, ?, ?, 'good', ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, 'good', $7, $8)",
     )
     .bind(&id)
     .bind(subject_pubkey)
@@ -462,8 +462,8 @@ pub async fn revoke_cert_for(
 
     // Mark any existing non-revoked certs revoked in the ledger.
     sqlx::query(
-        "UPDATE cert_issuances SET revoked_at = ?, standing = 'revoked'
-         WHERE subject_pubkey = ? AND revoked_at IS NULL",
+        "UPDATE cert_issuances SET revoked_at = $1, standing = 'revoked'
+         WHERE subject_pubkey = $2 AND revoked_at IS NULL",
     )
     .bind(now)
     .bind(subject_pubkey)
@@ -473,7 +473,7 @@ pub async fn revoke_cert_for(
 
     // Re-issue a cert with standing=revoked so pull-path verifiers see it.
     let user_row: Option<(i64,)> =
-        sqlx::query_as("SELECT first_seen_at FROM users WHERE public_key = ?")
+        sqlx::query_as("SELECT first_seen_at FROM users WHERE public_key = $1")
             .bind(subject_pubkey)
             .fetch_optional(&state.db)
             .await
@@ -510,7 +510,7 @@ pub async fn revoke_cert_for(
         sqlx::query(
             "INSERT INTO cert_issuances
              (id, subject_pubkey, pow_level, member_since, issued_at, expires_at, revoked_at, standing, payload_json, signature)
-             VALUES (?, ?, NULL, ?, ?, ?, ?, 'revoked', ?, ?)",
+             VALUES ($1, $2, NULL, $3, $4, $5, $6, 'revoked', $7, $8)",
         )
         .bind(&id)
         .bind(subject_pubkey)
@@ -705,7 +705,7 @@ async fn load_hub_url(state: &AppState) -> String {
 }
 
 async fn setting_i64(state: &AppState, key: &str, default: i64) -> i64 {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
         .bind(key)
         .fetch_optional(&state.db)
         .await

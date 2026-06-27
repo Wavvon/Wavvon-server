@@ -79,7 +79,7 @@ pub async fn dispatch_slash(
          FROM bot_commands bc
          JOIN bot_profiles bp ON bp.pubkey = bc.pubkey
          JOIN users u ON u.public_key = bc.pubkey
-         WHERE bc.name = ?
+         WHERE bc.name = $1
            AND u.is_bot = 1
            AND u.is_bot_removed = 0
            AND (
@@ -90,7 +90,7 @@ pub async fn dispatch_slash(
              -- ...or this channel is in the bot's scope.
              OR EXISTS (
                SELECT 1 FROM bot_channel_scope
-               WHERE bot_pubkey = bc.pubkey AND channel_id = ?
+               WHERE bot_pubkey = bc.pubkey AND channel_id = $2
              )
            )
          LIMIT 1",
@@ -124,7 +124,7 @@ pub async fn dispatch_slash(
 
     // Look up invoker display name.
     let invoker_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(invoker_pubkey)
             .fetch_optional(&state.db)
             .await
@@ -218,7 +218,7 @@ pub async fn dispatch_slash(
 
         sqlx::query(
             "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey, embeds)
-             VALUES(?,?,?,?,?,?,?)",
+             VALUES($1,$2,$3,$4,$5,$6,$7)",
         )
         .bind(&msg_id)
         .bind(channel_id)
@@ -233,7 +233,7 @@ pub async fn dispatch_slash(
 
         // Look up bot display name.
         let bot_name: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
                 .bind(&matched.bot_pubkey)
                 .fetch_optional(&state.db)
                 .await
@@ -290,7 +290,7 @@ pub async fn insert_ephemeral_error(
 
     sqlx::query(
         "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey)
-         VALUES(?,?,?,?,?,?)",
+         VALUES($1,$2,$3,$4,$5,$6)",
     )
     .bind(&err_id)
     .bind(channel_id)
@@ -363,7 +363,7 @@ pub async fn dispatch_component(
     }
 
     let msg_info: Option<MsgInfo> =
-        sqlx::query_as::<_, MsgInfo>("SELECT channel_id, sender FROM messages WHERE id = ?")
+        sqlx::query_as::<_, MsgInfo>("SELECT channel_id, sender FROM messages WHERE id = $1")
             .bind(message_id)
             .fetch_optional(&state.db)
             .await
@@ -379,7 +379,7 @@ pub async fn dispatch_component(
     };
 
     // Verify the sender is a bot.
-    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = ?")
+    let is_bot: Option<i64> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
         .bind(&msg_info.sender)
         .fetch_optional(&state.db)
         .await
@@ -394,7 +394,7 @@ pub async fn dispatch_component(
 
     // Get the bot's webhook_url from bot_profiles.
     let webhook_url: Option<String> =
-        sqlx::query_scalar("SELECT webhook_url FROM bot_profiles WHERE pubkey = ?")
+        sqlx::query_scalar("SELECT webhook_url FROM bot_profiles WHERE pubkey = $1")
             .bind(&msg_info.sender)
             .fetch_optional(&state.db)
             .await
@@ -410,9 +410,9 @@ pub async fn dispatch_component(
     // Check channel scope for this bot.
     let in_scope: bool = sqlx::query_scalar::<_, i64>(
         "SELECT CASE
-           WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = ?)
+           WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = $1)
            THEN 1
-           ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = ? AND channel_id = ?)
+           ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = $2 AND channel_id = $3)
          END",
     )
     .bind(&msg_info.sender)
@@ -429,7 +429,7 @@ pub async fn dispatch_component(
 
     // Look up user's display name.
     let user_name: Option<String> =
-        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(user_pubkey)
             .fetch_optional(&state.db)
             .await
@@ -526,7 +526,7 @@ async fn apply_component_response(
         let now = crate::auth::handlers::unix_timestamp();
 
         if let Some(new_body) = &body {
-            let _ = sqlx::query("UPDATE messages SET content = ?, edited_at = ? WHERE id = ?")
+            let _ = sqlx::query("UPDATE messages SET content = $1, edited_at = $2 WHERE id = $3")
                 .bind(new_body)
                 .bind(now)
                 .bind(message_id)
@@ -536,7 +536,7 @@ async fn apply_component_response(
 
         if let Some(rows) = &components {
             // Replace all components for this message.
-            let _ = sqlx::query("DELETE FROM message_components WHERE message_id = ?")
+            let _ = sqlx::query("DELETE FROM message_components WHERE message_id = $1")
                 .bind(message_id)
                 .execute(&state.db)
                 .await;
@@ -546,7 +546,7 @@ async fn apply_component_response(
             let comp_id = Uuid::new_v4().to_string();
             let _ = sqlx::query(
                 "INSERT INTO message_components(id, message_id, row_idx, component_idx, type, config_json)
-                 VALUES(?,?,0,0,'rows',?)",
+                 VALUES($1,$2,0,0,'rows',$3)",
             )
             .bind(&comp_id)
             .bind(message_id)
@@ -579,7 +579,7 @@ async fn apply_component_response(
 
         let _ = sqlx::query(
             "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey)
-             VALUES(?,?,?,?,?,?)",
+             VALUES($1,$2,$3,$4,$5,$6)",
         )
         .bind(&msg_id)
         .bind(channel_id)
@@ -591,7 +591,7 @@ async fn apply_component_response(
         .await;
 
         let bot_name: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
                 .bind(bot_pubkey)
                 .fetch_optional(&state.db)
                 .await
@@ -637,7 +637,7 @@ async fn load_updated_message(
     let row: (String, String, Option<String>, String, i64, Option<i64>) = sqlx::query_as(
         "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-         WHERE m.id = ?",
+         WHERE m.id = $1",
     )
     .bind(message_id)
     .fetch_one(&state.db)

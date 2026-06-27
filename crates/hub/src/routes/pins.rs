@@ -40,7 +40,7 @@ pub async fn pin_message(
 
     // Verify message belongs to this channel.
     let msg_channel: Option<String> =
-        sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = ?")
+        sqlx::query_scalar("SELECT channel_id FROM messages WHERE id = $1")
             .bind(&message_id)
             .fetch_optional(&state.db)
             .await
@@ -61,7 +61,7 @@ pub async fn pin_message(
 
     sqlx::query(
         "INSERT INTO channel_pins (channel_id, message_id, pinned_by, pinned_at)
-         VALUES (?, ?, ?, ?) ON CONFLICT (channel_id, message_id) DO NOTHING",
+         VALUES ($1, $2, $3, $4) ON CONFLICT (channel_id, message_id) DO NOTHING",
     )
     .bind(&channel_id)
     .bind(&message_id)
@@ -93,7 +93,7 @@ pub async fn unpin_message(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::MANAGE_MESSAGES)?;
 
-    sqlx::query("DELETE FROM channel_pins WHERE channel_id = ? AND message_id = ?")
+    sqlx::query("DELETE FROM channel_pins WHERE channel_id = $1 AND message_id = $2")
         .bind(&channel_id)
         .bind(&message_id)
         .execute(&state.db)
@@ -119,7 +119,7 @@ pub async fn list_pins(
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<PinResponse>>, (StatusCode, String)> {
     // Verify channel exists.
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
         .fetch_optional(&state.db)
         .await
@@ -148,7 +148,7 @@ pub async fn list_pins(
          FROM channel_pins cp
          INNER JOIN messages m ON m.id = cp.message_id
          LEFT JOIN users u ON u.public_key = m.sender
-         WHERE cp.channel_id = ?
+         WHERE cp.channel_id = $1
          ORDER BY cp.pinned_at DESC",
     )
     .bind(&channel_id)

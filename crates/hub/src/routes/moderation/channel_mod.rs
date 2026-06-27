@@ -31,7 +31,7 @@ pub async fn channel_ban(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (channel_id, target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&channel_id)
@@ -65,7 +65,7 @@ pub async fn list_channel_bans(
 
     let rows = sqlx::query_as::<_, ChannelBanRow>(
         "SELECT channel_id, target_public_key, banned_by, reason, created_at
-         FROM channel_bans WHERE channel_id = ? ORDER BY created_at DESC",
+         FROM channel_bans WHERE channel_id = $1 ORDER BY created_at DESC",
     )
     .bind(&channel_id)
     .fetch_all(&state.db)
@@ -93,7 +93,7 @@ pub async fn channel_unban(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MUTE_MEMBERS)?;
 
-    sqlx::query("DELETE FROM channel_bans WHERE channel_id = ? AND target_public_key = ?")
+    sqlx::query("DELETE FROM channel_bans WHERE channel_id = $1 AND target_public_key = $2")
         .bind(&channel_id)
         .bind(&target_key)
         .execute(&state.db)
@@ -121,7 +121,7 @@ pub async fn voice_mute(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO voice_mutes (target_public_key, muted_by, reason, created_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO voice_mutes (target_public_key, muted_by, reason, created_at) VALUES ($1, $2, $3, $4)
          ON CONFLICT (target_public_key) DO UPDATE SET muted_by = excluded.muted_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
@@ -151,7 +151,7 @@ pub async fn voice_unmute(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MUTE_MEMBERS)?;
 
-    sqlx::query("DELETE FROM voice_mutes WHERE target_public_key = ?")
+    sqlx::query("DELETE FROM voice_mutes WHERE target_public_key = $1")
         .bind(&target_key)
         .execute(&state.db)
         .await
@@ -198,8 +198,8 @@ pub async fn set_talk_power(
     perms.require(ADMIN)?;
 
     sqlx::query(
-        "INSERT INTO channel_settings (channel_id, min_talk_power) VALUES (?, ?)
-         ON CONFLICT(channel_id) DO UPDATE SET min_talk_power = ?",
+        "INSERT INTO channel_settings (channel_id, min_talk_power) VALUES ($1, $2)
+         ON CONFLICT(channel_id) DO UPDATE SET min_talk_power = $3",
     )
     .bind(&channel_id)
     .bind(req.min_talk_power)
@@ -217,7 +217,7 @@ pub async fn get_talk_power(
     Path(channel_id): Path<String>,
 ) -> Result<Json<TalkPowerResponse>, (StatusCode, String)> {
     let min_talk_power: i64 =
-        sqlx::query_scalar("SELECT min_talk_power FROM channel_settings WHERE channel_id = ?")
+        sqlx::query_scalar("SELECT min_talk_power FROM channel_settings WHERE channel_id = $1")
             .bind(&channel_id)
             .fetch_optional(&state.db)
             .await
@@ -243,7 +243,7 @@ pub async fn channel_ban_v2(
     let now = crate::auth::handlers::unix_timestamp().to_string();
 
     sqlx::query(
-        "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, NULL, ?)
+        "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES ($1, $2, $3, NULL, $4)
          ON CONFLICT (channel_id, target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&channel_id)
@@ -273,7 +273,7 @@ pub async fn channel_unban_v2(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(BAN_MEMBERS)?;
 
-    sqlx::query("DELETE FROM channel_bans WHERE channel_id = ? AND target_public_key = ?")
+    sqlx::query("DELETE FROM channel_bans WHERE channel_id = $1 AND target_public_key = $2")
         .bind(&channel_id)
         .bind(&pubkey)
         .execute(&state.db)
@@ -293,7 +293,7 @@ pub async fn list_channel_bans_v2(
 
     let rows = sqlx::query_as::<_, ChannelBanRow>(
         "SELECT channel_id, target_public_key, banned_by, reason, created_at
-         FROM channel_bans WHERE channel_id = ? ORDER BY created_at DESC",
+         FROM channel_bans WHERE channel_id = $1 ORDER BY created_at DESC",
     )
     .bind(&channel_id)
     .fetch_all(&state.db)
@@ -325,7 +325,7 @@ pub async fn channel_voice_mute(
     let now = crate::auth::handlers::unix_timestamp().to_string();
 
     sqlx::query(
-        "INSERT INTO channel_voice_mutes (channel_id, pubkey, muted_by, muted_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO channel_voice_mutes (channel_id, pubkey, muted_by, muted_at) VALUES ($1, $2, $3, $4)
          ON CONFLICT (channel_id, pubkey) DO UPDATE SET muted_by = excluded.muted_by, muted_at = excluded.muted_at",
     )
     .bind(&channel_id)
@@ -355,7 +355,7 @@ pub async fn channel_voice_unmute(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MUTE_MEMBERS)?;
 
-    sqlx::query("DELETE FROM channel_voice_mutes WHERE channel_id = ? AND pubkey = ?")
+    sqlx::query("DELETE FROM channel_voice_mutes WHERE channel_id = $1 AND pubkey = $2")
         .bind(&channel_id)
         .bind(&pubkey)
         .execute(&state.db)
@@ -382,7 +382,7 @@ pub async fn list_channel_voice_mutes(
     }
 
     let rows = sqlx::query_as::<_, Row>(
-        "SELECT channel_id, pubkey, muted_by, muted_at FROM channel_voice_mutes WHERE channel_id = ? ORDER BY muted_at DESC",
+        "SELECT channel_id, pubkey, muted_by, muted_at FROM channel_voice_mutes WHERE channel_id = $1 ORDER BY muted_at DESC",
     )
     .bind(&channel_id)
     .fetch_all(&state.db)
@@ -412,7 +412,7 @@ pub async fn raise_hand(
     let now = crate::auth::handlers::unix_timestamp().to_string();
 
     sqlx::query(
-        "INSERT INTO raise_hand_requests (id, channel_id, pubkey, requested_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO raise_hand_requests (id, channel_id, pubkey, requested_at) VALUES ($1, $2, $3, $4)
          ON CONFLICT (channel_id, pubkey) DO UPDATE SET id = excluded.id, requested_at = excluded.requested_at",
     )
     .bind(&id)
@@ -445,7 +445,7 @@ pub async fn lower_hand(
         perms.require(MUTE_MEMBERS)?;
     }
 
-    sqlx::query("DELETE FROM raise_hand_requests WHERE channel_id = ? AND pubkey = ?")
+    sqlx::query("DELETE FROM raise_hand_requests WHERE channel_id = $1 AND pubkey = $2")
         .bind(&channel_id)
         .bind(&pubkey)
         .execute(&state.db)
@@ -469,7 +469,7 @@ pub async fn list_raise_hands(
     }
 
     let rows = sqlx::query_as::<_, Row>(
-        "SELECT id, channel_id, pubkey, requested_at FROM raise_hand_requests WHERE channel_id = ? ORDER BY requested_at ASC",
+        "SELECT id, channel_id, pubkey, requested_at FROM raise_hand_requests WHERE channel_id = $1 ORDER BY requested_at ASC",
     )
     .bind(&channel_id)
     .fetch_all(&state.db)

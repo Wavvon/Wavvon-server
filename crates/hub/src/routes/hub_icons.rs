@@ -86,7 +86,7 @@ pub async fn create_icon(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO hub_icons (id, name, svg_content, uploaded_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO hub_icons (id, name, svg_content, uploaded_by, created_at) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&id)
     .bind(&name)
@@ -123,7 +123,7 @@ pub async fn rename_icon(
         return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".into()));
     }
 
-    let rows = sqlx::query("UPDATE hub_icons SET name = ? WHERE id = ?")
+    let rows = sqlx::query("UPDATE hub_icons SET name = $1 WHERE id = $2")
         .bind(&name)
         .bind(&icon_id)
         .execute(&state.db)
@@ -144,7 +144,7 @@ pub async fn delete_icon(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::MANAGE_HUB_ICONS)?;
 
-    let rows = sqlx::query("DELETE FROM hub_icons WHERE id = ?")
+    let rows = sqlx::query("DELETE FROM hub_icons WHERE id = $1")
         .bind(&icon_id)
         .execute(&state.db)
         .await

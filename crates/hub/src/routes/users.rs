@@ -52,7 +52,7 @@ pub async fn list_users(
                      WHERE ur.user_public_key = u.public_key AND r.display_separately = 1
                      ORDER BY r.priority DESC LIMIT 1) AS group_role
              FROM users u
-             WHERE u.display_name LIKE ? OR u.public_key LIKE ?
+             WHERE u.display_name LIKE $1 OR u.public_key LIKE $2
              ORDER BY u.display_name, u.public_key LIMIT 50",
         )
         .bind(&search)
@@ -102,7 +102,7 @@ pub async fn channel_members(
     let rows = sqlx::query_as::<_, UserRow>(
         "SELECT u.public_key, u.display_name, u.avatar, u.is_bot FROM users u
          WHERE u.public_key NOT IN (
-             SELECT target_public_key FROM channel_bans WHERE channel_id = ?
+             SELECT target_public_key FROM channel_bans WHERE channel_id = $1
          )
          ORDER BY u.display_name, u.public_key",
     )
@@ -177,7 +177,7 @@ pub async fn get_user_profile(
     Path(pubkey): Path<String>,
 ) -> Result<Json<UserProfileResponse>, (StatusCode, String)> {
     let row: Option<(Option<String>, Option<String>, i64)> = sqlx::query_as(
-        "SELECT display_name, avatar, first_seen_at FROM users WHERE public_key = ?",
+        "SELECT display_name, avatar, first_seen_at FROM users WHERE public_key = $1",
     )
     .bind(&pubkey)
     .fetch_optional(&state.db)
@@ -199,7 +199,7 @@ pub async fn get_user_profile(
         "SELECT r.id, r.name, NULL as color
          FROM roles r
          INNER JOIN user_roles ur ON r.id = ur.role_id
-         WHERE ur.user_public_key = ?
+         WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )
     .bind(&pubkey)
@@ -225,7 +225,7 @@ pub async fn get_user_profile(
     }
 
     let badges: Vec<BadgeRow> = sqlx::query_as(
-        "SELECT id, label FROM issued_badges WHERE recipient_hub_pubkey = ? AND revoked_at IS NULL",
+        "SELECT id, label FROM issued_badges WHERE recipient_hub_pubkey = $1 AND revoked_at IS NULL",
     )
     .bind(&pubkey)
     .fetch_all(&state.db)

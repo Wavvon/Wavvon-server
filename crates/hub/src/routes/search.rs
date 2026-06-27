@@ -47,7 +47,7 @@ pub async fn search_messages(
          WHERE is_category = 0
            AND channel_type = 'text'
            AND id NOT IN (
-               SELECT channel_id FROM channel_bans WHERE target_public_key = ?
+               SELECT channel_id FROM channel_bans WHERE target_public_key = $1
            )",
     )
     .bind(&user.public_key)

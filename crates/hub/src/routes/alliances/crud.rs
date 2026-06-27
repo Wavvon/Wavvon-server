@@ -23,7 +23,7 @@ pub async fn create_alliance(
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
 
-    sqlx::query("INSERT INTO alliances (id, name, created_by, created_at) VALUES (?, ?, ?, ?)")
+    sqlx::query("INSERT INTO alliances (id, name, created_by, created_at) VALUES ($1, $2, $3, $4)")
         .bind(&id)
         .bind(&req.name)
         .bind(&user.public_key)
@@ -36,7 +36,7 @@ pub async fn create_alliance(
     // (an admin may have renamed since startup) rather than state.hub_name.
     let hub_name = crate::routes::hub::current_hub_name(&state).await;
     sqlx::query(
-        "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&id)
     .bind(state.hub_identity.public_key_hex())
@@ -68,7 +68,7 @@ pub async fn list_alliances(
         "SELECT DISTINCT a.id, a.name, a.created_by, a.created_at
          FROM alliances a
          INNER JOIN alliance_members am ON a.id = am.alliance_id
-         WHERE am.hub_public_key = ?
+         WHERE am.hub_public_key = $1
          ORDER BY a.created_at",
     )
     .bind(state.hub_identity.public_key_hex())
@@ -94,7 +94,7 @@ pub async fn get_alliance(
     Path(alliance_id): Path<String>,
 ) -> Result<Json<AllianceDetailResponse>, (StatusCode, String)> {
     let alliance = sqlx::query_as::<_, AllianceRow>(
-        "SELECT id, name, created_by, created_at FROM alliances WHERE id = ?",
+        "SELECT id, name, created_by, created_at FROM alliances WHERE id = $1",
     )
     .bind(&alliance_id)
     .fetch_optional(&state.db)
@@ -103,7 +103,7 @@ pub async fn get_alliance(
     .ok_or((StatusCode::NOT_FOUND, "Alliance not found".to_string()))?;
 
     let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = ?",
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1",
     )
     .bind(&alliance_id)
     .fetch_all(&state.db)
@@ -139,7 +139,7 @@ pub async fn leave_alliance(
 
     // Remove shared channels
     sqlx::query(
-        "DELETE FROM alliance_shared_channels WHERE alliance_id = ? AND channel_id IN (SELECT id FROM channels)",
+        "DELETE FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id IN (SELECT id FROM channels)",
     )
     .bind(&alliance_id)
     .execute(&state.db)
@@ -147,7 +147,7 @@ pub async fn leave_alliance(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Remove membership
-    sqlx::query("DELETE FROM alliance_members WHERE alliance_id = ? AND hub_public_key = ?")
+    sqlx::query("DELETE FROM alliance_members WHERE alliance_id = $1 AND hub_public_key = $2")
         .bind(&alliance_id)
         .bind(&hub_key)
         .execute(&state.db)
@@ -156,14 +156,14 @@ pub async fn leave_alliance(
 
     // If no members left, delete the alliance
     let member_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM alliance_members WHERE alliance_id = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM alliance_members WHERE alliance_id = $1")
             .bind(&alliance_id)
             .fetch_one(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if member_count == 0 {
-        sqlx::query("DELETE FROM alliances WHERE id = ?")
+        sqlx::query("DELETE FROM alliances WHERE id = $1")
             .bind(&alliance_id)
             .execute(&state.db)
             .await

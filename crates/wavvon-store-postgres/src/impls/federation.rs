@@ -9,7 +9,7 @@ use crate::PostgresStore;
 impl FederationStore for PostgresStore {
     async fn upsert_peer(&self, p: &PeerRow) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)
+            "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
              ON CONFLICT(public_key) DO UPDATE SET name = excluded.name, url = excluded.url",
         )
         .bind(&p.public_key)
@@ -24,7 +24,7 @@ impl FederationStore for PostgresStore {
 
     async fn get_peer(&self, public_key: &str) -> Result<Option<PeerRow>, StoreError> {
         let row =
-            sqlx::query("SELECT public_key, name, url, added_at FROM peers WHERE public_key = ?")
+            sqlx::query("SELECT public_key, name, url, added_at FROM peers WHERE public_key = $1")
                 .bind(public_key)
                 .fetch_optional(self.pool())
                 .await
@@ -55,7 +55,7 @@ impl FederationStore for PostgresStore {
     }
 
     async fn delete_peer(&self, public_key: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM peers WHERE public_key = ?")
+        sqlx::query("DELETE FROM peers WHERE public_key = $1")
             .bind(public_key)
             .execute(self.pool())
             .await
@@ -67,7 +67,7 @@ impl FederationStore for PostgresStore {
         sqlx::query(
             "INSERT INTO federated_channels
              (id, peer_public_key, remote_id, name, created_at, last_synced_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT(peer_public_key, remote_id) DO UPDATE SET
                name = excluded.name,
                last_synced_at = excluded.last_synced_at",
@@ -90,7 +90,7 @@ impl FederationStore for PostgresStore {
     ) -> Result<Vec<FederatedChannelRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT id, peer_public_key, remote_id, name, created_at, last_synced_at
-             FROM federated_channels WHERE peer_public_key = ?",
+             FROM federated_channels WHERE peer_public_key = $1",
         )
         .bind(peer_pubkey)
         .fetch_all(self.pool())
@@ -117,7 +117,7 @@ impl FederationStore for PostgresStore {
         let row = sqlx::query(
             "SELECT id, peer_public_key, remote_id, name, created_at, last_synced_at
              FROM federated_channels
-             WHERE peer_public_key = ? AND remote_id = ?",
+             WHERE peer_public_key = $1 AND remote_id = $2",
         )
         .bind(peer_pubkey)
         .bind(remote_id)
@@ -141,20 +141,22 @@ impl FederationStore for PostgresStore {
         created_by: &str,
         created_at: i64,
     ) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO alliances (id, name, created_by, created_at) VALUES (?, ?, ?, ?)")
-            .bind(id)
-            .bind(name)
-            .bind(created_by)
-            .bind(created_at)
-            .execute(self.pool())
-            .await
-            .map_err(map_err)?;
+        sqlx::query(
+            "INSERT INTO alliances (id, name, created_by, created_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(created_by)
+        .bind(created_at)
+        .execute(self.pool())
+        .await
+        .map_err(map_err)?;
         Ok(())
     }
 
     async fn get_alliance(&self, id: &str) -> Result<Option<AllianceRow>, StoreError> {
         let row =
-            sqlx::query("SELECT id, name, created_by, created_at FROM alliances WHERE id = ?")
+            sqlx::query("SELECT id, name, created_by, created_at FROM alliances WHERE id = $1")
                 .bind(id)
                 .fetch_optional(self.pool())
                 .await
@@ -196,7 +198,7 @@ impl FederationStore for PostgresStore {
         sqlx::query(
             "INSERT INTO alliance_members
              (alliance_id, hub_public_key, hub_name, hub_url, joined_at)
-             VALUES (?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT(alliance_id, hub_public_key) DO UPDATE SET
                hub_name = excluded.hub_name, hub_url = excluded.hub_url",
         )
@@ -216,7 +218,7 @@ impl FederationStore for PostgresStore {
         alliance_id: &str,
         hub_public_key: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM alliance_members WHERE alliance_id = ? AND hub_public_key = ?")
+        sqlx::query("DELETE FROM alliance_members WHERE alliance_id = $1 AND hub_public_key = $2")
             .bind(alliance_id)
             .bind(hub_public_key)
             .execute(self.pool())
@@ -231,7 +233,7 @@ impl FederationStore for PostgresStore {
     ) -> Result<Vec<(String, String, String)>, StoreError> {
         let rows = sqlx::query(
             "SELECT hub_public_key, hub_name, hub_url
-             FROM alliance_members WHERE alliance_id = ?",
+             FROM alliance_members WHERE alliance_id = $1",
         )
         .bind(alliance_id)
         .fetch_all(self.pool())
@@ -265,7 +267,7 @@ impl FederationStore for PostgresStore {
             "INSERT INTO pending_alliance_invites
              (id, alliance_id, alliance_name, from_hub_url, from_hub_name,
               from_hub_public_key, invite_token, created_at, message)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(id)
         .bind(alliance_id)
@@ -302,7 +304,7 @@ impl FederationStore for PostgresStore {
     }
 
     async fn delete_pending_alliance_invite(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM pending_alliance_invites WHERE id = ?")
+        sqlx::query("DELETE FROM pending_alliance_invites WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -322,7 +324,7 @@ impl FederationStore for PostgresStore {
         sqlx::query(
             "INSERT INTO home_hub_designations
              (master_pubkey, hubs_json, issued_at, sequence, signature, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT(master_pubkey) DO UPDATE SET
                hubs_json = excluded.hubs_json,
                issued_at = excluded.issued_at,
@@ -348,7 +350,7 @@ impl FederationStore for PostgresStore {
     ) -> Result<Option<(String, i64, i64, String)>, StoreError> {
         let row = sqlx::query(
             "SELECT hubs_json, issued_at, sequence, signature
-             FROM home_hub_designations WHERE master_pubkey = ?",
+             FROM home_hub_designations WHERE master_pubkey = $1",
         )
         .bind(master_pubkey)
         .fetch_optional(self.pool())
@@ -372,7 +374,7 @@ impl FederationStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO public_hub_profiles (pubkey, profile_json, updated_at)
-             VALUES (?, ?, ?)
+             VALUES ($1, $2, $3)
              ON CONFLICT(pubkey) DO UPDATE SET
                profile_json = excluded.profile_json,
                updated_at = excluded.updated_at",
@@ -391,7 +393,7 @@ impl FederationStore for PostgresStore {
         pubkey: &str,
     ) -> Result<Option<(String, i64)>, StoreError> {
         let row = sqlx::query(
-            "SELECT profile_json, updated_at FROM public_hub_profiles WHERE pubkey = ?",
+            "SELECT profile_json, updated_at FROM public_hub_profiles WHERE pubkey = $1",
         )
         .bind(pubkey)
         .fetch_optional(self.pool())

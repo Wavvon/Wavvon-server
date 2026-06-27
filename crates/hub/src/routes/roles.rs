@@ -56,7 +56,7 @@ pub async fn create_role(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO roles (id, name, priority, display_separately, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO roles (id, name, priority, display_separately, created_at) VALUES ($1, $2, $3, $4, $5)",
     )
         .bind(&id)
         .bind(&req.name)
@@ -74,7 +74,7 @@ pub async fn create_role(
         })?;
 
     for perm in &req.permissions {
-        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)")
+        sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
             .bind(&id)
             .bind(perm)
             .execute(&state.db)
@@ -121,7 +121,7 @@ pub async fn update_role(
                 "Cannot set priority >= your own".to_string(),
             ));
         }
-        sqlx::query("UPDATE roles SET priority = ? WHERE id = ?")
+        sqlx::query("UPDATE roles SET priority = $1 WHERE id = $2")
             .bind(new_priority)
             .bind(&role_id)
             .execute(&state.db)
@@ -130,7 +130,7 @@ pub async fn update_role(
     }
 
     if let Some(ref name) = req.name {
-        sqlx::query("UPDATE roles SET name = ? WHERE id = ?")
+        sqlx::query("UPDATE roles SET name = $1 WHERE id = $2")
             .bind(name)
             .bind(&role_id)
             .execute(&state.db)
@@ -139,13 +139,13 @@ pub async fn update_role(
     }
 
     if let Some(ref new_perms) = req.permissions {
-        sqlx::query("DELETE FROM role_permissions WHERE role_id = ?")
+        sqlx::query("DELETE FROM role_permissions WHERE role_id = $1")
             .bind(&role_id)
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         for perm in new_perms {
-            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES (?, ?)")
+            sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2)")
                 .bind(&role_id)
                 .bind(perm)
                 .execute(&state.db)
@@ -155,7 +155,7 @@ pub async fn update_role(
     }
 
     if let Some(flag) = req.display_separately {
-        sqlx::query("UPDATE roles SET display_separately = ? WHERE id = ?")
+        sqlx::query("UPDATE roles SET display_separately = $1 WHERE id = $2")
             .bind(if flag { 1i64 } else { 0 })
             .bind(&role_id)
             .execute(&state.db)
@@ -194,19 +194,19 @@ pub async fn delete_role(
         ));
     }
 
-    sqlx::query("DELETE FROM user_roles WHERE role_id = ?")
+    sqlx::query("DELETE FROM user_roles WHERE role_id = $1")
         .bind(&role_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    sqlx::query("DELETE FROM role_permissions WHERE role_id = ?")
+    sqlx::query("DELETE FROM role_permissions WHERE role_id = $1")
         .bind(&role_id)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    sqlx::query("DELETE FROM roles WHERE id = ?")
+    sqlx::query("DELETE FROM roles WHERE id = $1")
         .bind(&role_id)
         .execute(&state.db)
         .await
@@ -233,7 +233,7 @@ pub async fn assign_role(
 
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, ?, ?)
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES ($1, $2, $3)
          ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(&public_key)
@@ -285,7 +285,7 @@ pub async fn remove_role(
         }
     }
 
-    sqlx::query("DELETE FROM user_roles WHERE user_public_key = ? AND role_id = ?")
+    sqlx::query("DELETE FROM user_roles WHERE user_public_key = $1 AND role_id = $2")
         .bind(&public_key)
         .bind(&role_id)
         .execute(&state.db)
@@ -314,7 +314,7 @@ pub async fn list_role_members(
     perms.require(MANAGE_ROLES)?;
 
     let members: Vec<String> =
-        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = ?")
+        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
             .bind(&role_id)
             .fetch_all(&state.db)
             .await
@@ -338,7 +338,7 @@ fn require_not_builtin(role_id: &str) -> Result<(), (StatusCode, String)> {
 
 async fn get_role(db: &sqlx::PgPool, role_id: &str) -> Result<RoleRow, (StatusCode, String)> {
     sqlx::query_as::<_, RoleRow>(
-        "SELECT id, name, priority, display_separately, created_at FROM roles WHERE id = ?",
+        "SELECT id, name, priority, display_separately, created_at FROM roles WHERE id = $1",
     )
     .bind(role_id)
     .fetch_optional(db)
@@ -351,7 +351,7 @@ async fn role_permissions(
     db: &sqlx::PgPool,
     role_id: &str,
 ) -> Result<Vec<String>, (StatusCode, String)> {
-    sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = ?")
+    sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
         .bind(role_id)
         .fetch_all(db)
         .await
@@ -366,7 +366,7 @@ async fn fetch_user_roles_response(
         "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at
          FROM roles r
          INNER JOIN user_roles ur ON r.id = ur.role_id
-         WHERE ur.user_public_key = ?
+         WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )
     .bind(public_key)

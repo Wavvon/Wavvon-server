@@ -23,7 +23,7 @@ pub async fn create_invite(
     let expires_at = req.expires_in_seconds.map(|s| now + s);
 
     sqlx::query(
-        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at) VALUES (?, ?, ?, 0, ?, ?)",
+        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at) VALUES ($1, $2, $3, 0, $4, $5)",
     )
     .bind(&code)
     .bind(&user.public_key)
@@ -83,7 +83,7 @@ pub async fn revoke_invite(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MANAGE_CHANNELS)?;
 
-    sqlx::query("DELETE FROM invites WHERE code = ?")
+    sqlx::query("DELETE FROM invites WHERE code = $1")
         .bind(&code)
         .execute(&state.db)
         .await
@@ -107,7 +107,7 @@ pub async fn validate_and_use_invite(
     // because SQLite doesn't have a clean way to distinguish "not found" from
     // "max_uses exceeded" without a separate read).
     let invite = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = ?",
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = $1",
     )
     .bind(code)
     .fetch_optional(db)
@@ -125,7 +125,7 @@ pub async fn validate_and_use_invite(
     // rows_affected == 0 means the race was lost and the invite is now exhausted.
     let result = sqlx::query(
         "UPDATE invites SET uses = uses + 1
-         WHERE code = ? AND (max_uses IS NULL OR uses < max_uses)",
+         WHERE code = $1 AND (max_uses IS NULL OR uses < max_uses)",
     )
     .bind(code)
     .execute(db)
@@ -151,7 +151,7 @@ pub async fn get_join_info(
     let now = crate::auth::handlers::unix_timestamp();
 
     let invite = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = ?",
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = $1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -194,7 +194,7 @@ pub async fn join_with_invite(
     let now = crate::auth::handlers::unix_timestamp();
 
     let invite = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = ?",
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = $1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -214,14 +214,14 @@ pub async fn join_with_invite(
     }
 
     // Increment use count
-    sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = ?")
+    sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1")
         .bind(&code)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Auto-approve: set approval_status = 'approved' for this user
-    sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = ?")
+    sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
         .bind(&user.public_key)
         .execute(&state.db)
         .await

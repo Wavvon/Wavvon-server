@@ -13,7 +13,7 @@ impl DmStore for PostgresStore {
         conv_type: &str,
         created_at: i64,
     ) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES (?, ?, ?)")
+        sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES ($1, $2, $3)")
             .bind(id)
             .bind(conv_type)
             .bind(created_at)
@@ -24,7 +24,7 @@ impl DmStore for PostgresStore {
     }
 
     async fn get_conversation(&self, id: &str) -> Result<Option<ConversationRow>, StoreError> {
-        let row = sqlx::query("SELECT id, conv_type, created_at FROM conversations WHERE id = ?")
+        let row = sqlx::query("SELECT id, conv_type, created_at FROM conversations WHERE id = $1")
             .bind(id)
             .fetch_optional(self.pool())
             .await
@@ -44,7 +44,7 @@ impl DmStore for PostgresStore {
             "SELECT c.id, c.conv_type, c.created_at
              FROM conversations c
              INNER JOIN conversation_members cm ON c.id = cm.conversation_id
-             WHERE cm.public_key = ?
+             WHERE cm.public_key = $1
              ORDER BY c.created_at DESC",
         )
         .bind(pubkey)
@@ -68,8 +68,8 @@ impl DmStore for PostgresStore {
     ) -> Result<Option<String>, StoreError> {
         sqlx::query_scalar::<_, String>(
             "SELECT c.id FROM conversations c
-             INNER JOIN conversation_members ma ON c.id = ma.conversation_id AND ma.public_key = ?
-             INNER JOIN conversation_members mb ON c.id = mb.conversation_id AND mb.public_key = ?
+             INNER JOIN conversation_members ma ON c.id = ma.conversation_id AND ma.public_key = $1
+             INNER JOIN conversation_members mb ON c.id = mb.conversation_id AND mb.public_key = $2
              WHERE c.conv_type = 'dm'
              LIMIT 1",
         )
@@ -89,7 +89,7 @@ impl DmStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url)
-             VALUES (?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT(conversation_id, public_key) DO NOTHING",
         )
         .bind(conv_id)
@@ -108,7 +108,7 @@ impl DmStore for PostgresStore {
         pubkey: &str,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "DELETE FROM conversation_members WHERE conversation_id = ? AND public_key = ?",
+            "DELETE FROM conversation_members WHERE conversation_id = $1 AND public_key = $2",
         )
         .bind(conv_id)
         .bind(pubkey)
@@ -123,7 +123,7 @@ impl DmStore for PostgresStore {
         conv_id: &str,
     ) -> Result<Vec<(String, Option<String>)>, StoreError> {
         let rows = sqlx::query(
-            "SELECT public_key, hub_url FROM conversation_members WHERE conversation_id = ?",
+            "SELECT public_key, hub_url FROM conversation_members WHERE conversation_id = $1",
         )
         .bind(conv_id)
         .fetch_all(self.pool())
@@ -147,7 +147,7 @@ impl DmStore for PostgresStore {
     ) -> Result<bool, StoreError> {
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM conversation_members
-             WHERE conversation_id = ? AND public_key = ?",
+             WHERE conversation_id = $1 AND public_key = $2",
         )
         .bind(conv_id)
         .bind(pubkey)
@@ -162,7 +162,7 @@ impl DmStore for PostgresStore {
             "INSERT INTO dm_messages
              (id, conversation_id, sender, content, signature, created_at,
               attachments, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(&m.id)
         .bind(&m.conversation_id)
@@ -192,12 +192,12 @@ impl DmStore for PostgresStore {
                 "SELECT id, conversation_id, sender, content, signature, created_at,
                         attachments, is_encrypted, ciphertext_json, is_group_encrypted
                  FROM dm_messages
-                 WHERE conversation_id = ?
+                 WHERE conversation_id = $1
                    AND (created_at, id) < (
-                     (SELECT created_at FROM dm_messages WHERE id = ?),
-                     ?
+                     (SELECT created_at FROM dm_messages WHERE id = $2),
+                     $3
                    )
-                 ORDER BY created_at DESC, id DESC LIMIT ?",
+                 ORDER BY created_at DESC, id DESC LIMIT $4",
             )
             .bind(conv_id)
             .bind(bid)
@@ -210,8 +210,8 @@ impl DmStore for PostgresStore {
             sqlx::query(
                 "SELECT id, conversation_id, sender, content, signature, created_at,
                         attachments, is_encrypted, ciphertext_json, is_group_encrypted
-                 FROM dm_messages WHERE conversation_id = ?
-                 ORDER BY created_at DESC, id DESC LIMIT ?",
+                 FROM dm_messages WHERE conversation_id = $1
+                 ORDER BY created_at DESC, id DESC LIMIT $2",
             )
             .bind(conv_id)
             .bind(limit)
@@ -246,7 +246,7 @@ impl DmStore for PostgresStore {
     }
 
     async fn delete_dm_message(&self, id: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM dm_messages WHERE id = ?")
+        sqlx::query("DELETE FROM dm_messages WHERE id = $1")
             .bind(id)
             .execute(self.pool())
             .await
@@ -256,7 +256,7 @@ impl DmStore for PostgresStore {
 
     async fn block_user(&self, owner: &str, blocked: &str) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO dm_blocks (owner_pubkey, blocked_pubkey) VALUES (?, ?)
+            "INSERT INTO dm_blocks (owner_pubkey, blocked_pubkey) VALUES ($1, $2)
              ON CONFLICT DO NOTHING",
         )
         .bind(owner)
@@ -268,7 +268,7 @@ impl DmStore for PostgresStore {
     }
 
     async fn unblock_user(&self, owner: &str, blocked: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM dm_blocks WHERE owner_pubkey = ? AND blocked_pubkey = ?")
+        sqlx::query("DELETE FROM dm_blocks WHERE owner_pubkey = $1 AND blocked_pubkey = $2")
             .bind(owner)
             .bind(blocked)
             .execute(self.pool())
@@ -279,7 +279,7 @@ impl DmStore for PostgresStore {
 
     async fn is_blocked(&self, owner: &str, blocked: &str) -> Result<bool, StoreError> {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM dm_blocks WHERE owner_pubkey = ? AND blocked_pubkey = ?",
+            "SELECT COUNT(*) FROM dm_blocks WHERE owner_pubkey = $1 AND blocked_pubkey = $2",
         )
         .bind(owner)
         .bind(blocked)
@@ -292,7 +292,7 @@ impl DmStore for PostgresStore {
     async fn upsert_friend(&self, f: &FriendRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO friends (user_a, user_b, status, created_at, hub_url, display_name)
-             VALUES (?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6)
              ON CONFLICT(user_a, user_b) DO UPDATE SET
                status = excluded.status,
                hub_url = excluded.hub_url,
@@ -317,7 +317,7 @@ impl DmStore for PostgresStore {
     ) -> Result<Option<FriendRow>, StoreError> {
         let row = sqlx::query(
             "SELECT user_a, user_b, status, created_at, hub_url, display_name
-             FROM friends WHERE user_a = ? AND user_b = ?",
+             FROM friends WHERE user_a = $1 AND user_b = $2",
         )
         .bind(user_a)
         .bind(user_b)
@@ -337,7 +337,7 @@ impl DmStore for PostgresStore {
     async fn list_friends(&self, pubkey: &str) -> Result<Vec<FriendRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT user_a, user_b, status, created_at, hub_url, display_name
-             FROM friends WHERE user_a = ? OR user_b = ?",
+             FROM friends WHERE user_a = $1 OR user_b = $2",
         )
         .bind(pubkey)
         .bind(pubkey)
@@ -359,7 +359,7 @@ impl DmStore for PostgresStore {
 
     async fn delete_friend(&self, user_a: &str, user_b: &str) -> Result<(), StoreError> {
         sqlx::query(
-            "DELETE FROM friends WHERE (user_a = ? AND user_b = ?) OR (user_a = ? AND user_b = ?)",
+            "DELETE FROM friends WHERE (user_a = $1 AND user_b = $2) OR (user_a = $3 AND user_b = $4)",
         )
         .bind(user_a)
         .bind(user_b)
@@ -374,7 +374,7 @@ impl DmStore for PostgresStore {
     async fn upsert_dh_key(&self, k: &DhKeyRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO dh_keys (pubkey, dh_pubkey_hex, signature_hex, published_at)
-             VALUES (?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT(pubkey) DO UPDATE SET
                dh_pubkey_hex = excluded.dh_pubkey_hex,
                signature_hex = excluded.signature_hex,
@@ -393,7 +393,7 @@ impl DmStore for PostgresStore {
     async fn get_dh_key(&self, pubkey: &str) -> Result<Option<DhKeyRow>, StoreError> {
         let row = sqlx::query(
             "SELECT pubkey, dh_pubkey_hex, signature_hex, published_at
-             FROM dh_keys WHERE pubkey = ?",
+             FROM dh_keys WHERE pubkey = $1",
         )
         .bind(pubkey)
         .fetch_optional(self.pool())
@@ -423,7 +423,7 @@ impl DmStore for PostgresStore {
             "INSERT INTO group_sender_key_distributions
              (id, conv_id, sender_pubkey, recipient_pubkey, sender_key_version,
               iteration, wrapped_key_hex, wrap_nonce_hex, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT(conv_id, sender_pubkey, recipient_pubkey, sender_key_version) DO NOTHING",
         )
         .bind(id)
@@ -450,7 +450,7 @@ impl DmStore for PostgresStore {
         let rows = sqlx::query(
             "SELECT sender_key_version, iteration, wrapped_key_hex, wrap_nonce_hex
              FROM group_sender_key_distributions
-             WHERE conv_id = ? AND sender_pubkey = ? AND recipient_pubkey = ?
+             WHERE conv_id = $1 AND sender_pubkey = $2 AND recipient_pubkey = $3
              ORDER BY sender_key_version DESC, iteration DESC",
         )
         .bind(conv_id)
@@ -480,7 +480,7 @@ impl DmStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO dm_outbox (message_id, recipient_hub_url, attempts, next_attempt_at)
-             VALUES (?, ?, 0, ?)",
+             VALUES ($1, $2, 0, $3)",
         )
         .bind(message_id)
         .bind(recipient_hub_url)
@@ -499,8 +499,8 @@ impl DmStore for PostgresStore {
         let rows = sqlx::query(
             "SELECT message_id, recipient_hub_url, attempts
              FROM dm_outbox
-             WHERE bounced_at IS NULL AND next_attempt_at <= ?
-             ORDER BY next_attempt_at ASC LIMIT ?",
+             WHERE bounced_at IS NULL AND next_attempt_at <= $1
+             ORDER BY next_attempt_at ASC LIMIT $2",
         )
         .bind(now)
         .bind(limit)
@@ -524,7 +524,7 @@ impl DmStore for PostgresStore {
         message_id: &str,
         hub_url: &str,
     ) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM dm_outbox WHERE message_id = ? AND recipient_hub_url = ?")
+        sqlx::query("DELETE FROM dm_outbox WHERE message_id = $1 AND recipient_hub_url = $2")
             .bind(message_id)
             .bind(hub_url)
             .execute(self.pool())
@@ -541,8 +541,8 @@ impl DmStore for PostgresStore {
         next_attempt_at: i64,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "UPDATE dm_outbox SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?
-             WHERE message_id = ? AND recipient_hub_url = ?",
+            "UPDATE dm_outbox SET attempts = attempts + 1, last_error = $1, next_attempt_at = $2
+             WHERE message_id = $3 AND recipient_hub_url = $4",
         )
         .bind(error)
         .bind(next_attempt_at)

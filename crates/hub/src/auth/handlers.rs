@@ -50,7 +50,7 @@ pub async fn resolve_canonical_identity(
 
     // Existing multi-device user?
     if let Some(canonical) =
-        sqlx::query_scalar::<_, String>("SELECT public_key FROM users WHERE master_pubkey = ?")
+        sqlx::query_scalar::<_, String>("SELECT public_key FROM users WHERE master_pubkey = $1")
             .bind(&master)
             .fetch_optional(db)
             .await
@@ -61,7 +61,7 @@ pub async fn resolve_canonical_identity(
 
     // Legacy user upgrading? (the auth subkey is the legacy pubkey)
     let legacy_exists: Option<String> = sqlx::query_scalar(
-        "SELECT public_key FROM users WHERE public_key = ? AND master_pubkey IS NULL",
+        "SELECT public_key FROM users WHERE public_key = $1 AND master_pubkey IS NULL",
     )
     .bind(auth_pubkey)
     .fetch_optional(db)
@@ -143,7 +143,7 @@ pub async fn verify(
     // self-register — the invite flow creates the row first.
     if req.is_bot == Some(true) {
         let status: Option<String> = sqlx::query_scalar::<_, String>(
-            "SELECT approval_status FROM users WHERE public_key = ? AND is_bot = 1",
+            "SELECT approval_status FROM users WHERE public_key = $1 AND is_bot = 1",
         )
         .bind(&canonical_pubkey)
         .fetch_optional(&state.db)
@@ -157,7 +157,7 @@ pub async fn verify(
         }
 
         // Ensure is_bot flag is set (idempotent).
-        sqlx::query("UPDATE users SET is_bot = 1 WHERE public_key = ?")
+        sqlx::query("UPDATE users SET is_bot = 1 WHERE public_key = $1")
             .bind(&canonical_pubkey)
             .execute(&state.db)
             .await
@@ -168,7 +168,7 @@ pub async fn verify(
             let now = unix_timestamp();
             sqlx::query(
                 "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
-                 VALUES(?,?,?,?,?,?,?,?)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
                  ON CONFLICT(pubkey) DO UPDATE SET
                    name=excluded.name, avatar_url=excluded.avatar_url,
                    description=excluded.description, webhook_url=excluded.webhook_url,
@@ -188,7 +188,7 @@ pub async fn verify(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             if let Some(cmds) = &meta.commands {
-                sqlx::query("DELETE FROM bot_commands WHERE pubkey = ?")
+                sqlx::query("DELETE FROM bot_commands WHERE pubkey = $1")
                     .bind(&canonical_pubkey)
                     .execute(&state.db)
                     .await
@@ -196,7 +196,7 @@ pub async fn verify(
                 for cmd in cmds {
                     sqlx::query(
                         "INSERT INTO bot_commands(pubkey,name,description,args,scope,privileged,cooldown_seconds)
-                         VALUES(?,?,?,?,?,?,?)",
+                         VALUES($1,$2,$3,$4,$5,$6,$7)",
                     )
                     .bind(&canonical_pubkey)
                     .bind(&cmd.name)
@@ -212,7 +212,7 @@ pub async fn verify(
             }
 
             // Flip approval_status to approved (idempotent if already approved).
-            sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = ?")
+            sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
                 .bind(&canonical_pubkey)
                 .execute(&state.db)
                 .await
@@ -231,7 +231,7 @@ pub async fn verify(
     {
         let check_pubkey = master_pubkey.as_deref().unwrap_or(&canonical_pubkey);
         let fed_ban_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = ?",
+            "SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = $1",
         )
         .bind(check_pubkey)
         .fetch_one(&state.db)
@@ -420,9 +420,9 @@ pub async fn verify(
     // a different cert can hijack an existing identity.
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, master_pubkey)
-         VALUES (?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT(public_key) DO UPDATE SET
-            last_seen_at = ?,
+            last_seen_at = $6,
             master_pubkey = COALESCE(users.master_pubkey, excluded.master_pubkey)",
     )
     .bind(&canonical_pubkey)
@@ -449,7 +449,7 @@ pub async fn verify(
     };
 
     sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)",
     )
     .bind(&token)
     .bind(&canonical_pubkey)
@@ -461,7 +461,7 @@ pub async fn verify(
 
     // Check invite requirement for new users
     let has_roles: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = $1")
             .bind(&canonical_pubkey)
             .fetch_one(&state.db)
             .await
@@ -486,7 +486,7 @@ pub async fn verify(
 
     // Assign roles for new users
     let has_roles: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = $1")
             .bind(&canonical_pubkey)
             .fetch_one(&state.db)
             .await
@@ -522,7 +522,7 @@ pub async fn verify(
             }
             Some(ct) => {
                 let ct_row: Option<(i64, i64, Option<i64>, String)> = sqlx::query_as(
-                    "SELECT issued_at, expires_at, consumed_at, pubkey FROM challenge_tokens WHERE token = ?",
+                    "SELECT issued_at, expires_at, consumed_at, pubkey FROM challenge_tokens WHERE token = $1",
                 )
                 .bind(ct)
                 .fetch_optional(&state.db)
@@ -553,14 +553,16 @@ pub async fn verify(
                             ));
                         }
                         // Mark consumed
-                        sqlx::query("UPDATE challenge_tokens SET consumed_at = ? WHERE token = ?")
-                            .bind(now)
-                            .bind(ct)
-                            .execute(&state.db)
-                            .await
-                            .map_err(|e| {
-                                (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-                            })?;
+                        sqlx::query(
+                            "UPDATE challenge_tokens SET consumed_at = $1 WHERE token = $2",
+                        )
+                        .bind(now)
+                        .bind(ct)
+                        .execute(&state.db)
+                        .await
+                        .map_err(|e| {
+                            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+                        })?;
                     }
                 }
             }
@@ -579,7 +581,7 @@ pub async fn verify(
     .unwrap_or(true);
 
     let pow_level: u32 =
-        sqlx::query_scalar::<_, i64>("SELECT pow_level FROM users WHERE public_key = ?")
+        sqlx::query_scalar::<_, i64>("SELECT pow_level FROM users WHERE public_key = $1")
             .bind(&canonical_pubkey)
             .fetch_optional(&state.db)
             .await
@@ -607,7 +609,7 @@ pub async fn verify(
         let short_name = &canonical_pubkey[..16.min(canonical_pubkey.len())];
         let _ = sqlx::query(
             "INSERT INTO peers (public_key, name, url, added_at)
-             VALUES (?, ?, '', ?)
+             VALUES ($1, $2, '', $3)
              ON CONFLICT(public_key) DO NOTHING",
         )
         .bind(&canonical_pubkey)
@@ -652,7 +654,7 @@ pub async fn validate_ws_token(
         "SELECT s.public_key, u.approval_status, s.expires_at
          FROM sessions s
          INNER JOIN users u ON s.public_key = u.public_key
-         WHERE s.token = ?",
+         WHERE s.token = $1",
     )
     .bind(token)
     .fetch_optional(db)
@@ -676,7 +678,7 @@ pub async fn validate_ws_token(
     } else {
         // Try bot tokens.
         let bot_key: Option<String> =
-            sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = ?")
+            sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = $1")
                 .bind(token)
                 .fetch_optional(db)
                 .await
@@ -695,7 +697,7 @@ pub async fn validate_ws_token(
 
     // Subkey revocation check.
     let revoked_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = ?")
+        sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = $1")
             .bind(&pk)
             .fetch_one(db)
             .await
@@ -747,7 +749,7 @@ pub async fn assign_initial_roles(
         if owner_count == 0 {
             sqlx::query(
                 "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-                 VALUES (?, 'builtin-owner', ?)
+                 VALUES ($1, 'builtin-owner', $2)
                  ON CONFLICT (user_public_key, role_id) DO NOTHING",
             )
             .bind(public_key)
@@ -760,7 +762,7 @@ pub async fn assign_initial_roles(
 
     sqlx::query(
         "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-         VALUES (?, 'builtin-everyone', ?)
+         VALUES ($1, 'builtin-everyone', $2)
          ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(public_key)
@@ -871,7 +873,7 @@ pub async fn renew(
     let expires_at = now + 30 * 24 * 3600;
 
     sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)",
     )
     .bind(&token)
     .bind(&user.public_key)

@@ -70,7 +70,7 @@ async fn load_poll_totals(
     poll_id: &str,
 ) -> Result<HashMap<String, i64>, (StatusCode, String)> {
     let rows: Vec<String> =
-        sqlx::query_scalar("SELECT option_ids FROM poll_votes WHERE poll_id = ?")
+        sqlx::query_scalar("SELECT option_ids FROM poll_votes WHERE poll_id = $1")
             .bind(poll_id)
             .fetch_all(db)
             .await
@@ -99,7 +99,7 @@ async fn post_poll_card(
     let sender = &poll.creator_pubkey;
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&msg_id)
     .bind(channel_id)
@@ -155,7 +155,7 @@ pub async fn create_poll(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::SEND_MESSAGES)?;
 
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = ?")
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
         .fetch_optional(&state.db)
         .await
@@ -192,7 +192,7 @@ pub async fn create_poll(
 
     sqlx::query(
         "INSERT INTO polls (id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -230,7 +230,7 @@ pub async fn get_poll(
 ) -> Result<Json<PollWithTotals>, (StatusCode, String)> {
     let poll: Option<PollResponse> = sqlx::query_as(
         "SELECT id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at
-         FROM polls WHERE id = ?",
+         FROM polls WHERE id = $1",
     )
     .bind(&poll_id)
     .fetch_optional(&state.db)
@@ -242,7 +242,7 @@ pub async fn get_poll(
     let totals = load_poll_totals(&state.db, &poll_id).await?;
 
     let your_vote_raw: Option<String> = sqlx::query_scalar(
-        "SELECT option_ids FROM poll_votes WHERE poll_id = ? AND user_pubkey = ?",
+        "SELECT option_ids FROM poll_votes WHERE poll_id = $1 AND user_pubkey = $2",
     )
     .bind(&poll_id)
     .bind(&user.public_key)
@@ -267,7 +267,7 @@ pub async fn vote_poll(
     Json(req): Json<VoteRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let poll: Option<(String, i64, Option<i64>)> =
-        sqlx::query_as("SELECT channel_id, max_choices, ends_at FROM polls WHERE id = ?")
+        sqlx::query_as("SELECT channel_id, max_choices, ends_at FROM polls WHERE id = $1")
             .bind(&poll_id)
             .fetch_optional(&state.db)
             .await
@@ -305,7 +305,7 @@ pub async fn vote_poll(
 
     sqlx::query(
         "INSERT INTO poll_votes (poll_id, user_pubkey, option_ids)
-         VALUES (?, ?, ?)
+         VALUES ($1, $2, $3)
          ON CONFLICT(poll_id, user_pubkey) DO UPDATE SET option_ids = excluded.option_ids",
     )
     .bind(&poll_id)
@@ -336,7 +336,7 @@ pub async fn delete_poll(
     user: AuthUser,
     Path(poll_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT creator_pubkey FROM polls WHERE id = ?")
+    let row: Option<(String,)> = sqlx::query_as("SELECT creator_pubkey FROM polls WHERE id = $1")
         .bind(&poll_id)
         .fetch_optional(&state.db)
         .await
@@ -349,7 +349,7 @@ pub async fn delete_poll(
         perms.require(permissions::ADMIN)?;
     }
 
-    sqlx::query("DELETE FROM polls WHERE id = ?")
+    sqlx::query("DELETE FROM polls WHERE id = $1")
         .bind(&poll_id)
         .execute(&state.db)
         .await

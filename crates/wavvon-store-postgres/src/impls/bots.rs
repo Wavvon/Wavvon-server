@@ -10,7 +10,7 @@ impl BotStore for PostgresStore {
     async fn upsert_bot_profile(&self, p: &BotProfileRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
-             VALUES(?,?,?,?,?,?,?,?)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)
              ON CONFLICT(pubkey) DO UPDATE SET
                name=excluded.name, avatar_url=excluded.avatar_url,
                description=excluded.description, webhook_url=excluded.webhook_url,
@@ -34,7 +34,7 @@ impl BotStore for PostgresStore {
     async fn get_bot_profile(&self, pubkey: &str) -> Result<Option<BotProfileRow>, StoreError> {
         let row = sqlx::query(
             "SELECT pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at
-             FROM bot_profiles WHERE pubkey = ?",
+             FROM bot_profiles WHERE pubkey = $1",
         )
         .bind(pubkey)
         .fetch_optional(self.pool())
@@ -76,7 +76,7 @@ impl BotStore for PostgresStore {
     }
 
     async fn delete_bot_profile(&self, pubkey: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM bot_profiles WHERE pubkey = ?")
+        sqlx::query("DELETE FROM bot_profiles WHERE pubkey = $1")
             .bind(pubkey)
             .execute(self.pool())
             .await
@@ -89,7 +89,7 @@ impl BotStore for PostgresStore {
         pubkey: &str,
         cmds: &[BotCommandRow],
     ) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM bot_commands WHERE pubkey = ?")
+        sqlx::query("DELETE FROM bot_commands WHERE pubkey = $1")
             .bind(pubkey)
             .execute(self.pool())
             .await
@@ -97,7 +97,7 @@ impl BotStore for PostgresStore {
         for cmd in cmds {
             sqlx::query(
                 "INSERT INTO bot_commands(pubkey,name,description,args,scope,privileged,cooldown_seconds)
-                 VALUES(?,?,?,?,?,?,?)",
+                 VALUES($1,$2,$3,$4,$5,$6,$7)",
             )
             .bind(pubkey)
             .bind(&cmd.name)
@@ -116,7 +116,7 @@ impl BotStore for PostgresStore {
     async fn list_bot_commands(&self, pubkey: &str) -> Result<Vec<BotCommandRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT pubkey, name, description, args, scope, privileged, cooldown_seconds
-             FROM bot_commands WHERE pubkey = ?",
+             FROM bot_commands WHERE pubkey = $1",
         )
         .bind(pubkey)
         .fetch_all(self.pool())
@@ -166,7 +166,7 @@ impl BotStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO bot_subscriptions (bot_pubkey, event_type, channel_id)
-             VALUES (?, ?, ?) ON CONFLICT DO NOTHING",
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
         )
         .bind(bot_pubkey)
         .bind(event_type)
@@ -185,7 +185,7 @@ impl BotStore for PostgresStore {
     ) -> Result<(), StoreError> {
         sqlx::query(
             "DELETE FROM bot_subscriptions
-             WHERE bot_pubkey = ? AND event_type = ? AND channel_id = ?",
+             WHERE bot_pubkey = $1 AND event_type = $2 AND channel_id = $3",
         )
         .bind(bot_pubkey)
         .bind(event_type)
@@ -201,7 +201,7 @@ impl BotStore for PostgresStore {
         bot_pubkey: &str,
     ) -> Result<Vec<(String, String)>, StoreError> {
         let rows = sqlx::query(
-            "SELECT event_type, channel_id FROM bot_subscriptions WHERE bot_pubkey = ?",
+            "SELECT event_type, channel_id FROM bot_subscriptions WHERE bot_pubkey = $1",
         )
         .bind(bot_pubkey)
         .fetch_all(self.pool())
@@ -225,7 +225,7 @@ impl BotStore for PostgresStore {
     ) -> Result<Vec<String>, StoreError> {
         sqlx::query_scalar::<_, String>(
             "SELECT bot_pubkey FROM bot_subscriptions
-             WHERE event_type = ? AND (channel_id = '' OR channel_id = ?)",
+             WHERE event_type = $1 AND (channel_id = '' OR channel_id = $2)",
         )
         .bind(event_type)
         .bind(channel_id)
@@ -240,7 +240,7 @@ impl BotStore for PostgresStore {
         channel_id: &str,
     ) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO bot_channel_scope (bot_pubkey, channel_id) VALUES (?, ?)
+            "INSERT INTO bot_channel_scope (bot_pubkey, channel_id) VALUES ($1, $2)
              ON CONFLICT DO NOTHING",
         )
         .bind(bot_pubkey)
@@ -253,7 +253,7 @@ impl BotStore for PostgresStore {
 
     async fn bot_channel_scope(&self, bot_pubkey: &str) -> Result<Vec<String>, StoreError> {
         sqlx::query_scalar::<_, String>(
-            "SELECT channel_id FROM bot_channel_scope WHERE bot_pubkey = ?",
+            "SELECT channel_id FROM bot_channel_scope WHERE bot_pubkey = $1",
         )
         .bind(bot_pubkey)
         .fetch_all(self.pool())
@@ -264,7 +264,7 @@ impl BotStore for PostgresStore {
     async fn create_bot(&self, b: &BotRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO bots (public_key, display_name, created_by, token_hash, webhook_url, mini_app_url, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&b.public_key)
         .bind(&b.display_name)
@@ -282,7 +282,7 @@ impl BotStore for PostgresStore {
     async fn get_bot_by_pubkey(&self, pubkey: &str) -> Result<Option<BotRow>, StoreError> {
         let row = sqlx::query(
             "SELECT public_key, display_name, created_by, token_hash, webhook_url, mini_app_url, created_at
-             FROM bots WHERE public_key = ?",
+             FROM bots WHERE public_key = $1",
         )
         .bind(pubkey)
         .fetch_optional(self.pool())
@@ -322,7 +322,7 @@ impl BotStore for PostgresStore {
     }
 
     async fn delete_bot(&self, pubkey: &str) -> Result<(), StoreError> {
-        sqlx::query("DELETE FROM bots WHERE public_key = ?")
+        sqlx::query("DELETE FROM bots WHERE public_key = $1")
             .bind(pubkey)
             .execute(self.pool())
             .await
@@ -333,7 +333,7 @@ impl BotStore for PostgresStore {
     async fn enqueue_bot_event(&self, e: &BotEventQueueRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO bot_event_queue (id, bot_pubkey, event_type, payload, created_at, delivered)
-             VALUES (?, ?, ?, ?, ?, FALSE)",
+             VALUES ($1, $2, $3, $4, $5, FALSE)",
         )
         .bind(&e.id)
         .bind(&e.bot_pubkey)
@@ -354,8 +354,8 @@ impl BotStore for PostgresStore {
         let rows = sqlx::query(
             "SELECT id, bot_pubkey, event_type, payload, created_at, delivered
              FROM bot_event_queue
-             WHERE bot_pubkey = ? AND delivered = FALSE
-             ORDER BY created_at ASC LIMIT ?",
+             WHERE bot_pubkey = $1 AND delivered = FALSE
+             ORDER BY created_at ASC LIMIT $2",
         )
         .bind(bot_pubkey)
         .bind(limit)
@@ -378,7 +378,7 @@ impl BotStore for PostgresStore {
 
     async fn mark_events_delivered(&self, ids: &[String]) -> Result<(), StoreError> {
         for id in ids {
-            sqlx::query("UPDATE bot_event_queue SET delivered = TRUE WHERE id = ?")
+            sqlx::query("UPDATE bot_event_queue SET delivered = TRUE WHERE id = $1")
                 .bind(id)
                 .execute(self.pool())
                 .await
@@ -394,7 +394,7 @@ impl BotStore for PostgresStore {
     ) -> Result<Option<String>, StoreError> {
         sqlx::query_scalar::<_, String>(
             "SELECT public_key FROM users
-             WHERE bot_invite_token = ? AND (bot_invite_expires IS NULL OR bot_invite_expires > ?)",
+             WHERE bot_invite_token = $1 AND (bot_invite_expires IS NULL OR bot_invite_expires > $2)",
         )
         .bind(token)
         .bind(now)

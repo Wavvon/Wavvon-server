@@ -56,7 +56,7 @@ pub struct UpdateLobbySettingsRequest {
 // ---------------------------------------------------------------------------
 
 async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
         .bind(key)
         .fetch_optional(db)
         .await
@@ -70,8 +70,8 @@ async fn upsert_setting(
     value: &str,
 ) -> Result<(), (StatusCode, String)> {
     sqlx::query(
-        "INSERT INTO hub_settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = ?",
+        "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
+         ON CONFLICT(key) DO UPDATE SET value = $3",
     )
     .bind(key)
     .bind(value)
@@ -99,7 +99,7 @@ pub async fn get_status(
     let welcome_md = read_setting(&state.db, "lobby_welcome_md").await;
 
     let row: Option<(String, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT lobby_status, lobby_entered_at, pow_level FROM users WHERE public_key = ?",
+        "SELECT lobby_status, lobby_entered_at, pow_level FROM users WHERE public_key = $1",
     )
     .bind(&user.public_key)
     .fetch_optional(&state.db)
@@ -169,7 +169,7 @@ pub async fn submit_pow(
     }
 
     // Update pow_level (only increase, never decrease)
-    let current_pow: i64 = sqlx::query_scalar("SELECT pow_level FROM users WHERE public_key = ?")
+    let current_pow: i64 = sqlx::query_scalar("SELECT pow_level FROM users WHERE public_key = $1")
         .bind(&user.public_key)
         .fetch_optional(&state.db)
         .await
@@ -183,7 +183,7 @@ pub async fn submit_pow(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "UPDATE users SET pow_level = ?, lobby_status = CASE WHEN lobby_status = 'none' THEN ? ELSE ? END, lobby_entered_at = COALESCE(lobby_entered_at, ?) WHERE public_key = ?",
+        "UPDATE users SET pow_level = $1, lobby_status = CASE WHEN lobby_status = 'none' THEN $2 ELSE $3 END, lobby_entered_at = COALESCE(lobby_entered_at, $4) WHERE public_key = $5",
     )
     .bind(new_level as i64)
     .bind(new_status)   // if transitioning from 'none'

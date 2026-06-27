@@ -46,8 +46,8 @@ pub async fn put_dh_key(
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO dh_keys (pubkey, dh_pubkey_hex, signature_hex, published_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(pubkey) DO UPDATE SET dh_pubkey_hex = ?, signature_hex = ?, published_at = ?",
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT(pubkey) DO UPDATE SET dh_pubkey_hex = $5, signature_hex = $6, published_at = $7",
     )
     .bind(&pubkey)
     .bind(&req.dh_pubkey_hex)
@@ -68,7 +68,7 @@ pub async fn get_dh_key(
     Path(pubkey): Path<String>,
 ) -> Result<Json<DhKeyResponse>, (StatusCode, String)> {
     let row: Option<(String, String, i64)> = sqlx::query_as(
-        "SELECT dh_pubkey_hex, signature_hex, published_at FROM dh_keys WHERE pubkey = ?",
+        "SELECT dh_pubkey_hex, signature_hex, published_at FROM dh_keys WHERE pubkey = $1",
     )
     .bind(&pubkey)
     .fetch_optional(&state.db)

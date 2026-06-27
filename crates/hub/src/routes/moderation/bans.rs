@@ -29,7 +29,7 @@ pub async fn ban_user(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO bans (target_public_key, banned_by, reason, created_at) VALUES (?, ?, ?, ?)
+        "INSERT INTO bans (target_public_key, banned_by, reason, created_at) VALUES ($1, $2, $3, $4)
          ON CONFLICT (target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
@@ -41,7 +41,7 @@ pub async fn ban_user(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Delete their sessions so they're immediately logged out
-    sqlx::query("DELETE FROM sessions WHERE public_key = ?")
+    sqlx::query("DELETE FROM sessions WHERE public_key = $1")
         .bind(&req.target_public_key)
         .execute(&state.db)
         .await
@@ -87,7 +87,7 @@ pub async fn unban_user(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(BAN_MEMBERS)?;
 
-    sqlx::query("DELETE FROM bans WHERE target_public_key = ?")
+    sqlx::query("DELETE FROM bans WHERE target_public_key = $1")
         .bind(&target_key)
         .execute(&state.db)
         .await
@@ -140,7 +140,7 @@ pub async fn mute_user(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES (?, ?, ?, NULL, ?)
+        "INSERT INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES ($1, $2, $3, NULL, $4)
          ON CONFLICT (target_public_key) DO UPDATE SET muted_by = excluded.muted_by, reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
@@ -173,7 +173,7 @@ pub async fn unmute_user(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MUTE_MEMBERS)?;
 
-    sqlx::query("DELETE FROM mutes WHERE target_public_key = ?")
+    sqlx::query("DELETE FROM mutes WHERE target_public_key = $1")
         .bind(&target_key)
         .execute(&state.db)
         .await
@@ -228,7 +228,7 @@ pub async fn timeout_user(
     let expires_at = now + req.duration_seconds as i64;
 
     sqlx::query(
-        "INSERT INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO mutes (target_public_key, muted_by, reason, expires_at, created_at) VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (target_public_key) DO UPDATE SET muted_by = excluded.muted_by, reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
@@ -274,7 +274,7 @@ pub async fn kick_user(
     .await?;
 
     // Delete their sessions to force re-auth
-    sqlx::query("DELETE FROM sessions WHERE public_key = ?")
+    sqlx::query("DELETE FROM sessions WHERE public_key = $1")
         .bind(&req.target_public_key)
         .execute(&state.db)
         .await

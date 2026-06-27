@@ -100,7 +100,7 @@ pub async fn accept_pending(
 
     let row = sqlx::query_as::<_, BadgeOfferRow>(
         "SELECT id, from_hub_pubkey, from_hub_url, label, note, payload, signature, created_at
-         FROM badge_offers WHERE id = ?",
+         FROM badge_offers WHERE id = $1",
     )
     .bind(&id)
     .fetch_optional(&state.db)
@@ -148,7 +148,7 @@ pub async fn accept_pending(
     let badge_id = Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO hub_badges (id, issuer_pubkey, issuer_url, label, payload, signature, accepted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&badge_id)
     .bind(&row.from_hub_pubkey)
@@ -161,7 +161,7 @@ pub async fn accept_pending(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    sqlx::query("DELETE FROM badge_offers WHERE id = ?")
+    sqlx::query("DELETE FROM badge_offers WHERE id = $1")
         .bind(&id)
         .execute(&state.db)
         .await
@@ -179,7 +179,7 @@ pub async fn decline_pending(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    let affected = sqlx::query("DELETE FROM badge_offers WHERE id = ?")
+    let affected = sqlx::query("DELETE FROM badge_offers WHERE id = $1")
         .bind(&id)
         .execute(&state.db)
         .await
@@ -258,7 +258,7 @@ pub async fn delete_badge(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    let affected = sqlx::query("DELETE FROM hub_badges WHERE id = ?")
+    let affected = sqlx::query("DELETE FROM hub_badges WHERE id = $1")
         .bind(&id)
         .execute(&state.db)
         .await
@@ -379,7 +379,7 @@ pub async fn issue_badge(
     sqlx::query(
         "INSERT INTO issued_badges
          (id, recipient_hub_url, recipient_hub_pubkey, label, payload, signature, issued_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(&recipient_url)
@@ -595,13 +595,14 @@ pub async fn revoke_issued_badge(
             .as_secs(),
     );
 
-    let result =
-        sqlx::query("UPDATE issued_badges SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL")
-            .bind(&now)
-            .bind(&id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let result = sqlx::query(
+        "UPDATE issued_badges SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL",
+    )
+    .bind(&now)
+    .bind(&id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if result.rows_affected() == 0 {
         return Err((
@@ -641,7 +642,7 @@ pub async fn federation_badge_revocations(
         sqlx::query_as::<_, (String, String, String, String)>(
             "SELECT id, recipient_hub_pubkey, label, revoked_at
              FROM issued_badges
-             WHERE revoked_at IS NOT NULL AND revoked_at >= ?
+             WHERE revoked_at IS NOT NULL AND revoked_at >= $1
              ORDER BY revoked_at",
         )
         .bind(since)
