@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::postgres::PgPoolOptions;
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
     // `wavvon-farm migrate` — run migrations and exit.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
-        let db = SqlitePoolOptions::new()
+        let db = PgPoolOptions::new()
             .max_connections(1)
             .connect("sqlite:farm.db?mode=rwc")
             .await?;
@@ -131,7 +131,7 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded farm identity: {pubkey_hex}");
     }
 
-    let db = SqlitePoolOptions::new()
+    let db = PgPoolOptions::new()
         .max_connections(5)
         .connect("sqlite:farm.db?mode=rwc")
         .await?;

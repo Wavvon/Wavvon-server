@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::postgres::PgPoolOptions;
 use wavvon_seed::db;
 use wavvon_seed::revalidation;
 use wavvon_seed::server;
 use wavvon_seed::state::SeedState;
 
 const DEFAULT_HTTP_PORT: u16 = 5000;
+const DEFAULT_DATABASE_URL: &str = "postgres://postgres:postgres@localhost:5432/wavvon_seed";
 
 fn port_from_env(var: &str, default: u16) -> Result<u16> {
     match std::env::var(var) {
@@ -22,25 +23,28 @@ fn port_from_env(var: &str, default: u16) -> Result<u16> {
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_string());
+
     // `wavvon-seed migrate` — run migrations and exit.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
-        let db = SqlitePoolOptions::new()
+        let db = PgPoolOptions::new()
             .max_connections(1)
-            .connect("sqlite:seed.db?mode=rwc")
+            .connect(&database_url)
             .await?;
         db::migrations::run(&db).await?;
-        println!("Migrations applied to seed.db");
+        println!("Migrations applied");
         return Ok(());
     }
 
     let http_port = port_from_env("WAVVON_SEED_HTTP_PORT", DEFAULT_HTTP_PORT)?;
 
-    let db = SqlitePoolOptions::new()
+    let db = PgPoolOptions::new()
         .max_connections(5)
-        .connect("sqlite:seed.db?mode=rwc")
+        .connect(&database_url)
         .await
-        .context("Failed to open seed.db")?;
+        .context("Failed to connect to PostgreSQL")?;
 
     db::migrations::run(&db).await?;
 

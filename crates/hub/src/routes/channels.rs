@@ -706,7 +706,7 @@ struct ChannelRow {
 /// Returns the code-depth a new item would sit at if placed under `parent_id`
 /// (0 = root-level, 1 = one level down, etc.).
 async fn node_depth(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     parent_id: Option<&str>,
 ) -> Result<u32, (StatusCode, String)> {
     let Some(pid) = parent_id else { return Ok(0) };
@@ -741,7 +741,7 @@ async fn node_depth(
 /// (i.e. walking up from `start` eventually reaches `candidate`).
 /// Used for server-side cycle detection.
 async fn is_ancestor(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     candidate: &str,
     start: &str,
 ) -> Result<bool, (StatusCode, String)> {
@@ -763,7 +763,7 @@ async fn is_ancestor(
     Ok(false)
 }
 
-async fn read_max_depth(db: &sqlx::AnyPool) -> u32 {
+async fn read_max_depth(db: &sqlx::PgPool) -> u32 {
     sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'max_channel_depth'",
     )

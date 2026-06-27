@@ -5,10 +5,10 @@ use sqlx::Row;
 use wavvon_store::{SettingsStore, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
 #[async_trait]
-impl SettingsStore for SqliteStore {
+impl SettingsStore for PostgresStore {
     async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError> {
         sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = ?")
             .bind(key)

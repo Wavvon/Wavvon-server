@@ -3,10 +3,10 @@ use sqlx::Row;
 use wavvon_store::{BotCommandRow, BotEventQueueRow, BotProfileRow, BotRow, BotStore, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
 #[async_trait]
-impl BotStore for SqliteStore {
+impl BotStore for PostgresStore {
     async fn upsert_bot_profile(&self, p: &BotProfileRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
@@ -333,7 +333,7 @@ impl BotStore for SqliteStore {
     async fn enqueue_bot_event(&self, e: &BotEventQueueRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO bot_event_queue (id, bot_pubkey, event_type, payload, created_at, delivered)
-             VALUES (?, ?, ?, ?, ?, 0)",
+             VALUES (?, ?, ?, ?, ?, FALSE)",
         )
         .bind(&e.id)
         .bind(&e.bot_pubkey)
@@ -354,7 +354,7 @@ impl BotStore for SqliteStore {
         let rows = sqlx::query(
             "SELECT id, bot_pubkey, event_type, payload, created_at, delivered
              FROM bot_event_queue
-             WHERE bot_pubkey = ? AND delivered = 0
+             WHERE bot_pubkey = ? AND delivered = FALSE
              ORDER BY created_at ASC LIMIT ?",
         )
         .bind(bot_pubkey)
@@ -370,14 +370,15 @@ impl BotStore for SqliteStore {
                 event_type: r.get("event_type"),
                 payload: r.get("payload"),
                 created_at: r.get("created_at"),
-                delivered: r.get("delivered"),
+                // PostgreSQL BOOLEAN → i64 for BotEventQueueRow compatibility
+                delivered: if r.get::<bool, _>("delivered") { 1 } else { 0 },
             })
             .collect())
     }
 
     async fn mark_events_delivered(&self, ids: &[String]) -> Result<(), StoreError> {
         for id in ids {
-            sqlx::query("UPDATE bot_event_queue SET delivered = 1 WHERE id = ?")
+            sqlx::query("UPDATE bot_event_queue SET delivered = TRUE WHERE id = ?")
                 .bind(id)
                 .execute(self.pool())
                 .await

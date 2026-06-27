@@ -52,7 +52,7 @@ fn require_auth(
 }
 
 /// Returns the admin pubkey stored in the `farms` singleton row, or `None`.
-async fn get_admin_pubkey(db: &sqlx::SqlitePool) -> Option<String> {
+async fn get_admin_pubkey(db: &sqlx::PgPool) -> Option<String> {
     sqlx::query_scalar::<_, Option<String>>("SELECT admin_pubkey FROM farms WHERE id = 1")
         .fetch_optional(db)
         .await

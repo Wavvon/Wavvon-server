@@ -3,15 +3,20 @@ use sqlx::Row;
 use wavvon_store::{ChannelPatch, ChannelRow, ChannelStore, NewChannel, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_channel(r: sqlx::any::AnyRow) -> ChannelRow {
+fn row_to_channel(r: sqlx::postgres::PgRow) -> ChannelRow {
     ChannelRow {
         id: r.get("id"),
         name: r.get("name"),
         created_by: r.get("created_by"),
         parent_id: r.get("parent_id"),
-        is_category: r.get("is_category"),
+        // PostgreSQL BOOLEAN → i64 for ChannelRow compatibility
+        is_category: if r.get::<bool, _>("is_category") {
+            1
+        } else {
+            0
+        },
         display_order: r.get("display_order"),
         description: r.get("description"),
         icon: r.get("icon"),
@@ -27,7 +32,7 @@ fn row_to_channel(r: sqlx::any::AnyRow) -> ChannelRow {
 }
 
 #[async_trait]
-impl ChannelStore for SqliteStore {
+impl ChannelStore for PostgresStore {
     async fn create_channel(&self, ch: &NewChannel) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO channels
@@ -39,7 +44,7 @@ impl ChannelStore for SqliteStore {
         .bind(&ch.name)
         .bind(&ch.created_by)
         .bind(&ch.parent_id)
-        .bind(if ch.is_category { 1i64 } else { 0 })
+        .bind(ch.is_category)
         .bind(ch.display_order)
         .bind(&ch.description)
         .bind(&ch.channel_type)
@@ -80,10 +85,7 @@ impl ChannelStore for SqliteStore {
     }
 
     async fn update_channel(&self, id: &str, patch: &ChannelPatch) -> Result<(), StoreError> {
-        // Build a dynamic UPDATE only touching provided fields.
         let mut parts: Vec<&str> = Vec::new();
-        // We'll use a raw query builder pattern.
-        // For simplicity each optional field is applied individually.
         if let Some(opt) = &patch.description {
             sqlx::query("UPDATE channels SET description = ? WHERE id = ?")
                 .bind(opt.as_deref())
@@ -174,7 +176,7 @@ impl ChannelStore for SqliteStore {
                 .map_err(map_err)?;
             parts.push("name");
         }
-        let _ = parts; // silence unused warning
+        let _ = parts;
         Ok(())
     }
 
@@ -222,7 +224,7 @@ impl ChannelStore for SqliteStore {
     }
 
     async fn list_leaf_channel_ids(&self) -> Result<Vec<String>, StoreError> {
-        sqlx::query_scalar::<_, String>("SELECT id FROM channels WHERE is_category = 0")
+        sqlx::query_scalar::<_, String>("SELECT id FROM channels WHERE is_category = FALSE")
             .fetch_all(self.pool())
             .await
             .map_err(map_err)

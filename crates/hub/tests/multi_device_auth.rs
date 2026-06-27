@@ -3,26 +3,22 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::AnyPool; // still used by insert_revocation and return type
+use sqlx::PgPool; // still used by insert_revocation and return type
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::routes::me::MeResponse;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::{DeviceSubkey, Identity, MasterIdentity, SubkeyCert};
 
-async fn setup() -> (TestServer, AnyPool) {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+#[path = "common.rs"]
+mod common;
+
+async fn setup() -> (TestServer, PgPool) {
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
 
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
@@ -320,7 +316,7 @@ async fn master_hijack_attempt_is_blocked_by_coalesce() {
 /// Insert a revocation row directly into the DB, bypassing signature checks.
 /// The middleware only checks the presence of the row; signature verification
 /// lives in the identity route that accepts the POST.
-async fn insert_revocation(db: &AnyPool, subkey_pubkey: &str) {
+async fn insert_revocation(db: &PgPool, subkey_pubkey: &str) {
     sqlx::query(
         "INSERT INTO subkey_revocations
          (master_pubkey, subkey_pubkey, revoked_at, signature, registered_at)

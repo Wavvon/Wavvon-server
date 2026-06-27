@@ -1,15 +1,15 @@
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
 /// Shared state for the discovery seed service.
 pub struct SeedState {
-    /// SQLite connection pool for seed.db.
-    pub db: SqlitePool,
+    /// PostgreSQL connection pool.
+    pub db: PgPool,
     /// Shared HTTP client for outbound farm verification calls.
     pub http_client: reqwest::Client,
 }
 
 impl SeedState {
-    pub fn new(db: SqlitePool) -> Self {
+    pub fn new(db: PgPool) -> Self {
         Self {
             db,
             http_client: reqwest::Client::builder()

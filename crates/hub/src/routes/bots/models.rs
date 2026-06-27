@@ -52,7 +52,7 @@ pub fn generate_token() -> String {
 /// Authenticate a bot request via `Authorization: Bearer <token>` and return
 /// the matching bot row.
 pub async fn authenticate_bot(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     headers: &HeaderMap,
 ) -> Result<BotRow, (StatusCode, String)> {
     let raw = headers
@@ -86,7 +86,7 @@ pub struct BotRow {
     pub created_at: i64,
     pub webhook_url: Option<String>,
     pub mini_app_url: Option<String>,
-    pub requires_camera: i64,
+    pub requires_camera: bool,
 }
 
 #[derive(sqlx::FromRow)]

@@ -1,7 +1,7 @@
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
-pub async fn run(pool: &SqlitePool) -> Result<()> {
+pub async fn run(pool: &PgPool) -> Result<()> {
     // Farm singleton metadata — always id=1.
     // Includes all additive columns from prior migrations (admin_pubkey,
     // creation policy, quotas, discovery metadata).

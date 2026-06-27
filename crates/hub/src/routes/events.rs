@@ -120,7 +120,7 @@ fn format_unix_utc(ts: i64) -> String {
 }
 
 async fn load_rsvp_counts(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     event_id: &str,
 ) -> Result<RsvpCounts, (StatusCode, String)> {
     let rows: Vec<(String, i64)> = sqlx::query_as(

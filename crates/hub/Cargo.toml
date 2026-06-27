@@ -28,7 +28,7 @@ sha2 = "0.10"
 base64 = { workspace = true }
 wavvon-identity = { path = "../identity" }
 wavvon-store = { path = "../wavvon-store" }
-wavvon-store-sqlite = { path = "../wavvon-store-sqlite" }
+wavvon-store-postgres = { path = "../wavvon-store-postgres" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sqlx = { workspace = true }
 futures-util = "0.3"

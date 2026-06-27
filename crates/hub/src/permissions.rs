@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use axum::http::StatusCode;
-use sqlx::AnyPool;
+use sqlx::PgPool;
 
 pub const SEND_MESSAGES: &str = "send_messages";
 pub const READ_MESSAGES: &str = "read_messages";
@@ -53,7 +53,7 @@ impl UserPermissions {
 }
 
 pub async fn user_permissions(
-    db: &AnyPool,
+    db: &PgPool,
     public_key: &str,
 ) -> Result<UserPermissions, (StatusCode, String)> {
     let roles = sqlx::query_as::<_, RoleRow>(
@@ -79,7 +79,7 @@ pub async fn user_permissions(
 }
 
 async fn fetch_permissions(
-    db: &AnyPool,
+    db: &PgPool,
     role_ids: &[&str],
 ) -> Result<HashSet<String>, (StatusCode, String)> {
     if role_ids.is_empty() {

@@ -3,9 +3,9 @@ use sqlx::Row;
 use wavvon_store::{StoreError, UploadFileRow, UploadStore};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_upload(r: sqlx::any::AnyRow) -> UploadFileRow {
+fn row_to_upload(r: sqlx::postgres::PgRow) -> UploadFileRow {
     UploadFileRow {
         id: r.get("id"),
         filename: r.get("filename"),
@@ -19,7 +19,7 @@ fn row_to_upload(r: sqlx::any::AnyRow) -> UploadFileRow {
 }
 
 #[async_trait]
-impl UploadStore for SqliteStore {
+impl UploadStore for PostgresStore {
     async fn insert_upload(&self, f: &UploadFileRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO upload_files

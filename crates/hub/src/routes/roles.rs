@@ -336,7 +336,7 @@ fn require_not_builtin(role_id: &str) -> Result<(), (StatusCode, String)> {
     }
 }
 
-async fn get_role(db: &sqlx::AnyPool, role_id: &str) -> Result<RoleRow, (StatusCode, String)> {
+async fn get_role(db: &sqlx::PgPool, role_id: &str) -> Result<RoleRow, (StatusCode, String)> {
     sqlx::query_as::<_, RoleRow>(
         "SELECT id, name, priority, display_separately, created_at FROM roles WHERE id = ?",
     )
@@ -348,7 +348,7 @@ async fn get_role(db: &sqlx::AnyPool, role_id: &str) -> Result<RoleRow, (StatusC
 }
 
 async fn role_permissions(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     role_id: &str,
 ) -> Result<Vec<String>, (StatusCode, String)> {
     sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = ?")
@@ -359,7 +359,7 @@ async fn role_permissions(
 }
 
 async fn fetch_user_roles_response(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     public_key: &str,
 ) -> Result<Vec<RoleResponse>, (StatusCode, String)> {
     let roles = sqlx::query_as::<_, RoleRow>(

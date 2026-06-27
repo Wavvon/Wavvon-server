@@ -375,7 +375,7 @@ pub async fn get_dm_blocks(
 
 /// Helper: check whether `sender` is in `recipient`'s DM-block set.
 /// Returns false on any DB error so the caller degrades safely.
-pub async fn is_dm_blocked(db: &sqlx::AnyPool, recipient: &str, sender: &str) -> bool {
+pub async fn is_dm_blocked(db: &sqlx::PgPool, recipient: &str, sender: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM dm_blocks WHERE owner_pubkey = ? AND blocked_pubkey = ?",
     )

@@ -1,45 +1,37 @@
-use sqlx::AnyPool;
 use wavvon_hub::db;
+
+#[path = "common.rs"]
+mod common;
 
 #[tokio::test]
 async fn migrations_idempotent_on_fresh_db() {
-    sqlx::any::install_default_drivers();
-    let pool = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let pool = common::create_test_db().await;
 
-    // Running twice in a row should not fail
-    db::migrations::run(&pool).await.unwrap();
+    // Running migrations again on an already-migrated database must not fail.
+    // (create_test_db already ran migrations once; running them again exercises
+    // the IF NOT EXISTS / DO NOTHING guards.)
     db::migrations::run(&pool).await.unwrap();
 
-    // All expected columns exist on channels
-    let cols: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('channels')")
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-    let names: Vec<&str> = cols.iter().map(|(n,)| n.as_str()).collect();
+    // All expected columns exist on channels — query information_schema
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'channels'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
 
-    assert!(names.contains(&"id"));
-    assert!(names.contains(&"name"));
-    assert!(names.contains(&"created_by"));
-    assert!(names.contains(&"parent_id"));
-    assert!(names.contains(&"is_category"));
-    assert!(names.contains(&"created_at"));
+    assert!(names.contains(&"id".to_string()));
+    assert!(names.contains(&"name".to_string()));
+    assert!(names.contains(&"created_by".to_string()));
+    assert!(names.contains(&"parent_id".to_string()));
+    assert!(names.contains(&"is_category".to_string()));
+    assert!(names.contains(&"created_at".to_string()));
 }
 
 #[tokio::test]
 async fn migrations_data_survives_rerun() {
-    sqlx::any::install_default_drivers();
-    let pool = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-
-    // First run: fresh schema
-    db::migrations::run(&pool).await.unwrap();
+    let pool = common::create_test_db().await;
 
     // Insert a user so the FK on channels.created_by is satisfied
     sqlx::query(
@@ -69,14 +61,7 @@ async fn migrations_data_survives_rerun() {
 
 #[tokio::test]
 async fn migrations_create_all_core_tables() {
-    sqlx::any::install_default_drivers();
-    let pool = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-
-    db::migrations::run(&pool).await.unwrap();
+    let pool = common::create_test_db().await;
 
     // Every table we expect to exist
     let expected = [
@@ -107,7 +92,8 @@ async fn migrations_create_all_core_tables() {
 
     for table in expected {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            "SELECT COUNT(*) FROM information_schema.tables \
+             WHERE table_schema = 'public' AND table_name = $1",
         )
         .bind(table)
         .fetch_one(&pool)

@@ -87,7 +87,7 @@ pub async fn update_me(
 }
 
 async fn fetch_user_roles(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     public_key: &str,
 ) -> Result<Vec<RoleResponse>, (StatusCode, String)> {
     let roles = sqlx::query_as::<_, RoleRow>(

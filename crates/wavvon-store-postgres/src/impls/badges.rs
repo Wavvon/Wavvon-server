@@ -3,10 +3,10 @@ use sqlx::Row;
 use wavvon_store::{BadgeOfferRow, BadgeStore, HubBadgeRow, IssuedBadgeRow, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
 #[async_trait]
-impl BadgeStore for SqliteStore {
+impl BadgeStore for PostgresStore {
     async fn insert_badge_offer(&self, b: &BadgeOfferRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO badge_offers

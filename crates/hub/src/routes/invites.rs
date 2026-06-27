@@ -98,7 +98,7 @@ pub async fn revoke_invite(
 /// Uses a single atomic UPDATE with the guard conditions so that
 /// concurrent registrations cannot over-consume a limited invite.
 pub async fn validate_and_use_invite(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     code: &str,
 ) -> Result<(), (StatusCode, String)> {
     let now = crate::auth::handlers::unix_timestamp();
@@ -231,7 +231,7 @@ pub async fn join_with_invite(
 }
 
 /// Check if the hub requires invites
-pub async fn is_invite_only(db: &sqlx::AnyPool) -> Result<bool, (StatusCode, String)> {
+pub async fn is_invite_only(db: &sqlx::PgPool) -> Result<bool, (StatusCode, String)> {
     let value: Option<String> =
         sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'invite_only'")
             .fetch_optional(db)

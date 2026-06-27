@@ -5,7 +5,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
-use sqlx::AnyPool;
+use sqlx::PgPool;
 use wavvon_identity::SubkeyCert;
 
 use crate::auth::middleware::AuthUser;
@@ -29,7 +29,7 @@ use crate::state::{AppState, PendingChallenge};
 /// - Cert + neither: brand-new paired device. Canonical = the
 ///   master pubkey.
 pub async fn resolve_canonical_identity(
-    db: &AnyPool,
+    db: &PgPool,
     auth_pubkey: &str,
     cert: Option<&SubkeyCert>,
 ) -> Result<(String, Option<String>), (StatusCode, String)> {
@@ -642,7 +642,7 @@ pub async fn verify(
 ///
 /// Returns the canonical public key on success.
 pub async fn validate_ws_token(
-    db: &AnyPool,
+    db: &PgPool,
     token: &str,
 ) -> Result<String, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
@@ -726,7 +726,7 @@ pub async fn validate_ws_token(
 /// the first owner. The builtin-everyone role is always assigned (idempotent).
 /// Returns an error only for genuine DB failures so callers can propagate it.
 pub async fn assign_initial_roles(
-    db: &AnyPool,
+    db: &PgPool,
     public_key: &str,
     now: i64,
     configured_owner: Option<&str>,

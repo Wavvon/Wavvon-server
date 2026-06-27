@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
 
 /// Returns true when the user has an active hub-level ban.
-pub async fn is_banned(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
+pub async fn is_banned(db: &sqlx::PgPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = ?")
         .bind(public_key)
         .fetch_one(db)
@@ -11,7 +11,7 @@ pub async fn is_banned(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (St
     Ok(count > 0)
 }
 
-pub async fn is_muted(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
+pub async fn is_muted(db: &sqlx::PgPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
     let now = crate::auth::handlers::unix_timestamp();
 
     // Check for permanent mute (no expires_at) or active timeout (expires_at > now)
@@ -28,7 +28,7 @@ pub async fn is_muted(db: &sqlx::AnyPool, public_key: &str) -> Result<bool, (Sta
 }
 
 pub async fn is_channel_banned(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     channel_id: &str,
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
@@ -45,7 +45,7 @@ pub async fn is_channel_banned(
 }
 
 pub async fn is_voice_muted(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let count: i64 =
@@ -59,7 +59,7 @@ pub async fn is_voice_muted(
 }
 
 pub async fn is_channel_voice_muted(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     channel_id: &str,
     pubkey: &str,
 ) -> Result<bool, (StatusCode, String)> {
@@ -74,7 +74,7 @@ pub async fn is_channel_voice_muted(
     Ok(count > 0)
 }
 
-pub async fn has_raised_hand(db: &sqlx::AnyPool, channel_id: &str, pubkey: &str) -> bool {
+pub async fn has_raised_hand(db: &sqlx::PgPool, channel_id: &str, pubkey: &str) -> bool {
     sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM raise_hand_requests WHERE channel_id = ? AND pubkey = ?",
     )
@@ -93,7 +93,7 @@ pub async fn has_raised_hand(db: &sqlx::AnyPool, channel_id: &str, pubkey: &str)
 /// at the message-submission layer. One indexed query on
 /// `idx_federated_bans_target`; no cache needed since federated bans are rare.
 pub async fn is_federated_banned(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     public_key: &str,
 ) -> Result<bool, (StatusCode, String)> {
     let master_pk: Option<String> =

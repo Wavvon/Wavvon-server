@@ -3,9 +3,9 @@ use sqlx::Row;
 use wavvon_store::{PollRow, PollStore, PollVoteRow, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_poll(r: sqlx::any::AnyRow) -> PollRow {
+fn row_to_poll(r: sqlx::postgres::PgRow) -> PollRow {
     PollRow {
         id: r.get("id"),
         channel_id: r.get("channel_id"),
@@ -19,7 +19,7 @@ fn row_to_poll(r: sqlx::any::AnyRow) -> PollRow {
 }
 
 #[async_trait]
-impl PollStore for SqliteStore {
+impl PollStore for PostgresStore {
     async fn create_poll(&self, p: &PollRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO polls

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use axum::http::StatusCode;
 use bytes::Bytes;
-use sqlx::AnyPool;
+use sqlx::PgPool;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_identity::Identity;
 use wavvon_store::StoreError;
@@ -205,10 +205,10 @@ impl Default for RateLimiters {
 pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
-    pub db: AnyPool,
+    pub db: PgPool,
     /// Read-replica pool, if configured. Route handlers that do only reads
     /// may use this via `state.db_read.as_ref().unwrap_or(&state.db)`.
-    pub db_read: Option<AnyPool>,
+    pub db_read: Option<PgPool>,
     /// Abstracted store handle — use this for new code; existing handlers
     /// may still use `state.db` directly while the per-handler migration
     /// proceeds incrementally.

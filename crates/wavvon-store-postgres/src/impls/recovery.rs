@@ -3,10 +3,10 @@ use sqlx::Row;
 use wavvon_store::{KeyRotationRequestRow, RecoveryStore, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
 #[async_trait]
-impl RecoveryStore for SqliteStore {
+impl RecoveryStore for PostgresStore {
     async fn upsert_recovery_settings(
         &self,
         owner_pubkey: &str,

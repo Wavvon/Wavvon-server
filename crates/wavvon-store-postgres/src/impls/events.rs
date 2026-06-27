@@ -3,9 +3,9 @@ use sqlx::Row;
 use wavvon_store::{EventRsvpRow, EventStore, HubEventRow, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_event(r: sqlx::any::AnyRow) -> HubEventRow {
+fn row_to_event(r: sqlx::postgres::PgRow) -> HubEventRow {
     HubEventRow {
         id: r.get("id"),
         channel_id: r.get("channel_id"),
@@ -20,7 +20,7 @@ fn row_to_event(r: sqlx::any::AnyRow) -> HubEventRow {
 }
 
 #[async_trait]
-impl EventStore for SqliteStore {
+impl EventStore for PostgresStore {
     async fn create_event(&self, e: &HubEventRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO hub_events

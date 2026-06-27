@@ -3,7 +3,7 @@ use wavvon_store::StoreError;
 /// Map a `sqlx::Error` to a `StoreError`.
 ///
 /// - `RowNotFound` → `NotFound`
-/// - Database errors with "UNIQUE" in the message → `Conflict`
+/// - Database errors with "unique" / "duplicate" in the message → `Conflict`
 /// - Everything else → `Internal`
 pub(crate) fn map_err(e: sqlx::Error) -> StoreError {
     match e {

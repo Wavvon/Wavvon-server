@@ -1,7 +1,7 @@
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 
-pub async fn run(pool: &SqlitePool) -> Result<()> {
+pub async fn run(pool: &PgPool) -> Result<()> {
     // Discovery aggregator listing. One row per registered farm.
     // farm_url is the primary key — re-registration is an upsert.
     sqlx::query(
@@ -14,12 +14,12 @@ pub async fn run(pool: &SqlitePool) -> Result<()> {
             region              TEXT,
             languages           TEXT NOT NULL DEFAULT '[\"en\"]',
             tags                TEXT NOT NULL DEFAULT '[]',
-            hub_count           INTEGER NOT NULL DEFAULT 0,
-            max_hubs_total      INTEGER,
-            capacity_pct        INTEGER,
-            geo_unverified      INTEGER NOT NULL DEFAULT 0,
-            last_verified_at    INTEGER NOT NULL,
-            registered_at       INTEGER NOT NULL
+            hub_count           BIGINT NOT NULL DEFAULT 0,
+            max_hubs_total      BIGINT,
+            capacity_pct        BIGINT,
+            geo_unverified      BOOLEAN NOT NULL DEFAULT FALSE,
+            last_verified_at    BIGINT NOT NULL,
+            registered_at       BIGINT NOT NULL
         )",
     )
     .execute(pool)

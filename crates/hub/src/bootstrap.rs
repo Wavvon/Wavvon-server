@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::AnyPool;
+use sqlx::PgPool;
 
 pub struct BootstrapConfig {
     pub template_url: Option<String>,
@@ -10,7 +10,7 @@ pub struct BootstrapConfig {
 /// Runs on first launch if template_url or bootstrap_token is set and the hub
 /// has no channels yet (blank DB).
 pub async fn maybe_bootstrap(
-    db: &AnyPool,
+    db: &PgPool,
     http: &reqwest::Client,
     cfg: &BootstrapConfig,
 ) -> Result<()> {
@@ -83,7 +83,7 @@ async fn fetch_template(url: &Option<String>, http: &reqwest::Client) -> Option<
     }
 }
 
-async fn apply_template(db: &AnyPool, template: &serde_json::Value) -> anyhow::Result<()> {
+async fn apply_template(db: &PgPool, template: &serde_json::Value) -> anyhow::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

@@ -5,22 +5,18 @@ use axum_test::TestServer;
 use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
+#[path = "common.rs"]
+mod common;
+
 async fn setup(startup_name: &str) -> TestServer {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 

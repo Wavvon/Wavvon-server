@@ -6,11 +6,10 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::AnyPool; // used by insert_bot_user and insert_bot_session helpers
+use sqlx::PgPool; // used by insert_bot_user and insert_bot_session helpers
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, RenewResponse, VerifyResponse};
 use wavvon_hub::bots::token_expiry;
-use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
@@ -20,16 +19,13 @@ use wavvon_identity::Identity;
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+#[path = "common.rs"]
+mod common;
+
 async fn make_state() -> Arc<AppState> {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
@@ -103,11 +99,11 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
 
 /// Insert a minimal bot `users` row directly into the DB (bypassing the
 /// invite flow) so we can test expiry without standing up a full bot.
-async fn insert_bot_user(db: &AnyPool, pubkey: &str) {
+async fn insert_bot_user(db: &PgPool, pubkey: &str) {
     let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
-         VALUES (?, ?, ?, 'approved', 1)",
+         VALUES (?, ?, ?, 'approved', TRUE)",
     )
     .bind(pubkey)
     .bind(now)
@@ -117,8 +113,8 @@ async fn insert_bot_user(db: &AnyPool, pubkey: &str) {
     .unwrap();
 
     sqlx::query(
-        "INSERT OR IGNORE INTO user_roles (user_public_key, role_id, assigned_at)
-         VALUES (?, 'builtin-everyone', ?)",
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+         VALUES (?, 'builtin-everyone', ?) ON CONFLICT DO NOTHING",
     )
     .bind(pubkey)
     .bind(now)
@@ -128,7 +124,7 @@ async fn insert_bot_user(db: &AnyPool, pubkey: &str) {
 }
 
 /// Insert a session row directly with the given `expires_at`.
-async fn insert_session(db: &AnyPool, token: &str, pubkey: &str, expires_at: Option<i64>) {
+async fn insert_session(db: &PgPool, token: &str, pubkey: &str, expires_at: Option<i64>) {
     let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",

@@ -52,7 +52,7 @@ fn require_auth(
 }
 
 /// Load the admin pubkey from the farms singleton row.
-async fn get_admin_pubkey(db: &sqlx::SqlitePool) -> Option<String> {
+async fn get_admin_pubkey(db: &sqlx::PgPool) -> Option<String> {
     sqlx::query_scalar::<_, Option<String>>("SELECT admin_pubkey FROM farms WHERE id = 1")
         .fetch_optional(db)
         .await
@@ -109,7 +109,7 @@ struct FarmRow {
 }
 
 async fn fetch_farm_row(
-    db: &sqlx::SqlitePool,
+    db: &sqlx::PgPool,
 ) -> Result<FarmRow, (StatusCode, Json<serde_json::Value>)> {
     #[allow(clippy::type_complexity)]
     let row: Option<(

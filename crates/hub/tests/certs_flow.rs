@@ -8,7 +8,6 @@ use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::cert_worker;
-use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::routes::certs::{Certification, IssuanceRow};
 use wavvon_hub::server;
@@ -19,16 +18,13 @@ use wavvon_identity::Identity;
 // Shared test setup
 // ---------------------------------------------------------------------------
 
+#[path = "common.rs"]
+mod common;
+
 async fn make_state() -> Arc<AppState> {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),

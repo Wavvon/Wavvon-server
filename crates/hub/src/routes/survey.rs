@@ -183,7 +183,7 @@ struct AnswerRow {
 /// Load the active survey (enabled=1) with all questions and choices,
 /// without role mappings.
 async fn load_active_survey_public(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
 ) -> Result<Option<SurveyPublic>, (StatusCode, String)> {
     let survey: Option<SurveyRow> =
         sqlx::query_as("SELECT id, enabled FROM surveys WHERE enabled = 1 LIMIT 1")
@@ -246,7 +246,7 @@ async fn load_active_survey_public(
 
 /// Load a survey with full admin data (role mappings).
 async fn load_survey_admin(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     survey_id: &str,
 ) -> Result<Option<SurveyAdmin>, (StatusCode, String)> {
     let survey: Option<SurveyRow> = sqlx::query_as("SELECT id, enabled FROM surveys WHERE id = ?")
@@ -663,7 +663,7 @@ pub async fn admin_get_response_for_pubkey(
 }
 
 async fn load_response_answers(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     response_id: &str,
 ) -> Result<Vec<SurveyAnswerView>, (StatusCode, String)> {
     let rows: Vec<AnswerRow> = sqlx::query_as(

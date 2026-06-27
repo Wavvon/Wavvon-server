@@ -15,7 +15,6 @@ use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
@@ -25,16 +24,13 @@ use wavvon_identity::Identity;
 // Shared harness
 // ---------------------------------------------------------------------------
 
+#[path = "common.rs"]
+mod common;
+
 async fn start_hub() -> (String, Arc<AppState>) {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -404,7 +400,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
 
     sqlx::query(
         "INSERT INTO users (public_key, display_name, is_bot, first_seen_at, last_seen_at)
-         VALUES (?, 'testbot', 1, ?, ?)",
+         VALUES (?, 'testbot', TRUE, ?, ?)",
     )
     .bind(&pk)
     .bind(now)
@@ -425,7 +421,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
 
     // Ensure the audit sequence row exists (migrations create it; guard
     // for any test harness that skips the normal migration path).
-    let _ = sqlx::query("INSERT OR IGNORE INTO hub_audit_seq (id, seq) VALUES (1, 0)")
+    let _ = sqlx::query("INSERT INTO hub_audit_seq (id, seq) VALUES (1, 0)")
         .execute(&state.db)
         .await;
 

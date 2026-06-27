@@ -5,9 +5,9 @@ use wavvon_store::{
 };
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_cert_issuance(r: sqlx::any::AnyRow) -> CertIssuanceRow {
+fn row_to_cert_issuance(r: sqlx::postgres::PgRow) -> CertIssuanceRow {
     CertIssuanceRow {
         id: r.get("id"),
         subject_pubkey: r.get("subject_pubkey"),
@@ -23,7 +23,7 @@ fn row_to_cert_issuance(r: sqlx::any::AnyRow) -> CertIssuanceRow {
 }
 
 #[async_trait]
-impl CertStore for SqliteStore {
+impl CertStore for PostgresStore {
     async fn insert_cert_issuance(&self, c: &CertIssuanceRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO cert_issuances

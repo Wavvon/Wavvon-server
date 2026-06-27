@@ -10,7 +10,6 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use tokio::sync::{broadcast, RwLock};
-use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server::create_router_with_cors;
 use wavvon_hub::state::AppState;
@@ -20,15 +19,9 @@ use wavvon_identity::Identity;
 mod common;
 
 async fn setup_with_cors(cors_origins: &str) -> TestServer {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 

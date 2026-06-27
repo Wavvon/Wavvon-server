@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sqlx::any::AnyPoolOptions;
+use sqlx::postgres::PgPoolOptions;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::bots::token_expiry;
@@ -15,7 +15,7 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::{AppState, ConsumedVoiceToken};
 use wavvon_identity::Identity;
-use wavvon_store_sqlite::SqliteStore;
+use wavvon_store_postgres::PostgresStore;
 
 /// Print the `--help` text to stdout.
 fn print_help() {
@@ -277,13 +277,14 @@ async fn main() -> Result<()> {
     // are handled above before settings are loaded.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
-        sqlx::any::install_default_drivers();
-        let db = AnyPoolOptions::new()
+        let db_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/wavvon".to_string());
+        let db = PgPoolOptions::new()
             .max_connections(1)
-            .connect("sqlite:hub.db?mode=rwc")
+            .connect(&db_url)
             .await?;
         db::migrations::run(&db).await?;
-        println!("Migrations applied to hub.db");
+        println!("Migrations applied");
         return Ok(());
     }
 
@@ -328,10 +329,9 @@ async fn main() -> Result<()> {
 
     if subcommand.as_deref() == Some("admin") {
         let admin_cmd = std::env::args().nth(2).unwrap_or_default();
-        sqlx::any::install_default_drivers();
-        let db_url =
-            std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:hub.db?mode=ro".to_string());
-        let db = AnyPoolOptions::new()
+        let db_url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/wavvon".to_string());
+        let db = PgPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
             .await
@@ -397,17 +397,12 @@ async fn main() -> Result<()> {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs() as i64;
-                        let db_rw = AnyPoolOptions::new()
-                            .max_connections(1)
-                            .connect("sqlite:hub.db?mode=rwc")
-                            .await
-                            .context("Cannot open DB for write")?;
                         sqlx::query(
-                            "INSERT INTO bans(target_public_key, banned_by, reason, created_at) VALUES(?,'cli','CLI ban',?) ON CONFLICT (target_public_key) DO NOTHING",
+                            "INSERT INTO bans(target_public_key, banned_by, reason, created_at) VALUES($1,'cli','CLI ban',$2) ON CONFLICT (target_public_key) DO NOTHING",
                         )
                         .bind(&pubkey)
                         .bind(now)
-                        .execute(&db_rw)
+                        .execute(&db)
                         .await?;
                         println!("Banned {pubkey}");
                     }
@@ -415,14 +410,9 @@ async fn main() -> Result<()> {
                         let pubkey = std::env::args()
                             .nth(4)
                             .context("Usage: admin users unban <pubkey>")?;
-                        let db_rw = AnyPoolOptions::new()
-                            .max_connections(1)
-                            .connect("sqlite:hub.db?mode=rwc")
-                            .await
-                            .context("Cannot open DB for write")?;
-                        sqlx::query("DELETE FROM bans WHERE target_public_key = ?")
+                        sqlx::query("DELETE FROM bans WHERE target_public_key = $1")
                             .bind(&pubkey)
-                            .execute(&db_rw)
+                            .execute(&db)
                             .await?;
                         println!("Unbanned {pubkey}");
                     }
@@ -434,11 +424,6 @@ async fn main() -> Result<()> {
                         if pubkey.len() != 64 || !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
                             anyhow::bail!("Invalid pubkey: expected 64 hex characters");
                         }
-                        let db_rw = AnyPoolOptions::new()
-                            .max_connections(1)
-                            .connect("sqlite:hub.db?mode=rwc")
-                            .await
-                            .context("Cannot open DB for write")?;
                         let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
@@ -447,30 +432,30 @@ async fn main() -> Result<()> {
                         let prev: Option<String> = sqlx::query_scalar(
                             "SELECT user_public_key FROM user_roles WHERE role_id = 'builtin-owner' LIMIT 1",
                         )
-                        .fetch_optional(&db_rw)
+                        .fetch_optional(&db)
                         .await
                         .unwrap_or(None);
                         sqlx::query("DELETE FROM user_roles WHERE role_id = 'builtin-owner'")
-                            .execute(&db_rw)
+                            .execute(&db)
                             .await?;
                         if let Some(p) = prev {
                             println!("Revoked owner from {}…", &p[..16.min(p.len())]);
                         }
                         // Ensure a minimal user record exists
                         sqlx::query(
-                            "INSERT INTO users (public_key, first_seen_at) VALUES (?, ?) ON CONFLICT (public_key) DO NOTHING",
+                            "INSERT INTO users (public_key, first_seen_at) VALUES ($1, $2) ON CONFLICT (public_key) DO NOTHING",
                         )
                         .bind(&pubkey)
                         .bind(now)
-                        .execute(&db_rw)
+                        .execute(&db)
                         .await?;
                         sqlx::query(
-                            "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)
+                            "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES ($1, 'builtin-owner', $2)
                              ON CONFLICT (user_public_key, role_id) DO UPDATE SET assigned_at = excluded.assigned_at",
                         )
                         .bind(&pubkey)
                         .bind(now)
-                        .execute(&db_rw)
+                        .execute(&db)
                         .await?;
                         println!("Owner set to {pubkey}");
                     }
@@ -567,7 +552,7 @@ async fn main() -> Result<()> {
         if tls_enabled { "enabled" } else { "disabled" },
         settings.cors_origins,
     );
-    tracing::info!("data files: {cwd}/hub.db  {cwd}/hub_identity.json");
+    tracing::info!("data: identity={cwd}/hub_identity.json  database=PostgreSQL");
 
     if !tls_enabled {
         tracing::warn!(
@@ -592,15 +577,12 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded hub identity: {}", hub_identity);
     }
 
-    // Install AnyPool drivers (required before connecting with AnyPool).
-    sqlx::any::install_default_drivers();
-
     let db_url = settings
         .database_url
         .as_deref()
-        .unwrap_or("sqlite:hub.db?mode=rwc");
+        .unwrap_or_else(|| "postgres://postgres:postgres@localhost:5432/wavvon");
 
-    let write_pool = AnyPoolOptions::new()
+    let write_pool = PgPoolOptions::new()
         .max_connections(5)
         .connect(db_url)
         .await
@@ -608,7 +590,7 @@ async fn main() -> Result<()> {
 
     let read_pool = if let Some(read_url) = settings.database_read_url.as_deref() {
         Some(
-            AnyPoolOptions::new()
+            PgPoolOptions::new()
                 .max_connections(5)
                 .connect(read_url)
                 .await
@@ -642,7 +624,7 @@ async fn main() -> Result<()> {
                     .unwrap_or_default()
                     .as_secs() as i64;
                 sqlx::query(
-                    "INSERT INTO users (public_key, first_seen_at) VALUES (?, ?) ON CONFLICT (public_key) DO NOTHING",
+                    "INSERT INTO users (public_key, first_seen_at) VALUES ($1, $2) ON CONFLICT (public_key) DO NOTHING",
                 )
                 .bind(&owner_pk)
                 .bind(now)
@@ -654,7 +636,7 @@ async fn main() -> Result<()> {
                     .await
                     .ok();
                 sqlx::query(
-                    "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES (?, 'builtin-owner', ?)
+                    "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES ($1, 'builtin-owner', $2)
                      ON CONFLICT (user_public_key, role_id) DO UPDATE SET assigned_at = excluded.assigned_at",
                 )
                 .bind(&owner_pk)
@@ -749,7 +731,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let store: Arc<dyn wavvon_store::HubStore> = Arc::new(SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
 
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),
@@ -1020,7 +1002,7 @@ async fn main() -> Result<()> {
             loop {
                 interval.tick().await;
                 let online = hb_state.online_users.read().await.len() as u64;
-                let db_size = std::fs::metadata("hub.db").map(|m| m.len()).unwrap_or(0);
+                let db_size = 0u64; // PostgreSQL: size reported separately by the DB server
                 let uptime = hb_state.started_at.elapsed().as_secs();
                 let payload = serde_json::json!({
                     "hub_pubkey": hb_state.hub_identity.public_key_hex(),

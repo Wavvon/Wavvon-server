@@ -3,10 +3,10 @@ use sqlx::Row;
 use wavvon_store::{ConversationRow, DhKeyRow, DmMessageRow, DmStore, FriendRow, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
 #[async_trait]
-impl DmStore for SqliteStore {
+impl DmStore for PostgresStore {
     async fn create_conversation(
         &self,
         id: &str,
@@ -171,9 +171,9 @@ impl DmStore for SqliteStore {
         .bind(&m.signature)
         .bind(m.created_at)
         .bind(&m.attachments)
-        .bind(m.is_encrypted)
+        .bind(m.is_encrypted != 0)
         .bind(&m.ciphertext_json)
-        .bind(m.is_group_encrypted)
+        .bind(m.is_group_encrypted != 0)
         .execute(self.pool())
         .await
         .map_err(map_err)?;
@@ -186,15 +186,21 @@ impl DmStore for SqliteStore {
         before_id: Option<&str>,
         limit: i64,
     ) -> Result<Vec<DmMessageRow>, StoreError> {
+        // PostgreSQL has no rowid. Paginate by (created_at, id) tuple.
         let rows = if let Some(bid) = before_id {
             sqlx::query(
                 "SELECT id, conversation_id, sender, content, signature, created_at,
                         attachments, is_encrypted, ciphertext_json, is_group_encrypted
                  FROM dm_messages
-                 WHERE conversation_id = ? AND rowid < (SELECT rowid FROM dm_messages WHERE id = ?)
-                 ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                 WHERE conversation_id = ?
+                   AND (created_at, id) < (
+                     (SELECT created_at FROM dm_messages WHERE id = ?),
+                     ?
+                   )
+                 ORDER BY created_at DESC, id DESC LIMIT ?",
             )
             .bind(conv_id)
+            .bind(bid)
             .bind(bid)
             .bind(limit)
             .fetch_all(self.pool())
@@ -205,7 +211,7 @@ impl DmStore for SqliteStore {
                 "SELECT id, conversation_id, sender, content, signature, created_at,
                         attachments, is_encrypted, ciphertext_json, is_group_encrypted
                  FROM dm_messages WHERE conversation_id = ?
-                 ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                 ORDER BY created_at DESC, id DESC LIMIT ?",
             )
             .bind(conv_id)
             .bind(limit)
@@ -223,9 +229,18 @@ impl DmStore for SqliteStore {
                 signature: r.get("signature"),
                 created_at: r.get("created_at"),
                 attachments: r.get("attachments"),
-                is_encrypted: r.get("is_encrypted"),
+                // PostgreSQL BOOLEAN → i64 for DmMessageRow compatibility
+                is_encrypted: if r.get::<bool, _>("is_encrypted") {
+                    1
+                } else {
+                    0
+                },
                 ciphertext_json: r.get("ciphertext_json"),
-                is_group_encrypted: r.get("is_group_encrypted"),
+                is_group_encrypted: if r.get::<bool, _>("is_group_encrypted") {
+                    1
+                } else {
+                    0
+                },
             })
             .collect())
     }

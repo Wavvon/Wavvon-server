@@ -58,10 +58,10 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
     #[derive(sqlx::FromRow)]
     struct BotAppRow {
         mini_app_url: Option<String>,
-        requires_camera: i64,
+        requires_camera: bool,
     }
     let bot_row: Option<BotAppRow> =
-        sqlx::query_as("SELECT mini_app_url, requires_camera FROM bots WHERE public_key = ?")
+        sqlx::query_as("SELECT mini_app_url, requires_camera FROM bots WHERE public_key = $1")
             .bind(&bot_id)
             .fetch_optional(&state.db)
             .await
@@ -70,7 +70,7 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
 
     let (mini_app_url, requires_camera) = match bot_row {
         Some(r) => match r.mini_app_url {
-            Some(url) => (url, r.requires_camera != 0),
+            Some(url) => (url, r.requires_camera),
             None => return DispatchResult::Continue,
         },
         None => return DispatchResult::Continue,
@@ -91,7 +91,7 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
     let expires_at = now + 4 * 3600;
 
     let insert_ok = sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)",
     )
     .bind(&token)
     .bind(&cs.public_key)

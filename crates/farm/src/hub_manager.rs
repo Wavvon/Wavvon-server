@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use tokio::process::Child;
 use tokio::sync::RwLock;
 
@@ -112,7 +112,7 @@ impl HubManager {
 
     /// Re-spawn all non-suspended, non-deleted hubs from the DB.
     /// Called once at farm startup.
-    pub async fn spawn_all_from_db(&self, db: &SqlitePool) -> Result<()> {
+    pub async fn spawn_all_from_db(&self, db: &PgPool) -> Result<()> {
         let rows: Vec<(String, String, i64, Option<String>)> = sqlx::query_as(
             "SELECT id, db_path, process_port, owner_pubkey FROM hubs
              WHERE suspended_at IS NULL AND deleted_at IS NULL AND process_port IS NOT NULL",
@@ -138,7 +138,7 @@ impl HubManager {
     /// Returns the allocated port.
     pub async fn allocate_and_spawn(
         self: &Arc<Self>,
-        db: &SqlitePool,
+        db: &PgPool,
         hub_id: &str,
         db_path: &str,
         owner_pubkey: Option<&str>,

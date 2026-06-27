@@ -3,6 +3,8 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::db;
@@ -10,17 +12,56 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
+use wavvon_store_postgres::PostgresStore;
+
+/// Base PostgreSQL URL for the test database server.
+/// Override with the `TEST_DATABASE_URL` environment variable.
+/// The default points at a local PostgreSQL instance with no password,
+/// matching the GitHub Actions service container in build.yml.
+fn base_db_url() -> String {
+    std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string())
+}
+
+/// Create a new, isolated PostgreSQL database for a single test, run
+/// migrations against it, and return the pool.
+///
+/// The database name is derived from a UUID to ensure isolation across
+/// parallel test runs.
+pub async fn create_test_db() -> PgPool {
+    let base_url = base_db_url();
+
+    // Connect to the `postgres` maintenance database to issue CREATE DATABASE.
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("Failed to connect to PostgreSQL (admin)");
+
+    let db_name = format!("wavvon_test_{}", uuid::Uuid::new_v4().simple());
+
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("Failed to create test database");
+
+    // Connect to the newly created test database.
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("{base_url}/{db_name}"))
+        .await
+        .expect("Failed to connect to test database");
+
+    db::migrations::run(&pool)
+        .await
+        .expect("Failed to run migrations on test database");
+
+    pool
+}
 
 pub async fn setup() -> TestServer {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+    let db = create_test_db().await;
+    let store: Arc<dyn wavvon_store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 

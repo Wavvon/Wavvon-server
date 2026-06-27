@@ -5,10 +5,37 @@ use sqlx::Row;
 use wavvon_store::{StoreError, UserRow, UserStore};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
+
+/// PostgreSQL returns BOOLEAN columns as `bool`. `UserRow` uses `i64` for
+/// boolean fields to remain compatible with callers that do `is_bot != 0`.
+/// We cast here at the boundary.
+fn row_to_user(r: sqlx::postgres::PgRow) -> UserRow {
+    UserRow {
+        public_key: r.get("public_key"),
+        display_name: r.get("display_name"),
+        first_seen_at: r.get("first_seen_at"),
+        last_seen_at: r.get("last_seen_at"),
+        approval_status: r.get("approval_status"),
+        avatar: r.get("avatar"),
+        master_pubkey: r.get("master_pubkey"),
+        is_bot: if r.get::<bool, _>("is_bot") { 1 } else { 0 },
+        is_bot_removed: if r.get::<bool, _>("is_bot_removed") {
+            1
+        } else {
+            0
+        },
+        bot_invite_token: r.get("bot_invite_token"),
+        bot_invite_expires: r.get("bot_invite_expires"),
+        is_webhook: if r.get::<bool, _>("is_webhook") { 1 } else { 0 },
+        lobby_status: r.get("lobby_status"),
+        lobby_entered_at: r.get("lobby_entered_at"),
+        pow_level: r.get("pow_level"),
+    }
+}
 
 #[async_trait]
-impl UserStore for SqliteStore {
+impl UserStore for PostgresStore {
     async fn upsert_user(&self, pubkey: &str, now: i64) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO users (public_key, first_seen_at, last_seen_at)
@@ -35,24 +62,7 @@ impl UserStore for SqliteStore {
         .fetch_optional(self.pool())
         .await
         .map_err(map_err)?;
-
-        Ok(row.map(|r| UserRow {
-            public_key: r.get("public_key"),
-            display_name: r.get("display_name"),
-            first_seen_at: r.get("first_seen_at"),
-            last_seen_at: r.get("last_seen_at"),
-            approval_status: r.get("approval_status"),
-            avatar: r.get("avatar"),
-            master_pubkey: r.get("master_pubkey"),
-            is_bot: r.get("is_bot"),
-            is_bot_removed: r.get("is_bot_removed"),
-            bot_invite_token: r.get("bot_invite_token"),
-            bot_invite_expires: r.get("bot_invite_expires"),
-            is_webhook: r.get("is_webhook"),
-            lobby_status: r.get("lobby_status"),
-            lobby_entered_at: r.get("lobby_entered_at"),
-            pow_level: r.get("pow_level"),
-        }))
+        Ok(row.map(row_to_user))
     }
 
     async fn set_display_name(&self, pubkey: &str, name: Option<&str>) -> Result<(), StoreError> {
@@ -87,32 +97,12 @@ impl UserStore for SqliteStore {
         .fetch_all(self.pool())
         .await
         .map_err(map_err)?;
-
-        Ok(rows
-            .into_iter()
-            .map(|r| UserRow {
-                public_key: r.get("public_key"),
-                display_name: r.get("display_name"),
-                first_seen_at: r.get("first_seen_at"),
-                last_seen_at: r.get("last_seen_at"),
-                approval_status: r.get("approval_status"),
-                avatar: r.get("avatar"),
-                master_pubkey: r.get("master_pubkey"),
-                is_bot: r.get("is_bot"),
-                is_bot_removed: r.get("is_bot_removed"),
-                bot_invite_token: r.get("bot_invite_token"),
-                bot_invite_expires: r.get("bot_invite_expires"),
-                is_webhook: r.get("is_webhook"),
-                lobby_status: r.get("lobby_status"),
-                lobby_entered_at: r.get("lobby_entered_at"),
-                pow_level: r.get("pow_level"),
-            })
-            .collect())
+        Ok(rows.into_iter().map(row_to_user).collect())
     }
 
     async fn member_count(&self) -> Result<i64, StoreError> {
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM users WHERE is_bot = 0 AND approval_status = 'approved'",
+            "SELECT COUNT(*) FROM users WHERE is_bot = FALSE AND approval_status = 'approved'",
         )
         .fetch_one(self.pool())
         .await
@@ -175,7 +165,7 @@ impl UserStore for SqliteStore {
 
     async fn set_is_bot(&self, pubkey: &str, is_bot: bool) -> Result<(), StoreError> {
         sqlx::query("UPDATE users SET is_bot = ? WHERE public_key = ?")
-            .bind(if is_bot { 1i64 } else { 0 })
+            .bind(is_bot)
             .bind(pubkey)
             .execute(self.pool())
             .await

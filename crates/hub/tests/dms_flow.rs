@@ -3,10 +3,9 @@ use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
-use sqlx::AnyPool;
+use sqlx::PgPool;
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::routes::dm_models::ConversationResponse;
 use wavvon_hub::server;
@@ -16,20 +15,14 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-/// Same as common::setup() but also returns the AnyPool so tests can poke the
+/// Same as common::setup() but also returns the PgPool so tests can poke the
 /// database directly (e.g. to mark a dm_outbox row as bounced for a test
 /// that exercises the delivery_failed reporting path).
-async fn setup_with_pool() -> (TestServer, AnyPool) {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+async fn setup_with_pool() -> (TestServer, PgPool) {
+    let db = crate::common::create_test_db().await;
     let pool_handle = db.clone();
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -232,15 +225,9 @@ async fn cannot_create_empty_conversation() {
 // --- Cross-hub federated DM tests ---
 
 async fn start_real_hub(name: &str) -> String {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -353,15 +340,9 @@ fn make_plaintext_sig(
 
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
-    sqlx::any::install_default_drivers();
-    let db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+    let db = crate::common::create_test_db().await;
     let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -548,15 +529,9 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     );
 
     // Bring Hub B up on the previously-chosen port.
-    sqlx::any::install_default_drivers();
-    let hub_b_db = sqlx::any::AnyPoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&hub_b_db).await.unwrap();
+    let hub_b_db = crate::common::create_test_db().await;
     let hub_b_store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_sqlite::SqliteStore::new(hub_b_db.clone()));
+        Arc::new(wavvon_store_postgres::PostgresStore::new(hub_b_db.clone()));
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);
     let hub_b_state = Arc::new(AppState {

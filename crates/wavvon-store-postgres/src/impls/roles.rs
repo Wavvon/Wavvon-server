@@ -5,21 +5,26 @@ use sqlx::Row;
 use wavvon_store::{NewRole, RoleRow, RoleStore, StoreError, UserPerms};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_role(r: sqlx::any::AnyRow) -> RoleRow {
+fn row_to_role(r: sqlx::postgres::PgRow) -> RoleRow {
     RoleRow {
         id: r.get("id"),
         name: r.get("name"),
         priority: r.get("priority"),
-        display_separately: r.get("display_separately"),
+        // PostgreSQL BOOLEAN → i64 for RoleRow compatibility
+        display_separately: if r.get::<bool, _>("display_separately") {
+            1
+        } else {
+            0
+        },
         created_at: r.get("created_at"),
         talk_power: r.try_get("talk_power").unwrap_or(0),
     }
 }
 
 #[async_trait]
-impl RoleStore for SqliteStore {
+impl RoleStore for PostgresStore {
     async fn create_role(&self, r: &NewRole) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO roles (id, name, priority, display_separately, created_at)
@@ -28,7 +33,7 @@ impl RoleStore for SqliteStore {
         .bind(&r.id)
         .bind(&r.name)
         .bind(r.priority)
-        .bind(if r.display_separately { 1i64 } else { 0 })
+        .bind(r.display_separately)
         .bind(r.created_at)
         .execute(self.pool())
         .await
@@ -99,7 +104,7 @@ impl RoleStore for SqliteStore {
 
     async fn set_display_separately(&self, role_id: &str, flag: bool) -> Result<(), StoreError> {
         sqlx::query("UPDATE roles SET display_separately = ? WHERE id = ?")
-            .bind(if flag { 1i64 } else { 0 })
+            .bind(flag)
             .bind(role_id)
             .execute(self.pool())
             .await

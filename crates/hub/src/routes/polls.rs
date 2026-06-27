@@ -66,7 +66,7 @@ pub struct PollWithTotals {
 
 /// Aggregate vote counts across all voters for a poll.
 async fn load_poll_totals(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     poll_id: &str,
 ) -> Result<HashMap<String, i64>, (StatusCode, String)> {
     let rows: Vec<String> =

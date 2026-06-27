@@ -3,9 +3,9 @@ use sqlx::Row;
 use wavvon_store::{InviteRow, InviteStore, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_invite(r: sqlx::any::AnyRow) -> InviteRow {
+fn row_to_invite(r: sqlx::postgres::PgRow) -> InviteRow {
     InviteRow {
         code: r.get("code"),
         created_by: r.get("created_by"),
@@ -17,7 +17,7 @@ fn row_to_invite(r: sqlx::any::AnyRow) -> InviteRow {
 }
 
 #[async_trait]
-impl InviteStore for SqliteStore {
+impl InviteStore for PostgresStore {
     async fn create_invite(
         &self,
         code: &str,

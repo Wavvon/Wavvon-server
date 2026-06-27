@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ed25519_dalek::SigningKey;
-use sqlx::SqlitePool;
+use sqlx::PgPool;
 use tokio::sync::RwLock;
 
 use crate::hub_manager::HubManager;
@@ -10,7 +10,7 @@ use crate::hub_manager::HubManager;
 /// Shared state for the farm process.
 pub struct FarmState {
     /// SQLite connection pool for farm.db.
-    pub db: SqlitePool,
+    pub db: PgPool,
     /// The farm's Ed25519 signing keypair — private half stays here only.
     pub keypair: Arc<SigningKey>,
     /// Canonical URL for this farm (e.g. `"https://farm.example.com"`).
@@ -32,7 +32,7 @@ pub struct FarmState {
 
 impl FarmState {
     pub fn new(
-        db: SqlitePool,
+        db: PgPool,
         keypair: SigningKey,
         farm_url: String,
         hub_manager: Arc<HubManager>,

@@ -26,7 +26,7 @@ fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
 }
 
-async fn prune_expired(pool: &sqlx::AnyPool) {
+async fn prune_expired(pool: &sqlx::PgPool) {
     let _ = sqlx::query("DELETE FROM pairing_offers WHERE expires_at < ?")
         .bind(now_secs())
         .execute(pool)

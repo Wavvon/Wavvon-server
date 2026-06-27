@@ -3,9 +3,9 @@ use sqlx::Row;
 use wavvon_store::{MessageRow, MessageStore, NewMessage, PinRow, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
-fn row_to_message(r: sqlx::any::AnyRow) -> MessageRow {
+fn row_to_message(r: sqlx::postgres::PgRow) -> MessageRow {
     MessageRow {
         id: r.get("id"),
         channel_id: r.get("channel_id"),
@@ -29,7 +29,7 @@ const MSG_SELECT: &str = "SELECT m.id, m.channel_id, m.sender, u.display_name AS
      FROM messages m LEFT JOIN users u ON m.sender = u.public_key";
 
 #[async_trait]
-impl MessageStore for SqliteStore {
+impl MessageStore for PostgresStore {
     async fn insert_message(&self, m: &NewMessage) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO messages
@@ -66,14 +66,20 @@ impl MessageStore for SqliteStore {
         before: Option<&str>,
         limit: i64,
     ) -> Result<Vec<MessageRow>, StoreError> {
+        // PostgreSQL has no rowid. Paginate by (created_at, id) tuple.
         let rows = if let Some(before_id) = before {
             let sql = format!(
                 "{MSG_SELECT}
-                 WHERE m.channel_id = ? AND m.rowid < (SELECT rowid FROM messages WHERE id = ?)
-                 ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?"
+                 WHERE m.channel_id = ?
+                   AND (m.created_at, m.id) < (
+                     (SELECT created_at FROM messages WHERE id = ?),
+                     ?
+                   )
+                 ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
             );
             sqlx::query(&sql)
                 .bind(channel_id)
+                .bind(before_id)
                 .bind(before_id)
                 .bind(limit)
                 .fetch_all(self.pool())
@@ -83,7 +89,7 @@ impl MessageStore for SqliteStore {
             let sql = format!(
                 "{MSG_SELECT}
                  WHERE m.channel_id = ?
-                 ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?"
+                 ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
             );
             sqlx::query(&sql)
                 .bind(channel_id)
@@ -104,7 +110,7 @@ impl MessageStore for SqliteStore {
         let sql = format!(
             "{MSG_SELECT}
              WHERE m.channel_id = ? AND m.reply_to = ?
-             ORDER BY m.created_at ASC, m.rowid ASC LIMIT ?"
+             ORDER BY m.created_at ASC, m.id ASC LIMIT ?"
         );
         let rows = sqlx::query(&sql)
             .bind(channel_id)
@@ -124,7 +130,7 @@ impl MessageStore for SqliteStore {
         let sql = format!(
             "{MSG_SELECT}
              WHERE m.id IN ({placeholders})
-             ORDER BY m.created_at DESC, m.rowid DESC"
+             ORDER BY m.created_at DESC, m.id DESC"
         );
         let mut q = sqlx::query(&sql);
         for id in ids {
@@ -170,7 +176,7 @@ impl MessageStore for SqliteStore {
 
     async fn decrement_reply_count(&self, id: &str) -> Result<(), StoreError> {
         sqlx::query(
-            "UPDATE messages SET reply_count = MAX(0, COALESCE(reply_count, 0) - 1) WHERE id = ?",
+            "UPDATE messages SET reply_count = GREATEST(0, COALESCE(reply_count, 0) - 1) WHERE id = ?",
         )
         .bind(id)
         .execute(self.pool())
@@ -223,6 +229,7 @@ impl MessageStore for SqliteStore {
         message_id: &str,
         viewer: &str,
     ) -> Result<Vec<(String, i64, bool)>, StoreError> {
+        // PostgreSQL: MAX(CASE WHEN ... THEN 1 ELSE 0 END) returns BIGINT.
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(
             "SELECT emoji, COUNT(*) as cnt,
                     MAX(CASE WHEN user_key = ? THEN 1 ELSE 0 END) as mine

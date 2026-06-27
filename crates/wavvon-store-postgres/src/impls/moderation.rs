@@ -3,10 +3,10 @@ use sqlx::Row;
 use wavvon_store::{BanRow, ModerationStore, MuteRow, NewReport, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
 #[async_trait]
-impl ModerationStore for SqliteStore {
+impl ModerationStore for PostgresStore {
     async fn ban_user(
         &self,
         target: &str,
@@ -105,10 +105,11 @@ impl ModerationStore for SqliteStore {
 
     async fn is_muted(&self, target: &str) -> Result<bool, StoreError> {
         // Muted if a row exists and either expires_at is NULL or in the future.
+        // PostgreSQL equivalent of SQLite strftime('%s','now') is EXTRACT(EPOCH FROM NOW())::BIGINT
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM mutes
              WHERE target_public_key = ?
-               AND (expires_at IS NULL OR expires_at > strftime('%s','now'))",
+               AND (expires_at IS NULL OR expires_at > EXTRACT(EPOCH FROM NOW())::BIGINT)",
         )
         .bind(target)
         .fetch_one(self.pool())

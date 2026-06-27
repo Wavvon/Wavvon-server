@@ -50,7 +50,7 @@ pub fn parse_dm_attachments(json: Option<String>) -> Vec<Attachment> {
 /// Ensure a user row exists for `public_key` so FKs into the users table hold.
 /// For remote users we only know their key; the stub is created with no display name.
 pub async fn ensure_user_stub(
-    db: &sqlx::AnyPool,
+    db: &sqlx::PgPool,
     public_key: &str,
     now: i64,
 ) -> Result<(), (StatusCode, String)> {

@@ -3,10 +3,10 @@ use sqlx::Row;
 use wavvon_store::{AllianceRow, FederatedChannelRow, FederationStore, PeerRow, StoreError};
 
 use crate::error_map::map_err;
-use crate::SqliteStore;
+use crate::PostgresStore;
 
 #[async_trait]
-impl FederationStore for SqliteStore {
+impl FederationStore for PostgresStore {
     async fn upsert_peer(&self, p: &PeerRow) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO peers (public_key, name, url, added_at) VALUES (?, ?, ?, ?)
@@ -283,7 +283,6 @@ impl FederationStore for SqliteStore {
     }
 
     async fn list_pending_alliance_invites(&self) -> Result<Vec<AllianceRow>, StoreError> {
-        // Return as AllianceRow using id/alliance_name/from_hub_public_key/created_at
         let rows = sqlx::query(
             "SELECT id, alliance_name, from_hub_public_key, created_at
              FROM pending_alliance_invites ORDER BY created_at DESC",
