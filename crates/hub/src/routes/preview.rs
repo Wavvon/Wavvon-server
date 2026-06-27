@@ -332,9 +332,36 @@ pub async fn get_preview(
     // Build a one-shot client that is pinned to the first validated address.
     // This prevents DNS-rebinding: the hostname in the URL resolves to the
     // address we already validated, not whatever the DNS says at connect time.
+    //
+    // no_proxy(): disable HTTP_PROXY / HTTPS_PROXY env vars so a system proxy
+    // cannot forward requests to private IPs that passed the DNS check.
+    //
+    // Custom redirect policy: cap at 3 hops and block redirects to private IP
+    // literals (covers 301 → http://127.0.0.1/ attacks). Hostname-based
+    // redirects are allowed — a follow-on DNS resolution would require async
+    // code that is unavailable in the policy callback; the small hop cap limits
+    // exposure. IPv6 bracket notation is handled by stripping [ ].
     let pinned_addr = validated_addrs[0];
     let pinned_client = reqwest::Client::builder()
         .resolve(&host, pinned_addr)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 3 {
+                return attempt.stop();
+            }
+            if let Some(h) = attempt.url().host_str() {
+                let bare = h.trim_start_matches('[').trim_end_matches(']');
+                if bare.eq_ignore_ascii_case("localhost") {
+                    return attempt.stop();
+                }
+                if let Ok(ip) = bare.parse::<IpAddr>() {
+                    if is_private_ip(ip) {
+                        return attempt.stop();
+                    }
+                }
+            }
+            attempt.follow()
+        }))
         .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
         .build()
         .map_err(|e| {
