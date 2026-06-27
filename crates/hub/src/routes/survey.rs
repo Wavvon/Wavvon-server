@@ -384,7 +384,7 @@ pub async fn submit_survey(
     .await;
 
     if let Err(e) = result {
-        if matches!(&e, sqlx::Error::Database(dbe) if dbe.code().map_or(false, |c| c == "23505")) {
+        if matches!(&e, sqlx::Error::Database(dbe) if dbe.code().is_some_and(|c| c == "23505")) {
             return Err((StatusCode::CONFLICT, "Survey already submitted".to_string()));
         }
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
