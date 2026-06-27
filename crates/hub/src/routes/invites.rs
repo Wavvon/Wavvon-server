@@ -142,47 +142,6 @@ pub async fn validate_and_use_invite(
     Ok(())
 }
 
-/// GET /join/:code — public, no auth.
-/// Returns basic hub info when the code is valid; 404/410 when not.
-pub async fn get_join_info(
-    State(state): State<Arc<AppState>>,
-    Path(code): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let now = crate::auth::handlers::unix_timestamp();
-
-    let invite = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = $1",
-    )
-    .bind(&code)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .ok_or((StatusCode::NOT_FOUND, "Invite not found".to_string()))?;
-
-    if let Some(expires_at) = invite.expires_at {
-        if now > expires_at {
-            return Err((StatusCode::GONE, "Invite has expired".to_string()));
-        }
-    }
-    if let Some(max_uses) = invite.max_uses {
-        if invite.uses >= max_uses {
-            return Err((StatusCode::GONE, "Invite has been fully used".to_string()));
-        }
-    }
-
-    let member_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE approval_status = 'approved'")
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    Ok(Json(serde_json::json!({
-        "hub_name": state.hub_name,
-        "member_count": member_count,
-        "code": code,
-    })))
-}
-
 /// POST /join/:code — requires a valid session token.
 /// Validates the invite, increments use_count, and auto-approves the user
 /// (bypasses the require_approval gate even when the hub has it enabled).
