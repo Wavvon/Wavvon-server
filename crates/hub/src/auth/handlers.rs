@@ -494,6 +494,18 @@ pub async fn verify(
 
     if has_roles == 0 {
         assign_initial_roles(&state.db, &canonical_pubkey, now).await?;
+        if existing_users == 0 {
+            sqlx::query(
+                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+                 VALUES ($1, 'builtin-owner', $2)
+                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
+            )
+            .bind(&canonical_pubkey)
+            .bind(now)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        }
     }
 
     // Bot challenge gate: if challenge_mode != 'off', require a valid token.
@@ -718,8 +730,8 @@ pub async fn validate_ws_token(
 
 /// Assign builtin roles to a brand-new user who has none yet.
 ///
-/// Assigns only `builtin-everyone`; ownership is never auto-granted.
-/// Operators set `WAVVON_OWNER_PUBKEY` or assign the role via the API.
+/// Grants `builtin-everyone` to a new user. The caller additionally grants
+/// `builtin-owner` when this is the first user on the hub.
 /// Returns an error only for genuine DB failures so callers can propagate it.
 pub async fn assign_initial_roles(
     db: &PgPool,
