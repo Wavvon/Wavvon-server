@@ -191,6 +191,9 @@ pub struct RateLimiters {
     /// Per-user fixed-window rate limiter for link preview fetches (10 requests/60 s).
     /// Each preview may trigger an outbound HTTP fetch, so we throttle per user.
     pub preview: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-hub-pubkey rate limiter for /federation/badge-offer (20 offers/3600 s).
+    /// Keyed by the sender's hub public key hex.
+    pub badge_offer: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 impl Default for RateLimiters {
@@ -198,6 +201,7 @@ impl Default for RateLimiters {
         Self {
             messages: Mutex::new(HashMap::new()),
             preview: Mutex::new(HashMap::new()),
+            badge_offer: Mutex::new(HashMap::new()),
         }
     }
 }

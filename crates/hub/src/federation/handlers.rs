@@ -316,6 +316,29 @@ pub async fn receive_badge_offer(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BadgeOfferRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // Rate limit: 20 badge offers per hour per sender hub pubkey.
+    {
+        let mut map = state
+            .rate_limiters
+            .badge_offer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(3600);
+        const EVICTION_THRESHOLD: usize = 2_000;
+        if map.len() >= EVICTION_THRESHOLD {
+            map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
+        }
+        let entry = map.entry(req.from_hub_pubkey.clone()).or_insert((0, now));
+        if now.duration_since(entry.1) > window {
+            *entry = (0, now);
+        }
+        if entry.0 >= 20 {
+            return Err((StatusCode::TOO_MANY_REQUESTS, "rate_limited".to_string()));
+        }
+        entry.0 += 1;
+    }
+
     // 1. Parse and validate payload shape.
     let payload: crate::routes::badges::BadgePayload =
         serde_json::from_str(&req.payload).map_err(|_| {
@@ -351,6 +374,19 @@ pub async fn receive_badge_offer(
             StatusCode::BAD_REQUEST,
             "payload.issuer_pubkey does not match from_hub_pubkey".to_string(),
         ));
+    }
+
+    // Reject duplicate: same hub + identical payload already pending admin review.
+    let duplicate_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM badge_offers WHERE from_hub_pubkey = $1 AND payload = $2",
+    )
+    .bind(&req.from_hub_pubkey)
+    .bind(&req.payload)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(0);
+    if duplicate_count > 0 {
+        return Ok(StatusCode::ACCEPTED);
     }
 
     let id = Uuid::new_v4().to_string();
