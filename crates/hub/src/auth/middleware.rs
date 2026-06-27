@@ -376,13 +376,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             if checks.role_count == 0 {
-                crate::auth::handlers::assign_initial_roles(
-                    &state.db,
-                    &public_key,
-                    now,
-                    state.owner_pubkey.as_deref(),
-                )
-                .await?;
+                crate::auth::handlers::assign_initial_roles(&state.db, &public_key, now).await?;
             }
 
             if checks.ban_count > 0 {

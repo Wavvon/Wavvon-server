@@ -654,6 +654,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    if settings.owner_pubkey.is_none() {
+        tracing::warn!(
+            "No WAVVON_OWNER_PUBKEY configured. \
+             The hub has no owner; set WAVVON_OWNER_PUBKEY and restart, \
+             or assign the builtin-owner role manually via the API."
+        );
+    }
+
     // First-run bootstrap: applies a template from template_url or redeems
     // bootstrap_token when the channels table is empty.
     // Non-fatal — a bad template or unreachable URL never blocks startup.

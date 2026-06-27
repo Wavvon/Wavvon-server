@@ -493,13 +493,7 @@ pub async fn verify(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if has_roles == 0 {
-        assign_initial_roles(
-            &state.db,
-            &canonical_pubkey,
-            now,
-            state.owner_pubkey.as_deref(),
-        )
-        .await?;
+        assign_initial_roles(&state.db, &canonical_pubkey, now).await?;
     }
 
     // Bot challenge gate: if challenge_mode != 'off', require a valid token.
@@ -724,42 +718,14 @@ pub async fn validate_ws_token(
 
 /// Assign builtin roles to a brand-new user who has none yet.
 ///
-/// If no owner role assignment exists anywhere in the hub, the user becomes
-/// the first owner. The builtin-everyone role is always assigned (idempotent).
+/// Assigns only `builtin-everyone`; ownership is never auto-granted.
+/// Operators set `WAVVON_OWNER_PUBKEY` or assign the role via the API.
 /// Returns an error only for genuine DB failures so callers can propagate it.
 pub async fn assign_initial_roles(
     db: &PgPool,
     public_key: &str,
     now: i64,
-    configured_owner: Option<&str>,
 ) -> Result<(), (StatusCode, String)> {
-    // Only auto-assign owner when no owner key is configured externally.
-    // If owner_pubkey is set, startup seeding already created the owner row
-    // before the server accepted connections, so the auto-grant must not run —
-    // otherwise the first user to reach this path on a WAVVON_OWNER_PUBKEY
-    // deployment (where owner_count would still be 0 between process start and
-    // the operator's own registration) would silently take ownership.
-    if configured_owner.is_none() {
-        let owner_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-owner'")
-                .fetch_one(db)
-                .await
-                .unwrap_or(1); // conservative: assume owner exists on error
-
-        if owner_count == 0 {
-            sqlx::query(
-                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-                 VALUES ($1, 'builtin-owner', $2)
-                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
-            )
-            .bind(public_key)
-            .bind(now)
-            .execute(db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        }
-    }
-
     sqlx::query(
         "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
          VALUES ($1, 'builtin-everyone', $2)
