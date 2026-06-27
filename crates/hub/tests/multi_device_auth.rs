@@ -156,7 +156,7 @@ async fn paired_device_auths_and_records_master() {
 
     // The user row records the master.
     let stored_master: Option<String> =
-        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
             .bind(master.public_key_hex())
             .fetch_one(&db)
             .await
@@ -187,7 +187,7 @@ async fn second_paired_device_finds_existing_user() {
     let me: MeResponse = resp.json();
     assert_eq!(me.public_key, master.public_key_hex());
 
-    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE master_pubkey = ?")
+    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE master_pubkey = $1")
         .bind(master.public_key_hex())
         .fetch_one(&db)
         .await
@@ -222,7 +222,7 @@ async fn legacy_user_upgrade_preserves_canonical_pubkey() {
     assert_eq!(user_count, 1);
 
     let stored_master: Option<String> =
-        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
             .bind(&alice_pubkey)
             .fetch_one(&db)
             .await
@@ -257,7 +257,7 @@ async fn legacy_auth_still_works_unchanged() {
     assert_eq!(me.public_key, alice.public_key_hex());
 
     let stored_master: Option<String> =
-        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
             .bind(alice.public_key_hex())
             .fetch_one(&db)
             .await
@@ -293,7 +293,7 @@ async fn master_hijack_attempt_is_blocked_by_coalesce() {
 
     // Alice's row should still have NULL master.
     let alice_master_value: Option<String> =
-        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
             .bind(&alice_pubkey)
             .fetch_one(&db)
             .await
@@ -319,7 +319,7 @@ async fn insert_revocation(db: &PgPool, subkey_pubkey: &str) {
     sqlx::query(
         "INSERT INTO subkey_revocations
          (master_pubkey, subkey_pubkey, revoked_at, signature, registered_at)
-         VALUES ('test-master', ?, 1, 'test-sig', 1)
+         VALUES ('test-master', $1, 1, 'test-sig', 1)
          ON CONFLICT (master_pubkey, subkey_pubkey) DO NOTHING",
     )
     .bind(subkey_pubkey)

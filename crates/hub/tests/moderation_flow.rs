@@ -467,7 +467,7 @@ async fn talk_power_blocks_low_priority_user() {
 
     // Sanity: confirm the row landed
     let stored: i64 =
-        sqlx::query_scalar("SELECT min_talk_power FROM channel_settings WHERE channel_id = ?")
+        sqlx::query_scalar("SELECT min_talk_power FROM channel_settings WHERE channel_id = $1")
             .bind(&channel.id)
             .fetch_one(&state.db)
             .await
@@ -777,7 +777,7 @@ async fn raise_hand_allows_voice_join_below_threshold() {
         .unwrap();
 
     // Confirm min_talk_power was written to the channels table
-    let stored: i64 = sqlx::query_scalar("SELECT min_talk_power FROM channels WHERE id = ?")
+    let stored: i64 = sqlx::query_scalar("SELECT min_talk_power FROM channels WHERE id = $1")
         .bind(&channel.id)
         .fetch_one(&state.db)
         .await
@@ -849,7 +849,7 @@ async fn federated_ban_blocks_message_posting() {
     sqlx::query(
         "INSERT INTO federated_bans
              (source_hub_pubkey, target_master_pubkey, reason, added_at, synced_at)
-         VALUES ('peer-hub-pubkey', ?, 'test', ?, ?)",
+         VALUES ('peer-hub-pubkey', $1, 'test', $2, $3)",
     )
     .bind(user.public_key_hex())
     .bind(now)

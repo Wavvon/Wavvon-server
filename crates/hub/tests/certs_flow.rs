@@ -234,7 +234,7 @@ async fn cert_worker_issues_on_tick() {
 
     // Back-date first_seen_at to 31 days ago so the worker considers them eligible.
     let thirty_one_days_ago = wavvon_hub::auth::handlers::unix_timestamp() - 31 * 86400;
-    sqlx::query("UPDATE users SET first_seen_at = ? WHERE public_key = ?")
+    sqlx::query("UPDATE users SET first_seen_at = $1 WHERE public_key = $2")
         .bind(thirty_one_days_ago)
         .bind(&member_pk)
         .execute(&state.db)
@@ -337,7 +337,7 @@ async fn cert_mode_any_accepts_valid_cert() {
     let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status)
-         VALUES (?, ?, ?, 'approved')",
+         VALUES ($1, $2, $3, 'approved')",
     )
     .bind(&newcomer_pk)
     .bind(now - 86400)

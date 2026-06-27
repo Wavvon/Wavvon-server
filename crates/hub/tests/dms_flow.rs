@@ -656,7 +656,7 @@ async fn list_dm_messages_marks_bounced_as_delivery_failed() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    sqlx::query("UPDATE dm_outbox SET bounced_at = ? WHERE recipient_hub_url = ?")
+    sqlx::query("UPDATE dm_outbox SET bounced_at = $1 WHERE recipient_hub_url = $2")
         .bind(now)
         .bind("http://unreachable.example")
         .execute(&pool)
@@ -746,7 +746,7 @@ async fn send_dm_uses_home_hub_designation_when_present() {
 
     // Give Bob a master_pubkey in Hub A's users table.
     let bob_master_hex = bob_master.public_key_hex();
-    sqlx::query("UPDATE users SET master_pubkey = ? WHERE public_key = ?")
+    sqlx::query("UPDATE users SET master_pubkey = $1 WHERE public_key = $2")
         .bind(&bob_master_hex)
         .bind(bob.public_key_hex())
         .execute(&hub_a_state.db)
@@ -762,7 +762,7 @@ async fn send_dm_uses_home_hub_designation_when_present() {
     sqlx::query(
         "INSERT INTO home_hub_designations
          (master_pubkey, hubs_json, issued_at, sequence, signature, updated_at)
-         VALUES (?, ?, ?, 1, 'test', ?)",
+         VALUES ($1, $2, $3, 1, 'test', $4)",
     )
     .bind(&bob_master_hex)
     .bind(&hubs_json)

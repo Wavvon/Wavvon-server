@@ -102,7 +102,7 @@ async fn insert_bot_user(db: &PgPool, pubkey: &str) {
     let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
-         VALUES (?, ?, ?, 'approved', TRUE)",
+         VALUES ($1, $2, $3, 'approved', TRUE)",
     )
     .bind(pubkey)
     .bind(now)
@@ -113,7 +113,7 @@ async fn insert_bot_user(db: &PgPool, pubkey: &str) {
 
     sqlx::query(
         "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-         VALUES (?, 'builtin-everyone', ?) ON CONFLICT DO NOTHING",
+         VALUES ($1, 'builtin-everyone', $2) ON CONFLICT DO NOTHING",
     )
     .bind(pubkey)
     .bind(now)
@@ -126,7 +126,7 @@ async fn insert_bot_user(db: &PgPool, pubkey: &str) {
 async fn insert_session(db: &PgPool, token: &str, pubkey: &str, expires_at: Option<i64>) {
     let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)",
     )
     .bind(token)
     .bind(pubkey)
@@ -227,7 +227,7 @@ async fn tick_sends_warning_for_near_expiry_session() {
 
     // expiry_warned_at should be set in the DB.
     let warned_at: Option<i64> =
-        sqlx::query_scalar("SELECT expiry_warned_at FROM sessions WHERE token = ?")
+        sqlx::query_scalar("SELECT expiry_warned_at FROM sessions WHERE token = $1")
             .bind(token)
             .fetch_one(&state.db)
             .await
@@ -277,7 +277,7 @@ async fn tick_does_not_rewarn_recently_warned_session() {
     insert_session(&state.db, token, &pk, Some(expires_at)).await;
 
     // Set expiry_warned_at to 1 hour ago (within the 24-h cooldown).
-    sqlx::query("UPDATE sessions SET expiry_warned_at = ? WHERE token = ?")
+    sqlx::query("UPDATE sessions SET expiry_warned_at = $1 WHERE token = $2")
         .bind(now - 3600)
         .bind(token)
         .execute(&state.db)
@@ -331,7 +331,7 @@ async fn tick_closes_and_deletes_expired_session() {
     assert_eq!(v["reason"], "token_expired");
 
     // Session row should be gone.
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = ?")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = $1")
         .bind(token)
         .fetch_one(&state.db)
         .await
@@ -357,7 +357,7 @@ async fn tick_does_not_touch_live_sessions() {
 
     token_expiry::tick(&state).await.unwrap();
 
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = ?")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE token = $1")
         .bind(token)
         .fetch_one(&state.db)
         .await

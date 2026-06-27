@@ -399,7 +399,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
 
     sqlx::query(
         "INSERT INTO users (public_key, display_name, is_bot, first_seen_at, last_seen_at)
-         VALUES (?, 'testbot', TRUE, ?, ?)",
+         VALUES ($1, 'testbot', TRUE, $2, $3)",
     )
     .bind(&pk)
     .bind(now)
@@ -411,7 +411,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
     // Subscribe to message.created hub-wide.
     sqlx::query(
         "INSERT INTO bot_subscriptions (bot_pubkey, event_type, channel_id)
-         VALUES (?, 'message.created', '')",
+         VALUES ($1, 'message.created', '')",
     )
     .bind(&pk)
     .execute(&state.db)
