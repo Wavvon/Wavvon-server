@@ -358,15 +358,24 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            // Assign builtin-everyone role if this user has no roles yet.
-            let has_roles: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = $1")
-                    .bind(&public_key)
-                    .fetch_one(&state.db)
-                    .await
-                    .unwrap_or(0);
+            // One combined query collects everything needed for the admission
+            // checks below (role_count, ban, federated ban, approval_status).
+            // This replaces 5 separate sequential reads with a single round-trip.
+            let checks: FarmTokenChecks = sqlx::query_as(
+                "SELECT
+                     u.approval_status,
+                     (SELECT COUNT(*) FROM user_roles      WHERE user_public_key  = $1) AS role_count,
+                     (SELECT COUNT(*) FROM bans            WHERE target_public_key = $1) AS ban_count,
+                     (SELECT COUNT(*) FROM federated_bans  WHERE target_master_pubkey
+                          = COALESCE(u.master_pubkey, $1)) AS fed_ban_count
+                 FROM users u WHERE u.public_key = $1",
+            )
+            .bind(&public_key)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            if has_roles == 0 {
+            if checks.role_count == 0 {
                 crate::auth::handlers::assign_initial_roles(
                     &state.db,
                     &public_key,
@@ -376,47 +385,15 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 .await?;
             }
 
-            // Ban check (same as the legacy path in handlers.rs).
-            if crate::routes::moderation::is_banned(&state.db, &public_key).await? {
+            if checks.ban_count > 0 {
                 return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
             }
 
-            // Federated ban check: farm-token users are identified by their
-            // canonical pubkey (the token's `sub` field). Check the master_pubkey
-            // column first; fall back to the canonical pubkey itself for
-            // users who have not paired a separate master key.
-            {
-                let master_pk: Option<String> =
-                    sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
-                        .bind(&public_key)
-                        .fetch_optional(&state.db)
-                        .await
-                        .ok()
-                        .flatten();
-                let check_key = master_pk.as_deref().unwrap_or(&public_key);
-                let fed_ban_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = $1",
-                )
-                .bind(check_key)
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or(0);
-                if fed_ban_count > 0 {
-                    return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
-                }
+            if checks.fed_ban_count > 0 {
+                return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
             }
 
-            // Pending approval check.
-            let approval_status: String =
-                sqlx::query_scalar("SELECT approval_status FROM users WHERE public_key = $1")
-                    .bind(&public_key)
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| "approved".to_string());
-
-            if approval_status == "pending" {
+            if checks.approval_status == "pending" {
                 let path = parts.uri.path();
                 if !PENDING_ALLOWED_PATHS.contains(&path) {
                     return Err((
@@ -429,4 +406,12 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
         Ok(AuthUser { public_key })
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct FarmTokenChecks {
+    approval_status: String,
+    role_count: i64,
+    ban_count: i64,
+    fed_ban_count: i64,
 }
