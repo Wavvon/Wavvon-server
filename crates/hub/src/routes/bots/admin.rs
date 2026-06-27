@@ -134,7 +134,7 @@ pub async fn admin_get_bot(
         created_at: bot.created_at,
         webhook_url: bot.webhook_url,
         mini_app_url: bot.mini_app_url,
-        requires_camera: bot.requires_camera,
+        requires_camera: bot.requires_camera != 0,
         commands: cmds
             .into_iter()
             .map(|c| SlashCommandInfo {

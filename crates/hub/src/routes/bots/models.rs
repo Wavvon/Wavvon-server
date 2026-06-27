@@ -86,7 +86,7 @@ pub struct BotRow {
     pub created_at: i64,
     pub webhook_url: Option<String>,
     pub mini_app_url: Option<String>,
-    pub requires_camera: bool,
+    pub requires_camera: i64,
 }
 
 #[derive(sqlx::FromRow)]

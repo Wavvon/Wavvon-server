@@ -58,7 +58,7 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
     #[derive(sqlx::FromRow)]
     struct BotAppRow {
         mini_app_url: Option<String>,
-        requires_camera: bool,
+        requires_camera: i64,
     }
     let bot_row: Option<BotAppRow> =
         sqlx::query_as("SELECT mini_app_url, requires_camera FROM bots WHERE public_key = ?")
@@ -70,7 +70,7 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
 
     let (mini_app_url, requires_camera) = match bot_row {
         Some(r) => match r.mini_app_url {
-            Some(url) => (url, r.requires_camera),
+            Some(url) => (url, r.requires_camera != 0),
             None => return DispatchResult::Continue,
         },
         None => return DispatchResult::Continue,
