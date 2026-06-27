@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -631,29 +632,38 @@ pub async fn get_messages(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     };
 
-    let mut messages: Vec<MessageResponse> = Vec::with_capacity(rows.len());
-    for r in rows {
-        let reactions = load_reactions(&state.db, &r.id, &user.public_key).await?;
-        let reply_to = if let Some(parent_id) = &r.reply_to {
-            load_reply_context(&state.db, parent_id).await?
-        } else {
-            None
-        };
-        messages.push(MessageResponse {
-            id: r.id,
-            channel_id: r.channel_id,
-            sender: r.sender,
-            sender_name: r.sender_name,
-            content: r.content,
-            created_at: r.created_at,
-            edited_at: r.edited_at,
-            attachments: parse_attachments(r.attachments),
-            reactions,
-            reply_to,
-            visible_to_pubkey: None,
-            reply_count: r.reply_count,
-        });
-    }
+    let msg_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let reply_ids: Vec<String> = rows
+        .iter()
+        .filter_map(|r| r.reply_to.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut reactions_map = batch_load_reactions(&state.db, &msg_ids, &user.public_key).await?;
+    let mut reply_map = batch_load_reply_contexts(&state.db, &reply_ids).await?;
+
+    let messages: Vec<MessageResponse> = rows
+        .into_iter()
+        .map(|r| {
+            let reactions = reactions_map.remove(&r.id).unwrap_or_default();
+            let reply_to = r.reply_to.as_deref().and_then(|id| reply_map.remove(id));
+            MessageResponse {
+                id: r.id,
+                channel_id: r.channel_id,
+                sender: r.sender,
+                sender_name: r.sender_name,
+                content: r.content,
+                created_at: r.created_at,
+                edited_at: r.edited_at,
+                attachments: parse_attachments(r.attachments),
+                reactions,
+                reply_to,
+                visible_to_pubkey: None,
+                reply_count: r.reply_count,
+            }
+        })
+        .collect();
 
     Ok(Json(messages))
 }
@@ -670,6 +680,77 @@ struct MessageRow {
     created_at: i64,
     edited_at: Option<i64>,
     reply_count: i64,
+}
+
+/// Bulk variant of load_reactions: one query for all messages in a page,
+/// returns a map keyed by message_id.
+async fn batch_load_reactions(
+    db: &sqlx::PgPool,
+    message_ids: &[String],
+    viewer: &str,
+) -> Result<HashMap<String, Vec<ReactionSummary>>, (StatusCode, String)> {
+    if message_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT message_id, emoji, COUNT(*) as cnt,
+                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+         FROM message_reactions
+         WHERE message_id = ANY($2)
+         GROUP BY message_id, emoji
+         ORDER BY message_id, MIN(created_at) ASC",
+    )
+    .bind(viewer)
+    .bind(message_ids)
+    .fetch_all(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let mut map: HashMap<String, Vec<ReactionSummary>> = HashMap::new();
+    for (message_id, emoji, count, mine) in rows {
+        map.entry(message_id).or_default().push(ReactionSummary {
+            emoji,
+            count,
+            me: mine != 0,
+        });
+    }
+    Ok(map)
+}
+
+/// Bulk variant of load_reply_context: one query for all parent IDs in a page,
+/// returns a map keyed by parent message_id.
+async fn batch_load_reply_contexts(
+    db: &sqlx::PgPool,
+    parent_ids: &[String],
+) -> Result<HashMap<String, ReplyContext>, (StatusCode, String)> {
+    if parent_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows: Vec<(String, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT m.id, m.sender, u.display_name as sender_name, m.content
+         FROM messages m LEFT JOIN users u ON m.sender = u.public_key
+         WHERE m.id = ANY($1)",
+    )
+    .bind(parent_ids)
+    .fetch_all(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, sender, sender_name, content)| {
+            let preview: String = content.chars().take(140).collect();
+            (
+                id.clone(),
+                ReplyContext {
+                    message_id: id,
+                    sender,
+                    sender_name,
+                    content_preview: preview,
+                },
+            )
+        })
+        .collect())
 }
 
 /// Load a small preview of a parent message for the reply chip. Returns
