@@ -580,7 +580,7 @@ async fn main() -> Result<()> {
     let db_url = settings
         .database_url
         .as_deref()
-        .unwrap_or_else(|| "postgres://postgres:postgres@localhost:5432/wavvon");
+        .unwrap_or("postgres://postgres:postgres@localhost:5432/wavvon");
 
     let write_pool = PgPoolOptions::new()
         .max_connections(5)
