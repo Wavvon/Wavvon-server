@@ -1,17 +1,17 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
 use sqlx::AnyPool;
 use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::routes::dm_models::ConversationResponse;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::routes::dm_models::ConversationResponse;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;
@@ -28,8 +28,8 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         .unwrap();
     db::migrations::run(&db).await.unwrap();
     let pool_handle = db.clone();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -70,7 +70,7 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -238,8 +238,8 @@ async fn start_real_hub(name: &str) -> String {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -280,7 +280,7 @@ async fn start_real_hub(name: &str) -> String {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -334,7 +334,7 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
 
 /// Build a valid `plaintext_signature` for a plaintext DM.
 ///
-/// The canonical form mirrors `voxply_identity::federated_plaintext_dm_signing_bytes`:
+/// The canonical form mirrors `wavvon_identity::federated_plaintext_dm_signing_bytes`:
 /// domain tag + len-prefixed(conversation_id) + len-prefixed(conv_type) + len-prefixed(content).
 /// `conv_type` is always `"dm"` for 1:1 conversations and `"group"` for group ones;
 /// tests that only deal with 1:1 DMs can pass `"dm"` directly.
@@ -345,7 +345,7 @@ fn make_plaintext_sig(
     content: &str,
 ) -> String {
     let bytes =
-        voxply_identity::federated_plaintext_dm_signing_bytes(conversation_id, conv_type, content);
+        wavvon_identity::federated_plaintext_dm_signing_bytes(conversation_id, conv_type, content);
     hex::encode(sender.sign(&bytes).to_bytes())
 }
 
@@ -358,8 +358,8 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -400,7 +400,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -487,7 +487,7 @@ async fn dm_delivered_across_hubs() {
 
 #[tokio::test]
 async fn dm_retries_when_recipient_hub_comes_online() {
-    use voxply_hub::dm_worker;
+    use wavvon_hub::dm_worker;
 
     // Hub A is up from the start.
     let (hub_a, hub_a_state) = start_real_hub_with_state("hub-a").await;
@@ -552,8 +552,8 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         .await
         .unwrap();
     db::migrations::run(&hub_b_db).await.unwrap();
-    let hub_b_store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(hub_b_db.clone()));
+    let hub_b_store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(hub_b_db.clone()));
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);
     let hub_b_state = Arc::new(AppState {
@@ -593,7 +593,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -903,7 +903,7 @@ fn make_group_envelope(
     let nonce_hex = "cafebabe000000000000000000000000".to_string();
 
     // Canonical signing bytes (mirrors group_envelope_signing_bytes in dms.rs)
-    let mut signing_msg = b"voxply/group-dm-ciphertext/v1\0".to_vec();
+    let mut signing_msg = b"wavvon/group-dm-ciphertext/v1\0".to_vec();
     for s in [
         conv_id,
         &version.to_string(),
@@ -951,7 +951,7 @@ fn make_push_sender_key_request(
     let mut sorted: Vec<(&Identity, &str, &str)> = recipients.to_vec();
     sorted.sort_by(|a, b| a.0.public_key_hex().cmp(&b.0.public_key_hex()));
 
-    let mut signing_msg = b"voxply/group-key-dist/v1\0".to_vec();
+    let mut signing_msg = b"wavvon/group-key-dist/v1\0".to_vec();
     for s in [conv_id, &version.to_string()] {
         let b = s.as_bytes();
         signing_msg.extend_from_slice(&(b.len() as u32).to_le_bytes());
@@ -1387,7 +1387,7 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
 
     // --- Case 2: attacker signs with their OWN key but claims sender=victim ---
     let wrong_sig = {
-        let bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+        let bytes = wavvon_identity::federated_plaintext_dm_signing_bytes(
             conv_id,
             "dm",
             "injected with wrong key",

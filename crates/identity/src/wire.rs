@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+﻿use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -48,7 +48,7 @@ impl HomeHubList {
         sequence: u64,
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"voxply/home-hub-list/v1\0");
+        buf.extend_from_slice(b"wavvon/home-hub-list/v1\0");
         write_str(&mut buf, master_pubkey);
         write_str_vec(&mut buf, hubs);
         write_u64_le(&mut buf, issued_at);
@@ -97,7 +97,7 @@ impl SubkeyCert {
         fallback_hubs: &[String],
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"voxply/subkey-cert/v1\0");
+        buf.extend_from_slice(b"wavvon/subkey-cert/v1\0");
         write_str(&mut buf, master_pubkey);
         write_str(&mut buf, subkey_pubkey);
         write_str(&mut buf, device_label);
@@ -144,7 +144,7 @@ pub struct RevocationEntry {
 impl RevocationEntry {
     pub fn signing_bytes(master_pubkey: &str, subkey_pubkey: &str, revoked_at: u64) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"voxply/revocation/v1\0");
+        buf.extend_from_slice(b"wavvon/revocation/v1\0");
         write_str(&mut buf, master_pubkey);
         write_str(&mut buf, subkey_pubkey);
         write_u64_le(&mut buf, revoked_at);
@@ -184,7 +184,7 @@ impl SignedPrefsBlob {
         let digest = hasher.finalize();
 
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"voxply/prefs-blob/v1\0");
+        buf.extend_from_slice(b"wavvon/prefs-blob/v1\0");
         write_str(&mut buf, master_pubkey);
         write_u64_le(&mut buf, blob_version);
         buf.extend_from_slice(&digest);
@@ -229,7 +229,7 @@ impl PairingOffer {
         expires_at: u64,
     ) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"voxply/pairing-offer/v1\0");
+        buf.extend_from_slice(b"wavvon/pairing-offer/v1\0");
         write_str(&mut buf, master_pubkey);
         write_str_vec(&mut buf, home_hubs);
         write_str(&mut buf, pairing_token);
@@ -270,7 +270,7 @@ pub struct PairingClaim {
 impl PairingClaim {
     pub fn signing_bytes(pairing_token: &str, subkey_pubkey: &str, device_label: &str) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"voxply/pairing-claim/v1\0");
+        buf.extend_from_slice(b"wavvon/pairing-claim/v1\0");
         write_str(&mut buf, pairing_token);
         write_str(&mut buf, subkey_pubkey);
         write_str(&mut buf, device_label);
@@ -314,7 +314,7 @@ pub enum PairingStatus {
 }
 
 /// Published DH key for a user. Stored on the user's home hub(s).
-/// Signing prefix: "voxply/dh-key/v1\0"
+/// Signing prefix: "wavvon/dh-key/v1\0"
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DhKeyRecord {
     pub pubkey: String,        // Ed25519 pubkey (owner)
@@ -325,7 +325,7 @@ pub struct DhKeyRecord {
 
 impl DhKeyRecord {
     pub fn signing_bytes(pubkey: &str, dh_pubkey_hex: &str) -> Vec<u8> {
-        let mut out = b"voxply/dh-key/v1\0".to_vec();
+        let mut out = b"wavvon/dh-key/v1\0".to_vec();
         let pk = pubkey.as_bytes();
         out.extend_from_slice(&(pk.len() as u32).to_le_bytes());
         out.extend_from_slice(pk);
@@ -350,7 +350,7 @@ pub fn dm_envelope_signing_bytes(
     nonce_hex: &str,
     dh_pubkey_hex: &str,
 ) -> Vec<u8> {
-    let mut buf = b"voxply/dm-ciphertext/v1\0".to_vec();
+    let mut buf = b"wavvon/dm-ciphertext/v1\0".to_vec();
     write_str(&mut buf, conv_id);
     write_str(&mut buf, ciphertext_hex);
     write_str(&mut buf, nonce_hex);
@@ -368,7 +368,7 @@ pub fn group_dm_envelope_signing_bytes(
     ciphertext_hex: &str,
     nonce_hex: &str,
 ) -> Vec<u8> {
-    let mut buf = b"voxply/group-dm-ciphertext/v1\0".to_vec();
+    let mut buf = b"wavvon/group-dm-ciphertext/v1\0".to_vec();
     write_str(&mut buf, conv_id);
     write_str(&mut buf, &sender_key_version.to_string());
     write_str(&mut buf, &iteration.to_string());
@@ -381,7 +381,7 @@ pub fn group_dm_envelope_signing_bytes(
 ///
 /// Covers the fields the client knows at send time:
 /// `conversation_id || conv_type || content`.
-/// Domain tag: `"voxply/federated-dm/v1\0"`.
+/// Domain tag: `"wavvon/federated-dm/v1\0"`.
 ///
 /// `message_id` and `created_at` are hub-assigned and therefore excluded from
 /// the signed payload; the client cannot know them before the hub responds.
@@ -394,7 +394,7 @@ pub fn federated_plaintext_dm_signing_bytes(
     conv_type: &str,
     content: &str,
 ) -> Vec<u8> {
-    let mut buf = b"voxply/federated-dm/v1\0".to_vec();
+    let mut buf = b"wavvon/federated-dm/v1\0".to_vec();
     write_str(&mut buf, conversation_id);
     write_str(&mut buf, conv_type);
     write_str(&mut buf, content);
@@ -411,7 +411,7 @@ pub fn sender_key_dist_signing_bytes(
     sender_key_version: u32,
     recipients: &[(String, String)],
 ) -> Vec<u8> {
-    let mut buf = b"voxply/group-key-dist/v1\0".to_vec();
+    let mut buf = b"wavvon/group-key-dist/v1\0".to_vec();
     write_str(&mut buf, conv_id);
     write_str(&mut buf, &sender_key_version.to_string());
     let mut sorted: Vec<&(String, String)> = recipients.iter().collect();
@@ -448,7 +448,7 @@ pub struct PublicHubProfile {
 impl PublicHubProfile {
     pub fn signing_bytes(pubkey: &str, public_hubs: &[PublicHubEntry], issued_at: u64) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend_from_slice(b"voxply/public-hub-profile/v1\0");
+        buf.extend_from_slice(b"wavvon/public-hub-profile/v1\0");
         write_str(&mut buf, pubkey);
         write_u64_le(&mut buf, issued_at);
         write_u32_le(&mut buf, public_hubs.len() as u32);

@@ -1,16 +1,16 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::routes::alliance_models::*;
-use voxply_hub::routes::chat_models::{ChannelResponse, MessageResponse};
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::routes::alliance_models::*;
+use wavvon_hub::routes::chat_models::{ChannelResponse, MessageResponse};
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_identity::Identity;
 
 async fn start_hub(name: &str) -> (String, Arc<AppState>) {
     sqlx::any::install_default_drivers();
@@ -20,8 +20,8 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -62,7 +62,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -365,7 +365,7 @@ async fn push_invite_happy_path() {
         .unwrap();
 
     // Hub B: no pending invites yet
-    let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
+    let pending: Vec<wavvon_hub::routes::alliance_models::PendingAllianceInviteRow> = client
         .get(format!("{hub_b_url}/alliances/pending-invites"))
         .bearer_auth(&token_b)
         .send()
@@ -395,7 +395,7 @@ async fn push_invite_happy_path() {
     );
 
     // Hub B: should now see one pending invite
-    let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
+    let pending: Vec<wavvon_hub::routes::alliance_models::PendingAllianceInviteRow> = client
         .get(format!("{hub_b_url}/alliances/pending-invites"))
         .bearer_auth(&token_b)
         .send()
@@ -427,7 +427,7 @@ async fn push_invite_happy_path() {
     );
 
     // Hub B: pending list should now be empty
-    let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
+    let pending: Vec<wavvon_hub::routes::alliance_models::PendingAllianceInviteRow> = client
         .get(format!("{hub_b_url}/alliances/pending-invites"))
         .bearer_auth(&token_b)
         .send()
@@ -491,7 +491,7 @@ async fn push_invite_decline() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
+    let pending: Vec<wavvon_hub::routes::alliance_models::PendingAllianceInviteRow> = client
         .get(format!("{hub_b_url}/alliances/pending-invites"))
         .bearer_auth(&token_b)
         .send()
@@ -518,7 +518,7 @@ async fn push_invite_decline() {
     );
 
     // Pending list should be empty
-    let pending: Vec<voxply_hub::routes::alliance_models::PendingAllianceInviteRow> = client
+    let pending: Vec<wavvon_hub::routes::alliance_models::PendingAllianceInviteRow> = client
         .get(format!("{hub_b_url}/alliances/pending-invites"))
         .bearer_auth(&token_b)
         .send()

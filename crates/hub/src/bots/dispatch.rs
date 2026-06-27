@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::http::StatusCode;
 use uuid::Uuid;
@@ -170,9 +170,9 @@ pub async fn dispatch_slash(
         .http_client
         .post(&webhook_url)
         .header("Content-Type", "application/json")
-        .header("X-Voxply-Hub-Pubkey", &hub_pubkey)
-        .header("X-Voxply-Signature", &sig_hex)
-        .header("X-Voxply-Timestamp", timestamp.to_string())
+        .header("X-Wavvon-Hub-Pubkey", &hub_pubkey)
+        .header("X-Wavvon-Signature", &sig_hex)
+        .header("X-Wavvon-Timestamp", timestamp.to_string())
         .body(body_json)
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -469,9 +469,9 @@ pub async fn dispatch_component(
         .http_client
         .post(&webhook_url)
         .header("Content-Type", "application/json")
-        .header("X-Voxply-Hub-Pubkey", &hub_pubkey)
-        .header("X-Voxply-Signature", &sig_hex)
-        .header("X-Voxply-Timestamp", timestamp.to_string())
+        .header("X-Wavvon-Hub-Pubkey", &hub_pubkey)
+        .header("X-Wavvon-Signature", &sig_hex)
+        .header("X-Wavvon-Timestamp", timestamp.to_string())
         .body(body_json)
         .timeout(std::time::Duration::from_secs(5))
         .send()

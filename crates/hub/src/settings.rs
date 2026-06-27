@@ -1,93 +1,93 @@
-use anyhow::Result;
+﻿use anyhow::Result;
 use serde::Deserialize;
 
-/// Single source of truth for every `VOXPLY_*` env var the hub reads.
+/// Single source of truth for every `WAVVON_*` env var the hub reads.
 ///
 /// This slice is used by both `load()` (for defaults) and `--help` (for the
 /// env-var table).  When you add a field to `Settings`, add a row here too.
 ///
 /// Fields: (env-var name without prefix, default value or "" if unset, purpose)
 pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
-    ("VOXPLY_HTTP_PORT", "3000", "HTTP / WebSocket port the hub listens on"),
+    ("WAVVON_HTTP_PORT", "3000", "HTTP / WebSocket port the hub listens on"),
     (
-        "VOXPLY_VOICE_UDP_PORT",
+        "WAVVON_VOICE_UDP_PORT",
         "3001",
         "UDP port for the voice relay",
     ),
     (
-        "VOXPLY_TLS_CERT",
+        "WAVVON_TLS_CERT",
         "(unset)",
         "Path to TLS certificate PEM. Both cert and key must be set to enable HTTPS",
     ),
     (
-        "VOXPLY_TLS_KEY",
+        "WAVVON_TLS_KEY",
         "(unset)",
-        "Path to TLS private key PEM. Required together with VOXPLY_TLS_CERT",
+        "Path to TLS private key PEM. Required together with WAVVON_TLS_CERT",
     ),
     (
-        "VOXPLY_CORS_ORIGINS",
+        "WAVVON_CORS_ORIGINS",
         "*",
         "Comma-separated allowed CORS origins for the main API, or `*` for any origin. \
          Default is permissive (`*`) because the API is bearer-token authenticated, \
          not cookie-based, so there is no CSRF surface",
     ),
     (
-        "VOXPLY_FARM_URL",
+        "WAVVON_FARM_URL",
         "(unset)",
         "URL of the farm this hub is managed by. Enables farm-issued token acceptance",
     ),
     (
-        "VOXPLY_OWNER_PUBKEY",
+        "WAVVON_OWNER_PUBKEY",
         "(unset)",
         "Ed25519 public key (64 hex chars) seeded as builtin-owner on first boot",
     ),
     (
-        "VOXPLY_DISCOVERY_URL",
-        "https://discovery.voxply.io",
+        "WAVVON_DISCOVERY_URL",
+        "https://discovery.wavvon.io",
         "Discovery service base URL",
     ),
     (
-        "VOXPLY_TEMPLATE_URL",
+        "WAVVON_TEMPLATE_URL",
         "(unset)",
         "Bootstrap template URL applied on first boot when the channels table is empty",
     ),
     (
-        "VOXPLY_BOOTSTRAP_TOKEN",
+        "WAVVON_BOOTSTRAP_TOKEN",
         "(unset)",
         "Bootstrap token redeemed from the discovery service to fetch a template",
     ),
     (
-        "VOXPLY_LOG_FORMAT",
+        "WAVVON_LOG_FORMAT",
         "text",
         "Logging format: `text` (default) or `json`",
     ),
     (
-        "VOXPLY_OTLP_ENDPOINT",
+        "WAVVON_OTLP_ENDPOINT",
         "(unset)",
         "OpenTelemetry OTLP collector endpoint (e.g. http://localhost:4318). Leave unset to disable",
     ),
     (
-        "VOXPLY_SEARCH_BACKEND",
+        "WAVVON_SEARCH_BACKEND",
         "tantivy",
         "Full-text search backend: `tantivy` (default) or `none` to disable search",
     ),
     (
-        "VOXPLY_DATABASE_URL",
+        "WAVVON_DATABASE_URL",
         "sqlite:hub.db",
         "Full database URL. Defaults to SQLite at hub.db. Also accepts postgresql://…",
     ),
     (
-        "VOXPLY_DATABASE_READ_URL",
+        "WAVVON_DATABASE_READ_URL",
         "(unset)",
         "Read-replica URL (PostgreSQL only). All queries go to the primary when unset",
     ),
     (
-        "VOXPLY_SFU_URL",
+        "WAVVON_SFU_URL",
         "(unset)",
         "Optional SFU URL for WebRTC video. Advertised in /info; clients connect there directly",
     ),
     (
-        "VOXPLY_TRUSTED_PROXY",
+        "WAVVON_TRUSTED_PROXY",
         "false",
         "Set to `true` when a single reverse proxy (Caddy/nginx) terminates TLS in front of the hub. \
          The rate limiter will derive the real client IP from the last X-Forwarded-For entry \
@@ -96,7 +96,7 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          would allow limiter bypass.",
     ),
     (
-        "VOXPLY_WEB_CLIENT_DIR",
+        "WAVVON_WEB_CLIENT_DIR",
         "(unset)",
         "Path to a directory of pre-built web-client assets. When set, the hub serves the \
          client at / with SPA fallback (Accept: text/html gets index.html; other requests get \
@@ -104,7 +104,7 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          this to /web-client automatically.",
     ),
     (
-        "VOXPLY_BOTS_ALLOW_CAMERA",
+        "WAVVON_BOTS_ALLOW_CAMERA",
         "false",
         "Set to `true` to allow bot mini-apps that declare `requires_camera: true` to \
          receive camera access in the client webview/iframe sandbox. Defaults to false; \
@@ -114,14 +114,14 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
-    /// HTTP port the hub listens on. Env: VOXPLY_HTTP_PORT
+    /// HTTP port the hub listens on. Env: WAVVON_HTTP_PORT
     pub http_port: u16,
-    /// UDP port for voice traffic. Env: VOXPLY_VOICE_UDP_PORT
+    /// UDP port for voice traffic. Env: WAVVON_VOICE_UDP_PORT
     pub voice_udp_port: u16,
     /// Path to TLS certificate PEM. Both cert and key must be set to enable HTTPS.
-    /// Env: VOXPLY_TLS_CERT
+    /// Env: WAVVON_TLS_CERT
     pub tls_cert: Option<String>,
-    /// Path to TLS private key PEM. Env: VOXPLY_TLS_KEY
+    /// Path to TLS private key PEM. Env: WAVVON_TLS_KEY
     pub tls_key: Option<String>,
     /// Allowed CORS origins for the main REST API.
     /// Comma-separated list of origins (e.g. "https://app.example.com,https://other.io")
@@ -131,29 +131,29 @@ pub struct Settings {
     /// is no CSRF surface.  Operators who want to restrict to specific origins can
     /// set this explicitly.
     ///
-    /// Env: VOXPLY_CORS_ORIGINS
+    /// Env: WAVVON_CORS_ORIGINS
     pub cors_origins: String,
-    /// Farm URL when this hub is managed by a farm. Env: VOXPLY_FARM_URL
+    /// Farm URL when this hub is managed by a farm. Env: WAVVON_FARM_URL
     pub farm_url: Option<String>,
     /// Owner's Ed25519 public key (64 hex chars). Seeded as builtin-owner on first boot.
-    /// Env: VOXPLY_OWNER_PUBKEY
+    /// Env: WAVVON_OWNER_PUBKEY
     pub owner_pubkey: Option<String>,
-    /// Discovery service base URL. Env: VOXPLY_DISCOVERY_URL
+    /// Discovery service base URL. Env: WAVVON_DISCOVERY_URL
     pub discovery_url: String,
     /// Bootstrap template URL applied on first boot when channels table is empty.
-    /// Env: VOXPLY_TEMPLATE_URL
+    /// Env: WAVVON_TEMPLATE_URL
     pub template_url: Option<String>,
     /// Bootstrap token redeemed from the discovery service to fetch a template.
-    /// Env: VOXPLY_BOOTSTRAP_TOKEN
+    /// Env: WAVVON_BOOTSTRAP_TOKEN
     pub bootstrap_token: Option<String>,
-    /// Logging format: "text" (default) or "json". Env: VOXPLY_LOG_FORMAT
+    /// Logging format: "text" (default) or "json". Env: WAVVON_LOG_FORMAT
     pub log_format: String,
     /// OpenTelemetry OTLP collector endpoint. Leave empty to disable.
-    /// Env: VOXPLY_OTLP_ENDPOINT
+    /// Env: WAVVON_OTLP_ENDPOINT
     pub otlp_endpoint: Option<String>,
     /// Full-text search backend. None or "tantivy" = Tantivy (default).
     /// Set to "none" to disable search entirely (NullSearch).
-    /// Env: VOXPLY_SEARCH_BACKEND
+    /// Env: WAVVON_SEARCH_BACKEND
     pub search_backend: Option<String>,
     /// Full database URL. Leave unset to use SQLite at hub.db (default).
     /// Examples:
@@ -171,7 +171,7 @@ pub struct Settings {
     /// (Caddy, nginx, …) terminates TLS in front of the hub — never when
     /// the hub is directly internet-facing.
     ///
-    /// Env: VOXPLY_TRUSTED_PROXY
+    /// Env: WAVVON_TRUSTED_PROXY
     pub trusted_proxy: bool,
     /// Path to a directory of pre-built web-client assets.
     ///
@@ -180,30 +180,30 @@ pub struct Settings {
     /// unmatched paths get a plain 404 so API error semantics are preserved.
     /// When unset the hub is API-only and no fallback is registered at all.
     ///
-    /// Env: VOXPLY_WEB_CLIENT_DIR
+    /// Env: WAVVON_WEB_CLIENT_DIR
     pub web_client_dir: Option<String>,
     /// Allow bot mini-apps that declare `requires_camera: true` to receive
     /// camera access in client webview/iframe sandboxes.
     ///
-    /// Env: VOXPLY_BOTS_ALLOW_CAMERA
+    /// Env: WAVVON_BOTS_ALLOW_CAMERA
     pub bots_allow_camera: bool,
 }
 
 /// Load hub settings from (in priority order, highest last):
 ///   1. Built-in defaults
 ///   2. `hub.toml` in the current working directory (optional — missing file is fine)
-///   3. `VOXPLY_*` environment variables
+///   3. `WAVVON_*` environment variables
 pub fn load() -> Result<Settings> {
     let settings = config::Config::builder()
         .set_default("http_port", 3000)?
         .set_default("voice_udp_port", 3001)?
         .set_default("cors_origins", "*")?
         .set_default("log_format", "text")?
-        .set_default("discovery_url", "https://discovery.voxply.io")?
+        .set_default("discovery_url", "https://discovery.wavvon.io")?
         .set_default("trusted_proxy", false)?
         .set_default("bots_allow_camera", false)?
         .add_source(config::File::with_name("hub").required(false))
-        .add_source(config::Environment::with_prefix("VOXPLY"))
+        .add_source(config::Environment::with_prefix("WAVVON"))
         .build()?
         .try_deserialize::<Settings>()?;
     Ok(settings)

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -111,7 +111,7 @@ pub async fn ext_accept_invite(
     let token_bytes = stored_token.as_bytes();
     let sig_bytes = hex::decode(&req.signature_over_token)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
-    voxply_identity::verify_signature(&req.pubkey, token_bytes, &sig_bytes).map_err(|_| {
+    wavvon_identity::verify_signature(&req.pubkey, token_bytes, &sig_bytes).map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
             "Invalid signature over invite token".to_string(),

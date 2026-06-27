@@ -1,8 +1,8 @@
-//! Per-IP token-bucket rate limiter with reverse-proxy support.
+﻿//! Per-IP token-bucket rate limiter with reverse-proxy support.
 //!
 //! # IP source
 //!
-//! When `VOXPLY_TRUSTED_PROXY=true` the limiter reads the client IP from the
+//! When `WAVVON_TRUSTED_PROXY=true` the limiter reads the client IP from the
 //! **`X-Forwarded-For`** header instead of the raw socket peer address.
 //!
 //! ## XFF parsing rule (single trusted-proxy assumption)
@@ -20,7 +20,7 @@
 //! connection from.  Any earlier entries were supplied by the client and MUST
 //! NOT be trusted.
 //!
-//! **Security**: when `VOXPLY_TRUSTED_PROXY` is `false` (the default) the header
+//! **Security**: when `WAVVON_TRUSTED_PROXY` is `false` (the default) the header
 //! is completely ignored and the raw socket peer address is used.  Never set the
 //! flag unless you have a real proxy that terminates TLS in front.
 //!
@@ -133,7 +133,7 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     /// Create a new limiter.  `trusted_proxy` should be taken from
-    /// `Settings::trusted_proxy` (loaded from `VOXPLY_TRUSTED_PROXY`).
+    /// `Settings::trusted_proxy` (loaded from `WAVVON_TRUSTED_PROXY`).
     pub fn new(config: Config, trusted_proxy: bool) -> Arc<Self> {
         Arc::new(Self {
             buckets: Mutex::new(HashMap::new()),

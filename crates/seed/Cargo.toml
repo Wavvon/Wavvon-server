@@ -1,14 +1,14 @@
-[package]
-name = "voxply-seed"
+﻿[package]
+name = "wavvon-seed"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "voxply-seed"
+name = "wavvon-seed"
 path = "src/main.rs"
 
 [lib]
-name = "voxply_seed"
+name = "wavvon_seed"
 path = "src/lib.rs"
 
 [dependencies]

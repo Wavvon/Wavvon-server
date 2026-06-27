@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -164,7 +164,7 @@ pub async fn submit_pow(
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid level".to_string()))?;
 
-    if !voxply_identity::verify_security_level(&user.public_key, nonce, claimed_level) {
+    if !wavvon_identity::verify_security_level(&user.public_key, nonce, claimed_level) {
         return Err((StatusCode::BAD_REQUEST, "Invalid proof of work".to_string()));
     }
 

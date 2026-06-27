@@ -1,4 +1,4 @@
-/// Farm auth routes: challenge / verify / renew.
+﻿/// Farm auth routes: challenge / verify / renew.
 ///
 /// The wire bodies are identical to the hub's existing auth routes — only the
 /// host they're sent to changes. That's deliberate: the client migration is
@@ -137,7 +137,7 @@ pub async fn verify(
     let sig_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    voxply_identity::verify_signature(&req.public_key, &challenge_bytes, &sig_bytes)
+    wavvon_identity::verify_signature(&req.public_key, &challenge_bytes, &sig_bytes)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
 
     // TOTP check — only applies when the verified pubkey is the admin key.
@@ -176,7 +176,7 @@ pub async fn verify(
                             30,
                             bytes,
                             None,
-                            "voxply-farm".to_string(),
+                            "wavvon-farm".to_string(),
                         )
                         .ok()?;
                         totp.check_current(code).ok()

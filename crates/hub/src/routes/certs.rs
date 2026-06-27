@@ -1,4 +1,4 @@
-//! Hub certification routes — Task #20 (issuance, admin management) and
+﻿//! Hub certification routes — Task #20 (issuance, admin management) and
 //! Task #21 (auth gate helpers + /info cert_requirement field).
 //!
 //! Routes registered in server.rs:
@@ -629,7 +629,7 @@ pub async fn verify_certification(
         Ok(s) => s,
         Err(_) => return false,
     };
-    if voxply_identity::verify_signature(
+    if wavvon_identity::verify_signature(
         &payload.issuer_pubkey,
         payload_json.as_bytes(),
         &sig_bytes,

@@ -1,4 +1,4 @@
-/// Integration tests for farm hub management routes.
+﻿/// Integration tests for farm hub management routes.
 ///
 /// Tests exercise:
 /// - GET /farm/hubs (unauthenticated, authenticated)
@@ -15,11 +15,11 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use sqlx::sqlite::SqlitePoolOptions;
-use voxply_farm::db;
-use voxply_farm::hub_manager::HubManager;
-use voxply_farm::server;
-use voxply_farm::state::FarmState;
-use voxply_identity::Identity;
+use wavvon_farm::db;
+use wavvon_farm::hub_manager::HubManager;
+use wavvon_farm::server;
+use wavvon_farm::state::FarmState;
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Setup helpers
@@ -56,7 +56,7 @@ async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>) {
     .unwrap();
 
     let hub_manager = Arc::new(HubManager::new(
-        "voxply-hub".to_string(),
+        "wavvon-hub".to_string(),
         farm_url.to_string(),
         9100,
     ));

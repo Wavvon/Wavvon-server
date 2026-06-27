@@ -1,4 +1,4 @@
-name: Build check
+﻿name: Build check
 
 on:
   push:
@@ -20,11 +20,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Fetch API spec (Voxply docs repo)
+      - name: Fetch API spec (Wavvon docs repo)
         if: github.event_name == 'pull_request' && github.base_ref == 'main'
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          repository: Voxply/Voxply
+          repository: Wavvon/Wavvon
           sparse-checkout: |
             openapi.yaml
             scripts/check-openapi-coverage.mjs

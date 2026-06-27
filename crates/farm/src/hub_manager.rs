@@ -1,4 +1,4 @@
-/// Hub process lifecycle manager.
+﻿/// Hub process lifecycle manager.
 ///
 /// Owns the map of running hub child processes and exposes spawn/stop/restart
 /// operations. On farm startup `spawn_all_from_db` re-spawns every non-suspended,
@@ -18,9 +18,9 @@ struct HubProcess {
 
 pub struct HubManager {
     hubs: RwLock<HashMap<String, HubProcess>>,
-    /// Absolute path (or name on PATH) of the `voxply-hub` binary.
+    /// Absolute path (or name on PATH) of the `wavvon-hub` binary.
     hub_bin: String,
-    /// Externally reachable farm URL — passed to hub processes as `VOXPLY_FARM_URL`.
+    /// Externally reachable farm URL — passed to hub processes as `WAVVON_FARM_URL`.
     farm_url: String,
     /// Base port for allocating new hub process ports.
     base_port: u16,
@@ -50,10 +50,10 @@ impl HubManager {
 
     /// Spawn a hub child process.
     ///
-    /// The hub binary is resolved from `VOXPLY_HUB_BIN` env var, falling back to
+    /// The hub binary is resolved from `WAVVON_HUB_BIN` env var, falling back to
     /// the path stored in `self.hub_bin`.
     ///
-    /// `owner_pubkey` is passed as `VOXPLY_OWNER_PUBKEY` so the hub seeds that key
+    /// `owner_pubkey` is passed as `WAVVON_OWNER_PUBKEY` so the hub seeds that key
     /// as the builtin-owner role on first boot.
     pub async fn spawn_hub(
         &self,
@@ -62,14 +62,14 @@ impl HubManager {
         port: u16,
         owner_pubkey: Option<&str>,
     ) -> Result<()> {
-        let bin = std::env::var("VOXPLY_HUB_BIN").unwrap_or_else(|_| self.hub_bin.clone());
+        let bin = std::env::var("WAVVON_HUB_BIN").unwrap_or_else(|_| self.hub_bin.clone());
 
         let mut cmd = tokio::process::Command::new(&bin);
-        cmd.env("VOXPLY_HUB_DB", db_path)
-            .env("VOXPLY_HUB_HTTP_PORT", port.to_string())
-            .env("VOXPLY_FARM_URL", &self.farm_url);
+        cmd.env("WAVVON_HUB_DB", db_path)
+            .env("WAVVON_HUB_HTTP_PORT", port.to_string())
+            .env("WAVVON_FARM_URL", &self.farm_url);
         if let Some(pk) = owner_pubkey {
-            cmd.env("VOXPLY_OWNER_PUBKEY", pk);
+            cmd.env("WAVVON_OWNER_PUBKEY", pk);
         }
         let child = cmd.spawn().with_context(|| {
             format!("Failed to spawn hub process for {hub_id} (binary: {bin:?})")

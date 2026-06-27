@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
 use sqlx::AnyPool;
-use voxply_identity::SubkeyCert;
+use wavvon_identity::SubkeyCert;
 
 use crate::auth::middleware::AuthUser;
 use crate::auth::models::{
@@ -129,7 +129,7 @@ pub async fn verify(
     let signature_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    voxply_identity::verify_signature(&req.public_key, &challenge_bytes, &signature_bytes)
+    wavvon_identity::verify_signature(&req.public_key, &challenge_bytes, &signature_bytes)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
 
     // Multi-device: if a cert is presented, resolve to the canonical
@@ -264,7 +264,7 @@ pub async fn verify(
             ));
         }
 
-        if !voxply_identity::verify_security_level(&req.public_key, nonce, claimed_level) {
+        if !wavvon_identity::verify_security_level(&req.public_key, nonce, claimed_level) {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Invalid security level proof".to_string(),
@@ -297,7 +297,7 @@ pub async fn verify(
                         "Invalid pow_proof nonce".to_string(),
                     )
                 })?;
-                if !voxply_identity::verify_security_level(
+                if !wavvon_identity::verify_security_level(
                     &req.public_key,
                     nonce,
                     proof.level as u32,
@@ -351,7 +351,7 @@ pub async fn verify(
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            if voxply_identity::verify_signature(
+            if wavvon_identity::verify_signature(
                 &payload.issuer_pubkey,
                 payload_json.as_bytes(),
                 &sig_bytes,
@@ -734,7 +734,7 @@ pub async fn assign_initial_roles(
     // Only auto-assign owner when no owner key is configured externally.
     // If owner_pubkey is set, startup seeding already created the owner row
     // before the server accepted connections, so the auto-grant must not run —
-    // otherwise the first user to reach this path on a VOXPLY_OWNER_PUBKEY
+    // otherwise the first user to reach this path on a WAVVON_OWNER_PUBKEY
     // deployment (where owner_count would still be 0 between process start and
     // the operator's own registration) would silently take ownership.
     if configured_owner.is_none() {
@@ -859,7 +859,7 @@ pub async fn renew(
         ));
     }
 
-    voxply_identity::verify_signature(&req.public_key, &challenge_bytes, &signature_bytes)
+    wavvon_identity::verify_signature(&req.public_key, &challenge_bytes, &signature_bytes)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
 
     let token = hex::encode({

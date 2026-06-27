@@ -1,4 +1,4 @@
-/// Farm admin routes — settings, user management, quota.
+﻿/// Farm admin routes — settings, user management, quota.
 ///
 /// GET  /farm/settings                      — read full farm settings (admin)
 /// PATCH /farm/settings                     — update farm settings (admin)
@@ -696,7 +696,7 @@ pub async fn public_info(
         serde_json::from_str(&row.tags).unwrap_or_else(|_| serde_json::json!([]));
 
     Ok(Json(PublicInfoResponse {
-        kind: "voxply-farm-public",
+        kind: "wavvon-farm-public",
         name: row.name,
         description: row.description,
         creation_policy: row.creation_policy,

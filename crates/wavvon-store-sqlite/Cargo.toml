@@ -1,10 +1,10 @@
-[package]
-name = "voxply-store-sqlite"
+﻿[package]
+name = "wavvon-store-sqlite"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-voxply-store = { path = "../voxply-store" }
+wavvon-store = { path = "../wavvon-store" }
 sqlx = { workspace = true }
 async-trait = "0.1"
 thiserror = "1"

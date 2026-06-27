@@ -1,7 +1,7 @@
-use axum_test::TestServer;
+﻿use axum_test::TestServer;
 use serde_json::{json, Value};
-use voxply_hub::routes::post_models::{PostDetail, PostListResponse, PostSearchResponse};
-use voxply_identity::Identity;
+use wavvon_hub::routes::post_models::{PostDetail, PostListResponse, PostSearchResponse};
+use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;

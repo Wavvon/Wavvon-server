@@ -1,5 +1,5 @@
-use sqlx::AnyPool;
-use voxply_hub::db;
+﻿use sqlx::AnyPool;
+use wavvon_hub::db;
 
 #[tokio::test]
 async fn migrations_idempotent_on_fresh_db() {

@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
+﻿use anyhow::{Context, Result};
 
 use crate::auth::models::{ChallengeResponse, VerifyResponse};
 use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelResponse};
 use crate::routes::chat_models::{ChannelResponse, MessageResponse};
 use crate::routes::dm_models::FederatedDmRequest;
 use crate::routes::health::InfoResponse;
-use voxply_identity::Identity;
+use wavvon_identity::Identity;
 
 pub struct FederationClient {
     http: reqwest::Client,

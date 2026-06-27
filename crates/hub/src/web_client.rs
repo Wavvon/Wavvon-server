@@ -1,6 +1,6 @@
-//! Optional static web-client serving.
+﻿//! Optional static web-client serving.
 //!
-//! When `VOXPLY_WEB_CLIENT_DIR` is set the hub serves a pre-built SPA from
+//! When `WAVVON_WEB_CLIENT_DIR` is set the hub serves a pre-built SPA from
 //! that directory at the root.  All named API routes take precedence; only
 //! requests that fall through to the axum fallback reach this handler.
 //!
@@ -11,7 +11,7 @@
 //!   when they typo a path — a stray `fetch("/apii/channels")` must NOT
 //!   silently receive an HTML document with 200.
 //!
-//! `index.html` has `<script>window.__VOXPLY_HOME_HUB__=window.location.origin;</script>`
+//! `index.html` has `<script>window.__WAVVON_HOME_HUB__=window.location.origin;</script>`
 //! injected immediately before `</head>` so the served client knows the hub
 //! it was served from.  The transformed bytes are cached at startup.
 
@@ -42,12 +42,12 @@ impl WebClientConfig {
     pub fn load(dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let dir = dir.into();
         if !dir.exists() {
-            anyhow::bail!("VOXPLY_WEB_CLIENT_DIR '{}' does not exist", dir.display());
+            anyhow::bail!("WAVVON_WEB_CLIENT_DIR '{}' does not exist", dir.display());
         }
         let index_path = dir.join("index.html");
         let raw = std::fs::read(&index_path).map_err(|e| {
             anyhow::anyhow!(
-                "VOXPLY_WEB_CLIENT_DIR: cannot read '{}': {e}",
+                "WAVVON_WEB_CLIENT_DIR: cannot read '{}': {e}",
                 index_path.display()
             )
         })?;
@@ -62,11 +62,11 @@ impl WebClientConfig {
 
 /// Insert the hub-origin config script immediately before `</head>`.
 ///
-/// The injected script sets `window.__VOXPLY_HOME_HUB__` to
+/// The injected script sets `window.__WAVVON_HOME_HUB__` to
 /// `window.location.origin` so the client defaults to the hub it was served
 /// from without any server-side origin detection.
 fn inject_hub_config(mut html: Vec<u8>) -> Vec<u8> {
-    const SCRIPT: &[u8] = b"<script>window.__VOXPLY_HOME_HUB__=window.location.origin;</script>";
+    const SCRIPT: &[u8] = b"<script>window.__WAVVON_HOME_HUB__=window.location.origin;</script>";
     const MARKER: &[u8] = b"</head>";
 
     if let Some(pos) = html.windows(MARKER.len()).position(|w| w == MARKER) {
@@ -162,7 +162,7 @@ mod tests {
         let result = inject_hub_config(html);
         let s = std::str::from_utf8(&result).unwrap();
         assert!(s.contains(
-            "<script>window.__VOXPLY_HOME_HUB__=window.location.origin;</script></head>"
+            "<script>window.__WAVVON_HOME_HUB__=window.location.origin;</script></head>"
         ));
     }
 
@@ -171,7 +171,7 @@ mod tests {
         let html = b"<html><body></body></html>".to_vec();
         let result = inject_hub_config(html);
         let s = std::str::from_utf8(&result).unwrap();
-        assert!(s.ends_with("<script>window.__VOXPLY_HOME_HUB__=window.location.origin;</script>"));
+        assert!(s.ends_with("<script>window.__WAVVON_HOME_HUB__=window.location.origin;</script>"));
     }
 
     #[test]

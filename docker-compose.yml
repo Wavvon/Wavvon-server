@@ -1,38 +1,38 @@
-# Standalone hub — no farm, hub-issued auth tokens.
+﻿# Standalone hub — no farm, hub-issued auth tokens.
 #
 # Quick start:
 #   docker compose up -d
 #
 # To build locally instead of pulling from ghcr.io, uncomment the build: block.
-# To enable HTTPS, set VOXPLY_TLS_CERT and VOXPLY_TLS_KEY (see below).
+# To enable HTTPS, set WAVVON_TLS_CERT and WAVVON_TLS_KEY (see below).
 # For a farm + hub setup, use docker-compose.farm.yml instead.
 
 services:
   hub:
-    image: ghcr.io/voxply/hub:latest
+    image: ghcr.io/wavvon/hub:latest
     # build:
     #   context: .
     #   dockerfile: crates/hub/Dockerfile
     ports:
-      - "${VOXPLY_HTTP_PORT:-3000}:3000"
-      - "${VOXPLY_VOICE_UDP_PORT:-3001}:3001/udp"
+      - "${WAVVON_HTTP_PORT:-3000}:3000"
+      - "${WAVVON_VOICE_UDP_PORT:-3001}:3001/udp"
     volumes:
       - hub-data:/data
       # Mount TLS certificates when HTTPS is enabled:
       # - /etc/letsencrypt/live/your.domain:/certs:ro
     environment:
-      VOXPLY_HTTP_PORT: "3000"
-      VOXPLY_VOICE_UDP_PORT: "3001"
+      WAVVON_HTTP_PORT: "3000"
+      WAVVON_VOICE_UDP_PORT: "3001"
       # Make yourself hub owner (64-char Ed25519 public key, shown in the
       # client under Settings -> Identity). Set before opening the hub to users:
-      # VOXPLY_OWNER_PUBKEY: "<your-public-key>"
+      # WAVVON_OWNER_PUBKEY: "<your-public-key>"
       # Uncomment for HTTPS (both must be set together):
-      # VOXPLY_TLS_CERT: /certs/fullchain.pem
-      # VOXPLY_TLS_KEY: /certs/privkey.pem
+      # WAVVON_TLS_CERT: /certs/fullchain.pem
+      # WAVVON_TLS_KEY: /certs/privkey.pem
       # Uncomment for structured JSON logs:
-      # VOXPLY_LOG_FORMAT: json
+      # WAVVON_LOG_FORMAT: json
       # Uncomment to export traces via OTLP (Grafana Tempo, Jaeger, Honeycomb, etc.):
-      # VOXPLY_OTLP_ENDPOINT: http://otel-collector:4318
+      # WAVVON_OTLP_ENDPOINT: http://otel-collector:4318
     restart: unless-stopped
 
 volumes:

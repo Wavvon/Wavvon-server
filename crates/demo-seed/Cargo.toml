@@ -1,15 +1,15 @@
-[package]
+﻿[package]
 name = "demo-seed"
 version = "0.1.0"
 edition = "2021"
-description = "Populates a running local Voxply hub with realistic demo content for screenshots and public demos."
+description = "Populates a running local Wavvon hub with realistic demo content for screenshots and public demos."
 
 [[bin]]
 name = "demo-seed"
 path = "src/main.rs"
 
 [dependencies]
-voxply-identity = { path = "../identity" }
+wavvon-identity = { path = "../identity" }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -116,7 +116,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         badges,
         cert_requirement,
         screen_share_v2: true,
-        sfu_url: std::env::var("VOXPLY_SFU_URL").ok(),
+        sfu_url: std::env::var("WAVVON_SFU_URL").ok(),
         emoji_count,
         rotation,
     })
@@ -165,7 +165,7 @@ pub struct InfoResponse {
     pub screen_share_v2: bool,
     /// Optional URL of an SFU (Selective Forwarding Unit) for this hub.
     /// When set, clients capable of SFU-based video should connect there
-    /// instead of doing full mesh WebRTC. Read from `VOXPLY_SFU_URL` env var.
+    /// instead of doing full mesh WebRTC. Read from `WAVVON_SFU_URL` env var.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sfu_url: Option<String>,
     /// Number of custom emojis uploaded to this hub. Clients can skip

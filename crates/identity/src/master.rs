@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Context, Result};
+﻿use anyhow::{anyhow, Context, Result};
 use bip39::{Language, Mnemonic};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
-const MASTER_HKDF_INFO: &[u8] = b"voxply/master/v1";
+const MASTER_HKDF_INFO: &[u8] = b"wavvon/master/v1";
 
 pub struct MasterIdentity {
     signing_key: SigningKey,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -347,7 +347,7 @@ pub async fn get_preview(
     // Fetch with timeout
     let resp = pinned_client
         .get(&url_str)
-        .header("User-Agent", "Mozilla/5.0 Voxply-Hub LinkPreview/1.0")
+        .header("User-Agent", "Mozilla/5.0 Wavvon-Hub LinkPreview/1.0")
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch_error: {e}")))?;

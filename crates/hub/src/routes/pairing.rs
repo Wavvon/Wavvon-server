@@ -1,11 +1,11 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use sqlx::Row;
-use voxply_identity::{PairingClaim, PairingComplete, PairingOffer, PairingStatus, SubkeyCert};
+use wavvon_identity::{PairingClaim, PairingComplete, PairingOffer, PairingStatus, SubkeyCert};
 
 use crate::state::AppState;
 

@@ -1,10 +1,10 @@
-# Voxply Server
+﻿# Wavvon Server
 
-[![Build check](https://github.com/Voxply/Voxply-server/actions/workflows/build.yml/badge.svg)](https://github.com/Voxply/Voxply-server/actions/workflows/build.yml)
-[![Release](https://github.com/Voxply/Voxply-server/actions/workflows/release.yml/badge.svg)](https://github.com/Voxply/Voxply-server/actions/workflows/release.yml)
+[![Build check](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml/badge.svg)](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml)
+[![Release](https://github.com/Wavvon/Wavvon-server/actions/workflows/release.yml/badge.svg)](https://github.com/Wavvon/Wavvon-server/actions/workflows/release.yml)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-**Run your community on your own terms.** Voxply is an open-source,
+**Run your community on your own terms.** Wavvon is an open-source,
 federated voice + text chat platform with no central servers and no
 accounts. A **hub** is your community's home — a single self-hosted
 binary (Rust + SQLite) that serves text channels, live voice, screen
@@ -18,7 +18,7 @@ This repository is the entire backend: the hub server plus the optional
 fleet tooling (farm controller, server agent, seed registry) and the
 canonical identity crate.
 
-![A community served by a single hub binary - unified channels, voice, presence](https://raw.githubusercontent.com/Voxply/Voxply/main/assets/screenshot-channel.png)
+![A community served by a single hub binary - unified channels, voice, presence](https://raw.githubusercontent.com/Wavvon/Wavvon/main/assets/screenshot-channel.png)
 
 ## Highlights
 
@@ -56,36 +56,36 @@ canonical identity crate.
 ### Docker (recommended)
 
 ```bash
-git clone https://github.com/Voxply/Voxply-server
-cd Voxply-server
+git clone https://github.com/Wavvon/Wavvon-server
+cd Wavvon-server
 docker compose up -d
 ```
 
 Or without cloning anything:
 
 ```bash
-docker run -d --name voxply-hub \
+docker run -d --name wavvon-hub \
   -p 3000:3000 -p 3001:3001/udp \
-  -v voxply-hub-data:/data \
-  ghcr.io/voxply/hub:latest
+  -v wavvon-hub-data:/data \
+  ghcr.io/wavvon/hub:latest
 ```
 
 Your hub is now serving HTTP on port 3000 and voice UDP on port 3001.
-Open a [Voxply client](https://github.com/Voxply/Voxply-client), click
+Open a [Wavvon client](https://github.com/Wavvon/Wavvon-client), click
 **Add hub**, and enter `http://your-server:3000`.
 
 ### Prebuilt binary (Linux, static musl — no dependencies)
 
 ```bash
-curl -LO https://github.com/Voxply/Voxply-server/releases/latest/download/voxply-hub-linux-x86_64
-chmod +x voxply-hub-linux-x86_64
-./voxply-hub-linux-x86_64
+curl -LO https://github.com/Wavvon/Wavvon-server/releases/latest/download/wavvon-hub-linux-x86_64
+chmod +x wavvon-hub-linux-x86_64
+./wavvon-hub-linux-x86_64
 ```
 
 ### From source
 
 ```bash
-cargo run --release -p voxply-hub
+cargo run --release -p wavvon-hub
 ```
 
 ### Make yourself the owner
@@ -95,35 +95,35 @@ your public key is shown in the client under **Settings → Identity**:
 
 ```bash
 # docker-compose.yml / environment, or shell env:
-VOXPLY_OWNER_PUBKEY=<your-64-char-ed25519-public-key>
+WAVVON_OWNER_PUBKEY=<your-64-char-ed25519-public-key>
 
 # or after first boot, via the CLI:
-voxply-hub admin users set-owner <pubkey>
+wavvon-hub admin users set-owner <pubkey>
 ```
 
 For production setups (systemd, TLS, reverse proxy, backups, upgrades,
 hardening) see the
-[hosting guide](https://github.com/Voxply/Voxply/blob/main/docs/hosting.md)
+[hosting guide](https://github.com/Wavvon/Wavvon/blob/main/docs/hosting.md)
 and the
-[hub operator guide](https://github.com/Voxply/Voxply/blob/main/docs/hub-operator-guide.md).
+[hub operator guide](https://github.com/Wavvon/Wavvon/blob/main/docs/hub-operator-guide.md).
 
 ## Configuration
 
 Defaults work out of the box. Override via `hub.toml` (copy
-[`hub.toml.example`](hub.toml.example)) or `VOXPLY_*` environment
+[`hub.toml.example`](hub.toml.example)) or `WAVVON_*` environment
 variables — env vars win.
 
 | Setting | Env var | Default | Purpose |
 |---|---|---|---|
-| `http_port` | `VOXPLY_HTTP_PORT` | `3000` | HTTP + WebSocket API |
-| `voice_udp_port` | `VOXPLY_VOICE_UDP_PORT` | `3001` | Voice relay (UDP) |
-| `tls_cert` / `tls_key` | `VOXPLY_TLS_CERT` / `VOXPLY_TLS_KEY` | — | Enable HTTPS (set both) |
-| `owner_pubkey` | `VOXPLY_OWNER_PUBKEY` | — | Hub owner identity |
-| `discovery_url` | `VOXPLY_DISCOVERY_URL` | `https://discovery.voxply.io` | Hub directory base URL |
-| `template_url` / `bootstrap_token` | `VOXPLY_TEMPLATE_URL` / `VOXPLY_BOOTSTRAP_TOKEN` | — | First-boot channel/role template |
-| `log_format` | `VOXPLY_LOG_FORMAT` | `text` | `text` or `json` |
-| `otlp_endpoint` | `VOXPLY_OTLP_ENDPOINT` | — | OpenTelemetry traces |
-| `search_backend` | `VOXPLY_SEARCH_BACKEND` | `tantivy` | `tantivy` or `none` |
+| `http_port` | `WAVVON_HTTP_PORT` | `3000` | HTTP + WebSocket API |
+| `voice_udp_port` | `WAVVON_VOICE_UDP_PORT` | `3001` | Voice relay (UDP) |
+| `tls_cert` / `tls_key` | `WAVVON_TLS_CERT` / `WAVVON_TLS_KEY` | — | Enable HTTPS (set both) |
+| `owner_pubkey` | `WAVVON_OWNER_PUBKEY` | — | Hub owner identity |
+| `discovery_url` | `WAVVON_DISCOVERY_URL` | `https://discovery.wavvon.io` | Hub directory base URL |
+| `template_url` / `bootstrap_token` | `WAVVON_TEMPLATE_URL` / `WAVVON_BOOTSTRAP_TOKEN` | — | First-boot channel/role template |
+| `log_format` | `WAVVON_LOG_FORMAT` | `text` | `text` or `json` |
+| `otlp_endpoint` | `WAVVON_OTLP_ENDPOINT` | — | OpenTelemetry traces |
+| `search_backend` | `WAVVON_SEARCH_BACKEND` | `tantivy` | `tantivy` or `none` |
 
 All hub state lives in the working directory (`/data` in the Docker
 image): `hub.db` (SQLite) and `hub_identity.json` (the hub's keypair —
@@ -138,17 +138,17 @@ back it up).
 | `farm/` | Optional control plane for running a fleet of hubs |
 | `server/` | Server agent that runs hubs on compute nodes for a farm |
 | `seed/` | Self-hostable cross-farm discovery registry |
-| `voxply-store/` + `voxply-store-sqlite/` | Trait-based storage layer + the SQLite backend |
+| `wavvon-store/` + `wavvon-store-sqlite/` | Trait-based storage layer + the SQLite backend |
 
 Multi-hub deployments use `docker-compose.farm.yml` — see
-[farm-model.md](https://github.com/Voxply/Voxply/blob/main/docs/farm-model.md).
+[farm-model.md](https://github.com/Wavvon/Wavvon/blob/main/docs/farm-model.md).
 
 ## Building & testing
 
 ```bash
 cargo check --workspace               # fast type check
 cargo test --workspace                # integration tests
-cargo build --release -p voxply-hub   # release binary
+cargo build --release -p wavvon-hub   # release binary
 ```
 
 ## Write your own client
@@ -162,30 +162,30 @@ The hub speaks plain HTTP + WebSocket — no SDK required:
    `GET /ws?token=<token>`.
 
 The full contract is documented in
-[`openapi.yaml`](https://github.com/Voxply/Voxply/blob/main/openapi.yaml)
+[`openapi.yaml`](https://github.com/Wavvon/Wavvon/blob/main/openapi.yaml)
 (every REST endpoint) and
-[`ws-protocol.md`](https://github.com/Voxply/Voxply/blob/main/docs/ws-protocol.md)
+[`ws-protocol.md`](https://github.com/Wavvon/Wavvon/blob/main/docs/ws-protocol.md)
 (every WebSocket message), with identity rules in
-[`identity.md`](https://github.com/Voxply/Voxply/blob/main/docs/identity.md).
+[`identity.md`](https://github.com/Wavvon/Wavvon/blob/main/docs/identity.md).
 
-## The Voxply project
+## The Wavvon project
 
 | Repo | What it is |
 |---|---|
-| **Voxply-server** *(this repo)* | Hub server, farm tooling, identity crate (Rust) |
-| [Voxply-client](https://github.com/Voxply/Voxply-client) | All clients (desktop / web / Android) + shared packages |
-| [Voxply-discovery](https://github.com/Voxply/Voxply-discovery) | Optional public hub directory |
-| [Voxply](https://github.com/Voxply/Voxply) | Architecture wiki, roadmap, API spec |
+| **Wavvon-server** *(this repo)* | Hub server, farm tooling, identity crate (Rust) |
+| [Wavvon-client](https://github.com/Wavvon/Wavvon-client) | All clients (desktop / web / Android) + shared packages |
+| [Wavvon-discovery](https://github.com/Wavvon/Wavvon-discovery) | Optional public hub directory |
+| [Wavvon](https://github.com/Wavvon/Wavvon) | Architecture wiki, roadmap, API spec |
 
 Start with the
-[architecture overview](https://github.com/Voxply/Voxply/blob/main/docs/architecture.md)
-and the [roadmap](https://github.com/Voxply/Voxply/blob/main/ROADMAP.md).
+[architecture overview](https://github.com/Wavvon/Wavvon/blob/main/docs/architecture.md)
+and the [roadmap](https://github.com/Wavvon/Wavvon/blob/main/ROADMAP.md).
 
 ## Contributing
 
 Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for the
 branching model and
-[decisions.md](https://github.com/Voxply/Voxply/blob/main/docs/decisions.md)
+[decisions.md](https://github.com/Wavvon/Wavvon/blob/main/docs/decisions.md)
 for design rationale before proposing big changes.
 
 ## License

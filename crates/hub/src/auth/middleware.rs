@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
@@ -116,7 +116,7 @@ fn try_verify_farm_token(
     })?;
 
     // Verify Ed25519 signature via the identity crate helper.
-    voxply_identity::verify_signature(farm_pubkey_hex, &payload_bytes, &sig_bytes).map_err(
+    wavvon_identity::verify_signature(farm_pubkey_hex, &payload_bytes, &sig_bytes).map_err(
         |_| {
             (
                 StatusCode::UNAUTHORIZED,

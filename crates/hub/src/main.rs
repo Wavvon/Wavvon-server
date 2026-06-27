@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,21 +7,21 @@ use anyhow::{Context, Result};
 use sqlx::any::AnyPoolOptions;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
-use voxply_hub::bots::token_expiry;
-use voxply_hub::cert_worker;
-use voxply_hub::db;
-use voxply_hub::dm_worker;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::{AppState, ConsumedVoiceToken};
-use voxply_identity::Identity;
-use voxply_store_sqlite::SqliteStore;
+use wavvon_hub::bots::token_expiry;
+use wavvon_hub::cert_worker;
+use wavvon_hub::db;
+use wavvon_hub::dm_worker;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::server;
+use wavvon_hub::state::{AppState, ConsumedVoiceToken};
+use wavvon_identity::Identity;
+use wavvon_store_sqlite::SqliteStore;
 
 /// Print the `--help` text to stdout.
 fn print_help() {
-    println!("voxply-hub {}\n", env!("CARGO_PKG_VERSION"));
+    println!("wavvon-hub {}\n", env!("CARGO_PKG_VERSION"));
     println!("USAGE:");
-    println!("  voxply-hub [SUBCOMMAND | OPTION]\n");
+    println!("  wavvon-hub [SUBCOMMAND | OPTION]\n");
     println!("SUBCOMMANDS:");
     println!("  migrate          Apply DB migrations and exit");
     println!("  backup [FILE]    Write a backup archive (default: hub-backup-<ts>.tar.gz)");
@@ -35,12 +35,12 @@ fn print_help() {
     println!("  --doctor         Pre-flight checks: bind ports, verify TLS files, check disk\n");
     println!("ENVIRONMENT VARIABLES:");
 
-    let name_w = voxply_hub::settings::ENV_VAR_HELP
+    let name_w = wavvon_hub::settings::ENV_VAR_HELP
         .iter()
         .map(|(n, _, _)| n.len())
         .max()
         .unwrap_or(20);
-    let default_w = voxply_hub::settings::ENV_VAR_HELP
+    let default_w = wavvon_hub::settings::ENV_VAR_HELP
         .iter()
         .map(|(_, d, _)| d.len())
         .max()
@@ -56,7 +56,7 @@ fn print_help() {
         "-".repeat(default_w),
         "-".repeat(40)
     );
-    for (name, default, purpose) in voxply_hub::settings::ENV_VAR_HELP {
+    for (name, default, purpose) in wavvon_hub::settings::ENV_VAR_HELP {
         println!("  {name:<name_w$}  {default:<default_w$}  {purpose}");
     }
     println!();
@@ -69,7 +69,7 @@ async fn run_doctor() -> bool {
     use std::net::TcpListener;
     use tokio::net::UdpSocket;
 
-    let settings = match voxply_hub::settings::load() {
+    let settings = match wavvon_hub::settings::load() {
         Ok(s) => s,
         Err(e) => {
             println!("FAIL  settings: {e}");
@@ -126,14 +126,14 @@ async fn run_doctor() -> bool {
         }
         _ => {
             println!(
-                "FAIL  TLS: VOXPLY_TLS_CERT and VOXPLY_TLS_KEY must both be set or both unset"
+                "FAIL  TLS: WAVVON_TLS_CERT and WAVVON_TLS_KEY must both be set or both unset"
             );
             all_pass = false;
         }
     }
 
     // Check working directory writable
-    let probe = ".voxply-doctor-probe";
+    let probe = ".wavvon-doctor-probe";
     match std::fs::write(probe, b"ok") {
         Ok(_) => {
             let _ = std::fs::remove_file(probe);
@@ -158,7 +158,7 @@ async fn run_doctor() -> bool {
     // Check web client directory when configured
     match settings.web_client_dir.as_deref() {
         None => {
-            println!("INFO  web client: disabled (VOXPLY_WEB_CLIENT_DIR not set)");
+            println!("INFO  web client: disabled (WAVVON_WEB_CLIENT_DIR not set)");
         }
         Some(dir) => {
             let dir_path = std::path::Path::new(dir);
@@ -204,7 +204,7 @@ async fn main() -> Result<()> {
     }
 
     if matches!(first_arg, Some("-V") | Some("--version")) {
-        println!("voxply-hub {}", env!("CARGO_PKG_VERSION"));
+        println!("wavvon-hub {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
         std::process::exit(if ok { 0 } else { 1 });
     }
 
-    let settings = match voxply_hub::settings::load() {
+    let settings = match wavvon_hub::settings::load() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to load configuration: {e}");
@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
     let json_logs = settings.log_format.to_lowercase() == "json";
 
     // Optional OpenTelemetry OTLP trace export.
-    // Set VOXPLY_OTLP_ENDPOINT or otlp_endpoint in hub.toml to any
+    // Set WAVVON_OTLP_ENDPOINT or otlp_endpoint in hub.toml to any
     // OTLP-compatible collector (Grafana Tempo, Jaeger, Honeycomb, Datadog, etc.).
     // No-op when unset or empty.
     let otlp_provider = settings
@@ -303,7 +303,7 @@ async fn main() -> Result<()> {
     if subcommand.as_deref() == Some("restore") {
         let src = std::env::args()
             .nth(2)
-            .ok_or_else(|| anyhow::anyhow!("Usage: voxply-hub restore <backup.tar.gz>"))?;
+            .ok_or_else(|| anyhow::anyhow!("Usage: wavvon-hub restore <backup.tar.gz>"))?;
         restore(&src)?;
         println!("Restore complete. Restart the hub to apply.");
         return Ok(());
@@ -475,7 +475,7 @@ async fn main() -> Result<()> {
                         println!("Owner set to {pubkey}");
                     }
                     _ => println!(
-                        "Usage: voxply-hub admin users [list|ban|unban|set-owner] [pubkey]"
+                        "Usage: wavvon-hub admin users [list|ban|unban|set-owner] [pubkey]"
                     ),
                 }
             }
@@ -500,7 +500,7 @@ async fn main() -> Result<()> {
                             .unwrap()
                         );
                     }
-                    _ => println!("Usage: voxply-hub admin channels [list]"),
+                    _ => println!("Usage: wavvon-hub admin channels [list]"),
                 }
             }
             "tokens" => {
@@ -543,7 +543,7 @@ async fn main() -> Result<()> {
                 println!("Restore complete. Restart the hub.");
             }
             _ => {
-                println!("Usage: voxply-hub admin [stats|users|channels|tokens|backup|restore]");
+                println!("Usage: wavvon-hub admin [stats|users|channels|tokens|backup|restore]");
             }
         }
         return Ok(());
@@ -560,7 +560,7 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "?".into());
 
     tracing::info!(
-        "voxply-hub {} starting  port={} ({scheme})  voice_udp={}  tls={}  cors={}",
+        "wavvon-hub {} starting  port={} ({scheme})  voice_udp={}  tls={}  cors={}",
         env!("CARGO_PKG_VERSION"),
         http_port,
         voice_udp_port,
@@ -572,7 +572,7 @@ async fn main() -> Result<()> {
     if !tls_enabled {
         tracing::warn!(
             "TLS is disabled — browser clients served over HTTPS cannot connect to an http:// hub \
-             (mixed-content blocked). Set VOXPLY_TLS_CERT and VOXPLY_TLS_KEY or terminate TLS at a reverse proxy."
+             (mixed-content blocked). Set WAVVON_TLS_CERT and WAVVON_TLS_KEY or terminate TLS at a reverse proxy."
         );
     }
     tracing::info!(
@@ -582,7 +582,7 @@ async fn main() -> Result<()> {
     );
     match settings.web_client_dir.as_deref() {
         Some(dir) => tracing::info!("web client: serving from {dir}"),
-        None => tracing::info!("web client: disabled (set VOXPLY_WEB_CLIENT_DIR to enable)"),
+        None => tracing::info!("web client: disabled (set WAVVON_WEB_CLIENT_DIR to enable)"),
     }
 
     let (hub_identity, is_new) = Identity::load_or_create(Path::new("hub_identity.json"))?;
@@ -677,10 +677,10 @@ async fn main() -> Result<()> {
     // Non-fatal — a bad template or unreachable URL never blocks startup.
     {
         let bootstrap_client = reqwest::Client::new();
-        voxply_hub::bootstrap::maybe_bootstrap(
+        wavvon_hub::bootstrap::maybe_bootstrap(
             &db,
             &bootstrap_client,
-            &voxply_hub::bootstrap::BootstrapConfig {
+            &wavvon_hub::bootstrap::BootstrapConfig {
                 template_url: settings.template_url.clone(),
                 bootstrap_token: settings.bootstrap_token.clone(),
                 discovery_url: settings.discovery_url.clone(),
@@ -691,18 +691,18 @@ async fn main() -> Result<()> {
     }
 
     let search_path = std::path::Path::new("hub.search");
-    let search: Arc<dyn voxply_hub::search::MessageSearch> =
+    let search: Arc<dyn wavvon_hub::search::MessageSearch> =
         if settings.search_backend.as_deref() == Some("none") {
-            Arc::new(voxply_hub::search::null_search::NullSearch)
+            Arc::new(wavvon_hub::search::null_search::NullSearch)
         } else {
             Arc::new(
-                voxply_hub::search::tantivy_search::TantivySearch::open(search_path)
+                wavvon_hub::search::tantivy_search::TantivySearch::open(search_path)
                     .expect("Failed to open Tantivy search index"),
             )
         };
 
     let (chat_tx, _) = broadcast::channel::<(
-        voxply_hub::routes::chat_models::ChatEvent,
+        wavvon_hub::routes::chat_models::ChatEvent,
         std::sync::Arc<str>,
     )>(256);
     let (voice_event_tx, _) = broadcast::channel(256);
@@ -749,7 +749,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let store: Arc<dyn voxply_store::HubStore> = Arc::new(SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> = Arc::new(SqliteStore::new(db.clone()));
 
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),
@@ -1005,12 +1005,12 @@ async fn main() -> Result<()> {
     cert_worker::spawn(state.clone());
 
     // Sweep messages and forum posts past their channel retention deadline.
-    voxply_hub::retention_worker::spawn(state.clone());
+    wavvon_hub::retention_worker::spawn(state.clone());
 
     // Sync federated ban lists from subscribed sources every 6 hours.
-    voxply_hub::banlist_worker::spawn(state.clone());
+    wavvon_hub::banlist_worker::spawn(state.clone());
 
-    // Farm heartbeat: POST /farm/heartbeat every 60 seconds when VOXPLY_FARM_URL is set.
+    // Farm heartbeat: POST /farm/heartbeat every 60 seconds when WAVVON_FARM_URL is set.
     if let Some(ref farm_url_for_hb) = state.farm_url {
         let hb_state = state.clone();
         let hb_url = farm_url_for_hb.clone();
@@ -1047,7 +1047,7 @@ async fn main() -> Result<()> {
     } else {
         tracing::info!(
             "Rate limiter: direct mode (socket peer address). \
-             Set VOXPLY_TRUSTED_PROXY=true when a reverse proxy terminates TLS in front."
+             Set WAVVON_TRUSTED_PROXY=true when a reverse proxy terminates TLS in front."
         );
     }
 
@@ -1055,7 +1055,7 @@ async fn main() -> Result<()> {
     // Fail fast here so a misconfigured path doesn't silently result in a
     // running hub that 404s everything at /.
     let web_client_cfg = match settings.web_client_dir.as_deref() {
-        Some(dir) => match voxply_hub::web_client::WebClientConfig::load(dir) {
+        Some(dir) => match wavvon_hub::web_client::WebClientConfig::load(dir) {
             Ok(cfg) => {
                 tracing::info!(
                     "web client: loaded {} bytes for index.html from {dir}",
@@ -1092,7 +1092,7 @@ async fn main() -> Result<()> {
             .await?;
     } else {
         tracing::info!(
-            "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set VOXPLY_TLS_CERT and VOXPLY_TLS_KEY to enable TLS)"
+            "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
         );
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(
@@ -1111,7 +1111,7 @@ async fn main() -> Result<()> {
 
 fn self_update_asset_name() -> Option<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-        Some("voxply-hub-linux-x86_64")
+        Some("wavvon-hub-linux-x86_64")
     } else {
         None
     }
@@ -1119,11 +1119,11 @@ fn self_update_asset_name() -> Option<&'static str> {
 
 async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
-        .user_agent(concat!("voxply-hub/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("wavvon-hub/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let release: serde_json::Value = client
-        .get("https://api.github.com/repos/Voxply/Voxply-server/releases/latest")
+        .get("https://api.github.com/repos/Wavvon/Wavvon-server/releases/latest")
         .header("Accept", "application/vnd.github+json")
         .send()
         .await
@@ -1152,7 +1152,7 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
     println!("Update available: v{current} → v{latest}");
 
     if check_only {
-        println!("Run 'voxply-hub update' (without --check) to install.");
+        println!("Run 'wavvon-hub update' (without --check) to install.");
         return Ok(());
     }
 
@@ -1191,7 +1191,7 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
     let current_exe =
         std::env::current_exe().context("Cannot determine current executable path")?;
 
-    let tmp = current_exe.with_file_name(".voxply-hub-update.tmp");
+    let tmp = current_exe.with_file_name(".wavvon-hub-update.tmp");
     std::fs::write(&tmp, &bytes).with_context(|| format!("Cannot write temp file {tmp:?}"))?;
 
     #[cfg(unix)]
@@ -1223,7 +1223,7 @@ fn backup(out_path: &str) -> anyhow::Result<()> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        "voxply_version": env!("CARGO_PKG_VERSION"),
+        "wavvon_version": env!("CARGO_PKG_VERSION"),
     });
     let meta_bytes = serde_json::to_vec_pretty(&meta)?;
     let mut header = tar::Header::new_gnu();

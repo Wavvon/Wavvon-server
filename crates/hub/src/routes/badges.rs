@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -119,7 +119,7 @@ pub async fn accept_pending(
             "Invalid signature hex in stored offer".to_string(),
         )
     })?;
-    voxply_identity::verify_signature(&row.from_hub_pubkey, payload_bytes, &sig_bytes).map_err(
+    wavvon_identity::verify_signature(&row.from_hub_pubkey, payload_bytes, &sig_bytes).map_err(
         |_| {
             (
                 StatusCode::BAD_REQUEST,

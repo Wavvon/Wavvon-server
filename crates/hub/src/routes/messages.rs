@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -238,7 +238,7 @@ pub async fn send_message(
                 state
                     .http_client
                     .post(&webhook_url)
-                    .header("X-Voxply-Signature", &sig)
+                    .header("X-Wavvon-Signature", &sig)
                     .header("Content-Type", "application/json")
                     .body(payload_str)
                     .send(),

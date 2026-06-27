@@ -1,4 +1,4 @@
-pub mod ecies;
+﻿pub mod ecies;
 mod master;
 mod pow;
 mod recovery;
@@ -111,7 +111,7 @@ impl Identity {
 
     pub fn default_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Could not find home directory")?;
-        Ok(home.join(".voxply").join("identity.json"))
+        Ok(home.join(".wavvon").join("identity.json"))
     }
 
     /// Derive the master keypair from this identity's secret bytes.
@@ -192,7 +192,7 @@ mod tests {
     #[test]
     fn sign_and_verify() {
         let identity = Identity::generate();
-        let message = b"hello voxply";
+        let message = b"hello wavvon";
 
         let signature = identity.sign(message);
         let pub_key_hex = identity.public_key_hex();

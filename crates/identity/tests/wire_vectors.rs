@@ -1,4 +1,4 @@
-/// Canonical hex test vectors for every wire-format envelope type.
+﻿/// Canonical hex test vectors for every wire-format envelope type.
 ///
 /// Inputs are fully deterministic — fixed key seeds and a fixed timestamp —
 /// so any reimplementation (client or server) can reproduce the same bytes.
@@ -13,7 +13,7 @@
 /// see docs/wire-format.md for the complete field-by-field specification.
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha512};
-use voxply_identity::{
+use wavvon_identity::{
     dm_envelope_signing_bytes, group_dm_envelope_signing_bytes, sender_key_dist_signing_bytes,
     DhKeyRecord, HomeHubList, PairingClaim, PairingOffer, RevocationEntry, SignedPrefsBlob,
     SubkeyCert,

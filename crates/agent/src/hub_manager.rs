@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+﻿use anyhow::{Context, Result};
 use std::collections::HashMap;
 use tokio::process::Child;
 use tokio::sync::RwLock;
@@ -32,15 +32,15 @@ impl HubManager {
         owner_pubkey: Option<&str>,
         farm_url: Option<&str>,
     ) -> Result<()> {
-        let bin = std::env::var("VOXPLY_HUB_BIN").unwrap_or_else(|_| self.hub_bin.clone());
+        let bin = std::env::var("WAVVON_HUB_BIN").unwrap_or_else(|_| self.hub_bin.clone());
         let mut cmd = tokio::process::Command::new(&bin);
-        cmd.env("VOXPLY_HUB_DB", db_path)
-            .env("VOXPLY_HUB_HTTP_PORT", port.to_string());
+        cmd.env("WAVVON_HUB_DB", db_path)
+            .env("WAVVON_HUB_HTTP_PORT", port.to_string());
         if let Some(pk) = owner_pubkey {
-            cmd.env("VOXPLY_OWNER_PUBKEY", pk);
+            cmd.env("WAVVON_OWNER_PUBKEY", pk);
         }
         if let Some(url) = farm_url {
-            cmd.env("VOXPLY_FARM_URL", url);
+            cmd.env("WAVVON_FARM_URL", url);
         }
         let child = cmd.spawn().with_context(|| format!("spawn hub {hub_id}"))?;
         self.hubs.write().await.insert(

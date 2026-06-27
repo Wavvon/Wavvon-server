@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -433,7 +433,7 @@ pub async fn join_alliance(
         )
     })?;
 
-    voxply_identity::verify_signature(
+    wavvon_identity::verify_signature(
         &state.hub_identity.public_key_hex(),
         alliance_id.as_bytes(),
         &sig_bytes,

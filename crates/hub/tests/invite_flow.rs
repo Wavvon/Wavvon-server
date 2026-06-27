@@ -1,8 +1,8 @@
-use axum_test::TestServer;
+﻿use axum_test::TestServer;
 use serde_json::json;
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::routes::invite_models::InviteResponse;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::routes::invite_models::InviteResponse;
+use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;

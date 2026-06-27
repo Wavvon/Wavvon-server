@@ -1,4 +1,4 @@
-//! Integration tests for hub certification issuance (#20) and auth gate (#21).
+﻿//! Integration tests for hub certification issuance (#20) and auth gate (#21).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,14 +6,14 @@ use std::sync::Arc;
 use axum_test::TestServer;
 use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::cert_worker;
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::routes::certs::{Certification, IssuanceRow};
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::cert_worker;
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::routes::certs::{Certification, IssuanceRow};
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Shared test setup
@@ -27,8 +27,8 @@ async fn make_state() -> Arc<AppState> {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),
@@ -67,7 +67,7 @@ async fn make_state() -> Arc<AppState> {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     })
@@ -237,7 +237,7 @@ async fn cert_worker_issues_on_tick() {
     do_auth(&server, &member).await;
 
     // Back-date first_seen_at to 31 days ago so the worker considers them eligible.
-    let thirty_one_days_ago = voxply_hub::auth::handlers::unix_timestamp() - 31 * 86400;
+    let thirty_one_days_ago = wavvon_hub::auth::handlers::unix_timestamp() - 31 * 86400;
     sqlx::query("UPDATE users SET first_seen_at = ? WHERE public_key = ?")
         .bind(thirty_one_days_ago)
         .bind(&member_pk)
@@ -338,7 +338,7 @@ async fn cert_mode_any_accepts_valid_cert() {
     let newcomer_pk = newcomer.public_key_hex();
 
     // Insert minimal user row so issue_cert_for can find them.
-    let now = voxply_hub::auth::handlers::unix_timestamp();
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status)
          VALUES (?, ?, ?, 'approved')",
@@ -350,7 +350,7 @@ async fn cert_mode_any_accepts_valid_cert() {
     .await
     .unwrap();
 
-    let cert = voxply_hub::routes::certs::issue_cert_for(&state, &newcomer_pk)
+    let cert = wavvon_hub::routes::certs::issue_cert_for(&state, &newcomer_pk)
         .await
         .unwrap();
 

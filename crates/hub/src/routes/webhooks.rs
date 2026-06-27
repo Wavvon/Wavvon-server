@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -237,7 +237,7 @@ pub async fn post_webhook_message(
     // as a stub: if the header is present we accept it (the sender controls the
     // secret and we've already validated the URL token). A future version should
     // use a middleware that captures raw body bytes.
-    if let Some(sig_header) = headers.get("X-Voxply-Signature") {
+    if let Some(sig_header) = headers.get("X-Wavvon-Signature") {
         // Header present — acknowledged. Full HMAC verification requires raw
         // body bytes captured before JSON parsing; deferred to a future middleware
         // refactor. For now: if signature is present but we can't verify, we log

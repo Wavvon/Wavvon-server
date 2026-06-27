@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -16,7 +16,7 @@ use crate::state::AppState;
 pub(super) fn envelope_signing_bytes(
     env: &crate::routes::dm_models::EncryptedDmEnvelope,
 ) -> Vec<u8> {
-    voxply_identity::dm_envelope_signing_bytes(
+    wavvon_identity::dm_envelope_signing_bytes(
         &env.conv_id,
         &env.ciphertext_hex,
         &env.nonce_hex,
@@ -31,7 +31,7 @@ pub(super) fn group_envelope_signing_bytes(
     ciphertext_hex: &str,
     nonce_hex: &str,
 ) -> Vec<u8> {
-    voxply_identity::group_dm_envelope_signing_bytes(
+    wavvon_identity::group_dm_envelope_signing_bytes(
         conv_id,
         version,
         iteration,
@@ -49,7 +49,7 @@ fn sender_key_dist_signing_bytes(
         .iter()
         .map(|r| (r.recipient_pubkey.clone(), r.wrapped_key_hex.clone()))
         .collect();
-    voxply_identity::sender_key_dist_signing_bytes(conv_id, version, &pairs)
+    wavvon_identity::sender_key_dist_signing_bytes(conv_id, version, &pairs)
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +99,7 @@ pub async fn push_sender_keys(
         sender_key_dist_signing_bytes(&conversation_id, req.sender_key_version, &req.recipients);
     let sig_bytes = hex::decode(&req.signature_hex)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-    voxply_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
+    wavvon_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("Invalid distribution signature: {e}"),

@@ -1,4 +1,4 @@
-//! Tests for H2 (presence refcount) and H3 (bot_sessions per-session).
+﻿//! Tests for H2 (presence refcount) and H3 (bot_sessions per-session).
 //!
 //! H2: `online_users` is now a refcount map (`HashMap<String, usize>`).
 //!     A second session's connect increments the count; the first disconnect
@@ -14,12 +14,12 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, mpsc, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -33,8 +33,8 @@ async fn start_hub() -> (String, Arc<AppState>) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -75,7 +75,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(HashMap::new()),
-        search: Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -399,7 +399,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
     // Insert a real bot user row (publish_hub_event queries the DB for
     // subscriptions, so we need valid bot_subscriptions rows).
     let pk = Identity::generate().public_key_hex();
-    let now = voxply_hub::auth::handlers::unix_timestamp();
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
 
     sqlx::query(
         "INSERT INTO users (public_key, display_name, is_bot, first_seen_at, last_seen_at)
@@ -442,7 +442,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
     }
 
     // Publish an event — should be delivered to both sessions.
-    voxply_hub::bots::events::publish_hub_event(
+    wavvon_hub::bots::events::publish_hub_event(
         &state,
         "message.created",
         Some(&pk),

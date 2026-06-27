@@ -1,4 +1,4 @@
-use voxply_store::StoreError;
+﻿use wavvon_store::StoreError;
 
 /// Map a `sqlx::Error` to a `StoreError`.
 ///

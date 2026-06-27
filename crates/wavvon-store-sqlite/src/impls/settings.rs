@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 
 use async_trait::async_trait;
 use sqlx::Row;
-use voxply_store::{SettingsStore, StoreError};
+use wavvon_store::{SettingsStore, StoreError};
 
 use crate::error_map::map_err;
 use crate::SqliteStore;

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -258,7 +258,7 @@ pub async fn post_alliance_channel_message(
         }
 
         // Found the owner. Prefix the user's name so attribution survives the
-        // hub-as-sender hop. e.g. "[alice via voxply.example] hello".
+        // hub-as-sender hop. e.g. "[alice via wavvon.example] hello".
         let user_label: Option<String> =
             sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = ?")
                 .bind(&user.public_key)

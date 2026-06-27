@@ -1,4 +1,4 @@
-/// Integration tests for the background revalidation sweep.
+﻿/// Integration tests for the background revalidation sweep.
 ///
 /// Spins up a real local HTTP server playing the farm role so `tick` probes
 /// `GET /farm/public-info` exactly as it does in production. A request
@@ -9,9 +9,9 @@ use std::sync::Arc;
 use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
 use sqlx::sqlite::SqlitePoolOptions;
-use voxply_seed::db;
-use voxply_seed::revalidation;
-use voxply_seed::state::SeedState;
+use wavvon_seed::db;
+use wavvon_seed::revalidation;
+use wavvon_seed::state::SeedState;
 
 async fn setup_state() -> Arc<SeedState> {
     let db = SqlitePoolOptions::new()

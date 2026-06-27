@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+﻿use std::collections::HashSet;
 
 use async_trait::async_trait;
 use sqlx::Row;
-use voxply_store::{NewRole, RoleRow, RoleStore, StoreError, UserPerms};
+use wavvon_store::{NewRole, RoleRow, RoleStore, StoreError, UserPerms};
 
 use crate::error_map::map_err;
 use crate::SqliteStore;

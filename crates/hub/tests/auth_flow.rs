@@ -1,7 +1,7 @@
-use serde_json::json;
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::routes::me::MeResponse;
-use voxply_identity::Identity;
+﻿use serde_json::json;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::routes::me::MeResponse;
+use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;

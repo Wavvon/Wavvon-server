@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -37,7 +37,7 @@ pub async fn get_listing(
 ) -> Result<Json<ListingResponse>, (StatusCode, String)> {
     let branding = read_branding(&state).await;
 
-    let hub_url = std::env::var("VOXPLY_HUB_URL").unwrap_or_default();
+    let hub_url = std::env::var("WAVVON_HUB_URL").unwrap_or_default();
 
     let tags = crate::routes::tags::load_tags(&state).await?;
 

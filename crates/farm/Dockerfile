@@ -1,7 +1,7 @@
-# Build the farm binary.
+﻿# Build the farm binary.
 # Run from the workspace root:
 #
-#   docker build -f farm/Dockerfile -t ghcr.io/voxply/farm:latest .
+#   docker build -f farm/Dockerfile -t ghcr.io/wavvon/farm:latest .
 #
 # Or use docker-compose.farm.yml from the workspace root.
 
@@ -14,7 +14,7 @@ FROM rust:1-slim-trixie AS builder
 
 WORKDIR /build
 COPY . .
-RUN cargo build --release -p voxply-farm
+RUN cargo build --release -p wavvon-farm
 
 # ---------- runtime ----------
 FROM debian:trixie-slim
@@ -27,19 +27,19 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /data
 VOLUME ["/data"]
 
-COPY --from=builder /build/target/release/voxply-farm /usr/local/bin/voxply-farm
+COPY --from=builder /build/target/release/wavvon-farm /usr/local/bin/wavvon-farm
 
 # Farm HTTP API
 EXPOSE 4000
 
 # All env vars the farm reads. Override in docker-compose.yml or with -e flags.
-ENV VOXPLY_FARM_HTTP_PORT=4000
+ENV WAVVON_FARM_HTTP_PORT=4000
 # The externally reachable URL of this farm — used in session tokens.
 # Must be set correctly in production.
-# ENV VOXPLY_FARM_URL=https://farm.example.com
+# ENV WAVVON_FARM_URL=https://farm.example.com
 # Path to the hub binary for auto-spawning hubs (Phase 3).
-# ENV VOXPLY_HUB_BIN=/usr/local/bin/voxply-hub
-# ENV VOXPLY_LOG_FORMAT=json
-# ENV VOXPLY_OTLP_ENDPOINT=http://otel-collector:4318
+# ENV WAVVON_HUB_BIN=/usr/local/bin/wavvon-hub
+# ENV WAVVON_LOG_FORMAT=json
+# ENV WAVVON_OTLP_ENDPOINT=http://otel-collector:4318
 
-ENTRYPOINT ["/usr/local/bin/voxply-farm"]
+ENTRYPOINT ["/usr/local/bin/wavvon-farm"]

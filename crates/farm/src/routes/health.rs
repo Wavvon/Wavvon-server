@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::State;
 use axum::Json;
@@ -56,7 +56,7 @@ pub async fn farm_info(State(state): State<Arc<FarmState>>) -> Json<FarmInfoResp
     .unwrap_or(0);
 
     Json(FarmInfoResponse {
-        kind: "voxply-farm",
+        kind: "wavvon-farm",
         version: env!("CARGO_PKG_VERSION"),
         name,
         description,

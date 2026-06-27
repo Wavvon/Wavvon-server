@@ -1,6 +1,6 @@
-use async_trait::async_trait;
+﻿use async_trait::async_trait;
 use futures::future::BoxFuture;
-use voxply_store::{HubStore, StoreError, Transactional};
+use wavvon_store::{HubStore, StoreError, Transactional};
 
 use crate::SqliteStore;
 

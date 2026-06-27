@@ -1,4 +1,4 @@
-//! Integration tests for the optional static web-client serving feature.
+﻿//! Integration tests for the optional static web-client serving feature.
 //!
 //! Tests are split into two sections:
 //! - With `web_client_dir` set to a temp dir containing index.html + an asset.
@@ -10,12 +10,12 @@ use std::sync::Arc;
 use axum::http::header;
 use axum_test::TestServer;
 use tokio::sync::{broadcast, RwLock};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_hub::web_client::WebClientConfig;
-use voxply_identity::Identity;
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_hub::web_client::WebClientConfig;
+use wavvon_identity::Identity;
 
 /// Build a test server with an optional WebClientConfig.
 async fn setup_with_web_client(cfg: Option<Arc<WebClientConfig>>) -> TestServer {
@@ -26,8 +26,8 @@ async fn setup_with_web_client(cfg: Option<Arc<WebClientConfig>>) -> TestServer 
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -68,7 +68,7 @@ async fn setup_with_web_client(cfg: Option<Arc<WebClientConfig>>) -> TestServer 
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -83,11 +83,11 @@ fn make_web_client_dir() -> (tempfile::TempDir, Arc<WebClientConfig>) {
     let dir = tempfile::tempdir().expect("tempdir");
 
     // Write a minimal index.html with a </head> tag so injection is testable.
-    let index_html = b"<html><head><title>Voxply</title></head><body>hello</body></html>";
+    let index_html = b"<html><head><title>Wavvon</title></head><body>hello</body></html>";
     std::fs::write(dir.path().join("index.html"), index_html).unwrap();
 
     // Write a static asset.
-    std::fs::write(dir.path().join("app.js"), b"console.log('voxply');").unwrap();
+    std::fs::write(dir.path().join("app.js"), b"console.log('wavvon');").unwrap();
 
     let cfg = WebClientConfig::load(dir.path()).expect("WebClientConfig::load");
     (dir, Arc::new(cfg))
@@ -95,7 +95,7 @@ fn make_web_client_dir() -> (tempfile::TempDir, Arc<WebClientConfig>) {
 
 // ── with web client ───────────────────────────────────────────────────────────
 
-/// GET / with Accept: text/html → returns index.html containing __VOXPLY_HOME_HUB__.
+/// GET / with Accept: text/html → returns index.html containing __WAVVON_HOME_HUB__.
 #[tokio::test]
 async fn root_with_html_accept_returns_index() {
     let (_dir, cfg) = make_web_client_dir();
@@ -109,7 +109,7 @@ async fn root_with_html_accept_returns_index() {
     resp.assert_status_ok();
     let body = resp.text();
     assert!(
-        body.contains("__VOXPLY_HOME_HUB__"),
+        body.contains("__WAVVON_HOME_HUB__"),
         "Expected injected config script in index.html; got: {body}"
     );
     assert!(
@@ -141,7 +141,7 @@ async fn spa_route_with_html_accept_returns_index() {
     resp.assert_status_ok();
     let body = resp.text();
     assert!(
-        body.contains("__VOXPLY_HOME_HUB__"),
+        body.contains("__WAVVON_HOME_HUB__"),
         "SPA fallback should serve injected index.html; got: {body}"
     );
 }
@@ -162,7 +162,7 @@ async fn non_api_path_with_json_accept_returns_404() {
     let body = resp.text();
     // Must NOT be the index.html content.
     assert!(
-        !body.contains("__VOXPLY_HOME_HUB__"),
+        !body.contains("__WAVVON_HOME_HUB__"),
         "JSON client must receive a plain 404, not the SPA index; got: {body}"
     );
 }
@@ -187,7 +187,7 @@ async fn health_route_unaffected_by_web_client() {
         "Expected health JSON; got: {body}"
     );
     assert!(
-        !body.contains("__VOXPLY_HOME_HUB__"),
+        !body.contains("__WAVVON_HOME_HUB__"),
         "Health route should not be overridden by web client fallback; got: {body}"
     );
 }
@@ -202,7 +202,7 @@ async fn static_asset_is_served() {
     resp.assert_status_ok();
     let body = resp.text();
     assert!(
-        body.contains("voxply"),
+        body.contains("wavvon"),
         "Expected JS asset content; got: {body}"
     );
 }

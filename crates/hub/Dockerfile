@@ -1,12 +1,12 @@
-# Build the hub binary (and optionally the web client).
+﻿# Build the hub binary (and optionally the web client).
 #
-# Normal CI/release build — Voxply-client checked out to web-client-src/:
+# Normal CI/release build — Wavvon-client checked out to web-client-src/:
 #
-#   docker build -f hub/Dockerfile -t ghcr.io/voxply/hub:latest .
+#   docker build -f hub/Dockerfile -t ghcr.io/wavvon/hub:latest .
 #
 # Local build WITHOUT the web client source (produces an API-only image):
 #
-#   docker build -f hub/Dockerfile -t voxply-hub:dev .
+#   docker build -f hub/Dockerfile -t wavvon-hub:dev .
 #
 # docker-compose from the workspace root:
 #
@@ -19,16 +19,16 @@
 # and only runs npm when it is present.  /web-client always exists in the
 # resulting layer so COPY --from=web-builder in the runtime stage never fails.
 #
-# CI/release: actions/checkout puts Voxply-client at web-client-src/ in the context
-#   → pnpm install --frozen-lockfile && pnpm --filter voxply-web build
+# CI/release: actions/checkout puts Wavvon-client at web-client-src/ in the context
+#   → pnpm install --frozen-lockfile && pnpm --filter wavvon-web build
 #   → /web-client contains the built SPA from apps/web/dist/.
-#   → ENV VOXPLY_WEB_CLIENT_DIR=/web-client activates serving.
+#   → ENV WAVVON_WEB_CLIENT_DIR=/web-client activates serving.
 #
 # Local `docker build` without web-client-src/:
 #   → /web-client is created but empty; index.html is absent.
-#   → VOXPLY_WEB_CLIENT_DIR=/web-client is still set, but the hub's startup
+#   → WAVVON_WEB_CLIENT_DIR=/web-client is still set, but the hub's startup
 #     validation will detect the missing index.html and exit with a clear error.
-#   → Override at runtime with -e VOXPLY_WEB_CLIENT_DIR= to run API-only.
+#   → Override at runtime with -e WAVVON_WEB_CLIENT_DIR= to run API-only.
 FROM node:22-slim AS web-builder
 
 WORKDIR /build-web
@@ -46,7 +46,7 @@ RUN mkdir -p /web-client && \
     if [ -f /build-web/web-client-src/apps/web/package.json ]; then \
         cd /build-web/web-client-src && \
         pnpm install --frozen-lockfile && \
-        pnpm --filter voxply-web build && \
+        pnpm --filter wavvon-web build && \
         cp -r apps/web/dist/. /web-client/; \
     fi
 
@@ -60,7 +60,7 @@ FROM rust:1-slim-trixie AS builder
 
 WORKDIR /build
 COPY . .
-RUN cargo build --release -p voxply-hub
+RUN cargo build --release -p wavvon-hub
 
 # ── runtime ───────────────────────────────────────────────────────────────────
 FROM debian:trixie-slim
@@ -74,13 +74,13 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /data
 VOLUME ["/data"]
 
-COPY --from=builder /build/target/release/voxply-hub /usr/local/bin/voxply-hub
+COPY --from=builder /build/target/release/wavvon-hub /usr/local/bin/wavvon-hub
 
 # Copy the pre-built web client assets produced by the web-builder stage.
 # The directory always exists (populated in CI builds; empty in local builds
-# without web-client-src/).  VOXPLY_WEB_CLIENT_DIR is set to /web-client below;
+# without web-client-src/).  WAVVON_WEB_CLIENT_DIR is set to /web-client below;
 # if /web-client is empty (no index.html), the hub will exit with a clear error
-# at startup — override with -e VOXPLY_WEB_CLIENT_DIR= to run API-only.
+# at startup — override with -e WAVVON_WEB_CLIENT_DIR= to run API-only.
 COPY --from=web-builder /web-client /web-client
 
 # HTTP API
@@ -89,16 +89,16 @@ EXPOSE 3000
 EXPOSE 3001/udp
 
 # All env vars the hub reads. Override in docker-compose.yml or with -e flags.
-ENV VOXPLY_HTTP_PORT=3000
-ENV VOXPLY_VOICE_UDP_PORT=3001
-# ENV VOXPLY_TLS_CERT=/certs/fullchain.pem
-# ENV VOXPLY_TLS_KEY=/certs/privkey.pem
-# ENV VOXPLY_FARM_URL=http://farm:4000
-# ENV VOXPLY_LOG_FORMAT=json
-# ENV VOXPLY_OTLP_ENDPOINT=http://otel-collector:4318
+ENV WAVVON_HTTP_PORT=3000
+ENV WAVVON_VOICE_UDP_PORT=3001
+# ENV WAVVON_TLS_CERT=/certs/fullchain.pem
+# ENV WAVVON_TLS_KEY=/certs/privkey.pem
+# ENV WAVVON_FARM_URL=http://farm:4000
+# ENV WAVVON_LOG_FORMAT=json
+# ENV WAVVON_OTLP_ENDPOINT=http://otel-collector:4318
 
 # When the web client was baked in (index.html present), serve it automatically.
-# Overridable at runtime: -e VOXPLY_WEB_CLIENT_DIR= (empty) disables serving.
-ENV VOXPLY_WEB_CLIENT_DIR=/web-client
+# Overridable at runtime: -e WAVVON_WEB_CLIENT_DIR= (empty) disables serving.
+ENV WAVVON_WEB_CLIENT_DIR=/web-client
 
-ENTRYPOINT ["/usr/local/bin/voxply-hub"]
+ENTRYPOINT ["/usr/local/bin/wavvon-hub"]

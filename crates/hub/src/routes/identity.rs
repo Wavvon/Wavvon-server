@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use voxply_identity::{HomeHubList, RevocationEntry, SignedPrefsBlob, SubkeyCert};
+use wavvon_identity::{HomeHubList, RevocationEntry, SignedPrefsBlob, SubkeyCert};
 
 use crate::auth::middleware::AuthUser;
 use crate::state::AppState;

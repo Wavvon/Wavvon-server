@@ -1,4 +1,4 @@
-/// End-to-end integration test: server agent WebSocket flow.
+﻿/// End-to-end integration test: server agent WebSocket flow.
 ///
 /// Unlike the other farm tests (which use axum-test's in-memory transport),
 /// this test binds a real TCP listener so that tokio-tungstenite can establish
@@ -25,8 +25,8 @@ use sqlx::sqlite::SqlitePoolOptions;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use totp_rs::{Algorithm, Secret, TOTP};
-use voxply_farm::{db, hub_manager::HubManager, server, state::FarmState};
-use voxply_identity::Identity;
+use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState};
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Test server setup
@@ -59,7 +59,7 @@ async fn start_farm() -> (String, Arc<FarmState>) {
     let farm_url = format!("http://127.0.0.1:{port}");
 
     let hub_manager = Arc::new(HubManager::new(
-        "voxply-hub".to_string(),
+        "wavvon-hub".to_string(),
         farm_url.clone(),
         9100,
     ));
@@ -68,7 +68,7 @@ async fn start_farm() -> (String, Arc<FarmState>) {
         keypair,
         farm_url.clone(),
         hub_manager,
-        "/tmp/voxply-e2e-hubs".to_string(),
+        "/tmp/wavvon-e2e-hubs".to_string(),
     ));
 
     let app = server::create_router(state.clone());

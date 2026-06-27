@@ -1,11 +1,11 @@
-use crate::auth::middleware::AuthUser;
+﻿use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use voxply_identity::DhKeyRecord;
+use wavvon_identity::DhKeyRecord;
 
 #[derive(Deserialize)]
 pub struct PublishDhKeyRequest {

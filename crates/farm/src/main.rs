@@ -1,4 +1,4 @@
-use std::path::Path;
+﻿use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -6,11 +6,11 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::SqlitePoolOptions;
-use voxply_farm::db;
-use voxply_farm::hub_manager::HubManager;
-use voxply_farm::server;
-use voxply_farm::settings;
-use voxply_farm::state::FarmState;
+use wavvon_farm::db;
+use wavvon_farm::hub_manager::HubManager;
+use wavvon_farm::server;
+use wavvon_farm::settings;
+use wavvon_farm::state::FarmState;
 
 /// Persisted farm identity — same shape as hub_identity.json.
 #[derive(Serialize, Deserialize)]
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
     let json_logs = cfg.log_format.to_lowercase() == "json";
 
     // Optional OpenTelemetry OTLP trace export.
-    // Set VOXPLY_OTLP_ENDPOINT to any OTLP-compatible collector
+    // Set WAVVON_OTLP_ENDPOINT to any OTLP-compatible collector
     // (Grafana Tempo, Jaeger, Honeycomb, Datadog, etc.).
     // No-op when the variable is unset or empty.
     let otlp_provider = cfg
@@ -104,7 +104,7 @@ async fn main() -> Result<()> {
         tracing::info!("OpenTelemetry OTLP trace export enabled");
     }
 
-    // `voxply-farm migrate` — run migrations and exit.
+    // `wavvon-farm migrate` — run migrations and exit.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
         let db = SqlitePoolOptions::new()
@@ -160,17 +160,17 @@ async fn main() -> Result<()> {
         if let Ok(exe) = std::env::current_exe() {
             let dir = exe.parent().unwrap_or(Path::new("."));
             let candidate = dir.join(if cfg!(windows) {
-                "voxply-hub.exe"
+                "wavvon-hub.exe"
             } else {
-                "voxply-hub"
+                "wavvon-hub"
             });
             if candidate.exists() {
                 candidate.to_string_lossy().into_owned()
             } else {
-                "voxply-hub".to_string()
+                "wavvon-hub".to_string()
             }
         } else {
-            "voxply-hub".to_string()
+            "wavvon-hub".to_string()
         }
     };
 
@@ -193,7 +193,7 @@ async fn main() -> Result<()> {
     let app = server::create_router(state);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
     tracing::info!(
-        "Farm server listening on http://0.0.0.0:{http_port} (set VOXPLY_FARM_URL for the external URL)"
+        "Farm server listening on http://0.0.0.0:{http_port} (set WAVVON_FARM_URL for the external URL)"
     );
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;

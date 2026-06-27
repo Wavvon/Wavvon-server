@@ -1,4 +1,4 @@
-//! demo-seed: populates a running Voxply hub with realistic demo content.
+﻿//! demo-seed: populates a running Wavvon hub with realistic demo content.
 //!
 //! Run against a **fresh** hub (empty DB). On a non-fresh hub the tool
 //! detects existing channels and exits with a clear error rather than
@@ -19,11 +19,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time::sleep;
-use voxply_identity::Identity;
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Wire types (mirrors the hub's auth models — kept local so this crate has
-// no compile dependency on voxply_hub itself)
+// no compile dependency on wavvon_hub itself)
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -404,7 +404,7 @@ async fn existing_channel_count(client: &Client, hub: &str, token: &str) -> Resu
 // bytes by re-encoding the sign output of a known message and verifying, but
 // the cleaner path is to just keep the entropy from generate()).
 //
-// voxply_identity::Identity does not expose the raw secret bytes directly in
+// wavvon_identity::Identity does not expose the raw secret bytes directly in
 // the public API, so we persist the recovery phrase (24 BIP39 words) which
 // is sufficient to reconstruct the keypair, plus the session token for
 // immediate use. We also derive the public key for reference.
@@ -497,12 +497,12 @@ async fn main() -> Result<()> {
         &client,
         &hub_url,
         &admin_token,
-        "Voxply HQ",
-        "The official Voxply community hub",
+        "Wavvon HQ",
+        "The official Wavvon community hub",
     )
     .await
     .context("Failed to configure hub branding")?;
-    println!("Hub branding set to 'Voxply HQ'.");
+    println!("Hub branding set to 'Wavvon HQ'.");
 
     // ------------------------------------------------------------------
     // Step 5: Create member identities
@@ -621,7 +621,7 @@ async fn main() -> Result<()> {
         &hub_url,
         &admin_token,
         &welcome_ch.id,
-        "**Welcome to Voxply HQ!** \
+        "**Welcome to Wavvon HQ!** \
          This is the official community hub. \
          Introduce yourself in #general, plan game nights in #game-night, \
          and geek out about Rust in #dev-talk. \
@@ -886,7 +886,7 @@ async fn main() -> Result<()> {
         &hub_url,
         &admin_token,
         &dev_talk_ch.id,
-        "Worth noting: Voxply hub itself uses `sqlx` with `AnyPool` so it can swap between \
+        "Worth noting: Wavvon hub itself uses `sqlx` with `AnyPool` so it can swap between \
          SQLite (dev/self-host) and Postgres (production) without changing query code.",
         None,
     )
@@ -917,7 +917,7 @@ async fn main() -> Result<()> {
 
     let _d10 = send_message(&client, &hub_url, tok(1), &dev_talk_ch.id,
         "Self-hosting tip: run the hub behind [Caddy](https://caddyserver.com/) for automatic \
-         HTTPS. The config is literally two lines:\n```\nvoxply.example.com\nreverse_proxy localhost:3000\n```", None).await?;
+         HTTPS. The config is literally two lines:\n```\nwavvon.example.com\nreverse_proxy localhost:3000\n```", None).await?;
 
     // ------------------------------------------------------------------
     // Step 11: Persist credentials
@@ -946,7 +946,7 @@ async fn main() -> Result<()> {
     println!("demo-seed complete!");
     println!("=============================================================");
     println!("Hub       : {hub_url}");
-    println!("Branding  : 'Voxply HQ' / 'The official Voxply community hub'");
+    println!("Branding  : 'Wavvon HQ' / 'The official Wavvon community hub'");
     println!("Channels  : welcome (pinned), general, game-night (poll), dev-talk, Lounge");
     println!("Identities: Nova (admin/owner) + 7 members");
     println!("Messages  : ~30 realistic messages spread across channels");

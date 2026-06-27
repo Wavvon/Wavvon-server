@@ -1,5 +1,5 @@
-use axum::http::StatusCode;
-use voxply_identity::{
+﻿use axum::http::StatusCode;
+use wavvon_identity::{
     DeviceSubkey, HomeHubList, Identity, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
@@ -7,7 +7,7 @@ use voxply_identity::{
 mod common;
 
 fn signed_designation(
-    master: &voxply_identity::MasterIdentity,
+    master: &wavvon_identity::MasterIdentity,
     hubs: Vec<String>,
     issued_at: u64,
     sequence: u64,
@@ -25,7 +25,7 @@ fn signed_designation(
 }
 
 fn signed_cert(
-    master: &voxply_identity::MasterIdentity,
+    master: &wavvon_identity::MasterIdentity,
     subkey_pubkey: &str,
     label: &str,
     issued_at: u64,
@@ -46,7 +46,7 @@ fn signed_cert(
 }
 
 fn signed_revocation(
-    master: &voxply_identity::MasterIdentity,
+    master: &wavvon_identity::MasterIdentity,
     subkey_pubkey: &str,
     revoked_at: u64,
 ) -> RevocationEntry {
@@ -62,7 +62,7 @@ fn signed_revocation(
 }
 
 fn signed_prefs(
-    master: &voxply_identity::MasterIdentity,
+    master: &wavvon_identity::MasterIdentity,
     blob_version: u64,
     ciphertext: &[u8],
 ) -> SignedPrefsBlob {

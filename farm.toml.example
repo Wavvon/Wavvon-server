@@ -1,5 +1,5 @@
-# Voxply Farm — example configuration file
-# Copy to farm.toml and edit. Environment variables (VOXPLY_*) override any value here.
+﻿# Wavvon Farm — example configuration file
+# Copy to farm.toml and edit. Environment variables (WAVVON_*) override any value here.
 
 # ── Network ──────────────────────────────────────────────────────────────────
 
@@ -11,8 +11,8 @@ http_port = 4000
 
 # ── Hub process management ────────────────────────────────────────────────────
 
-# Path to the voxply-hub binary. Defaults to a sibling of this binary.
-# hub_bin = "/usr/local/bin/voxply-hub"
+# Path to the wavvon-hub binary. Defaults to a sibling of this binary.
+# hub_bin = "/usr/local/bin/wavvon-hub"
 
 # Base port for hub child processes. Hub 1 gets this port, hub 2 gets port+1, etc.
 hub_base_port = 9100

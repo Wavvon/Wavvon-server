@@ -1,12 +1,12 @@
-# demo-seed
+﻿# demo-seed
 
-Populates a **running** Voxply hub with realistic demo content — channels, users,
+Populates a **running** Wavvon hub with realistic demo content — channels, users,
 and a believable community conversation — so you can take README screenshots or
 bootstrap a public demo hub.
 
 ## Prerequisites
 
-- A Voxply hub running with a **fresh (empty) database**.
+- A Wavvon hub running with a **fresh (empty) database**.
   The seeder checks for existing channels on startup and exits immediately if any
   are found, so it cannot corrupt a hub that already has content.
 - Rust toolchain (the tool lives in the workspace, no separate install needed).
@@ -14,7 +14,7 @@ bootstrap a public demo hub.
 ## Usage
 
 ```sh
-# From the workspace root (C:/repo/Voxply/hub):
+# From the workspace root (C:/repo/Wavvon/hub):
 cargo run -p demo-seed
 ```
 
@@ -28,14 +28,14 @@ Default target: `http://localhost:3000`
 | `CREDS_OUT` | `demo-credentials.json`   | Path where identity credentials are written (gitignored)    |
 
 ```sh
-HUB_URL=https://demo.voxply.app cargo run -p demo-seed
+HUB_URL=https://demo.wavvon.app cargo run -p demo-seed
 ```
 
 ## What gets created
 
 | Thing                   | Detail                                                              |
 |-------------------------|---------------------------------------------------------------------|
-| **Hub branding**        | Name: "Voxply HQ", description: "The official Voxply community hub"|
+| **Hub branding**        | Name: "Wavvon HQ", description: "The official Wavvon community hub"|
 | **Channels**            | Categories: Community, Gaming, Dev, Voice                          |
 |                         | Channels: #welcome (pinned msg), #general, #game-night, #dev-talk, Lounge |
 | **Identities**          | 8 total — Nova (admin/owner) + 7 members                           |
@@ -55,7 +55,7 @@ The seeder writes `demo-credentials.json` (path controlled by `CREDS_OUT`) with:
 in the workspace root `.gitignore`.
 
 Recovery phrases are 24-word BIP39 mnemonics. You can load any identity in the
-Voxply desktop client using "Restore from recovery phrase".
+Wavvon desktop client using "Restore from recovery phrase".
 
 ## Admin / owner bootstrap
 

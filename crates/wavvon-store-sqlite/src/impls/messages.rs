@@ -1,6 +1,6 @@
-use async_trait::async_trait;
+﻿use async_trait::async_trait;
 use sqlx::Row;
-use voxply_store::{MessageRow, MessageStore, NewMessage, PinRow, StoreError};
+use wavvon_store::{MessageRow, MessageStore, NewMessage, PinRow, StoreError};
 
 use crate::error_map::map_err;
 use crate::SqliteStore;

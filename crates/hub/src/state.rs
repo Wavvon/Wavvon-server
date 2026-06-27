@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+﻿use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -7,8 +7,8 @@ use axum::http::StatusCode;
 use bytes::Bytes;
 use sqlx::AnyPool;
 use tokio::sync::{broadcast, mpsc, RwLock};
-use voxply_identity::Identity;
-use voxply_store::StoreError;
+use wavvon_identity::Identity;
+use wavvon_store::StoreError;
 
 use crate::federation::client::FederationClient;
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
@@ -212,7 +212,7 @@ pub struct AppState {
     /// Abstracted store handle — use this for new code; existing handlers
     /// may still use `state.db` directly while the per-handler migration
     /// proceeds incrementally.
-    pub store: Arc<dyn voxply_store::HubStore>,
+    pub store: Arc<dyn wavvon_store::HubStore>,
     pub pending_challenges: RwLock<HashMap<String, PendingChallenge>>,
     pub chat_tx: broadcast::Sender<(ChatEvent, Arc<str>)>,
     pub federation_client: FederationClient,
@@ -269,7 +269,7 @@ pub struct AppState {
     pub started_at: std::time::Instant,
 
     /// URL of the farm process this hub is paired with, if any.
-    /// Populated from the `VOXPLY_FARM_URL` environment variable on startup.
+    /// Populated from the `WAVVON_FARM_URL` environment variable on startup.
     /// Surfaced in `GET /info` so clients know where to route auth.
     pub farm_url: Option<String>,
     /// Cached farm Ed25519 public key (hex). Populated from `GET {farm_url}/farm/info`
@@ -344,7 +344,7 @@ pub struct AppState {
     /// `{"status":"already_running"}` and do not start a second job.
     pub reindex_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
 
-    /// The operator-configured owner public key, if any (`VOXPLY_OWNER_PUBKEY`).
+    /// The operator-configured owner public key, if any (`WAVVON_OWNER_PUBKEY`).
     ///
     /// When set, startup seeding already inserted a `builtin-owner` row before
     /// the server accepted connections.  `assign_initial_roles` checks this to

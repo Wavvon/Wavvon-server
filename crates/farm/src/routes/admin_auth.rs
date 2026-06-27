@@ -1,4 +1,4 @@
-/// TOTP 2FA routes for the farm admin account.
+﻿/// TOTP 2FA routes for the farm admin account.
 ///
 /// POST /farm/admin/totp/setup   — generate a new TOTP secret (not saved yet)
 /// POST /farm/admin/totp/confirm — verify and persist the TOTP secret
@@ -30,7 +30,7 @@ fn totp_from_base32(secret_b32: &str) -> Result<TOTP, String> {
         30,
         secret,
         None,
-        "voxply-farm".to_string(),
+        "wavvon-farm".to_string(),
     )
     .map_err(|e| format!("totp construction failed: {e}"))
 }
@@ -72,7 +72,7 @@ pub async fn totp_setup(
         1,
         30,
         secret_bytes,
-        Some("Voxply Farm".to_string()),
+        Some("Wavvon Farm".to_string()),
         admin_sub.clone(),
     )
     .map_err(|e| {

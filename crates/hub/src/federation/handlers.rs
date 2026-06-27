@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -337,7 +337,7 @@ pub async fn receive_badge_offer(
     // 3. Verify Ed25519 signature: from_hub_pubkey signs the payload bytes.
     let sig_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
-    voxply_identity::verify_signature(&req.from_hub_pubkey, req.payload.as_bytes(), &sig_bytes)
+    wavvon_identity::verify_signature(&req.from_hub_pubkey, req.payload.as_bytes(), &sig_bytes)
         .map_err(|_| {
             (
                 StatusCode::UNAUTHORIZED,

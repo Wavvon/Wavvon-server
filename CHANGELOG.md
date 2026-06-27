@@ -1,6 +1,6 @@
-# Changelog
+﻿# Changelog
 
-All notable changes to Voxply Server (hub + farm) are documented here.
+All notable changes to Wavvon Server (hub + farm) are documented here.
 
 ## [0.2.4] — 2026-06-13
 ### Bug Fixes

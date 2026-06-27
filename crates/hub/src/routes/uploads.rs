@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderValue, StatusCode};
@@ -27,7 +27,7 @@ fn is_allowed_mime(mime: &str) -> bool {
 }
 
 fn uploads_dir() -> String {
-    std::env::var("VOXPLY_UPLOADS_DIR").unwrap_or_else(|_| "./uploads/".to_string())
+    std::env::var("WAVVON_UPLOADS_DIR").unwrap_or_else(|_| "./uploads/".to_string())
 }
 
 #[derive(Serialize)]

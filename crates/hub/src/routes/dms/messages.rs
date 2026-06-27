@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -149,7 +149,7 @@ pub async fn send_dm(
         let msg = envelope_signing_bytes(env);
         let sig_bytes = hex::decode(&env.signature_hex)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-        voxply_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
+        wavvon_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid envelope signature: {e}"),
@@ -175,7 +175,7 @@ pub async fn send_dm(
                 format!("Bad group envelope signature hex: {e}"),
             )
         })?;
-        voxply_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
+        wavvon_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid group envelope signature: {e}"),
@@ -250,7 +250,7 @@ pub async fn send_dm(
         // storage) so we don't persist a message with a bad signature that would
         // be rejected by receiving hubs during federation.
         let plaintext_sig_hex: Option<String> = if let Some(ref sig_hex) = req.plaintext_signature {
-            let signing_bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+            let signing_bytes = wavvon_identity::federated_plaintext_dm_signing_bytes(
                 &conversation_id,
                 &conv_type,
                 content,
@@ -261,7 +261,7 @@ pub async fn send_dm(
                     format!("Bad plaintext_signature hex: {e}"),
                 )
             })?;
-            voxply_identity::verify_signature(&user.public_key, &signing_bytes, &sig_bytes)
+            wavvon_identity::verify_signature(&user.public_key, &signing_bytes, &sig_bytes)
                 .map_err(|e| {
                     (
                         StatusCode::BAD_REQUEST,
@@ -612,7 +612,7 @@ pub async fn receive_federated_dm(
         let msg = envelope_signing_bytes(env);
         let sig_bytes = hex::decode(&env.signature_hex)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-        voxply_identity::verify_signature(&req.sender, &msg, &sig_bytes).map_err(|e| {
+        wavvon_identity::verify_signature(&req.sender, &msg, &sig_bytes).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid envelope signature: {e}"),
@@ -653,7 +653,7 @@ pub async fn receive_federated_dm(
                 format!("Bad group envelope signature hex: {e}"),
             )
         })?;
-        voxply_identity::verify_signature(&req.sender, &msg, &sig_bytes).map_err(|e| {
+        wavvon_identity::verify_signature(&req.sender, &msg, &sig_bytes).map_err(|e| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid group envelope signature: {e}"),
@@ -688,14 +688,14 @@ pub async fn receive_federated_dm(
             StatusCode::BAD_REQUEST,
             "plaintext federated DM requires a sender signature".to_string(),
         ))?;
-        let signing_bytes = voxply_identity::federated_plaintext_dm_signing_bytes(
+        let signing_bytes = wavvon_identity::federated_plaintext_dm_signing_bytes(
             &req.conversation_id,
             &req.conv_type,
             content,
         );
         let sig_bytes = hex::decode(sig_hex)
             .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-        voxply_identity::verify_signature(&req.sender, &signing_bytes, &sig_bytes).map_err(
+        wavvon_identity::verify_signature(&req.sender, &signing_bytes, &sig_bytes).map_err(
             |e| {
                 (
                     StatusCode::UNAUTHORIZED,

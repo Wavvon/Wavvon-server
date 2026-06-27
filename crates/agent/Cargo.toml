@@ -1,10 +1,10 @@
-[package]
-name = "voxply-agent"
+﻿[package]
+name = "wavvon-agent"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "voxply-agent"
+name = "wavvon-agent"
 path = "src/main.rs"
 
 [dependencies]

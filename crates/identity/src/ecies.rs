@@ -1,4 +1,4 @@
-use aes_gcm::{
+﻿use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
@@ -8,7 +8,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256, Sha512};
 
-const ECIES_INFO: &[u8] = b"voxply/ecies/v1";
+const ECIES_INFO: &[u8] = b"wavvon/ecies/v1";
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -43,7 +43,7 @@ pub fn wrap_blob_key(blob_key: &[u8; 32], recipient_ed25519_pubkey_hex: &str) ->
     // 4. ECDH
     let shared = eph_priv.diffie_hellman(&x25519_pub);
 
-    // 5. HKDF-SHA256: ikm=shared, salt=eph_pub, info="voxply/ecies/v1" → 32-byte enc key
+    // 5. HKDF-SHA256: ikm=shared, salt=eph_pub, info="wavvon/ecies/v1" → 32-byte enc key
     let hk = Hkdf::<Sha256>::new(Some(eph_pub.as_bytes()), shared.as_bytes());
     let mut enc_key = [0u8; 32];
     hk.expand(ECIES_INFO, &mut enc_key)

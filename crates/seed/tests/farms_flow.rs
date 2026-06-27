@@ -1,4 +1,4 @@
-/// Integration tests for the seed discovery service.
+﻿/// Integration tests for the seed discovery service.
 ///
 /// Tests:
 /// - GET /info returns role: "discovery"
@@ -19,9 +19,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use sqlx::sqlite::SqlitePoolOptions;
-use voxply_seed::db;
-use voxply_seed::server;
-use voxply_seed::state::SeedState;
+use wavvon_seed::db;
+use wavvon_seed::server;
+use wavvon_seed::state::SeedState;
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -104,7 +104,7 @@ async fn info_returns_discovery_role() {
     resp.assert_status_ok();
 
     let body = resp.json::<Value>();
-    assert_eq!(body["kind"], "voxply-seed");
+    assert_eq!(body["kind"], "wavvon-seed");
     assert_eq!(body["role"], "discovery");
 }
 

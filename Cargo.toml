@@ -1,4 +1,4 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
 members = [
     "crates/hub",
@@ -6,8 +6,8 @@ members = [
     "crates/identity",
     "crates/farm",
     "crates/agent",
-    "crates/voxply-store",
-    "crates/voxply-store-sqlite",
+    "crates/wavvon-store",
+    "crates/wavvon-store-sqlite",
     "crates/demo-seed",
 ]
 

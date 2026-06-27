@@ -1,4 +1,4 @@
-/// Integration tests for Phase 3 farm admin routes.
+﻿/// Integration tests for Phase 3 farm admin routes.
 ///
 /// Tests exercise:
 /// - GET  /farm/settings         (admin-only)
@@ -16,11 +16,11 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use sqlx::sqlite::SqlitePoolOptions;
-use voxply_farm::db;
-use voxply_farm::hub_manager::HubManager;
-use voxply_farm::server;
-use voxply_farm::state::FarmState;
-use voxply_identity::Identity;
+use wavvon_farm::db;
+use wavvon_farm::hub_manager::HubManager;
+use wavvon_farm::server;
+use wavvon_farm::state::FarmState;
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Setup helpers
@@ -49,7 +49,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
 
     let farm_url = "https://farm.test";
     let hub_manager = Arc::new(HubManager::new(
-        "voxply-hub".to_string(),
+        "wavvon-hub".to_string(),
         farm_url.to_string(),
         9100,
     ));
@@ -679,7 +679,7 @@ async fn public_info_returns_body_when_discovery_enabled() {
     let resp = server.get("/farm/public-info").await;
     resp.assert_status_ok();
     let body: Value = resp.json();
-    assert_eq!(body["kind"], "voxply-farm-public");
+    assert_eq!(body["kind"], "wavvon-farm-public");
     assert_eq!(body["name"], "Test Farm");
     assert_eq!(body["allow_discovery_listing"], true);
     assert_eq!(body["creation_policy"], "open");

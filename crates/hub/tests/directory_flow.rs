@@ -1,15 +1,15 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_identity::Identity;
 
 async fn setup() -> (TestServer, Identity) {
     sqlx::any::install_default_drivers();
@@ -19,8 +19,8 @@ async fn setup() -> (TestServer, Identity) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -63,7 +63,7 @@ async fn setup() -> (TestServer, Identity) {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -147,7 +147,7 @@ async fn directory_sign_returns_valid_signature() {
 
     // The signature must verify against the hub's public key.
     let sig_bytes = hex::decode(sig_hex).unwrap();
-    voxply_identity::verify_signature(pubkey_hex, canonical.as_bytes(), &sig_bytes)
+    wavvon_identity::verify_signature(pubkey_hex, canonical.as_bytes(), &sig_bytes)
         .expect("signature should verify against hub pubkey");
 }
 

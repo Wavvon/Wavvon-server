@@ -1,4 +1,4 @@
-use std::sync::Arc;
+﻿use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -8,7 +8,7 @@ use sqlx::Row;
 
 use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
-use voxply_identity::PublicHubProfile;
+use wavvon_identity::PublicHubProfile;
 
 fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))

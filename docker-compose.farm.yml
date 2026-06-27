@@ -1,14 +1,14 @@
-# Farm + hub setup — farm handles auth, hub handles community state.
+﻿# Farm + hub setup — farm handles auth, hub handles community state.
 #
 # Quick start:
 #   docker compose -f docker-compose.farm.yml up -d
 #
-# Set VOXPLY_FARM_URL to the farm's externally reachable URL before starting.
+# Set WAVVON_FARM_URL to the farm's externally reachable URL before starting.
 # The hub will discover the farm at startup and delegate auth to it.
 
 services:
   farm:
-    image: ghcr.io/voxply/farm:latest
+    image: ghcr.io/wavvon/farm:latest
     # build:
     #   context: .
     #   dockerfile: crates/farm/Dockerfile
@@ -17,15 +17,15 @@ services:
     volumes:
       - farm-data:/data
     environment:
-      VOXPLY_FARM_HTTP_PORT: "4000"
+      WAVVON_FARM_HTTP_PORT: "4000"
       # Must match the URL clients and hubs use to reach the farm externally:
-      VOXPLY_FARM_URL: "${VOXPLY_FARM_URL:-http://localhost:4000}"
-      # VOXPLY_LOG_FORMAT: json
-      # VOXPLY_OTLP_ENDPOINT: http://otel-collector:4318
+      WAVVON_FARM_URL: "${WAVVON_FARM_URL:-http://localhost:4000}"
+      # WAVVON_LOG_FORMAT: json
+      # WAVVON_OTLP_ENDPOINT: http://otel-collector:4318
     restart: unless-stopped
 
   hub:
-    image: ghcr.io/voxply/hub:latest
+    image: ghcr.io/wavvon/hub:latest
     # build:
     #   context: .
     #   dockerfile: crates/hub/Dockerfile
@@ -36,14 +36,14 @@ services:
       - hub-data:/data
       # - /etc/letsencrypt/live/your.domain:/certs:ro
     environment:
-      VOXPLY_HTTP_PORT: "3000"
-      VOXPLY_VOICE_UDP_PORT: "3001"
+      WAVVON_HTTP_PORT: "3000"
+      WAVVON_VOICE_UDP_PORT: "3001"
       # Point the hub at the farm so it delegates auth:
-      VOXPLY_FARM_URL: http://farm:4000
-      # VOXPLY_TLS_CERT: /certs/fullchain.pem
-      # VOXPLY_TLS_KEY: /certs/privkey.pem
-      # VOXPLY_LOG_FORMAT: json
-      # VOXPLY_OTLP_ENDPOINT: http://otel-collector:4318
+      WAVVON_FARM_URL: http://farm:4000
+      # WAVVON_TLS_CERT: /certs/fullchain.pem
+      # WAVVON_TLS_KEY: /certs/privkey.pem
+      # WAVVON_LOG_FORMAT: json
+      # WAVVON_OTLP_ENDPOINT: http://otel-collector:4318
     depends_on:
       - farm
     restart: unless-stopped

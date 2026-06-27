@@ -1,4 +1,4 @@
-/// Integration tests for the farm auth routes and revoke-check endpoint.
+﻿/// Integration tests for the farm auth routes and revoke-check endpoint.
 ///
 /// Each test spins up an in-memory SQLite farm and hits the API through
 /// axum-test's TestServer — no network, no disk IO, fast and hermetic.
@@ -10,12 +10,12 @@ use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use sqlx::sqlite::SqlitePoolOptions;
-use voxply_farm::db;
-use voxply_farm::hub_manager::HubManager;
-use voxply_farm::server;
-use voxply_farm::state::FarmState;
-use voxply_farm::token::verify_token;
-use voxply_identity::Identity;
+use wavvon_farm::db;
+use wavvon_farm::hub_manager::HubManager;
+use wavvon_farm::server;
+use wavvon_farm::state::FarmState;
+use wavvon_farm::token::verify_token;
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Test setup helper
@@ -45,7 +45,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
         .unwrap();
 
     let hub_manager = Arc::new(HubManager::new(
-        "voxply-hub".to_string(),
+        "wavvon-hub".to_string(),
         farm_url.clone(),
         9100,
     ));
@@ -70,7 +70,7 @@ async fn farm_info_returns_correct_shape() {
     let resp = server.get("/farm/info").await;
     resp.assert_status_ok();
     let body: Value = resp.json();
-    assert_eq!(body["kind"], "voxply-farm");
+    assert_eq!(body["kind"], "wavvon-farm");
     assert_eq!(body["public_key"], state.public_key_hex());
     assert!(body["auth"]["challenge_url"].is_string());
     assert!(body["auth"]["verify_url"].is_string());

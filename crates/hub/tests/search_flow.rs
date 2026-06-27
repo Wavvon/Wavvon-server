@@ -1,17 +1,17 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum_test::TestServer;
 use serde_json::json;
 use tokio::sync::{broadcast, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::routes::chat_models::ChannelResponse;
-use voxply_hub::routes::search::SearchResult;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::routes::chat_models::ChannelResponse;
+use wavvon_hub::routes::search::SearchResult;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;
@@ -26,13 +26,13 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
     let tmp = tempfile::tempdir().unwrap();
     let search =
-        Arc::new(voxply_hub::search::tantivy_search::TantivySearch::open(tmp.path()).unwrap());
+        Arc::new(wavvon_hub::search::tantivy_search::TantivySearch::open(tmp.path()).unwrap());
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
@@ -116,14 +116,14 @@ async fn search_finds_matching_message() {
     let resp = server
         .post(format!("/channels/{}/messages", channel.id).as_str())
         .authorization_bearer(&token)
-        .json(&json!({ "content": "hello voxplysearch world", "attachments": [] }))
+        .json(&json!({ "content": "hello wavvonsearch world", "attachments": [] }))
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
 
     // Search for the distinctive word.
     let resp = server
         .get("/search")
-        .add_query_param("q", "voxplysearch")
+        .add_query_param("q", "wavvonsearch")
         .authorization_bearer(&token)
         .await;
     resp.assert_status_ok();
@@ -133,7 +133,7 @@ async fn search_finds_matching_message() {
     let hit = &results[0];
     assert_eq!(hit.channel_id, channel.id);
     assert_eq!(hit.channel_name, "general");
-    assert!(hit.content_preview.contains("voxplysearch"));
+    assert!(hit.content_preview.contains("wavvonsearch"));
 }
 
 /// Short query (< 2 chars) returns an empty list, not an error.

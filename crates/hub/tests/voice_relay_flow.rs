@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -7,13 +7,13 @@ use serde_json::{json, Value};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use tokio_tungstenite::tungstenite::Message as TsMessage;
-use voxply_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::routes::chat_models::ChannelResponse;
-use voxply_hub::server;
-use voxply_hub::state::{AppState, ConsumedVoiceToken};
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::routes::chat_models::ChannelResponse;
+use wavvon_hub::server;
+use wavvon_hub::state::{AppState, ConsumedVoiceToken};
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Test harness — real TCP listener so WS upgrades work.
@@ -27,8 +27,8 @@ async fn start_hub() -> (String, Arc<AppState>) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -69,7 +69,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(HashMap::new()),
-        search: Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });
@@ -250,7 +250,7 @@ async fn ws_disconnect_removes_relay_slot() {
     assert!(state.voice_addr_map.read().await.contains_key(&bound_addr));
 
     // Simulate WS disconnect by calling leave_voice.
-    voxply_hub::routes::ws::leave_voice_for_test(&state, pk, channel_id).await;
+    wavvon_hub::routes::ws::leave_voice_for_test(&state, pk, channel_id).await;
 
     // Slot must be gone.
     assert!(
@@ -281,7 +281,7 @@ async fn rejoin_reactivates_relay_slot() {
         .entry(ch.to_string())
         .or_default()
         .insert(pk.to_string(), 0u16);
-    voxply_hub::routes::ws::leave_voice_for_test(&state, pk, ch).await;
+    wavvon_hub::routes::ws::leave_voice_for_test(&state, pk, ch).await;
     assert!(!state.voice_relay_active.read().await.contains(pk));
 
     // Re-join (sentinel only — UDP registration would happen separately in production).
@@ -454,8 +454,8 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -465,7 +465,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
 
     let state = Arc::new(AppState {
         hub_name: "voice-udp-test".to_string(),
-        hub_identity: voxply_identity::Identity::generate(),
+        hub_identity: wavvon_identity::Identity::generate(),
         db,
         db_read: None,
         store,
@@ -500,7 +500,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(HashMap::new()),
-        search: Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     });

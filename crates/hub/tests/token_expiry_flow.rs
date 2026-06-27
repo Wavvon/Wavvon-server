@@ -1,4 +1,4 @@
-//! Integration tests for bot session token expiry, renewal, and the
+﻿//! Integration tests for bot session token expiry, renewal, and the
 //! background sweep (`token_expiry::tick`).
 
 use std::collections::HashMap;
@@ -8,13 +8,13 @@ use axum_test::TestServer;
 use serde_json::json;
 use sqlx::AnyPool; // used by insert_bot_user and insert_bot_session helpers
 use tokio::sync::{broadcast, mpsc, RwLock};
-use voxply_hub::auth::models::{ChallengeResponse, RenewResponse, VerifyResponse};
-use voxply_hub::bots::token_expiry;
-use voxply_hub::db;
-use voxply_hub::federation::client::FederationClient;
-use voxply_hub::server;
-use voxply_hub::state::AppState;
-use voxply_identity::Identity;
+use wavvon_hub::auth::models::{ChallengeResponse, RenewResponse, VerifyResponse};
+use wavvon_hub::bots::token_expiry;
+use wavvon_hub::db;
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -28,8 +28,8 @@ async fn make_state() -> Arc<AppState> {
         .await
         .unwrap();
     db::migrations::run(&db).await.unwrap();
-    let store: Arc<dyn voxply_store::HubStore> =
-        Arc::new(voxply_store_sqlite::SqliteStore::new(db.clone()));
+    let store: Arc<dyn wavvon_store::HubStore> =
+        Arc::new(wavvon_store_sqlite::SqliteStore::new(db.clone()));
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
@@ -67,7 +67,7 @@ async fn make_state() -> Arc<AppState> {
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(voxply_hub::search::null_search::NullSearch),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
     })
@@ -103,7 +103,7 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
 /// Insert a minimal bot `users` row directly into the DB (bypassing the
 /// invite flow) so we can test expiry without standing up a full bot.
 async fn insert_bot_user(db: &AnyPool, pubkey: &str) {
-    let now = voxply_hub::auth::handlers::unix_timestamp();
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
          VALUES (?, ?, ?, 'approved', 1)",
@@ -128,7 +128,7 @@ async fn insert_bot_user(db: &AnyPool, pubkey: &str) {
 
 /// Insert a session row directly with the given `expires_at`.
 async fn insert_session(db: &AnyPool, token: &str, pubkey: &str, expires_at: Option<i64>) {
-    let now = voxply_hub::auth::handlers::unix_timestamp();
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
         "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES (?, ?, ?, ?)",
     )
@@ -166,7 +166,7 @@ async fn bot_session_not_yet_expired_is_accepted() {
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
 
-    let future = voxply_hub::auth::handlers::unix_timestamp() + 86400;
+    let future = wavvon_hub::auth::handlers::unix_timestamp() + 86400;
     let token = "fresh_bot_token_not_yet_expired";
     insert_session(&state.db, token, &pk, Some(future)).await;
 
@@ -185,7 +185,7 @@ async fn expired_bot_session_is_rejected() {
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
 
-    let past = voxply_hub::auth::handlers::unix_timestamp() - 1;
+    let past = wavvon_hub::auth::handlers::unix_timestamp() - 1;
     let token = "stale_bot_token_that_is_past";
     insert_session(&state.db, token, &pk, Some(past)).await;
 
@@ -209,7 +209,7 @@ async fn tick_sends_warning_for_near_expiry_session() {
     insert_bot_user(&state.db, &pk).await;
 
     // expires in 24 hours — within the 72-hour window
-    let expires_at = voxply_hub::auth::handlers::unix_timestamp() + 24 * 3600;
+    let expires_at = wavvon_hub::auth::handlers::unix_timestamp() + 24 * 3600;
     let token = "near_expiry_session_token_0001";
     insert_session(&state.db, token, &pk, Some(expires_at)).await;
 
@@ -248,7 +248,7 @@ async fn tick_does_not_warn_session_with_distant_expiry() {
     insert_bot_user(&state.db, &pk).await;
 
     // Expires in 10 days — outside the 72-hour window
-    let expires_at = voxply_hub::auth::handlers::unix_timestamp() + 10 * 86400;
+    let expires_at = wavvon_hub::auth::handlers::unix_timestamp() + 10 * 86400;
     let token = "far_expiry_session_token_0002";
     insert_session(&state.db, token, &pk, Some(expires_at)).await;
 
@@ -275,7 +275,7 @@ async fn tick_does_not_rewarn_recently_warned_session() {
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
 
-    let now = voxply_hub::auth::handlers::unix_timestamp();
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
     let expires_at = now + 24 * 3600; // within the 72-h window
     let token = "warned_session_token_0003";
     insert_session(&state.db, token, &pk, Some(expires_at)).await;
@@ -315,7 +315,7 @@ async fn tick_closes_and_deletes_expired_session() {
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
 
-    let past = voxply_hub::auth::handlers::unix_timestamp() - 1;
+    let past = wavvon_hub::auth::handlers::unix_timestamp() - 1;
     let token = "expired_session_token_0004";
     insert_session(&state.db, token, &pk, Some(past)).await;
 
@@ -355,7 +355,7 @@ async fn tick_does_not_touch_live_sessions() {
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
 
-    let future = voxply_hub::auth::handlers::unix_timestamp() + 86400;
+    let future = wavvon_hub::auth::handlers::unix_timestamp() + 86400;
     let token = "live_session_token_0005";
     insert_session(&state.db, token, &pk, Some(future)).await;
 
@@ -406,7 +406,7 @@ async fn renew_returns_new_token_with_expires_at() {
     assert!(!body.token.is_empty(), "renewed token should not be empty");
 
     // expires_at should be roughly now + 30 days.
-    let now = voxply_hub::auth::handlers::unix_timestamp();
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
     let expected = now + 30 * 24 * 3600;
     let delta = (body.expires_at - expected).abs();
     assert!(

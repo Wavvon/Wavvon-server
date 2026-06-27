@@ -1,14 +1,14 @@
-[package]
-name = "voxply-farm"
+﻿[package]
+name = "wavvon-farm"
 version = "0.2.0"
 edition = "2021"
 
 [[bin]]
-name = "voxply-farm"
+name = "wavvon-farm"
 path = "src/main.rs"
 
 [lib]
-name = "voxply_farm"
+name = "wavvon_farm"
 path = "src/lib.rs"
 
 [dependencies]
@@ -27,7 +27,7 @@ sha2 = "0.10"
 totp-rs = { version = "5", features = ["qr"] }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
-voxply-identity = { path = "../identity" }
+wavvon-identity = { path = "../identity" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures-util = "0.3"
 opentelemetry        = { workspace = true }

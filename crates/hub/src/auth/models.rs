@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
-use voxply_identity::SubkeyCert;
+﻿use serde::{Deserialize, Serialize};
+use wavvon_identity::SubkeyCert;
 
 use crate::routes::bot_models::BotMeta;
 use crate::routes::certs::Certification;

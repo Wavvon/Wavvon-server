@@ -1,8 +1,8 @@
-/// Integration tests for Feature 2 (unread counts) and Feature 5 (join links).
+﻿/// Integration tests for Feature 2 (unread counts) and Feature 5 (join links).
 use serde_json::json;
-use voxply_hub::routes::chat_models::ChannelResponse;
-use voxply_hub::routes::invite_models::InviteResponse;
-use voxply_identity::Identity;
+use wavvon_hub::routes::chat_models::ChannelResponse;
+use wavvon_hub::routes::invite_models::InviteResponse;
+use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;

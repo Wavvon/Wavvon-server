@@ -1,14 +1,14 @@
-[package]
-name = "voxply-hub"
+﻿[package]
+name = "wavvon-hub"
 version = "0.2.4"
 edition = "2021"
 
 [[bin]]
-name = "voxply-hub"
+name = "wavvon-hub"
 path = "src/main.rs"
 
 [lib]
-name = "voxply_hub"
+name = "wavvon_hub"
 path = "src/lib.rs"
 
 [dependencies]
@@ -26,9 +26,9 @@ hmac = "0.12"
 rand = "0.8"
 sha2 = "0.10"
 base64 = { workspace = true }
-voxply-identity = { path = "../identity" }
-voxply-store = { path = "../voxply-store" }
-voxply-store-sqlite = { path = "../voxply-store-sqlite" }
+wavvon-identity = { path = "../identity" }
+wavvon-store = { path = "../wavvon-store" }
+wavvon-store-sqlite = { path = "../wavvon-store-sqlite" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 sqlx = { workspace = true }
 futures-util = "0.3"
