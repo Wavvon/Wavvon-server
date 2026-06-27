@@ -1,0 +1,13 @@
+[package]
+name = "store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+async-trait = "0.1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+futures = "0.3"
+sqlx = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

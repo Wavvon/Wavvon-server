@@ -21,8 +21,7 @@ mod common;
 async fn setup_with_pool() -> (TestServer, PgPool) {
     let db = crate::common::create_test_db().await;
     let pool_handle = db.clone();
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -226,8 +225,7 @@ async fn cannot_create_empty_conversation() {
 
 async fn start_real_hub(name: &str) -> String {
     let db = crate::common::create_test_db().await;
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -341,8 +339,7 @@ fn make_plaintext_sig(
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
     let db = crate::common::create_test_db().await;
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -530,8 +527,8 @@ async fn dm_retries_when_recipient_hub_comes_online() {
 
     // Bring Hub B up on the previously-chosen port.
     let hub_b_db = crate::common::create_test_db().await;
-    let hub_b_store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(hub_b_db.clone()));
+    let hub_b_store: Arc<dyn store::HubStore> =
+        Arc::new(store::PostgresStore::new(hub_b_db.clone()));
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);
     let hub_b_state = Arc::new(AppState {

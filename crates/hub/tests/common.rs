@@ -5,6 +5,7 @@ use axum_test::TestServer;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::db;
@@ -12,7 +13,6 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
-use wavvon_store_postgres::PostgresStore;
 
 /// Base PostgreSQL URL for the test database server.
 /// Override with the `TEST_DATABASE_URL` environment variable.
@@ -61,7 +61,7 @@ pub async fn create_test_db() -> PgPool {
 
 pub async fn setup() -> TestServer {
     let db = create_test_db().await;
-    let store: Arc<dyn wavvon_store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 

@@ -3565,6 +3565,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "serde",
+ "sqlx",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "stringprep"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4665,6 +4678,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "store",
  "tantivy",
  "tar",
  "tempfile",
@@ -4677,8 +4691,6 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wavvon-identity",
- "wavvon-store",
- "wavvon-store-postgres",
 ]
 
 [[package]]
@@ -4720,29 +4732,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "wavvon-store"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "wavvon-store-postgres"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "sqlx",
- "thiserror 1.0.69",
- "tracing",
- "wavvon-store",
 ]
 
 [[package]]

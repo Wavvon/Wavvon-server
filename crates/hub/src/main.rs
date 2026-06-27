@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
+use store::PostgresStore;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::bots::token_expiry;
@@ -15,7 +16,6 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::{AppState, ConsumedVoiceToken};
 use wavvon_identity::Identity;
-use wavvon_store_postgres::PostgresStore;
 
 /// Print the `--help` text to stdout.
 fn print_help() {
@@ -739,7 +739,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let store: Arc<dyn wavvon_store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
 
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),

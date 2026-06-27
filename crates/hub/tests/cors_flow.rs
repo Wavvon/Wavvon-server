@@ -20,8 +20,7 @@ mod common;
 
 async fn setup_with_cors(cors_origins: &str) -> TestServer {
     let db = crate::common::create_test_db().await;
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 

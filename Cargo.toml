@@ -6,8 +6,7 @@ members = [
     "crates/identity",
     "crates/farm",
     "crates/agent",
-    "crates/wavvon-store",
-    "crates/wavvon-store-postgres",
+    "crates/store",
     "crates/demo-seed",
 ]
 

@@ -23,8 +23,7 @@ mod common;
 
 async fn make_state() -> Arc<AppState> {
     let db = crate::common::create_test_db().await;
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),

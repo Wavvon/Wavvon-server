@@ -23,8 +23,7 @@ mod common;
 
 async fn start_hub() -> (String, Arc<AppState>) {
     let db = crate::common::create_test_db().await;
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -445,8 +444,7 @@ async fn ws_close_removes_relay_slot_without_explicit_leave() {
 /// Returns (http_base_url, udp_port, Arc<AppState>).
 async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
     let db = crate::common::create_test_db().await;
-    let store: Arc<dyn wavvon_store::HubStore> =
-        Arc::new(wavvon_store_postgres::PostgresStore::new(db.clone()));
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 

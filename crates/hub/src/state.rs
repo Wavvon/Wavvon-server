@@ -6,9 +6,9 @@ use std::time::Instant;
 use axum::http::StatusCode;
 use bytes::Bytes;
 use sqlx::PgPool;
+use store::StoreError;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_identity::Identity;
-use wavvon_store::StoreError;
 
 use crate::federation::client::FederationClient;
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
@@ -216,7 +216,7 @@ pub struct AppState {
     /// Abstracted store handle — use this for new code; existing handlers
     /// may still use `state.db` directly while the per-handler migration
     /// proceeds incrementally.
-    pub store: Arc<dyn wavvon_store::HubStore>,
+    pub store: Arc<dyn store::HubStore>,
     pub pending_challenges: RwLock<HashMap<String, PendingChallenge>>,
     pub chat_tx: broadcast::Sender<(ChatEvent, Arc<str>)>,
     pub federation_client: FederationClient,
