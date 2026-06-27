@@ -15,9 +15,11 @@ pub struct Settings {
     /// Base port for hub child processes. Hub i gets base_port + i.
     /// Env: WAVVON_HUB_BASE_PORT
     pub hub_base_port: u16,
-    /// Directory where per-hub SQLite databases are stored.
+    /// Directory where hub data directories are stored.
     /// Env: WAVVON_HUBS_DIR
     pub hubs_dir: String,
+    /// PostgreSQL connection URL. Env: DATABASE_URL
+    pub database_url: String,
     /// Logging format: "text" (default) or "json". Env: WAVVON_LOG_FORMAT
     pub log_format: String,
     /// OpenTelemetry OTLP collector endpoint. Leave empty to disable.

@@ -21,7 +21,8 @@ use futures_util::{SinkExt, StreamExt};
 use rand::rngs::OsRng;
 use reqwest::Client;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -29,15 +30,35 @@ use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState};
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
+// Test database helper
+// ---------------------------------------------------------------------------
+
+async fn create_test_db() -> PgPool {
+    let base_url = std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("connect to postgres admin");
+    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("create test database");
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("{base_url}/{db_name}"))
+        .await
+        .expect("connect to test database")
+}
+
+// ---------------------------------------------------------------------------
 // Test server setup
 // ---------------------------------------------------------------------------
 
 async fn start_farm() -> (String, Arc<FarmState>) {
-    let db = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let db = create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -46,7 +67,7 @@ async fn start_farm() -> (String, Arc<FarmState>) {
 
     sqlx::query(
         "INSERT INTO farms (id, public_key, created_at, creation_policy)
-         VALUES (1, ?, ?, 'open')",
+         VALUES (1, $1, $2, 'open')",
     )
     .bind(&farm_pubkey)
     .bind(now)
@@ -139,7 +160,7 @@ async fn server_agent_connects_and_receives_hub_spawn() {
     let token = authenticate(&client, &base, &admin).await;
 
     // Make this user the farm admin.
-    sqlx::query("UPDATE farms SET admin_pubkey = ? WHERE id = 1")
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
         .bind(admin.public_key_hex())
         .execute(&state.db)
         .await
@@ -238,7 +259,7 @@ async fn server_agent_connects_and_receives_hub_spawn() {
 
     // --- 8. Verify hub row is assigned to our server ---
     let assigned_server_id: Option<String> =
-        sqlx::query_scalar("SELECT server_id FROM hubs WHERE id = ?")
+        sqlx::query_scalar("SELECT server_id FROM hubs WHERE id = $1")
             .bind(&hub_id)
             .fetch_one(&state.db)
             .await
@@ -262,7 +283,7 @@ async fn totp_setup_confirm_and_login_enforcement() {
     // Auth as admin.
     let admin = Identity::generate();
     let token = authenticate(&client, &base, &admin).await;
-    sqlx::query("UPDATE farms SET admin_pubkey = ? WHERE id = 1")
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
         .bind(admin.public_key_hex())
         .execute(&state.db)
         .await

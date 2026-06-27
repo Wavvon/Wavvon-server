@@ -14,12 +14,37 @@ use axum_test::TestServer;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
 use wavvon_farm::state::FarmState;
 use wavvon_identity::Identity;
+
+// ---------------------------------------------------------------------------
+// Test database helper
+// ---------------------------------------------------------------------------
+
+async fn create_test_db() -> PgPool {
+    let base_url = std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("connect to postgres admin");
+    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("create test database");
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("{base_url}/{db_name}"))
+        .await
+        .expect("connect to test database")
+}
 
 // ---------------------------------------------------------------------------
 // Setup helpers
@@ -30,10 +55,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
 }
 
 async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let db = create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -47,7 +69,7 @@ async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>) {
     // Policy-enforcement tests live in admin_flow.rs and set their own policy.
     sqlx::query(
         "INSERT INTO farms (id, public_key, created_at, creation_policy)
-         VALUES (1, ?, ?, 'open')",
+         VALUES (1, $1, $2, 'open')",
     )
     .bind(&pubkey_hex)
     .bind(now)
@@ -95,7 +117,7 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
 
 /// Set admin_pubkey for the farm singleton row.
 async fn set_admin(state: &FarmState, pubkey: &str) {
-    sqlx::query("UPDATE farms SET admin_pubkey = ? WHERE id = 1")
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
         .bind(pubkey)
         .execute(&state.db)
         .await
@@ -116,7 +138,7 @@ async fn insert_hub(
         .as_secs() as i64;
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(hub_id)
     .bind(owner_pubkey)
@@ -168,7 +190,7 @@ async fn farm_info_hosted_hubs_counts_active_only() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    sqlx::query("UPDATE hubs SET suspended_at = ? WHERE id = 'hub002'")
+    sqlx::query("UPDATE hubs SET suspended_at = $1 WHERE id = 'hub002'")
         .bind(now)
         .execute(&state.db)
         .await
@@ -225,7 +247,7 @@ async fn list_hubs_unauthenticated_returns_public_when_directory_public() {
     )
     .await;
 
-    sqlx::query("UPDATE farms SET directory_public = 1 WHERE id = 1")
+    sqlx::query("UPDATE farms SET directory_public = TRUE WHERE id = 1")
         .execute(&state.db)
         .await
         .unwrap();
@@ -245,7 +267,7 @@ async fn list_hubs_authenticated_returns_owned_plus_public() {
     let owner = Identity::generate();
     let other = Identity::generate();
 
-    sqlx::query("UPDATE farms SET directory_public = 1 WHERE id = 1")
+    sqlx::query("UPDATE farms SET directory_public = TRUE WHERE id = 1")
         .execute(&state.db)
         .await
         .unwrap();
@@ -397,7 +419,7 @@ async fn create_hub_happy_path() {
 
     // Verify the hub exists in the DB.
     let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE id = ? AND deleted_at IS NULL")
+        sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE id = $1 AND deleted_at IS NULL")
             .bind(hub_id)
             .fetch_one(&state.db)
             .await

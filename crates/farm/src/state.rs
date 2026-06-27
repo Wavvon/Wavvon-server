@@ -9,7 +9,7 @@ use crate::hub_manager::HubManager;
 
 /// Shared state for the farm process.
 pub struct FarmState {
-    /// SQLite connection pool for farm.db.
+    /// PostgreSQL connection pool for the farm database.
     pub db: PgPool,
     /// The farm's Ed25519 signing keypair — private half stays here only.
     pub keypair: Arc<SigningKey>,
@@ -23,7 +23,7 @@ pub struct FarmState {
     pub hub_manager: Arc<HubManager>,
     /// Shared HTTP client for outbound requests (proxying, health checks).
     pub http_client: reqwest::Client,
-    /// Directory where per-hub SQLite databases are stored.
+    /// Directory where hub data directories are stored.
     pub hubs_dir: String,
     /// Map server_id → bounded sender for the agent's WebSocket write half.
     /// Only present while the agent is connected.

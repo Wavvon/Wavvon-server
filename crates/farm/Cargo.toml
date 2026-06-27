@@ -28,6 +28,7 @@ totp-rs = { version = "5", features = ["qr"] }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 wavvon-identity = { path = "../identity" }
+uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures-util = "0.3"
 opentelemetry        = { workspace = true }

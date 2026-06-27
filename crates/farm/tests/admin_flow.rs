@@ -15,7 +15,8 @@ use axum_test::TestServer;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
@@ -23,14 +24,35 @@ use wavvon_farm::state::FarmState;
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
+// Test database helper
+// ---------------------------------------------------------------------------
+
+async fn create_test_db() -> PgPool {
+    let base_url = std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("connect to postgres admin");
+    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("create test database");
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("{base_url}/{db_name}"))
+        .await
+        .expect("connect to test database")
+}
+
+// ---------------------------------------------------------------------------
 // Setup helpers
 // ---------------------------------------------------------------------------
 
 async fn setup() -> (TestServer, Arc<FarmState>) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let db = create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -39,7 +61,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
 
     sqlx::query(
         "INSERT INTO farms (id, public_key, created_at, creation_policy, max_hubs_per_user, max_hubs_total)
-         VALUES (1, ?, ?, 'open', 0, 0)",
+         VALUES (1, $1, $2, 'open', 0, 0)",
     )
     .bind(&pubkey_hex)
     .bind(now)
@@ -93,7 +115,7 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
 }
 
 async fn set_admin(state: &FarmState, pubkey: &str) {
-    sqlx::query("UPDATE farms SET admin_pubkey = ? WHERE id = 1")
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
         .bind(pubkey)
         .execute(&state.db)
         .await
@@ -101,7 +123,7 @@ async fn set_admin(state: &FarmState, pubkey: &str) {
 }
 
 async fn set_policy(state: &FarmState, policy: &str) {
-    sqlx::query("UPDATE farms SET creation_policy = ? WHERE id = 1")
+    sqlx::query("UPDATE farms SET creation_policy = $1 WHERE id = 1")
         .bind(policy)
         .execute(&state.db)
         .await
@@ -321,7 +343,7 @@ async fn hub_quota_reflects_owned_hubs_and_limit() {
     for i in 0..2u32 {
         sqlx::query(
             "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-             VALUES (?, ?, ?, 'private', '/tmp/test.db', ?)",
+             VALUES ($1, $2, $3, 'private', '/tmp/test.db', $4)",
         )
         .bind(format!("hub{i}"))
         .bind(user.public_key_hex())
@@ -415,7 +437,7 @@ async fn create_hub_enforces_per_user_quota() {
     let now = unix_now();
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ('existinghub', ?, 'Existing Hub', 'private', '/tmp/test.db', ?)",
+         VALUES ('existinghub', $1, 'Existing Hub', 'private', '/tmp/test.db', $2)",
     )
     .bind(user.public_key_hex())
     .bind(now)
@@ -449,7 +471,7 @@ async fn create_hub_enforces_farm_total_quota() {
     let now = unix_now();
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ('farmhub', ?, 'Farm Hub', 'public', '/tmp/test.db', ?)",
+         VALUES ('farmhub', $1, 'Farm Hub', 'public', '/tmp/test.db', $2)",
     )
     .bind(other.public_key_hex())
     .bind(now)
@@ -506,7 +528,7 @@ async fn list_users_returns_users_with_counts() {
     let now = unix_now();
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ('uh1', ?, 'User Hub', 'private', '/tmp/test.db', ?)",
+         VALUES ('uh1', $1, 'User Hub', 'private', '/tmp/test.db', $2)",
     )
     .bind(user.public_key_hex())
     .bind(now)
@@ -643,7 +665,7 @@ async fn revoke_sessions_marks_active_sessions_revoked() {
 
     // Verify in DB that revoked_at and revoked_manually are set.
     let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM farm_sessions WHERE public_key = ? AND revoked_at IS NOT NULL AND revoked_manually = 1",
+        "SELECT COUNT(*) FROM farm_sessions WHERE public_key = $1 AND revoked_at IS NOT NULL AND revoked_manually = TRUE",
     )
     .bind(user.public_key_hex())
     .fetch_one(&state.db)
@@ -669,7 +691,7 @@ async fn public_info_returns_404_when_discovery_disabled() {
 async fn public_info_returns_body_when_discovery_enabled() {
     let (server, state) = setup().await;
     sqlx::query(
-        "UPDATE farms SET allow_discovery_listing = 1, name = 'Test Farm',
+        "UPDATE farms SET allow_discovery_listing = TRUE, name = 'Test Farm',
          languages = '[\"it\",\"en\"]', tags = '[\"gaming\"]' WHERE id = 1",
     )
     .execute(&state.db)
@@ -695,7 +717,7 @@ async fn public_info_does_not_expose_admin_pubkey() {
     let (server, state) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
-    sqlx::query("UPDATE farms SET allow_discovery_listing = 1 WHERE id = 1")
+    sqlx::query("UPDATE farms SET allow_discovery_listing = TRUE WHERE id = 1")
         .execute(&state.db)
         .await
         .unwrap();
@@ -712,7 +734,7 @@ async fn public_info_does_not_expose_admin_pubkey() {
 #[tokio::test]
 async fn public_info_exposes_farm_public_key() {
     let (server, state) = setup().await;
-    sqlx::query("UPDATE farms SET allow_discovery_listing = 1 WHERE id = 1")
+    sqlx::query("UPDATE farms SET allow_discovery_listing = TRUE WHERE id = 1")
         .execute(&state.db)
         .await
         .unwrap();

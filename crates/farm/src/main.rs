@@ -107,12 +107,13 @@ async fn main() -> Result<()> {
     // `wavvon-farm migrate` — run migrations and exit.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
         let db = PgPoolOptions::new()
             .max_connections(1)
-            .connect("sqlite:farm.db?mode=rwc")
+            .connect(&database_url)
             .await?;
         db::migrations::run(&db).await?;
-        println!("Migrations applied to farm.db");
+        tracing::info!("Migrations applied to PostgreSQL database");
         return Ok(());
     }
 
@@ -131,9 +132,10 @@ async fn main() -> Result<()> {
         tracing::info!("Loaded farm identity: {pubkey_hex}");
     }
 
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let db = PgPoolOptions::new()
         .max_connections(5)
-        .connect("sqlite:farm.db?mode=rwc")
+        .connect(&database_url)
         .await?;
 
     db::migrations::run(&db).await?;
@@ -144,8 +146,9 @@ async fn main() -> Result<()> {
         .unwrap()
         .as_secs() as i64;
     sqlx::query(
-        "INSERT OR IGNORE INTO farms (id, public_key, created_at)
-         VALUES (1, ?, ?)",
+        "INSERT INTO farms (id, public_key, created_at)
+         VALUES (1, $1, $2)
+         ON CONFLICT (id) DO NOTHING",
     )
     .bind(&pubkey_hex)
     .bind(now)

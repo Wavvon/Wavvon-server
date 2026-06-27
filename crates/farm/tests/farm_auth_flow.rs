@@ -1,7 +1,7 @@
 /// Integration tests for the farm auth routes and revoke-check endpoint.
 ///
-/// Each test spins up an in-memory SQLite farm and hits the API through
-/// axum-test's TestServer — no network, no disk IO, fast and hermetic.
+/// Each test spins up an isolated PostgreSQL database and hits the API through
+/// axum-test's TestServer — no network, fast and hermetic.
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
@@ -9,7 +9,8 @@ use axum_test::TestServer;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::PgPool;
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
@@ -18,14 +19,35 @@ use wavvon_farm::token::verify_token;
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
+// Test database helper
+// ---------------------------------------------------------------------------
+
+async fn create_test_db() -> PgPool {
+    let base_url = std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("connect to postgres admin");
+    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("create test database");
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("{base_url}/{db_name}"))
+        .await
+        .expect("connect to test database")
+}
+
+// ---------------------------------------------------------------------------
 // Test setup helper
 // ---------------------------------------------------------------------------
 
 async fn setup() -> (TestServer, Arc<FarmState>) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
+    let db = create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -37,7 +59,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    sqlx::query("INSERT INTO farms (id, public_key, created_at) VALUES (1, ?, ?)")
+    sqlx::query("INSERT INTO farms (id, public_key, created_at) VALUES (1, $1, $2)")
         .bind(&pubkey_hex)
         .bind(now)
         .execute(&db)
@@ -352,7 +374,7 @@ async fn heartbeat_accepts_known_hub_pubkey() {
         .as_secs() as i64;
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at, hub_pubkey)
-         VALUES ('hbhub', 'aa', 'Heartbeat Hub', 'private', '/tmp/x.db', ?, ?)",
+         VALUES ('hbhub', 'aa', 'Heartbeat Hub', 'private', '/tmp/x.db', $1, $2)",
     )
     .bind(now)
     .bind(&hub_pubkey)
