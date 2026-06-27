@@ -1,4 +1,4 @@
-﻿//! Hub certification routes — Task #20 (issuance, admin management) and
+//! Hub certification routes — Task #20 (issuance, admin management) and
 //! Task #21 (auth gate helpers + /info cert_requirement field).
 //!
 //! Routes registered in server.rs:

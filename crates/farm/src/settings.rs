@@ -1,4 +1,4 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]

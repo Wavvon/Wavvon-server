@@ -1,4 +1,4 @@
-﻿//! Integration tests for the optional static web-client serving feature.
+//! Integration tests for the optional static web-client serving feature.
 //!
 //! Tests are split into two sections:
 //! - With `web_client_dir` set to a temp dir containing index.html + an asset.

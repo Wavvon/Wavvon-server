@@ -1,4 +1,4 @@
-﻿# Build the hub binary (and optionally the web client).
+# Build the hub binary (and optionally the web client).
 #
 # Normal CI/release build — Wavvon-client checked out to web-client-src/:
 #

@@ -1,4 +1,4 @@
-﻿//! demo-seed: populates a running Wavvon hub with realistic demo content.
+//! demo-seed: populates a running Wavvon hub with realistic demo content.
 //!
 //! Run against a **fresh** hub (empty DB). On a non-fresh hub the tool
 //! detects existing channels and exits with a clear error rather than

@@ -1,4 +1,4 @@
-﻿/// Farm auth routes: challenge / verify / renew.
+/// Farm auth routes: challenge / verify / renew.
 ///
 /// The wire bodies are identical to the hub's existing auth routes — only the
 /// host they're sent to changes. That's deliberate: the client migration is

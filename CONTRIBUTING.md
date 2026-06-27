@@ -1,4 +1,4 @@
-﻿# Contributing
+# Contributing
 
 See [CONTRIBUTING.md in the Wavvon docs repo](https://github.com/Wavvon/Wavvon/blob/main/CONTRIBUTING.md)
 for the full branching model, workflow, and release process.

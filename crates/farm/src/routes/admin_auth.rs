@@ -1,4 +1,4 @@
-﻿/// TOTP 2FA routes for the farm admin account.
+/// TOTP 2FA routes for the farm admin account.
 ///
 /// POST /farm/admin/totp/setup   — generate a new TOTP secret (not saved yet)
 /// POST /farm/admin/totp/confirm — verify and persist the TOTP secret

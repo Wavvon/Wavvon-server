@@ -1,4 +1,4 @@
-﻿/// Integration tests for farm hub management routes.
+/// Integration tests for farm hub management routes.
 ///
 /// Tests exercise:
 /// - GET /farm/hubs (unauthenticated, authenticated)

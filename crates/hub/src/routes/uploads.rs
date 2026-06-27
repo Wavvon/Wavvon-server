@@ -1,4 +1,4 @@
-﻿use std::sync::Arc;
+use std::sync::Arc;
 
 use axum::extract::{Multipart, Path, State};
 use axum::http::{HeaderValue, StatusCode};

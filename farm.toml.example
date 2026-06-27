@@ -1,4 +1,4 @@
-﻿# Wavvon Farm — example configuration file
+# Wavvon Farm — example configuration file
 # Copy to farm.toml and edit. Environment variables (WAVVON_*) override any value here.
 
 # ── Network ──────────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-﻿/// End-to-end integration test: server agent WebSocket flow.
+/// End-to-end integration test: server agent WebSocket flow.
 ///
 /// Unlike the other farm tests (which use axum-test's in-memory transport),
 /// this test binds a real TCP listener so that tokio-tungstenite can establish

@@ -1,4 +1,4 @@
-﻿# Standalone hub — no farm, hub-issued auth tokens.
+# Standalone hub — no farm, hub-issued auth tokens.
 #
 # Quick start:
 #   docker compose up -d

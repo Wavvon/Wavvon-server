@@ -1,4 +1,4 @@
-﻿/// Canonical hex test vectors for every wire-format envelope type.
+/// Canonical hex test vectors for every wire-format envelope type.
 ///
 /// Inputs are fully deterministic — fixed key seeds and a fixed timestamp —
 /// so any reimplementation (client or server) can reproduce the same bytes.

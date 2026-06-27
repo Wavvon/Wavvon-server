@@ -1,4 +1,4 @@
-﻿# Build the farm binary.
+# Build the farm binary.
 # Run from the workspace root:
 #
 #   docker build -f farm/Dockerfile -t ghcr.io/wavvon/farm:latest .

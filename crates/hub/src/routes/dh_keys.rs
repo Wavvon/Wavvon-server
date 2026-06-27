@@ -1,4 +1,4 @@
-﻿use crate::auth::middleware::AuthUser;
+use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;

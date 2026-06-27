@@ -1,4 +1,4 @@
-﻿use crate::routes::chat_models::Attachment;
+use crate::routes::chat_models::Attachment;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

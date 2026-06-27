@@ -1,4 +1,4 @@
-﻿use wavvon_identity::Identity;
+use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;

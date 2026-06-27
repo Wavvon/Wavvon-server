@@ -1,4 +1,4 @@
-﻿use aes_gcm::{
+use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };

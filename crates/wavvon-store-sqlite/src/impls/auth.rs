@@ -1,4 +1,4 @@
-﻿use async_trait::async_trait;
+use async_trait::async_trait;
 use wavvon_store::{AuthStore, StoreError, SubkeyCertRow};
 
 use crate::error_map::map_err;

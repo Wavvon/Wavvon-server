@@ -1,4 +1,4 @@
-﻿use axum::http::StatusCode;
+use axum::http::StatusCode;
 use wavvon_identity::{
     DeviceSubkey, HomeHubList, Identity, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };

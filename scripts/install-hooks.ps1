@@ -1,4 +1,4 @@
-﻿# Install the pre-push git hook for Wavvon-server.
+# Install the pre-push git hook for Wavvon-server.
 # Run from any directory inside the repo:  .\scripts\install-hooks.ps1
 $root = git rev-parse --show-toplevel
 $hookDir = "$root/.git/hooks"

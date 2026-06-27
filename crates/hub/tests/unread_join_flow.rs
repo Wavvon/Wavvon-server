@@ -1,4 +1,4 @@
-﻿/// Integration tests for Feature 2 (unread counts) and Feature 5 (join links).
+/// Integration tests for Feature 2 (unread counts) and Feature 5 (join links).
 use serde_json::json;
 use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_hub::routes::invite_models::InviteResponse;

@@ -1,4 +1,4 @@
-﻿use sqlx::AnyPool;
+use sqlx::AnyPool;
 use wavvon_hub::db;
 
 #[tokio::test]

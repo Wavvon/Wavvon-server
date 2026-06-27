@@ -1,4 +1,4 @@
-﻿/// Farm admin routes — settings, user management, quota.
+/// Farm admin routes — settings, user management, quota.
 ///
 /// GET  /farm/settings                      — read full farm settings (admin)
 /// PATCH /farm/settings                     — update farm settings (admin)

@@ -1,4 +1,4 @@
-﻿use serde_json::json;
+use serde_json::json;
 use wavvon_identity::Identity;
 
 #[path = "common.rs"]

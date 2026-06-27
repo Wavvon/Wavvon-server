@@ -1,4 +1,4 @@
-﻿# Wavvon Server
+# Wavvon Server
 
 [![Build check](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml/badge.svg)](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml)
 [![Release](https://github.com/Wavvon/Wavvon-server/actions/workflows/release.yml/badge.svg)](https://github.com/Wavvon/Wavvon-server/actions/workflows/release.yml)

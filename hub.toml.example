@@ -1,4 +1,4 @@
-﻿# Wavvon Hub — example configuration file
+# Wavvon Hub — example configuration file
 # Copy to hub.toml and edit. Environment variables (WAVVON_*) override any value here.
 
 # ── Network ──────────────────────────────────────────────────────────────────

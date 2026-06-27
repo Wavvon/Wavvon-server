@@ -1,4 +1,4 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 use serde::Deserialize;
 
 /// Single source of truth for every `WAVVON_*` env var the hub reads.

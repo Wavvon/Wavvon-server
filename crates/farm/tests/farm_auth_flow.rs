@@ -1,4 +1,4 @@
-﻿/// Integration tests for the farm auth routes and revoke-check endpoint.
+/// Integration tests for the farm auth routes and revoke-check endpoint.
 ///
 /// Each test spins up an in-memory SQLite farm and hits the API through
 /// axum-test's TestServer — no network, no disk IO, fast and hermetic.

@@ -1,4 +1,4 @@
-﻿# Changelog
+# Changelog
 
 All notable changes to Wavvon Server (hub + farm) are documented here.
 

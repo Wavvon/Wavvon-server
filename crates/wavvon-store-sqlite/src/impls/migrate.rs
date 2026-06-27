@@ -1,4 +1,4 @@
-﻿use async_trait::async_trait;
+use async_trait::async_trait;
 use wavvon_store::{Migrate, StoreError};
 
 use crate::SqliteStore;

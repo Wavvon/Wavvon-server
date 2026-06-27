@@ -1,4 +1,4 @@
-﻿use serde_json::json;
+use serde_json::json;
 use wavvon_hub::routes::chat_models::{ChannelResponse, MessageResponse};
 use wavvon_hub::routes::me::MeResponse;
 use wavvon_identity::Identity;

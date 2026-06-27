@@ -1,4 +1,4 @@
-﻿use anyhow::{Context, Result};
+use anyhow::{Context, Result};
 
 use crate::auth::models::{ChallengeResponse, VerifyResponse};
 use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelResponse};

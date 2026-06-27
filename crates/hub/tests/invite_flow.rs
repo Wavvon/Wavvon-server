@@ -1,4 +1,4 @@
-﻿use axum_test::TestServer;
+use axum_test::TestServer;
 use serde_json::json;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::routes::invite_models::InviteResponse;

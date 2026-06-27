@@ -1,4 +1,4 @@
-﻿pub mod ecies;
+pub mod ecies;
 mod master;
 mod pow;
 mod recovery;

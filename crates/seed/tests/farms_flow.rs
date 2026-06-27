@@ -1,4 +1,4 @@
-﻿/// Integration tests for the seed discovery service.
+/// Integration tests for the seed discovery service.
 ///
 /// Tests:
 /// - GET /info returns role: "discovery"

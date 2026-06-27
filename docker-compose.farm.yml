@@ -1,4 +1,4 @@
-﻿# Farm + hub setup — farm handles auth, hub handles community state.
+# Farm + hub setup — farm handles auth, hub handles community state.
 #
 # Quick start:
 #   docker compose -f docker-compose.farm.yml up -d

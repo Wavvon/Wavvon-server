@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use wavvon_identity::SubkeyCert;
 
 use crate::routes::bot_models::BotMeta;

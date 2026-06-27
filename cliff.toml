@@ -1,4 +1,4 @@
-﻿[changelog]
+[changelog]
 header = "# Changelog\n\nAll notable changes to Wavvon Server (hub + farm) are documented here.\n\n"
 body = """
 {% if version %}\

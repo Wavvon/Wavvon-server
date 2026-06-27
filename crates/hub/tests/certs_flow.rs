@@ -1,4 +1,4 @@
-﻿//! Integration tests for hub certification issuance (#20) and auth gate (#21).
+//! Integration tests for hub certification issuance (#20) and auth gate (#21).
 
 use std::collections::HashMap;
 use std::sync::Arc;

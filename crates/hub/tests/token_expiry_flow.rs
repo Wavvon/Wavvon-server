@@ -1,4 +1,4 @@
-﻿//! Integration tests for bot session token expiry, renewal, and the
+//! Integration tests for bot session token expiry, renewal, and the
 //! background sweep (`token_expiry::tick`).
 
 use std::collections::HashMap;

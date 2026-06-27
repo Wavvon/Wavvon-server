@@ -1,4 +1,4 @@
-﻿use async_trait::async_trait;
+use async_trait::async_trait;
 use sqlx::Row;
 use wavvon_store::{ConversationRow, DhKeyRow, DmMessageRow, DmStore, FriendRow, StoreError};
 

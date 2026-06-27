@@ -1,4 +1,4 @@
-﻿/// Integration tests for the background revalidation sweep.
+/// Integration tests for the background revalidation sweep.
 ///
 /// Spins up a real local HTTP server playing the farm role so `tick` probes
 /// `GET /farm/public-info` exactly as it does in production. A request

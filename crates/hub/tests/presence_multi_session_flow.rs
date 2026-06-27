@@ -1,4 +1,4 @@
-﻿//! Tests for H2 (presence refcount) and H3 (bot_sessions per-session).
+//! Tests for H2 (presence refcount) and H3 (bot_sessions per-session).
 //!
 //! H2: `online_users` is now a refcount map (`HashMap<String, usize>`).
 //!     A second session's connect increments the count; the first disconnect

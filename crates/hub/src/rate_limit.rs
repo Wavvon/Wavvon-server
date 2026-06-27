@@ -1,4 +1,4 @@
-﻿//! Per-IP token-bucket rate limiter with reverse-proxy support.
+//! Per-IP token-bucket rate limiter with reverse-proxy support.
 //!
 //! # IP source
 //!

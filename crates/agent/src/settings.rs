@@ -1,4 +1,4 @@
-﻿use anyhow::Result;
+use anyhow::Result;
 
 #[derive(Clone)]
 pub struct Settings {

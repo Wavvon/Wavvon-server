@@ -1,4 +1,4 @@
-﻿# demo-seed
+# demo-seed
 
 Populates a **running** Wavvon hub with realistic demo content — channels, users,
 and a believable community conversation — so you can take README screenshots or

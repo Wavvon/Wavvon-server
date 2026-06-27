@@ -1,4 +1,4 @@
-﻿/// Hub process lifecycle manager.
+/// Hub process lifecycle manager.
 ///
 /// Owns the map of running hub child processes and exposes spawn/stop/restart
 /// operations. On farm startup `spawn_all_from_db` re-spawns every non-suspended,

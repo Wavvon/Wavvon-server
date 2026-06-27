@@ -1,4 +1,4 @@
-﻿/// Integration tests for Phase 3 farm admin routes.
+/// Integration tests for Phase 3 farm admin routes.
 ///
 /// Tests exercise:
 /// - GET  /farm/settings         (admin-only)

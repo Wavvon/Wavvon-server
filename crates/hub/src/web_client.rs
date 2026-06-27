@@ -1,4 +1,4 @@
-﻿//! Optional static web-client serving.
+//! Optional static web-client serving.
 //!
 //! When `WAVVON_WEB_CLIENT_DIR` is set the hub serves a pre-built SPA from
 //! that directory at the root.  All named API routes take precedence; only

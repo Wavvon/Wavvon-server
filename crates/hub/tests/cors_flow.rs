@@ -1,4 +1,4 @@
-﻿/// CORS integration tests.
+/// CORS integration tests.
 ///
 /// Verifies that:
 ///   1. The wildcard default returns `access-control-allow-origin: *` on a
