@@ -70,6 +70,7 @@ async fn make_state() -> Arc<AppState> {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     })
 }
 

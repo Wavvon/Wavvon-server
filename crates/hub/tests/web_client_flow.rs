@@ -71,6 +71,7 @@ async fn setup_with_web_client(cfg: Option<Arc<WebClientConfig>>) -> TestServer 
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
 
     let app = server::create_router_full(state, "*", false, cfg);

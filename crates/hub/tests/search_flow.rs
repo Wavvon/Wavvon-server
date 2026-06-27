@@ -73,6 +73,7 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
         search,
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
     (TestServer::new(server::create_router(state)), tmp)
 }

@@ -72,6 +72,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
 
     let app = server::create_router(state.clone());
@@ -503,6 +504,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
 
     // Spawn the relay loop (mirrors main.rs).

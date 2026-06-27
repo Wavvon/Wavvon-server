@@ -73,6 +73,7 @@ async fn setup_with_pool() -> (TestServer, AnyPool) {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
     let app = server::create_router(state);
     (TestServer::new(app), pool_handle)
@@ -283,6 +284,7 @@ async fn start_real_hub(name: &str) -> String {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -403,6 +405,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -596,6 +599,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
+        bots_allow_camera: false,
     });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))
