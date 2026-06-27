@@ -122,7 +122,7 @@ pub struct DmMessageResponse {
 }
 
 /// Hub-to-hub DM delivery envelope (POST /federation/dm).
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct FederatedDmRequest {
     pub message_id: String,
     pub conversation_id: String,

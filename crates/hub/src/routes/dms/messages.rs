@@ -379,6 +379,8 @@ pub async fn send_dm(
         };
 
         for hub_url in &delivery_urls {
+            // Persist the outbox entry before spawning so the message is not
+            // lost if the process restarts between the spawn and the delivery.
             sqlx::query(
                 "INSERT INTO dm_outbox
                  (message_id, recipient_hub_url, attempts, next_attempt_at)
@@ -391,34 +393,43 @@ pub async fn send_dm(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            match deliver_federated_dm(&state, hub_url, &envelope).await {
-                Ok(()) => {
-                    let _ = sqlx::query(
-                        "DELETE FROM dm_outbox WHERE message_id = $1 AND recipient_hub_url = $2",
-                    )
-                    .bind(&message_id)
-                    .bind(hub_url)
-                    .execute(&state.db)
-                    .await;
+            // Deliver in background so slow or unreachable peers do not stall
+            // the response to the sender. The outbox entry above is the
+            // durability guarantee; the retry worker will pick it up on failure.
+            let bg_state = state.clone();
+            let bg_url = hub_url.clone();
+            let bg_env = envelope.clone();
+            let bg_msg_id = message_id.clone();
+            tokio::spawn(async move {
+                match deliver_federated_dm(&bg_state, &bg_url, &bg_env).await {
+                    Ok(()) => {
+                        let _ = sqlx::query(
+                            "DELETE FROM dm_outbox WHERE message_id = $1 AND recipient_hub_url = $2",
+                        )
+                        .bind(&bg_msg_id)
+                        .bind(&bg_url)
+                        .execute(&bg_state.db)
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "DM {} to {} failed immediately, leaving in outbox for retry: {e}",
+                            &bg_msg_id[..8],
+                            bg_url
+                        );
+                        let _ = sqlx::query(
+                            "UPDATE dm_outbox SET attempts = 1, next_attempt_at = $1, last_error = $2
+                             WHERE message_id = $3 AND recipient_hub_url = $4",
+                        )
+                        .bind(now + 10)
+                        .bind(&e)
+                        .bind(&bg_msg_id)
+                        .bind(&bg_url)
+                        .execute(&bg_state.db)
+                        .await;
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "DM {} to {} failed immediately, leaving in outbox for retry: {e}",
-                        &message_id[..8],
-                        hub_url
-                    );
-                    let _ = sqlx::query(
-                        "UPDATE dm_outbox SET attempts = 1, next_attempt_at = $1, last_error = $2
-                         WHERE message_id = $3 AND recipient_hub_url = $4",
-                    )
-                    .bind(now + 10)
-                    .bind(&e)
-                    .bind(&message_id)
-                    .bind(hub_url)
-                    .execute(&state.db)
-                    .await;
-                }
-            }
+            });
         }
     }
 
