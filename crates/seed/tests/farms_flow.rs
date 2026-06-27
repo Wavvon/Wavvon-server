@@ -18,7 +18,8 @@ use axum_test::TestServer;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use uuid::Uuid;
 use wavvon_seed::db;
 use wavvon_seed::server;
 use wavvon_seed::state::SeedState;
@@ -27,13 +28,36 @@ use wavvon_seed::state::SeedState;
 // Setup
 // ---------------------------------------------------------------------------
 
-async fn setup() -> (TestServer, Arc<SeedState>) {
-    let db = SqlitePoolOptions::new()
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    db::migrations::run(&db).await.unwrap();
+fn base_db_url() -> String {
+    std::env::var("TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string())
+}
 
+async fn create_test_db() -> sqlx::PgPool {
+    let base_url = base_db_url();
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("Failed to connect to PostgreSQL (admin)");
+    let db_name = format!("seed_test_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("Failed to create test database");
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&format!("{base_url}/{db_name}"))
+        .await
+        .expect("Failed to connect to test database");
+    db::migrations::run(&pool)
+        .await
+        .expect("Failed to run migrations on test database");
+    pool
+}
+
+async fn setup() -> (TestServer, Arc<SeedState>) {
+    let db = create_test_db().await;
     let state = Arc::new(SeedState::new(db));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state)
@@ -73,7 +97,7 @@ async fn insert_farm(
             (farm_url, farm_pubkey, name, hub_count, max_hubs_total, capacity_pct,
              country, region, languages, tags, geo_unverified,
              last_verified_at, registered_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false, $11, $12)",
     )
     .bind(farm_url)
     .bind(farm_pubkey)
