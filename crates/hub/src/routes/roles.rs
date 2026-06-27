@@ -66,7 +66,7 @@ pub async fn create_role(
         .execute(&state.db)
         .await
         .map_err(|e| {
-            if e.to_string().contains("UNIQUE") {
+            if matches!(&e, sqlx::Error::Database(dbe) if dbe.code().map_or(false, |c| c == "23505")) {
                 (StatusCode::CONFLICT, format!("Role '{}' already exists", req.name))
             } else {
                 (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))

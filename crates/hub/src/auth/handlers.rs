@@ -759,6 +759,13 @@ pub fn unix_timestamp() -> i64 {
         .as_secs() as i64
 }
 
+pub fn unix_timestamp_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 /// Returns the current UTC time as a compact ISO-8601 string
 /// (`YYYY-MM-DDTHH:MM:SSZ`). Used for badge timestamps.
 pub fn unix_timestamp_iso() -> String {

@@ -241,7 +241,7 @@ pub async fn create_channel(
     .execute(&state.db)
     .await
     .map_err(|e| {
-        if e.to_string().contains("UNIQUE") {
+        if matches!(&e, sqlx::Error::Database(dbe) if dbe.code().map_or(false, |c| c == "23505")) {
             (StatusCode::CONFLICT, format!("Channel '{}' already exists", req.name))
         } else {
             (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
@@ -502,7 +502,7 @@ pub async fn update_channel(
             .await
         {
             Ok(_) => {}
-            Err(sqlx::Error::Database(e)) if e.message().contains("UNIQUE") => {
+            Err(sqlx::Error::Database(e)) if e.code().map_or(false, |c| c == "23505") => {
                 return Err((
                     StatusCode::CONFLICT,
                     "A channel with that name already exists".to_string(),

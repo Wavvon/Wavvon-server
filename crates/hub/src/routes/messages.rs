@@ -99,7 +99,7 @@ pub async fn send_message(
     }
 
     let id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp();
+    let now = crate::auth::handlers::unix_timestamp_ms();
 
     let attachments_json = if req.attachments.is_empty() {
         None
