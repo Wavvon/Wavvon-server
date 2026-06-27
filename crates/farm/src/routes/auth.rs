@@ -77,10 +77,10 @@ pub async fn challenge(
     // Upsert: one pending challenge per pubkey (replacing any stale one).
     sqlx::query(
         "INSERT INTO pending_challenges (public_key, challenge_hex, expires_at)
-         VALUES (?, ?, ?)
+         VALUES ($1, $2, $3)
          ON CONFLICT(public_key) DO UPDATE SET
-             challenge_hex = excluded.challenge_hex,
-             expires_at    = excluded.expires_at",
+             challenge_hex = EXCLUDED.challenge_hex,
+             expires_at    = EXCLUDED.expires_at",
     )
     .bind(&req.public_key)
     .bind(&challenge_hex)
@@ -106,7 +106,7 @@ pub async fn verify(
 
     // Pull and validate the pending challenge.
     let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT challenge_hex, expires_at FROM pending_challenges WHERE public_key = ?",
+        "SELECT challenge_hex, expires_at FROM pending_challenges WHERE public_key = $1",
     )
     .bind(&req.public_key)
     .fetch_optional(&state.db)
@@ -120,7 +120,7 @@ pub async fn verify(
 
     if now >= expires_at {
         // Delete expired challenge before returning.
-        let _ = sqlx::query("DELETE FROM pending_challenges WHERE public_key = ?")
+        let _ = sqlx::query("DELETE FROM pending_challenges WHERE public_key = $1")
             .bind(&req.public_key)
             .execute(&state.db)
             .await;
@@ -142,7 +142,7 @@ pub async fn verify(
 
     // TOTP check — only applies when the verified pubkey is the admin key.
     {
-        let admin_row: Option<(Option<String>, i64)> =
+        let admin_row: Option<(Option<String>, bool)> =
             sqlx::query_as("SELECT totp_secret, totp_enabled FROM farms WHERE id = 1")
                 .fetch_optional(&state.db)
                 .await
@@ -156,7 +156,7 @@ pub async fn verify(
 
         if admin_pubkey.as_deref() == Some(req.public_key.as_str()) {
             if let Some((totp_secret, totp_enabled)) = admin_row {
-                if totp_enabled != 0 {
+                if totp_enabled {
                     let secret = totp_secret.ok_or_else(|| {
                         (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -191,7 +191,7 @@ pub async fn verify(
     }
 
     // Delete the used challenge.
-    sqlx::query("DELETE FROM pending_challenges WHERE public_key = ?")
+    sqlx::query("DELETE FROM pending_challenges WHERE public_key = $1")
         .bind(&req.public_key)
         .execute(&state.db)
         .await
@@ -201,8 +201,8 @@ pub async fn verify(
     // in Phase 1 — that lives on the hub still; the farm just records who showed up).
     sqlx::query(
         "INSERT INTO farm_users (public_key, master_pubkey, first_seen_at, last_seen_at)
-         VALUES (?, NULL, ?, ?)
-         ON CONFLICT(public_key) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+         VALUES ($1, NULL, $2, $3)
+         ON CONFLICT(public_key) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at",
     )
     .bind(&req.public_key)
     .bind(now)
@@ -222,7 +222,7 @@ pub async fn verify(
 
     sqlx::query(
         "INSERT INTO farm_sessions (jti, public_key, issued_at, expires_at, scope)
-         VALUES (?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&jti)
     .bind(&req.public_key)
@@ -274,7 +274,7 @@ pub async fn renew(
 
     sqlx::query(
         "INSERT INTO farm_sessions (jti, public_key, issued_at, expires_at, scope)
-         VALUES (?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&new_jti)
     .bind(&old_payload.sub)

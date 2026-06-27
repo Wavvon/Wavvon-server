@@ -96,11 +96,11 @@ async fn require_admin(
 struct FarmRow {
     name: String,
     description: Option<String>,
-    directory_public: i64,
+    directory_public: bool,
     creation_policy: String,
     max_hubs_per_user: i64,
     max_hubs_total: i64,
-    allow_discovery_listing: i64,
+    allow_discovery_listing: bool,
     languages: String,
     tags: String,
     country: Option<String>,
@@ -115,11 +115,11 @@ async fn fetch_farm_row(
     let row: Option<(
         String,
         Option<String>,
-        i64,
+        bool,
         String,
         i64,
         i64,
-        i64,
+        bool,
         String,
         String,
         Option<String>,
@@ -268,11 +268,11 @@ pub async fn get_settings(
     Ok(Json(FarmSettingsResponse {
         name: row.name,
         description: row.description,
-        directory_public: row.directory_public != 0,
+        directory_public: row.directory_public,
         creation_policy: row.creation_policy,
         max_hubs_per_user: row.max_hubs_per_user,
         max_hubs_total: row.max_hubs_total,
-        allow_discovery_listing: row.allow_discovery_listing != 0,
+        allow_discovery_listing: row.allow_discovery_listing,
         languages,
         tags,
         country: row.country,
@@ -331,16 +331,12 @@ pub async fn patch_settings(
 
     let new_name = req.name.unwrap_or(row.name);
     let new_description = req.description.or(row.description);
-    let new_directory_public = req
-        .directory_public
-        .map(|b| b as i64)
-        .unwrap_or(row.directory_public);
+    let new_directory_public = req.directory_public.unwrap_or(row.directory_public);
     let new_creation_policy = req.creation_policy.unwrap_or(row.creation_policy);
     let new_max_per_user = req.max_hubs_per_user.unwrap_or(row.max_hubs_per_user);
     let new_max_total = req.max_hubs_total.unwrap_or(row.max_hubs_total);
     let new_allow_discovery = req
         .allow_discovery_listing
-        .map(|b| b as i64)
         .unwrap_or(row.allow_discovery_listing);
     let new_languages = req
         .languages
@@ -355,17 +351,17 @@ pub async fn patch_settings(
 
     sqlx::query(
         "UPDATE farms SET
-            name = ?,
-            description = ?,
-            directory_public = ?,
-            creation_policy = ?,
-            max_hubs_per_user = ?,
-            max_hubs_total = ?,
-            allow_discovery_listing = ?,
-            languages = ?,
-            tags = ?,
-            country = ?,
-            region = ?
+            name = $1,
+            description = $2,
+            directory_public = $3,
+            creation_policy = $4,
+            max_hubs_per_user = $5,
+            max_hubs_total = $6,
+            allow_discovery_listing = $7,
+            languages = $8,
+            tags = $9,
+            country = $10,
+            region = $11
          WHERE id = 1",
     )
     .bind(&new_name)
@@ -396,11 +392,11 @@ pub async fn patch_settings(
     Ok(Json(FarmSettingsResponse {
         name: new_name,
         description: new_description,
-        directory_public: new_directory_public != 0,
+        directory_public: new_directory_public,
         creation_policy: new_creation_policy,
         max_hubs_per_user: new_max_per_user,
         max_hubs_total: new_max_total,
-        allow_discovery_listing: new_allow_discovery != 0,
+        allow_discovery_listing: new_allow_discovery,
         languages: languages_val,
         tags: tags_val,
         country: new_country,
@@ -434,7 +430,7 @@ pub async fn me_hub_quota(
     let row = fetch_farm_row(&state.db).await?;
 
     let hubs_owned: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = ? AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = $1 AND deleted_at IS NULL",
     )
     .bind(&payload.sub)
     .fetch_one(&state.db)
@@ -534,11 +530,11 @@ pub async fn list_users(
              FROM farm_users u
              LEFT JOIN hubs h ON h.owner_pubkey = u.public_key AND h.deleted_at IS NULL
              LEFT JOIN farm_sessions s ON s.public_key = u.public_key
-                 AND s.revoked_at IS NULL AND s.expires_at > ?
-             WHERE u.public_key > ?
+                 AND s.revoked_at IS NULL AND s.expires_at > $1
+             WHERE u.public_key > $2
              GROUP BY u.public_key
              ORDER BY u.public_key
-             LIMIT ?",
+             LIMIT $3",
         )
         .bind(now)
         .bind(cursor)
@@ -553,10 +549,10 @@ pub async fn list_users(
              FROM farm_users u
              LEFT JOIN hubs h ON h.owner_pubkey = u.public_key AND h.deleted_at IS NULL
              LEFT JOIN farm_sessions s ON s.public_key = u.public_key
-                 AND s.revoked_at IS NULL AND s.expires_at > ?
+                 AND s.revoked_at IS NULL AND s.expires_at > $1
              GROUP BY u.public_key
              ORDER BY u.public_key
-             LIMIT ?",
+             LIMIT $2",
         )
         .bind(now)
         .bind(limit)
@@ -604,7 +600,7 @@ pub async fn revoke_user_sessions(
 
     // Verify the user exists.
     let exists: Option<String> =
-        sqlx::query_scalar("SELECT public_key FROM farm_users WHERE public_key = ?")
+        sqlx::query_scalar("SELECT public_key FROM farm_users WHERE public_key = $1")
             .bind(&pubkey)
             .fetch_optional(&state.db)
             .await
@@ -627,10 +623,10 @@ pub async fn revoke_user_sessions(
     // Mark all non-expired, non-already-revoked sessions as revoked.
     let result = sqlx::query(
         "UPDATE farm_sessions
-         SET revoked_at = ?, revoked_manually = 1
-         WHERE public_key = ?
+         SET revoked_at = $1, revoked_manually = true
+         WHERE public_key = $2
            AND revoked_at IS NULL
-           AND expires_at > ?",
+           AND expires_at > $3",
     )
     .bind(now)
     .bind(&pubkey)
@@ -678,7 +674,7 @@ pub async fn public_info(
 ) -> Result<Json<PublicInfoResponse>, (StatusCode, Json<serde_json::Value>)> {
     let row = fetch_farm_row(&state.db).await?;
 
-    if row.allow_discovery_listing == 0 {
+    if !row.allow_discovery_listing {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "discovery_disabled"})),
@@ -702,7 +698,7 @@ pub async fn public_info(
         creation_policy: row.creation_policy,
         hub_count,
         max_hubs_total: row.max_hubs_total,
-        allow_discovery_listing: row.allow_discovery_listing != 0,
+        allow_discovery_listing: row.allow_discovery_listing,
         country: row.country,
         region: row.region,
         languages,

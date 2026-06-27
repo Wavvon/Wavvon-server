@@ -27,7 +27,7 @@ pub async fn proxy_handler(
 ) -> Response<Body> {
     // Look up the hub row.
     let row: Option<(Option<i64>, Option<i64>)> = sqlx::query_as(
-        "SELECT suspended_at, process_port FROM hubs WHERE id = ? AND deleted_at IS NULL",
+        "SELECT suspended_at, process_port FROM hubs WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(&hub_id)
     .fetch_optional(&state.db)

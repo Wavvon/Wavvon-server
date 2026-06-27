@@ -119,7 +119,7 @@ pub async fn list_hubs(
             "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey
                  FROM hubs
                  WHERE deleted_at IS NULL
-                   AND (visibility = 'public' OR owner_pubkey = ?)",
+                   AND (visibility = 'public' OR owner_pubkey = $1)",
         )
         .bind(sub)
         .fetch_all(&state.db)
@@ -127,12 +127,11 @@ pub async fn list_hubs(
     } else {
         // Unauthenticated: public hubs only (and only if directory_public is set).
         let dir_public: bool =
-            sqlx::query_scalar::<_, i64>("SELECT directory_public FROM farms WHERE id = 1")
+            sqlx::query_scalar::<_, bool>("SELECT directory_public FROM farms WHERE id = 1")
                 .fetch_optional(&state.db)
                 .await
                 .ok()
                 .flatten()
-                .map(|v| v != 0)
                 .unwrap_or(false);
 
         if !dir_public {
@@ -237,7 +236,7 @@ pub async fn create_hub(
                     // Per-user quota check.
                     if max_hubs_per_user > 0 {
                         let owned: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = ? AND deleted_at IS NULL",
+                            "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = $1 AND deleted_at IS NULL",
                         )
                         .bind(&payload.sub)
                         .fetch_one(&state.db)
@@ -322,7 +321,7 @@ pub async fn create_hub(
     // Generate a unique hub_id.
     let hub_id = loop {
         let candidate = generate_hub_id();
-        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hubs WHERE id = ?")
+        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hubs WHERE id = $1")
             .bind(&candidate)
             .fetch_optional(&state.db)
             .await
@@ -353,7 +352,7 @@ pub async fn create_hub(
 
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, description, visibility, db_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&hub_id)
     .bind(&payload.sub)
@@ -382,7 +381,7 @@ pub async fn create_hub(
             "owner_pubkey": payload.sub,
             "farm_url": state.farm_url,
         });
-        let _ = sqlx::query("UPDATE hubs SET server_id = ? WHERE id = ?")
+        let _ = sqlx::query("UPDATE hubs SET server_id = $1 WHERE id = $2")
             .bind(&server_id)
             .bind(&hub_id)
             .execute(&state.db)
@@ -426,7 +425,7 @@ pub async fn get_hub(
     #[allow(clippy::type_complexity)]
     let row: Option<(String, Option<String>, String, i64, Option<i64>)> = sqlx::query_as(
         "SELECT name, description, visibility, created_at, suspended_at
-         FROM hubs WHERE id = ? AND deleted_at IS NULL",
+         FROM hubs WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(&hub_id)
     .fetch_optional(&state.db)
@@ -490,7 +489,7 @@ pub async fn suspend_hub(
     }
 
     let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM hubs WHERE id = ? AND deleted_at IS NULL")
+        sqlx::query_scalar("SELECT id FROM hubs WHERE id = $1 AND deleted_at IS NULL")
             .bind(&hub_id)
             .fetch_optional(&state.db)
             .await
@@ -509,7 +508,7 @@ pub async fn suspend_hub(
     }
 
     let now = unix_now();
-    sqlx::query("UPDATE hubs SET suspended_at = ?, suspension_reason = ? WHERE id = ?")
+    sqlx::query("UPDATE hubs SET suspended_at = $1, suspension_reason = $2 WHERE id = $3")
         .bind(now)
         .bind(&req.reason)
         .bind(&hub_id)
@@ -545,7 +544,7 @@ pub async fn delete_hub(
     let is_admin = admin_pubkey.as_deref() == Some(&payload.sub);
 
     let row: Option<(String,)> =
-        sqlx::query_as("SELECT owner_pubkey FROM hubs WHERE id = ? AND deleted_at IS NULL")
+        sqlx::query_as("SELECT owner_pubkey FROM hubs WHERE id = $1 AND deleted_at IS NULL")
             .bind(&hub_id)
             .fetch_optional(&state.db)
             .await
@@ -577,7 +576,7 @@ pub async fn delete_hub(
 
     // Tombstone the row (leave DB file for operator).
     let now = unix_now();
-    sqlx::query("UPDATE hubs SET deleted_at = ? WHERE id = ?")
+    sqlx::query("UPDATE hubs SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&hub_id)
         .execute(&state.db)

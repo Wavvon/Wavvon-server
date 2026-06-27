@@ -116,7 +116,7 @@ pub async fn totp_confirm(
         ));
     }
 
-    sqlx::query("UPDATE farms SET totp_secret = ?, totp_enabled = 1 WHERE id = 1")
+    sqlx::query("UPDATE farms SET totp_secret = $1, totp_enabled = true WHERE id = 1")
         .bind(&req.secret)
         .execute(&state.db)
         .await
@@ -147,7 +147,7 @@ pub async fn totp_disable(
     require_admin_pub(&headers, &state).await?;
 
     // Load current TOTP state.
-    let row: Option<(Option<String>, i64)> =
+    let row: Option<(Option<String>, bool)> =
         sqlx::query_as("SELECT totp_secret, totp_enabled FROM farms WHERE id = 1")
             .fetch_optional(&state.db)
             .await
@@ -158,9 +158,9 @@ pub async fn totp_disable(
                 )
             })?;
 
-    let (totp_secret, totp_enabled) = row.unwrap_or((None, 0));
+    let (totp_secret, totp_enabled) = row.unwrap_or((None, false));
 
-    if totp_enabled != 0 {
+    if totp_enabled {
         let secret = totp_secret.ok_or_else(|| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -176,7 +176,7 @@ pub async fn totp_disable(
         }
     }
 
-    sqlx::query("UPDATE farms SET totp_secret = NULL, totp_enabled = 0 WHERE id = 1")
+    sqlx::query("UPDATE farms SET totp_secret = NULL, totp_enabled = false WHERE id = 1")
         .execute(&state.db)
         .await
         .map_err(|e| {

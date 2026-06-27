@@ -36,7 +36,7 @@ pub async fn revoke_check(
         .as_secs() as i64;
 
     let row: Option<(Option<i64>, i64)> =
-        sqlx::query_as("SELECT revoked_at, expires_at FROM farm_sessions WHERE jti = ?")
+        sqlx::query_as("SELECT revoked_at, expires_at FROM farm_sessions WHERE jti = $1")
             .bind(&req.jti)
             .fetch_optional(&state.db)
             .await

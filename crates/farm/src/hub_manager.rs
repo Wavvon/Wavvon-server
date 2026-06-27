@@ -146,7 +146,7 @@ impl HubManager {
         let port = self.allocate_port().await;
 
         // Persist port before spawning so a restart can re-use it.
-        sqlx::query("UPDATE hubs SET process_port = ? WHERE id = ?")
+        sqlx::query("UPDATE hubs SET process_port = $1 WHERE id = $2")
             .bind(port as i64)
             .bind(hub_id)
             .execute(db)

@@ -78,7 +78,7 @@ pub async fn generate_server_token(
 
     sqlx::query(
         "INSERT INTO servers (id, token_hash, name, region, registered_at)
-         VALUES (?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&server_id)
     .bind(&token_hash)
@@ -211,7 +211,7 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
     let token_hash = sha256_hex(&token_bytes);
 
     let lookup = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM servers WHERE token_hash = ? AND deleted_at IS NULL",
+        "SELECT id FROM servers WHERE token_hash = $1 AND deleted_at IS NULL",
     )
     .bind(&token_hash)
     .fetch_optional(&state.db)
@@ -265,7 +265,7 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
             Some(Ok(Message::Text(txt))) => {
                 // Update last_seen_at on any message received.
                 let now = unix_now();
-                let _ = sqlx::query("UPDATE servers SET last_seen_at = ? WHERE id = ?")
+                let _ = sqlx::query("UPDATE servers SET last_seen_at = $1 WHERE id = $2")
                     .bind(now)
                     .bind(&server_id)
                     .execute(&state.db)
@@ -279,7 +279,7 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
                             val.get("port").and_then(|v| v.as_u64()),
                         ) {
                             let _ = sqlx::query(
-                                "UPDATE hubs SET process_port = ?, server_id = ? WHERE id = ?",
+                                "UPDATE hubs SET process_port = $1, server_id = $2 WHERE id = $3",
                             )
                             .bind(port as i32)
                             .bind(&server_id)
@@ -290,10 +290,11 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
                         }
                     } else if msg_type == "hub_stopped" {
                         if let Some(hub_id) = val.get("hub_id").and_then(|v| v.as_str()) {
-                            let _ = sqlx::query("UPDATE hubs SET process_port = NULL WHERE id = ?")
-                                .bind(hub_id)
-                                .execute(&state.db)
-                                .await;
+                            let _ =
+                                sqlx::query("UPDATE hubs SET process_port = NULL WHERE id = $1")
+                                    .bind(hub_id)
+                                    .execute(&state.db)
+                                    .await;
                             tracing::info!(server_id, hub_id, "Hub stopped on remote server");
                         }
                     }
@@ -302,7 +303,7 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
             Some(Ok(Message::Binary(_))) => {
                 // Binary frames not used in this protocol; update last_seen_at anyway.
                 let now = unix_now();
-                let _ = sqlx::query("UPDATE servers SET last_seen_at = ? WHERE id = ?")
+                let _ = sqlx::query("UPDATE servers SET last_seen_at = $1 WHERE id = $2")
                     .bind(now)
                     .bind(&server_id)
                     .execute(&state.db)
@@ -326,7 +327,7 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
     send_task.abort();
 
     let now = unix_now();
-    let _ = sqlx::query("UPDATE servers SET last_seen_at = ? WHERE id = ?")
+    let _ = sqlx::query("UPDATE servers SET last_seen_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&server_id)
         .execute(&state.db)

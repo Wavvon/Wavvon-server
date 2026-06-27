@@ -47,11 +47,12 @@ pub async fn receive_heartbeat(
     let now = unix_now();
 
     // Only accept heartbeats from hubs we recognise (hub_pubkey in hubs table).
-    let known_count: Result<i64, _> =
-        sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE hub_pubkey = ? AND deleted_at IS NULL")
-            .bind(&hub_pubkey)
-            .fetch_one(&state.db)
-            .await;
+    let known_count: Result<i64, _> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hubs WHERE hub_pubkey = $1 AND deleted_at IS NULL",
+    )
+    .bind(&hub_pubkey)
+    .fetch_one(&state.db)
+    .await;
 
     match known_count {
         Ok(0) => return StatusCode::FORBIDDEN,
@@ -60,9 +61,14 @@ pub async fn receive_heartbeat(
     }
 
     let _ = sqlx::query(
-        "INSERT OR REPLACE INTO hub_heartbeats
+        "INSERT INTO hub_heartbeats
              (hub_pubkey, online_users, storage_bytes, uptime_seconds, last_seen_at)
-         VALUES (?, ?, ?, ?, ?)",
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (hub_pubkey) DO UPDATE SET
+             online_users   = EXCLUDED.online_users,
+             storage_bytes  = EXCLUDED.storage_bytes,
+             uptime_seconds = EXCLUDED.uptime_seconds,
+             last_seen_at   = EXCLUDED.last_seen_at",
     )
     .bind(&hub_pubkey)
     .bind(online_users)
@@ -107,7 +113,7 @@ pub async fn get_fleet(
     let rows = sqlx::query(
         "SELECT h.id, h.name, h.hub_pubkey,
                 hb.online_users, hb.storage_bytes, hb.last_seen_at,
-                CASE WHEN hb.last_seen_at IS NULL OR hb.last_seen_at < ? THEN 0 ELSE 1 END AS online,
+                (hb.last_seen_at IS NOT NULL AND hb.last_seen_at >= $1) AS online,
                 h.created_at
          FROM hubs h
          LEFT JOIN hub_heartbeats hb ON hb.hub_pubkey = h.hub_pubkey
@@ -136,7 +142,7 @@ pub async fn get_fleet(
                 id,
                 name: r.get("name"),
                 hub_pubkey: r.get("hub_pubkey"),
-                online: r.get::<i64, _>("online") == 1,
+                online: r.get::<bool, _>("online"),
                 online_users: r.get::<Option<i64>, _>("online_users").unwrap_or(0),
                 storage_bytes: r.get::<Option<i64>, _>("storage_bytes").unwrap_or(0),
                 last_seen_at: r.get("last_seen_at"),
