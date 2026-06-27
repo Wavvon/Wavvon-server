@@ -229,6 +229,10 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!("WebSocket client lagged, missed {n} messages");
+                        let lag_msg = crate::routes::chat_models::WsServerMessage::Lagged { count: n };
+                        if let Ok(json) = serde_json::to_string(&lag_msg) {
+                            let _ = ws_tx.send(Message::Text(json.into())).await;
+                        }
                     }
                     Err(_) => break,
                 }

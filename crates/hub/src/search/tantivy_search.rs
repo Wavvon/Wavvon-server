@@ -108,7 +108,7 @@ impl MessageSearch for TantivySearch {
                     content_field => content.as_str(),
                     ts_field => timestamp,
                 );
-                let mut w = writer.lock().unwrap();
+                let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
                 w.add_document(doc)?;
                 // Commit on every document. The reader is refreshed lazily
                 // inside query() instead of here, so this hot path does not
@@ -133,7 +133,7 @@ impl MessageSearch for TantivySearch {
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
                 let term = Term::from_field_text(id_field, &msg_id);
-                let mut w = writer.lock().unwrap();
+                let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
                 w.delete_term(term);
                 w.commit()?;
                 Ok::<_, tantivy::TantivyError>(())
@@ -157,7 +157,7 @@ impl MessageSearch for TantivySearch {
 
         Box::pin(async move {
             tokio::task::spawn_blocking(move || {
-                let mut w = writer.lock().unwrap();
+                let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
                 // Delete all existing documents before rebuilding.
                 w.delete_all_documents()?;
                 for msg in messages {

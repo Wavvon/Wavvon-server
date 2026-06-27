@@ -799,6 +799,15 @@ pub enum WsServerMessage {
     /// Hub-wide signal that the channel list changed; clients should re-fetch /channels.
     #[serde(rename = "channels_updated")]
     ChannelsUpdated,
+
+    /// Sent when the hub dropped messages destined for this connection because
+    /// it was consuming the broadcast channel too slowly. The client should
+    /// re-fetch recent messages for any subscribed channels it cares about.
+    #[serde(rename = "lagged")]
+    Lagged {
+        /// Number of messages dropped since the last delivery to this client.
+        count: u64,
+    },
     /// A user just came online (their first WS session connected).
     #[serde(rename = "member_online")]
     MemberOnline { public_key: String },

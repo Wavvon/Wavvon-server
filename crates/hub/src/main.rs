@@ -686,10 +686,10 @@ async fn main() -> Result<()> {
     let (chat_tx, _) = broadcast::channel::<(
         wavvon_hub::routes::chat_models::ChatEvent,
         std::sync::Arc<str>,
-    )>(256);
-    let (voice_event_tx, _) = broadcast::channel(256);
-    let (dm_tx, _) = broadcast::channel(256);
-    let (screen_share_tx, _) = broadcast::channel(256);
+    )>(4096);
+    let (voice_event_tx, _) = broadcast::channel(1024);
+    let (dm_tx, _) = broadcast::channel(1024);
+    let (screen_share_tx, _) = broadcast::channel(1024);
 
     // Farm integration: fetch the farm pubkey from farm_url if set.
     let farm_url = settings.farm_url.clone();
