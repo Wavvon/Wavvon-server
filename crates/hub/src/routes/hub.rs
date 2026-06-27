@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -344,59 +345,88 @@ pub async fn list_members(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    let online = state.online_users.read().await;
-
     let users = sqlx::query_as::<_, UserAdminRow>(
         "SELECT public_key, display_name, first_seen_at, last_seen_at, is_bot
-         FROM users ORDER BY first_seen_at",
+         FROM users ORDER BY first_seen_at LIMIT 1000",
     )
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let mut result = Vec::with_capacity(users.len());
-    for u in users {
-        let roles = sqlx::query_as::<_, RoleAdminRow>(
-            "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at
-             FROM roles r
-             INNER JOIN user_roles ur ON r.id = ur.role_id
-             WHERE ur.user_public_key = $1
-             ORDER BY r.priority DESC",
-        )
-        .bind(&u.public_key)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-        let mut role_summaries = Vec::with_capacity(roles.len());
-        for r in roles {
-            let perms_for_role: Vec<String> =
-                sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
-                    .bind(&r.id)
-                    .fetch_all(&state.db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-            role_summaries.push(RoleResponse {
-                id: r.id,
-                name: r.name,
-                priority: r.priority,
-                permissions: perms_for_role,
-                display_separately: r.display_separately != 0,
-                created_at: r.created_at,
-            });
-        }
-
-        result.push(MemberAdminInfo {
-            online: online.contains_key(&u.public_key),
-            public_key: u.public_key,
-            display_name: u.display_name,
-            first_seen_at: u.first_seen_at,
-            last_seen_at: u.last_seen_at,
-            roles: role_summaries,
-            is_bot: u.is_bot != 0,
-        });
+    if users.is_empty() {
+        return Ok(Json(vec![]));
     }
+
+    let user_keys: Vec<String> = users.iter().map(|u| u.public_key.clone()).collect();
+
+    // One query for all user-role associations + role metadata.
+    let user_role_rows: Vec<(String, String, String, i64, i64, i64)> = sqlx::query_as(
+        "SELECT ur.user_public_key, r.id, r.name, r.priority, r.display_separately, r.created_at
+         FROM user_roles ur
+         INNER JOIN roles r ON r.id = ur.role_id
+         WHERE ur.user_public_key = ANY($1)
+         ORDER BY ur.user_public_key, r.priority DESC",
+    )
+    .bind(&user_keys[..])
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // One query for all permissions across all roles seen above.
+    let distinct_role_ids: Vec<String> = user_role_rows
+        .iter()
+        .map(|(_, id, ..)| id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    let perm_rows: Vec<(String, String)> = if distinct_role_ids.is_empty() {
+        vec![]
+    } else {
+        sqlx::query_as("SELECT role_id, permission FROM role_permissions WHERE role_id = ANY($1)")
+            .bind(&distinct_role_ids[..])
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    };
+
+    let mut perms_by_role: HashMap<String, Vec<String>> = HashMap::new();
+    for (role_id, perm) in perm_rows {
+        perms_by_role.entry(role_id).or_default().push(perm);
+    }
+
+    let mut roles_by_user: HashMap<String, Vec<RoleResponse>> = HashMap::new();
+    for (user_key, role_id, role_name, priority, display_separately, created_at) in user_role_rows {
+        let permissions = perms_by_role.get(&role_id).cloned().unwrap_or_default();
+        roles_by_user
+            .entry(user_key)
+            .or_default()
+            .push(RoleResponse {
+                id: role_id,
+                name: role_name,
+                priority,
+                display_separately: display_separately != 0,
+                created_at,
+                permissions,
+            });
+    }
+
+    let online = state.online_users.read().await;
+    let result: Vec<MemberAdminInfo> = users
+        .into_iter()
+        .map(|u| {
+            let roles = roles_by_user.remove(&u.public_key).unwrap_or_default();
+            MemberAdminInfo {
+                online: online.contains_key(&u.public_key),
+                public_key: u.public_key,
+                display_name: u.display_name,
+                first_seen_at: u.first_seen_at,
+                last_seen_at: u.last_seen_at,
+                roles,
+                is_bot: u.is_bot != 0,
+            }
+        })
+        .collect();
 
     Ok(Json(result))
 }
@@ -420,13 +450,4 @@ struct UserAdminRow {
     first_seen_at: i64,
     last_seen_at: i64,
     is_bot: i64,
-}
-
-#[derive(sqlx::FromRow)]
-struct RoleAdminRow {
-    id: String,
-    name: String,
-    priority: i64,
-    display_separately: i64,
-    created_at: i64,
 }
