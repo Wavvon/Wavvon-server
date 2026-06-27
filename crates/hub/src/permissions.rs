@@ -87,7 +87,11 @@ async fn fetch_permissions(
     }
 
     // Build a query with placeholders for each role_id
-    let placeholders: Vec<&str> = role_ids.iter().map(|_| "?").collect();
+    let placeholders: Vec<String> = role_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("${}", i + 1))
+        .collect();
     let query = format!(
         "SELECT DISTINCT permission FROM role_permissions WHERE role_id IN ({})",
         placeholders.join(",")

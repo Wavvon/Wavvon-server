@@ -73,7 +73,12 @@ pub async fn search_messages(
 
     // Fetch channel name and sender display name for each hit from the DB.
     let ids: Vec<String> = hits.iter().map(|h| h.message_id.clone()).collect();
-    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("${}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT m.id, c.name, u.display_name
          FROM messages m

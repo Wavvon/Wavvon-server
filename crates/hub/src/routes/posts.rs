@@ -806,7 +806,8 @@ pub async fn mark_post_read(
 
     let now = unix_now();
     sqlx::query(
-        "INSERT OR REPLACE INTO post_reads (user_pubkey, post_id, read_at) VALUES ($1, $2, $3)",
+        "INSERT INTO post_reads (user_pubkey, post_id, read_at) VALUES ($1, $2, $3)
+         ON CONFLICT (user_pubkey, post_id) DO UPDATE SET read_at = EXCLUDED.read_at",
     )
     .bind(&user.public_key)
     .bind(&post_id)

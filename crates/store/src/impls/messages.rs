@@ -51,7 +51,7 @@ impl MessageStore for PostgresStore {
     }
 
     async fn get_message(&self, id: &str) -> Result<Option<MessageRow>, StoreError> {
-        let sql = format!("{MSG_SELECT} WHERE m.id = ?");
+        let sql = format!("{MSG_SELECT} WHERE m.id = $1");
         let row = sqlx::query(&sql)
             .bind(id)
             .fetch_optional(self.pool())
@@ -88,8 +88,8 @@ impl MessageStore for PostgresStore {
         } else {
             let sql = format!(
                 "{MSG_SELECT}
-                 WHERE m.channel_id = ?
-                 ORDER BY m.created_at DESC, m.id DESC LIMIT ?"
+                 WHERE m.channel_id = $1
+                 ORDER BY m.created_at DESC, m.id DESC LIMIT $2"
             );
             sqlx::query(&sql)
                 .bind(channel_id)
@@ -109,8 +109,8 @@ impl MessageStore for PostgresStore {
     ) -> Result<Vec<MessageRow>, StoreError> {
         let sql = format!(
             "{MSG_SELECT}
-             WHERE m.channel_id = ? AND m.reply_to = ?
-             ORDER BY m.created_at ASC, m.id ASC LIMIT ?"
+             WHERE m.channel_id = $1 AND m.reply_to = $2
+             ORDER BY m.created_at ASC, m.id ASC LIMIT $3"
         );
         let rows = sqlx::query(&sql)
             .bind(channel_id)
@@ -126,7 +126,12 @@ impl MessageStore for PostgresStore {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let placeholders = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
         let sql = format!(
             "{MSG_SELECT}
              WHERE m.id IN ({placeholders})

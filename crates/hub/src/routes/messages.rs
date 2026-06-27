@@ -560,7 +560,7 @@ pub async fn get_messages(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
-             ORDER BY m.created_at ASC, m.rowid ASC LIMIT $3",
+             ORDER BY m.created_at ASC, m.id ASC LIMIT $3",
         )
         .bind(&channel_id)
         .bind(root_id)
@@ -590,12 +590,17 @@ pub async fn get_messages(
                     return Ok(Json(vec![]));
                 }
 
-                let placeholders = hit_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+                let placeholders = hit_ids
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| format!("${}", i + 1))
+                    .collect::<Vec<_>>()
+                    .join(",");
                 let sql = format!(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
-                     ORDER BY m.created_at DESC, m.rowid DESC"
+                     ORDER BY m.created_at DESC, m.id DESC"
                 );
                 let mut q_builder = sqlx::query_as::<_, MessageRow>(&sql);
                 for id in &hit_ids {
@@ -607,8 +612,11 @@ pub async fn get_messages(
                 sqlx::query_as::<_, MessageRow>(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                     WHERE m.channel_id = $1 AND m.rowid < (SELECT rowid FROM messages WHERE id = $2)
-                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT $3",
+                     WHERE m.channel_id = $1
+                       AND (m.created_at, m.id) < (
+                         (SELECT created_at FROM messages WHERE id = $2), $2
+                       )
+                     ORDER BY m.created_at DESC, m.id DESC LIMIT $3",
                 )
                 .bind(&channel_id)
                 .bind(before_id)
@@ -621,7 +629,7 @@ pub async fn get_messages(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
-                     ORDER BY m.created_at DESC, m.rowid DESC LIMIT $2",
+                     ORDER BY m.created_at DESC, m.id DESC LIMIT $2",
                 )
                 .bind(&channel_id)
                 .bind(limit)

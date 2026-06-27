@@ -315,7 +315,7 @@ pub async fn get_alliance_channel_messages(
                     m.content, m.attachments, m.created_at, m.edited_at
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1
-             ORDER BY m.created_at DESC, m.rowid DESC LIMIT 50",
+             ORDER BY m.created_at DESC, m.id DESC LIMIT 50",
         )
         .bind(&channel_id)
         .fetch_all(&state.db)

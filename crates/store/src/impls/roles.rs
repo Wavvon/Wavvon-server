@@ -205,7 +205,12 @@ impl RoleStore for PostgresStore {
         let effective: HashSet<String> = if role_ids.is_empty() {
             HashSet::new()
         } else {
-            let placeholders = role_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let placeholders = role_ids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("${}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
             let sql = format!(
                 "SELECT DISTINCT permission FROM role_permissions WHERE role_id IN ({placeholders})"
             );
