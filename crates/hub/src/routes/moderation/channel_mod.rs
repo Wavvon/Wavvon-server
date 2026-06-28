@@ -240,7 +240,7 @@ pub async fn channel_ban_v2(
 ) -> Result<(StatusCode, Json<ChannelBanByPubkeyResponse>), (StatusCode, String)> {
     require_can_moderate(&state, &user.public_key, &req.pubkey, BAN_MEMBERS).await?;
 
-    let now = crate::auth::handlers::unix_timestamp().to_string();
+    let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
         "INSERT INTO channel_bans (channel_id, target_public_key, banned_by, reason, created_at) VALUES ($1, $2, $3, NULL, $4)
@@ -249,7 +249,7 @@ pub async fn channel_ban_v2(
     .bind(&channel_id)
     .bind(&req.pubkey)
     .bind(&user.public_key)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -260,7 +260,7 @@ pub async fn channel_ban_v2(
             channel_id,
             pubkey: req.pubkey,
             banned_by: user.public_key,
-            banned_at: now,
+            banned_at: now.to_string(),
         }),
     ))
 }
