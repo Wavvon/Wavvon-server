@@ -40,13 +40,16 @@ impl FromRequestParts<Arc<AppState>> for PeerHub {
         let auth_user = AuthUser::from_request_parts(parts, state).await?;
 
         // The authenticated pubkey must be in the `peers` table.
-        let is_peer: Option<i64> = sqlx::query_scalar("SELECT 1 FROM peers WHERE public_key = $1")
-            .bind(&auth_user.public_key)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        // Uses EXISTS so PostgreSQL always returns boolean — avoids int4/int8
+        // type mismatch that SELECT 1 decoded as i64 would produce.
+        let is_peer: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM peers WHERE public_key = $1)")
+                .bind(&auth_user.public_key)
+                .fetch_one(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-        if is_peer.is_none() {
+        if !is_peer {
             return Err((
                 StatusCode::FORBIDDEN,
                 "Caller is not a registered peer hub".to_string(),
