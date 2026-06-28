@@ -470,7 +470,7 @@ pub async fn delete_message(
     // Decrement reply_count on the parent when a reply is removed.
     if let Some(parent_id) = reply_to {
         let _ = sqlx::query(
-            "UPDATE messages SET reply_count = MAX(0, COALESCE(reply_count, 0) - 1) WHERE id = $1",
+            "UPDATE messages SET reply_count = GREATEST(0, COALESCE(reply_count, 0) - 1) WHERE id = $1",
         )
         .bind(&parent_id)
         .execute(&state.db)

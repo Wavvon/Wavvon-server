@@ -1138,7 +1138,10 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             is_locked        BOOLEAN NOT NULL DEFAULT FALSE,
             reply_count      BIGINT NOT NULL DEFAULT 0,
             last_activity_at BIGINT NOT NULL,
-            deleted_at       BIGINT
+            deleted_at       BIGINT,
+            search_vector    tsvector GENERATED ALWAYS AS (
+                to_tsvector('simple', title || ' ' || body)
+            ) STORED
         )",
     )
     .execute(pool)
@@ -1177,10 +1180,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // TODO: Add PostgreSQL full-text search for posts using tsvector + GIN index.
-    // The SQLite FTS5 virtual table has been removed. A future iteration should
-    // add a generated tsvector column on posts(title, body) with a GIN index
-    // and update post_replies similarly.
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_posts_search_vector ON posts USING GIN(search_vector)",
+    )
+    .execute(pool)
+    .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS post_reads (

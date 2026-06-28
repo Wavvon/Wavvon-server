@@ -629,7 +629,7 @@ pub async fn delete_reply(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Decrement reply_count (don't go below 0).
-    sqlx::query("UPDATE posts SET reply_count = MAX(0, reply_count - 1) WHERE id = $1")
+    sqlx::query("UPDATE posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1")
         .bind(&post_id)
         .execute(&state.db)
         .await
@@ -836,22 +836,22 @@ pub async fn search_posts(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "q_required".to_string()))?;
 
-    // FTS5 query: scope to channel, exclude tombstoned posts.
     #[derive(sqlx::FromRow)]
-    struct FtsRow {
+    struct SearchRow {
         post_id: String,
         title_snippet: String,
         body_snippet: String,
     }
 
-    let rows: Vec<FtsRow> = sqlx::query_as::<_, FtsRow>(
-        "SELECT f.post_id,
-                snippet(posts_fts, 0, '<b>', '</b>', '...', 10) AS title_snippet,
-                snippet(posts_fts, 1, '<b>', '</b>', '...', 20) AS body_snippet
-         FROM posts_fts f
-         INNER JOIN posts p ON p.id = f.post_id
-         WHERE posts_fts MATCH $1
-           AND f.channel_id = $2
+    let rows: Vec<SearchRow> = sqlx::query_as::<_, SearchRow>(
+        "SELECT p.id AS post_id,
+                COALESCE(ts_headline('simple', p.title, plainto_tsquery('simple', $1),
+                    'StartSel=<b>,StopSel=</b>,MaxWords=10,MinWords=5,MaxFragments=1'), '') AS title_snippet,
+                COALESCE(ts_headline('simple', p.body, plainto_tsquery('simple', $1),
+                    'StartSel=<b>,StopSel=</b>,MaxWords=20,MinWords=10,MaxFragments=2'), '') AS body_snippet
+         FROM posts p
+         WHERE p.search_vector @@ plainto_tsquery('simple', $1)
+           AND p.channel_id = $2
            AND p.deleted_at IS NULL
          LIMIT 50",
     )
