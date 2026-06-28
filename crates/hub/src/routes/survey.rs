@@ -521,7 +521,7 @@ pub async fn admin_put_survey(
 
     sqlx::query("INSERT INTO surveys (id, enabled, updated_at) VALUES ($1, $2, $3)")
         .bind(&req.id)
-        .bind(if req.enabled { 1i64 } else { 0i64 })
+        .bind(req.enabled)
         .bind(now)
         .execute(&state.db)
         .await
@@ -535,7 +535,7 @@ pub async fn admin_put_survey(
         .bind(&req.id)
         .bind(&q.prompt)
         .bind(&q.kind)
-        .bind(if q.required { 1i64 } else { 0i64 })
+        .bind(q.required)
         .bind(q.display_order)
         .execute(&state.db)
         .await
