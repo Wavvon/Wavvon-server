@@ -21,7 +21,7 @@ impl BadgeStore for PostgresStore {
         .bind(&b.note)
         .bind(&b.payload)
         .bind(&b.signature)
-        .bind(&b.created_at)
+        .bind(b.created_at)
         .execute(self.pool())
         .await
         .map_err(map_err)?;
@@ -73,7 +73,7 @@ impl BadgeStore for PostgresStore {
         .bind(&b.label)
         .bind(&b.payload)
         .bind(&b.signature)
-        .bind(&b.accepted_at)
+        .bind(b.accepted_at)
         .execute(self.pool())
         .await
         .map_err(map_err)?;
@@ -125,9 +125,9 @@ impl BadgeStore for PostgresStore {
         .bind(&b.label)
         .bind(&b.payload)
         .bind(&b.signature)
-        .bind(&b.issued_at)
-        .bind(&b.expires_at)
-        .bind(&b.revoked_at)
+        .bind(b.issued_at)
+        .bind(b.expires_at)
+        .bind(b.revoked_at)
         .execute(self.pool())
         .await
         .map_err(map_err)?;
