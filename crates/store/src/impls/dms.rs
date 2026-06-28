@@ -171,9 +171,9 @@ impl DmStore for PostgresStore {
         .bind(&m.signature)
         .bind(m.created_at)
         .bind(&m.attachments)
-        .bind(m.is_encrypted != 0)
+        .bind(m.is_encrypted)
         .bind(&m.ciphertext_json)
-        .bind(m.is_group_encrypted != 0)
+        .bind(m.is_group_encrypted)
         .execute(self.pool())
         .await
         .map_err(map_err)?;
@@ -229,18 +229,9 @@ impl DmStore for PostgresStore {
                 signature: r.get("signature"),
                 created_at: r.get("created_at"),
                 attachments: r.get("attachments"),
-                // PostgreSQL BOOLEAN → i64 for DmMessageRow compatibility
-                is_encrypted: if r.get::<bool, _>("is_encrypted") {
-                    1
-                } else {
-                    0
-                },
+                is_encrypted: r.get("is_encrypted"),
                 ciphertext_json: r.get("ciphertext_json"),
-                is_group_encrypted: if r.get::<bool, _>("is_group_encrypted") {
-                    1
-                } else {
-                    0
-                },
+                is_group_encrypted: r.get("is_group_encrypted"),
             })
             .collect())
     }

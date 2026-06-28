@@ -45,7 +45,7 @@ pub struct PendingBadgeResponse {
     pub label: String,
     pub note: Option<String>,
     pub payload: BadgePayload,
-    pub created_at: String,
+    pub created_at: i64,
 }
 
 /// GET /badges/pending
@@ -143,7 +143,7 @@ pub async fn accept_pending(
         ));
     }
 
-    let accepted_at = crate::auth::handlers::unix_timestamp_iso();
+    let accepted_at = unix_now_secs();
 
     let badge_id = Uuid::new_v4().to_string();
     sqlx::query(
@@ -156,7 +156,7 @@ pub async fn accept_pending(
     .bind(&row.label)
     .bind(&row.payload)
     .bind(&row.signature)
-    .bind(&accepted_at)
+    .bind(accepted_at)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -207,7 +207,7 @@ pub struct HeldBadgeResponse {
     pub issuer_url: String,
     pub label: String,
     pub payload: BadgePayload,
-    pub accepted_at: String,
+    pub accepted_at: i64,
 }
 
 /// GET /badges
@@ -291,8 +291,8 @@ pub struct IssuedBadgeResponse {
     pub recipient_hub_pubkey: String,
     pub label: String,
     pub payload: BadgePayload,
-    pub issued_at: String,
-    pub expires_at: Option<String>,
+    pub issued_at: i64,
+    pub expires_at: Option<i64>,
 }
 
 /// POST /admin/badges/issue
@@ -324,24 +324,18 @@ pub async fn issue_badge(
 
     let our_pubkey = state.hub_identity.public_key_hex();
     let our_url = load_hub_url(&state).await;
-    let issued_at = crate::auth::handlers::unix_timestamp_iso();
-
-    let expires_at: Option<String> = req.expires_days.map(|days| {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let expire_secs = secs + (days as u64) * 86400;
-        iso_from_unix(expire_secs)
-    });
+    let issued_secs = unix_now_secs();
+    let expires_secs: Option<i64> = req
+        .expires_days
+        .map(|days| issued_secs + (days as i64) * 86400);
 
     let payload = BadgePayload {
         issuer_pubkey: our_pubkey.clone(),
         issuer_url: our_url.clone(),
         subject_pubkey: recipient_info.public_key.clone(),
         label: req.label.clone(),
-        issued_at: issued_at.clone(),
-        expires_at: expires_at.clone(),
+        issued_at: iso_from_unix(issued_secs as u64),
+        expires_at: expires_secs.map(|s| iso_from_unix(s as u64)),
     };
 
     let payload_json = serde_json::to_string(&payload).map_err(|e| {
@@ -387,8 +381,8 @@ pub async fn issue_badge(
     .bind(&req.label)
     .bind(&payload_json)
     .bind(&sig_hex)
-    .bind(&issued_at)
-    .bind(&expires_at)
+    .bind(issued_secs)
+    .bind(expires_secs)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -408,8 +402,8 @@ pub async fn issue_badge(
             recipient_hub_pubkey: recipient_info.public_key,
             label: req.label,
             payload,
-            issued_at,
-            expires_at,
+            issued_at: issued_secs,
+            expires_at: expires_secs,
         }),
     ))
 }
@@ -506,6 +500,13 @@ async fn load_hub_url(state: &AppState) -> String {
         .unwrap_or_default()
 }
 
+fn unix_now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 /// Convert a Unix timestamp (seconds) to a simple ISO-8601 string.
 fn iso_from_unix(secs: u64) -> String {
     // Reuse the same Gregorian decomposition as directory.rs.
@@ -546,7 +547,7 @@ pub(crate) struct BadgeOfferRow {
     pub note: Option<String>,
     pub payload: String,
     pub signature: String,
-    pub created_at: String,
+    pub created_at: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -557,7 +558,7 @@ struct HubBadgeRow {
     pub label: String,
     pub payload: String,
     pub signature: String,
-    pub accepted_at: String,
+    pub accepted_at: i64,
 }
 
 #[derive(sqlx::FromRow)]
@@ -569,8 +570,8 @@ struct IssuedBadgeRow {
     pub payload: String,
     #[allow(dead_code)]
     pub signature: String,
-    pub issued_at: String,
-    pub expires_at: Option<String>,
+    pub issued_at: i64,
+    pub expires_at: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -588,17 +589,12 @@ pub async fn revoke_issued_badge(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
-    let now = iso_from_unix(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
-    );
+    let now = unix_now_secs();
 
     let result = sqlx::query(
         "UPDATE issued_badges SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL",
     )
-    .bind(&now)
+    .bind(now)
     .bind(&id)
     .execute(&state.db)
     .await
@@ -619,13 +615,13 @@ pub struct RevokedBadgeEntry {
     pub id: String,
     pub recipient_hub_pubkey: String,
     pub label: String,
-    pub revoked_at: String,
+    pub revoked_at: i64,
 }
 
 #[derive(serde::Deserialize)]
 pub struct RevocationsQuery {
-    /// Return only revocations that happened at or after this ISO-8601 timestamp.
-    pub since: Option<String>,
+    /// Return only revocations that happened at or after this Unix timestamp (seconds).
+    pub since: Option<i64>,
 }
 
 /// GET /federation/badge-revocations?since=<iso-timestamp>
@@ -639,7 +635,7 @@ pub async fn federation_badge_revocations(
     axum::extract::Query(params): axum::extract::Query<RevocationsQuery>,
 ) -> Result<Json<Vec<RevokedBadgeEntry>>, (StatusCode, String)> {
     let rows = if let Some(since) = params.since {
-        sqlx::query_as::<_, (String, String, String, String)>(
+        sqlx::query_as::<_, (String, String, String, i64)>(
             "SELECT id, recipient_hub_pubkey, label, revoked_at
              FROM issued_badges
              WHERE revoked_at IS NOT NULL AND revoked_at >= $1
@@ -649,7 +645,7 @@ pub async fn federation_badge_revocations(
         .fetch_all(&state.db)
         .await
     } else {
-        sqlx::query_as::<_, (String, String, String, String)>(
+        sqlx::query_as::<_, (String, String, String, i64)>(
             "SELECT id, recipient_hub_pubkey, label, revoked_at
              FROM issued_badges
              WHERE revoked_at IS NOT NULL

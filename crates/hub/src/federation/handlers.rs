@@ -390,7 +390,10 @@ pub async fn receive_badge_offer(
     }
 
     let id = Uuid::new_v4().to_string();
-    let created_at = crate::auth::handlers::unix_timestamp_iso();
+    let created_at: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
 
     sqlx::query(
         "INSERT INTO badge_offers
@@ -404,7 +407,7 @@ pub async fn receive_badge_offer(
     .bind(&req.note)
     .bind(&req.payload)
     .bind(&req.signature)
-    .bind(&created_at)
+    .bind(created_at)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

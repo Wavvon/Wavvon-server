@@ -11,12 +11,7 @@ fn row_to_channel(r: sqlx::postgres::PgRow) -> ChannelRow {
         name: r.get("name"),
         created_by: r.get("created_by"),
         parent_id: r.get("parent_id"),
-        // PostgreSQL BOOLEAN → i64 for ChannelRow compatibility
-        is_category: if r.get::<bool, _>("is_category") {
-            1
-        } else {
-            0
-        },
+        is_category: r.get("is_category"),
         display_order: r.get("display_order"),
         description: r.get("description"),
         icon: r.get("icon"),

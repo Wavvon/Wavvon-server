@@ -159,7 +159,7 @@ impl BadgeStore for PostgresStore {
             .collect())
     }
 
-    async fn revoke_issued_badge(&self, id: &str, revoked_at: &str) -> Result<(), StoreError> {
+    async fn revoke_issued_badge(&self, id: &str, revoked_at: i64) -> Result<(), StoreError> {
         sqlx::query("UPDATE issued_badges SET revoked_at = $1 WHERE id = $2")
             .bind(revoked_at)
             .bind(id)

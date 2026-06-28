@@ -13,11 +13,11 @@ pub struct UserRow {
     pub approval_status: String,
     pub avatar: Option<String>,
     pub master_pubkey: Option<String>,
-    pub is_bot: i64,
-    pub is_bot_removed: i64,
+    pub is_bot: bool,
+    pub is_bot_removed: bool,
     pub bot_invite_token: Option<String>,
     pub bot_invite_expires: Option<i64>,
-    pub is_webhook: i64,
+    pub is_webhook: bool,
     pub lobby_status: String,
     pub lobby_entered_at: Option<i64>,
     pub pow_level: i64,
@@ -65,7 +65,7 @@ pub struct ChannelRow {
     pub name: String,
     pub created_by: String,
     pub parent_id: Option<String>,
-    pub is_category: i64,
+    pub is_category: bool,
     pub display_order: i64,
     pub description: Option<String>,
     pub icon: Option<String>,
@@ -147,7 +147,7 @@ pub struct RoleRow {
     pub id: String,
     pub name: String,
     pub priority: i64,
-    pub display_separately: i64,
+    pub display_separately: bool,
     pub created_at: i64,
     pub talk_power: i64,
 }
@@ -242,7 +242,7 @@ pub struct BotCommandRow {
     pub description: String,
     pub args: Option<String>,
     pub scope: String,
-    pub privileged: i64,
+    pub privileged: bool,
     pub cooldown_seconds: i64,
 }
 
@@ -253,7 +253,7 @@ pub struct BotEventQueueRow {
     pub event_type: String,
     pub payload: String,
     pub created_at: i64,
-    pub delivered: i64,
+    pub delivered: bool,
 }
 
 // ---- DMs ----
@@ -274,9 +274,9 @@ pub struct DmMessageRow {
     pub signature: Option<String>,
     pub created_at: i64,
     pub attachments: Option<String>,
-    pub is_encrypted: i64,
+    pub is_encrypted: bool,
     pub ciphertext_json: Option<String>,
-    pub is_group_encrypted: i64,
+    pub is_group_encrypted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,7 +399,7 @@ pub struct BadgeOfferRow {
     pub note: Option<String>,
     pub payload: String,
     pub signature: String,
-    pub created_at: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,7 +410,7 @@ pub struct HubBadgeRow {
     pub label: String,
     pub payload: String,
     pub signature: String,
-    pub accepted_at: String,
+    pub accepted_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,9 +421,9 @@ pub struct IssuedBadgeRow {
     pub label: String,
     pub payload: String,
     pub signature: String,
-    pub issued_at: String,
-    pub expires_at: Option<String>,
-    pub revoked_at: Option<String>,
+    pub issued_at: i64,
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
 }
 
 // ---- Recovery ----
@@ -546,8 +546,8 @@ pub struct PostRow {
     pub body: String,
     pub created_at: i64,
     pub edited_at: Option<i64>,
-    pub is_pinned: i64,
-    pub is_locked: i64,
+    pub is_pinned: bool,
+    pub is_locked: bool,
     pub reply_count: i64,
     pub last_activity_at: i64,
     pub deleted_at: Option<i64>,
@@ -586,7 +586,7 @@ pub struct WebhookRow {
     pub avatar_url: Option<String>,
     pub created_by_pubkey: String,
     pub rate_limit: i64,
-    pub active: i64,
+    pub active: bool,
     pub created_at: i64,
 }
 
@@ -595,7 +595,7 @@ pub struct WebhookRow {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SurveyRow {
     pub id: String,
-    pub enabled: i64,
+    pub enabled: bool,
     pub updated_at: i64,
 }
 

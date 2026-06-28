@@ -12,12 +12,7 @@ fn row_to_role(r: sqlx::postgres::PgRow) -> RoleRow {
         id: r.get("id"),
         name: r.get("name"),
         priority: r.get("priority"),
-        // PostgreSQL BOOLEAN → i64 for RoleRow compatibility
-        display_separately: if r.get::<bool, _>("display_separately") {
-            1
-        } else {
-            0
-        },
+        display_separately: r.get("display_separately"),
         created_at: r.get("created_at"),
         talk_power: r.try_get("talk_power").unwrap_or(0),
     }

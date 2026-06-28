@@ -256,7 +256,7 @@ mod hub_migrations {
                 description      TEXT NOT NULL DEFAULT '',
                 args             TEXT,
                 scope            TEXT NOT NULL DEFAULT 'all',
-                privileged       BIGINT NOT NULL DEFAULT 0,
+                privileged       BOOLEAN NOT NULL DEFAULT FALSE,
                 cooldown_seconds BIGINT NOT NULL DEFAULT 0,
                 PRIMARY KEY (pubkey, name)
             )"#,
@@ -502,7 +502,7 @@ mod hub_migrations {
                 note             TEXT,
                 payload          TEXT NOT NULL DEFAULT '',
                 signature        TEXT NOT NULL DEFAULT '',
-                created_at       TEXT NOT NULL DEFAULT ''
+                created_at       BIGINT NOT NULL DEFAULT 0
             )"#,
             r#"CREATE TABLE IF NOT EXISTS hub_badges (
                 id             TEXT PRIMARY KEY,
@@ -511,7 +511,7 @@ mod hub_migrations {
                 label          TEXT NOT NULL,
                 payload        TEXT NOT NULL DEFAULT '',
                 signature      TEXT NOT NULL DEFAULT '',
-                accepted_at    TEXT NOT NULL DEFAULT ''
+                accepted_at    BIGINT NOT NULL DEFAULT 0
             )"#,
             r#"CREATE TABLE IF NOT EXISTS issued_badges (
                 id                    TEXT PRIMARY KEY,
@@ -520,9 +520,9 @@ mod hub_migrations {
                 label                 TEXT NOT NULL,
                 payload               TEXT NOT NULL DEFAULT '',
                 signature             TEXT NOT NULL DEFAULT '',
-                issued_at             TEXT NOT NULL DEFAULT '',
-                expires_at            TEXT,
-                revoked_at            TEXT
+                issued_at             BIGINT NOT NULL DEFAULT 0,
+                expires_at            BIGINT,
+                revoked_at            BIGINT
             )"#,
             // -----------------------------------------------------------
             // Recovery

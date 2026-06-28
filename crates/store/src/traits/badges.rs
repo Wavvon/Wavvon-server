@@ -26,5 +26,5 @@ pub trait BadgeStore: Send + Sync {
 
     async fn list_issued_badges(&self) -> Result<Vec<IssuedBadgeRow>, StoreError>;
 
-    async fn revoke_issued_badge(&self, id: &str, revoked_at: &str) -> Result<(), StoreError>;
+    async fn revoke_issued_badge(&self, id: &str, revoked_at: i64) -> Result<(), StoreError>;
 }

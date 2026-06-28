@@ -370,8 +370,7 @@ impl BotStore for PostgresStore {
                 event_type: r.get("event_type"),
                 payload: r.get("payload"),
                 created_at: r.get("created_at"),
-                // PostgreSQL BOOLEAN → i64 for BotEventQueueRow compatibility
-                delivered: if r.get::<bool, _>("delivered") { 1 } else { 0 },
+                delivered: r.get("delivered"),
             })
             .collect())
     }

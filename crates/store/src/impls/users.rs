@@ -7,9 +7,6 @@ use sqlx::Row;
 use crate::error_map::map_err;
 use crate::PostgresStore;
 
-/// PostgreSQL returns BOOLEAN columns as `bool`. `UserRow` uses `i64` for
-/// boolean fields to remain compatible with callers that do `is_bot != 0`.
-/// We cast here at the boundary.
 fn row_to_user(r: sqlx::postgres::PgRow) -> UserRow {
     UserRow {
         public_key: r.get("public_key"),
@@ -19,15 +16,11 @@ fn row_to_user(r: sqlx::postgres::PgRow) -> UserRow {
         approval_status: r.get("approval_status"),
         avatar: r.get("avatar"),
         master_pubkey: r.get("master_pubkey"),
-        is_bot: if r.get::<bool, _>("is_bot") { 1 } else { 0 },
-        is_bot_removed: if r.get::<bool, _>("is_bot_removed") {
-            1
-        } else {
-            0
-        },
+        is_bot: r.get("is_bot"),
+        is_bot_removed: r.get("is_bot_removed"),
         bot_invite_token: r.get("bot_invite_token"),
         bot_invite_expires: r.get("bot_invite_expires"),
-        is_webhook: if r.get::<bool, _>("is_webhook") { 1 } else { 0 },
+        is_webhook: r.get("is_webhook"),
         lobby_status: r.get("lobby_status"),
         lobby_entered_at: r.get("lobby_entered_at"),
         pow_level: r.get("pow_level"),
