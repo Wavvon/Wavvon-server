@@ -334,8 +334,8 @@ pub async fn issue_badge(
         issuer_url: our_url.clone(),
         subject_pubkey: recipient_info.public_key.clone(),
         label: req.label.clone(),
-        issued_at: iso_from_unix(issued_secs as u64),
-        expires_at: expires_secs.map(|s| iso_from_unix(s as u64)),
+        issued_at: crate::auth::handlers::iso_from_unix(issued_secs),
+        expires_at: expires_secs.map(crate::auth::handlers::iso_from_unix),
     };
 
     let payload_json = serde_json::to_string(&payload).map_err(|e| {
@@ -505,33 +505,6 @@ fn unix_now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-/// Convert a Unix timestamp (seconds) to a simple ISO-8601 string.
-fn iso_from_unix(secs: u64) -> String {
-    // Reuse the same Gregorian decomposition as directory.rs.
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hour = time_of_day / 3600;
-    let minute = (time_of_day % 3600) / 60;
-    let second = time_of_day % 60;
-
-    let jdn = days + 2_440_588;
-    let l = jdn + 68_569;
-    let n = (4 * l) / 146_097;
-    let l = l - (146_097 * n).div_ceil(4);
-    let year_i = (4_000 * (l + 1)) / 1_461_001;
-    let l = l - (1_461 * year_i) / 4 + 31;
-    let month_i = (80 * l) / 2_447;
-    let day = l - (2_447 * month_i) / 80;
-    let l = month_i / 11;
-    let month = month_i + 2 - 12 * l;
-    let year = 100 * (n - 49) + year_i + l;
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, minute, second
-    )
 }
 
 // ---------------------------------------------------------------------------

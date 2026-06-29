@@ -766,14 +766,10 @@ pub fn unix_timestamp_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Returns the current UTC time as a compact ISO-8601 string
-/// (`YYYY-MM-DDTHH:MM:SSZ`). Used for badge timestamps.
-pub fn unix_timestamp_iso() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
+/// Converts a Unix timestamp (seconds) to a compact ISO-8601 string
+/// (`YYYY-MM-DDTHH:MM:SSZ`). Used for badge payload timestamps.
+pub fn iso_from_unix(secs: i64) -> String {
+    let secs = secs as u64;
     let days = secs / 86400;
     let time_of_day = secs % 86400;
     let hour = time_of_day / 3600;
@@ -796,6 +792,11 @@ pub fn unix_timestamp_iso() -> String {
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
         year, month, day, hour, minute, second
     )
+}
+
+/// Returns the current UTC time as a compact ISO-8601 string (`YYYY-MM-DDTHH:MM:SSZ`).
+pub fn unix_timestamp_iso() -> String {
+    iso_from_unix(unix_timestamp())
 }
 
 /// POST /auth/renew — issue a fresh 30-day session token while the current one
