@@ -26,7 +26,7 @@ use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use totp_rs::{Algorithm, Secret, TOTP};
-use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState};
+use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
@@ -137,13 +137,6 @@ async fn authenticate(client: &Client, base: &str, identity: &Identity) -> Strin
     );
     let body: Value = resp.json().await.unwrap();
     body["token"].as_str().unwrap().to_string()
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
 }
 
 // ---------------------------------------------------------------------------

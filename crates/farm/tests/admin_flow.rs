@@ -21,6 +21,7 @@ use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
 use wavvon_farm::state::FarmState;
+use wavvon_farm::unix_now;
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
@@ -84,13 +85,6 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
     ));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state)
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
 }
 
 async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identity) -> String {

@@ -17,17 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::routes::admin::require_admin_pub;
 use crate::state::FarmState;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
+use crate::unix_now;
 
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();

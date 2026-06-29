@@ -285,10 +285,10 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS channel_voice_mutes (
-            channel_id TEXT NOT NULL,
-            pubkey     TEXT NOT NULL,
-            muted_by   TEXT NOT NULL,
-            muted_at   TEXT NOT NULL,
+            channel_id TEXT   NOT NULL,
+            pubkey     TEXT   NOT NULL,
+            muted_by   TEXT   NOT NULL,
+            muted_at   BIGINT NOT NULL,
             PRIMARY KEY (channel_id, pubkey)
         )",
     )
@@ -297,10 +297,10 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS raise_hand_requests (
-            id           TEXT PRIMARY KEY,
-            channel_id   TEXT NOT NULL,
-            pubkey       TEXT NOT NULL,
-            requested_at TEXT NOT NULL,
+            id           TEXT   PRIMARY KEY,
+            channel_id   TEXT   NOT NULL,
+            pubkey       TEXT   NOT NULL,
+            requested_at BIGINT NOT NULL,
             UNIQUE (channel_id, pubkey)
         )",
     )
@@ -1029,14 +1029,14 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS badge_offers (
-            id              TEXT PRIMARY KEY,
-            from_hub_pubkey TEXT NOT NULL,
-            from_hub_url    TEXT NOT NULL,
-            label           TEXT NOT NULL,
+            id              TEXT   PRIMARY KEY,
+            from_hub_pubkey TEXT   NOT NULL,
+            from_hub_url    TEXT   NOT NULL,
+            label           TEXT   NOT NULL,
             note            TEXT,
-            payload         TEXT NOT NULL,
-            signature       TEXT NOT NULL,
-            created_at      TEXT NOT NULL
+            payload         TEXT   NOT NULL,
+            signature       TEXT   NOT NULL,
+            created_at      BIGINT NOT NULL
         )",
     )
     .execute(pool)
@@ -1044,13 +1044,13 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS hub_badges (
-            id            TEXT PRIMARY KEY,
-            issuer_pubkey TEXT NOT NULL,
-            issuer_url    TEXT NOT NULL,
-            label         TEXT NOT NULL,
-            payload       TEXT NOT NULL,
-            signature     TEXT NOT NULL,
-            accepted_at   TEXT NOT NULL
+            id            TEXT   PRIMARY KEY,
+            issuer_pubkey TEXT   NOT NULL,
+            issuer_url    TEXT   NOT NULL,
+            label         TEXT   NOT NULL,
+            payload       TEXT   NOT NULL,
+            signature     TEXT   NOT NULL,
+            accepted_at   BIGINT NOT NULL
         )",
     )
     .execute(pool)
@@ -1058,15 +1058,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS issued_badges (
-            id                   TEXT PRIMARY KEY,
-            recipient_hub_url    TEXT NOT NULL,
-            recipient_hub_pubkey TEXT NOT NULL,
-            label                TEXT NOT NULL,
-            payload              TEXT NOT NULL,
-            signature            TEXT NOT NULL,
-            issued_at            TEXT NOT NULL,
-            expires_at           TEXT,
-            revoked_at           TEXT
+            id                   TEXT   PRIMARY KEY,
+            recipient_hub_url    TEXT   NOT NULL,
+            recipient_hub_pubkey TEXT   NOT NULL,
+            label                TEXT   NOT NULL,
+            payload              TEXT   NOT NULL,
+            signature            TEXT   NOT NULL,
+            issued_at            BIGINT NOT NULL,
+            expires_at           BIGINT,
+            revoked_at           BIGINT
         )",
     )
     .execute(pool)

@@ -15,6 +15,7 @@ use totp_rs::{Algorithm, Secret, TOTP};
 
 use crate::state::FarmState;
 use crate::token::{sign_token, verify_token, FarmTokenPayload};
+use crate::unix_now;
 
 // ---------------------------------------------------------------------------
 // Request / response types
@@ -50,13 +51,6 @@ pub struct TokenResponse {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
 
 /// 30 days in seconds.
 const SESSION_TTL: i64 = 30 * 24 * 60 * 60;

@@ -15,17 +15,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::FarmState;
 use crate::token::verify_token;
+use crate::unix_now;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
 
 /// Extract and verify a Bearer farm token. Returns the payload on success.
 fn require_auth(

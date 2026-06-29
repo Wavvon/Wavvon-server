@@ -108,7 +108,7 @@ pub struct ChannelVoiceMuteResponse {
     pub channel_id: String,
     pub pubkey: String,
     pub muted_by: String,
-    pub muted_at: String,
+    pub muted_at: i64,
 }
 
 // --- Raise-hand ---
@@ -118,5 +118,5 @@ pub struct RaiseHandResponse {
     pub id: String,
     pub channel_id: String,
     pub pubkey: String,
-    pub requested_at: String,
+    pub requested_at: i64,
 }

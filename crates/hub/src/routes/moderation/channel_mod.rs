@@ -322,7 +322,7 @@ pub async fn channel_voice_mute(
 ) -> Result<(StatusCode, Json<ChannelVoiceMuteResponse>), (StatusCode, String)> {
     require_can_moderate(&state, &user.public_key, &req.pubkey, MUTE_MEMBERS).await?;
 
-    let now = crate::auth::handlers::unix_timestamp().to_string();
+    let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
         "INSERT INTO channel_voice_mutes (channel_id, pubkey, muted_by, muted_at) VALUES ($1, $2, $3, $4)
@@ -331,7 +331,7 @@ pub async fn channel_voice_mute(
     .bind(&channel_id)
     .bind(&req.pubkey)
     .bind(&user.public_key)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -378,7 +378,7 @@ pub async fn list_channel_voice_mutes(
         channel_id: String,
         pubkey: String,
         muted_by: String,
-        muted_at: String,
+        muted_at: i64,
     }
 
     let rows = sqlx::query_as::<_, Row>(
@@ -409,7 +409,7 @@ pub async fn raise_hand(
     Path(channel_id): Path<String>,
 ) -> Result<(StatusCode, Json<RaiseHandResponse>), (StatusCode, String)> {
     let id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp().to_string();
+    let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
         "INSERT INTO raise_hand_requests (id, channel_id, pubkey, requested_at) VALUES ($1, $2, $3, $4)
@@ -418,7 +418,7 @@ pub async fn raise_hand(
     .bind(&id)
     .bind(&channel_id)
     .bind(&user.public_key)
-    .bind(&now)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -465,7 +465,7 @@ pub async fn list_raise_hands(
         id: String,
         channel_id: String,
         pubkey: String,
-        requested_at: String,
+        requested_at: i64,
     }
 
     let rows = sqlx::query_as::<_, Row>(
