@@ -73,8 +73,8 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
     ),
     (
         "WAVVON_DATABASE_URL",
-        "sqlite:hub.db",
-        "Full database URL. Defaults to SQLite at hub.db. Also accepts postgresql://…",
+        "postgres://postgres:postgres@localhost:5432/wavvon",
+        "PostgreSQL connection URL (required). Example: postgres://user:pass@host/dbname",
     ),
     (
         "WAVVON_DATABASE_READ_URL",
@@ -174,10 +174,8 @@ pub struct Settings {
     /// Set to "none" to disable search entirely (NullSearch).
     /// Env: WAVVON_SEARCH_BACKEND
     pub search_backend: Option<String>,
-    /// Full database URL. Leave unset to use SQLite at hub.db (default).
-    /// Examples:
-    ///   sqlite://hub.db          (explicit SQLite)
-    ///   postgresql://user:pass@host/dbname
+    /// PostgreSQL connection URL. Defaults to postgres://postgres:postgres@localhost:5432/wavvon.
+    /// Env: WAVVON_DATABASE_URL
     pub database_url: Option<String>,
     /// Read-replica URL. Only used when database_url is PostgreSQL.
     /// If unset, all queries go to the primary.

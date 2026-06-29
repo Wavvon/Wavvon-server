@@ -1255,11 +1255,11 @@ fn backup(out_path: &str) -> anyhow::Result<()> {
     let file = std::fs::File::create(out_path)?;
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
-    tar.append_path("hub.db")?;
+    // The database is PostgreSQL — back it up separately with pg_dump.
+    // This archive only captures the identity file.
     if std::path::Path::new("hub_identity.json").exists() {
         tar.append_path("hub_identity.json")?;
     }
-    // Write a metadata JSON entry into the archive.
     let meta = serde_json::json!({
         "timestamp": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1283,7 +1283,9 @@ fn restore(src_path: &str) -> anyhow::Result<()> {
     let mut archive = tar::Archive::new(gz);
     let staging = tempfile::tempdir()?;
     archive.unpack(staging.path())?;
-    for name in &["hub.db", "hub_identity.json"] {
+    // The database is PostgreSQL — restore it separately with pg_restore/psql.
+    // This command only restores the identity file from the archive.
+    for name in &["hub_identity.json"] {
         let src = staging.path().join(name);
         if src.exists() {
             std::fs::copy(&src, name)?;
