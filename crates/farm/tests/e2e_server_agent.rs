@@ -178,16 +178,18 @@ async fn server_agent_connects_and_receives_hub_spawn() {
 
     // --- 3. Connect mock agent via WebSocket ---
     let ws_base = base.replacen("http://", "ws://", 1);
-    let ws_url = format!("{ws_base}/ws/agent?token={reg_token}");
+    let ws_url = format!("{ws_base}/ws/agent");
     let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
         .await
         .expect("WS connect failed");
     let (mut ws_write, mut ws_read) = ws_stream.split();
 
-    // Send hello.
+    // Send hello with token as first frame (token never appears in the URL).
     ws_write
         .send(Message::Text(
-            json!({"type":"hello","version":"0.1.0"}).to_string().into(),
+            json!({"type":"hello","version":"0.1.0","token":reg_token})
+                .to_string()
+                .into(),
         ))
         .await
         .unwrap();

@@ -7,7 +7,7 @@ use crate::hub_manager::HubManager;
 use crate::settings::Settings;
 
 pub async fn run(cfg: &Settings, manager: Arc<HubManager>) -> Result<()> {
-    let ws_url = build_ws_url(&cfg.farm_url, &cfg.server_token);
+    let ws_url = build_ws_url(&cfg.farm_url);
     tracing::info!(url = %ws_url, "Connecting to farm");
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
@@ -16,7 +16,7 @@ pub async fn run(cfg: &Settings, manager: Arc<HubManager>) -> Result<()> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    let hello = serde_json::json!({"type": "hello", "version": "0.1.0"});
+    let hello = serde_json::json!({"type": "hello", "version": "0.1.0", "token": cfg.server_token});
     write.send(Message::Text(hello.to_string().into())).await?;
 
     while let Some(raw) = read.next().await {
@@ -103,12 +103,12 @@ async fn handle_message(
     }
 }
 
-fn build_ws_url(farm_url: &str, token: &str) -> String {
+fn build_ws_url(farm_url: &str) -> String {
     let base = farm_url.trim_end_matches('/');
     let ws_base = if base.starts_with("https://") {
         base.replacen("https://", "wss://", 1)
     } else {
         base.replacen("http://", "ws://", 1)
     };
-    format!("{ws_base}/ws/agent?token={token}")
+    format!("{ws_base}/ws/agent")
 }

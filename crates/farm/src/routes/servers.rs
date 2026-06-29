@@ -2,12 +2,12 @@
 ///
 /// POST /farm/admin/server-token — generate a one-time registration token (admin)
 /// GET  /farm/admin/servers      — list registered server agents (admin)
-/// GET  /ws/agent?token=<hex>   — WebSocket upgrade for remote server agents
+/// GET  /ws/agent               — WebSocket upgrade for remote server agents (token in first frame)
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -173,49 +173,103 @@ pub async fn list_servers(
 }
 
 // ---------------------------------------------------------------------------
-// GET /ws/agent?token=<hex>  — WebSocket upgrade for server agents
+// GET /ws/agent  — WebSocket upgrade for server agents (token in first frame)
 // ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct AgentTokenQuery {
-    pub token: String,
-}
 
 pub async fn ws_agent_handler(
     ws: WebSocketUpgrade,
-    Query(params): Query<AgentTokenQuery>,
     State(state): State<Arc<FarmState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_agent_socket(socket, state, params.token))
+    ws.on_upgrade(move |socket| handle_agent_socket(socket, state))
 }
 
-async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: String) {
-    // Validate token: hash it, look up in servers by token_hash.
-    let token_bytes = match hex::decode(&token) {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::warn!("Agent WebSocket: invalid token hex");
+async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
+    use futures_util::{SinkExt, StreamExt};
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // First frame must be {"type":"hello","token":"<hex>",...}.
+    // Validating here keeps the token out of the HTTP request URL (and logs).
+    let server_id = {
+        let first = match ws_receiver.next().await {
+            Some(Ok(Message::Text(txt))) => txt,
+            _ => {
+                tracing::warn!("Agent WS: connection closed before hello");
+                return;
+            }
+        };
+        let val = match serde_json::from_str::<serde_json::Value>(&first) {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::warn!("Agent WS: first message is not valid JSON");
+                let _ = ws_sender
+                    .send(Message::Text(
+                        r#"{"type":"error","code":"auth_failed"}"#.into(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("hello") {
+            tracing::warn!("Agent WS: first message type is not hello");
+            let _ = ws_sender
+                .send(Message::Text(
+                    r#"{"type":"error","code":"auth_failed"}"#.into(),
+                ))
+                .await;
             return;
         }
-    };
-    let token_hash = sha256_hex(&token_bytes);
-
-    let lookup = sqlx::query_as::<_, (String,)>(
-        "SELECT id FROM servers WHERE token_hash = $1 AND deleted_at IS NULL",
-    )
-    .bind(&token_hash)
-    .fetch_optional(&state.db)
-    .await;
-
-    let server_id = match lookup {
-        Ok(Some((id,))) => id,
-        Ok(None) => {
-            tracing::warn!("Agent WebSocket: token not found or server deleted");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!("Agent WebSocket: DB error during token lookup: {e}");
-            return;
+        let token = match val.get("token").and_then(|v| v.as_str()) {
+            Some(t) => t.to_string(),
+            None => {
+                tracing::warn!("Agent WS: hello missing token field");
+                let _ = ws_sender
+                    .send(Message::Text(
+                        r#"{"type":"error","code":"auth_failed"}"#.into(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        let token_bytes = match hex::decode(&token) {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::warn!("Agent WS: invalid token hex");
+                let _ = ws_sender
+                    .send(Message::Text(
+                        r#"{"type":"error","code":"auth_failed"}"#.into(),
+                    ))
+                    .await;
+                return;
+            }
+        };
+        let token_hash = sha256_hex(&token_bytes);
+        let lookup = sqlx::query_as::<_, (String,)>(
+            "SELECT id FROM servers WHERE token_hash = $1 AND deleted_at IS NULL",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&state.db)
+        .await;
+        match lookup {
+            Ok(Some((id,))) => id,
+            Ok(None) => {
+                tracing::warn!("Agent WS: token not found or server deleted");
+                let _ = ws_sender
+                    .send(Message::Text(
+                        r#"{"type":"error","code":"auth_failed"}"#.into(),
+                    ))
+                    .await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("Agent WS: DB error during token lookup: {e}");
+                let _ = ws_sender
+                    .send(Message::Text(
+                        r#"{"type":"error","code":"auth_failed"}"#.into(),
+                    ))
+                    .await;
+                return;
+            }
         }
     };
 
@@ -231,26 +285,17 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>, token: St
         .await
         .insert(server_id.clone(), tx);
 
-    let (mut ws_sender, mut ws_receiver) = {
-        use futures_util::StreamExt;
-        socket.split()
-    };
-
     // Spawn a task that forwards messages from the channel to the WebSocket.
-    let send_task = {
-        tokio::spawn(async move {
-            use futures_util::SinkExt;
-            while let Some(msg) = rx.recv().await {
-                if ws_sender.send(Message::Text(msg.into())).await.is_err() {
-                    break;
-                }
+    let send_task = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+                break;
             }
-        })
-    };
+        }
+    });
 
     // Read incoming messages from the agent.
     loop {
-        use futures_util::StreamExt;
         match ws_receiver.next().await {
             Some(Ok(Message::Text(txt))) => {
                 // Update last_seen_at on any message received.
