@@ -45,6 +45,8 @@ pub(in crate::routes::ws) async fn handle_subscribe(
             if ws_tx.send(Message::Text(json.into())).await.is_err() {
                 return DispatchResult::Break;
             }
+            cs.notified_streams
+                .insert((channel_id.clone(), stream_id.clone()));
             if let Some(init_bytes) = &meta.init_chunk {
                 let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
                     channel_id: channel_id.clone(),

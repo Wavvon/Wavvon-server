@@ -106,11 +106,19 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
         let _ = ws_tx.send(Message::Text(hello.to_string().into())).await;
     }
 
+    let mut cs = ConnState::new(
+        public_key.clone(),
+        is_bot,
+        session_id.clone(),
+        subscribed,
+        my_conversations,
+    );
+
     // Push in-progress screen shares to this client.
     {
         let shares = state.screen_shares.read().await;
         for ((ch_id, _sharer), active) in shares.iter() {
-            if !subscribed.contains(ch_id) {
+            if !cs.subscribed.contains(ch_id) {
                 continue;
             }
             for (stream_id, meta) in &active.streams {
@@ -127,6 +135,8 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                 };
                 let json = serde_json::to_string(&started).unwrap();
                 let _ = ws_tx.send(Message::Text(json.into())).await;
+                cs.notified_streams
+                    .insert((ch_id.clone(), stream_id.clone()));
                 if let Some(init_bytes) = &meta.init_chunk {
                     let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
                         channel_id: ch_id.clone(),
@@ -144,14 +154,6 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
             }
         }
     }
-
-    let mut cs = ConnState::new(
-        public_key.clone(),
-        is_bot,
-        session_id.clone(),
-        subscribed,
-        my_conversations,
-    );
 
     // ── Main select! loop ────────────────────────────────────────────────────
 
@@ -219,6 +221,13 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                             }
 
                             let json = pre_json.to_string();
+                            // Track when screen_share_started reaches this client
+                            // so the chunk-relay arm never races ahead of it.
+                            if let crate::routes::chat_models::ChatEvent::ScreenShareStarted {
+                                channel_id, stream_id, ..
+                            } = &event {
+                                cs.notified_streams.insert((channel_id.clone(), stream_id.clone()));
+                            }
                             if cs.is_replaying {
                                 cs.replay_buffer.push(json);
                             } else if ws_tx.send(Message::Text(json.into())).await.is_err() {
@@ -354,14 +363,39 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                         let in_channel =
                             ev.sharer_pubkey != cs.public_key
                             && cs.subscribed.contains(&ev.channel_id);
-                        let is_cross_subscriber = {
+                        let (is_cross_subscriber, stream_meta) = {
                             let shares = state.screen_shares.read().await;
-                            shares
-                                .get(&(ev.channel_id.clone(), ev.sharer_pubkey.clone()))
+                            let active = shares.get(&(ev.channel_id.clone(), ev.sharer_pubkey.clone()));
+                            let cross = active
                                 .map(|a| a.cross_channel_subscribers.contains(&cs.public_key))
-                                .unwrap_or(false)
+                                .unwrap_or(false);
+                            let meta = active
+                                .and_then(|a| a.streams.get(&ev.stream_id))
+                                .map(|m| (m.sharer_pubkey.clone(), m.kind.clone(), m.mime.clone(), m.has_audio));
+                            (cross, meta)
                         };
                         if in_channel || is_cross_subscriber {
+                            // Guarantee screen_share_started arrives before the
+                            // first chunk for this stream, regardless of the order
+                            // the hub processes the sharer's messages.
+                            let stream_key = (ev.channel_id.clone(), ev.stream_id.clone());
+                            if !cs.notified_streams.contains(&stream_key) {
+                                if let Some((sharer_pubkey, kind, mime, has_audio)) = stream_meta {
+                                    let started = WsServerMessage::ScreenShareStarted {
+                                        channel_id: ev.channel_id.clone(),
+                                        stream_id: ev.stream_id.clone(),
+                                        sharer_pubkey,
+                                        kind,
+                                        mime,
+                                        has_audio,
+                                    };
+                                    let json = serde_json::to_string(&started).unwrap();
+                                    if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                                        break;
+                                    }
+                                    cs.notified_streams.insert(stream_key);
+                                }
+                            }
                             let envelope = WsServerMessage::ScreenShareChunkOut {
                                 channel_id: ev.channel_id,
                                 stream_id: ev.stream_id,

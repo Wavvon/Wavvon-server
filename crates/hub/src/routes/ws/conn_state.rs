@@ -21,6 +21,10 @@ pub(super) struct ConnState {
     pub pending_chunk: Option<(String, String, u32, bool)>,
     /// Channels whose events this connection currently receives.
     pub subscribed: HashSet<String>,
+    /// Streams for which `screen_share_started` has already been sent to this
+    /// client.  Keyed by (channel_id, stream_id).  Ensures the chunk relay arm
+    /// never delivers a chunk before the client knows the stream exists.
+    pub notified_streams: HashSet<(String, String)>,
     /// Rate-limit map for component interactions.
     /// Key: (user_pubkey, custom_id).  Value: last interaction instant.
     pub component_rate_limit: HashMap<(String, String), Instant>,
@@ -47,6 +51,7 @@ impl ConnState {
             voice_channel: None,
             pending_chunk: None,
             subscribed,
+            notified_streams: HashSet::new(),
             component_rate_limit: HashMap::new(),
             my_conversations,
             replay_buffer: Vec::new(),
