@@ -598,6 +598,24 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // home_hub_url column — used by the subkey revocation sync worker to discover
+    // the issuing hub for each subkey cert.
+    let _ =
+        sqlx::query("ALTER TABLE subkey_certs ADD COLUMN home_hub_url TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS subkey_revocation_sync (
+            master_pubkey  TEXT NOT NULL,
+            home_hub_url   TEXT NOT NULL,
+            last_synced_at BIGINT NOT NULL DEFAULT 0,
+            PRIMARY KEY (master_pubkey, home_hub_url)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS prefs_blobs (
             master_pubkey  TEXT PRIMARY KEY,

@@ -1003,6 +1003,9 @@ async fn main() -> Result<()> {
     // Poll known cert issuers for revocations every 6 hours.
     wavvon_hub::cert_revocation_worker::spawn(state.clone());
 
+    // Poll known subkey issuers for revocations every 6 hours.
+    wavvon_hub::subkey_revocation_worker::spawn(state.clone());
+
     // Farm heartbeat: POST /farm/heartbeat every 60 seconds when WAVVON_FARM_URL is set.
     if let Some(ref farm_url_for_hb) = state.farm_url {
         let hb_state = state.clone();

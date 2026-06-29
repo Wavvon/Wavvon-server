@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -159,16 +159,19 @@ pub async fn post_device(
     let fallback_json = serde_json::to_string(&cert.fallback_hubs)
         .map_err(|e| db_err(format!("serialize fallback_hubs: {e}")))?;
 
+    let home_hub_url = cert.fallback_hubs.first().cloned().unwrap_or_default();
+
     sqlx::query(
         "INSERT INTO subkey_certs
             (master_pubkey, subkey_pubkey, device_label, issued_at,
-             not_after, fallback_hubs_json, signature, registered_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             not_after, fallback_hubs_json, home_hub_url, signature, registered_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT(master_pubkey, subkey_pubkey) DO UPDATE SET
             device_label = excluded.device_label,
             issued_at = excluded.issued_at,
             not_after = excluded.not_after,
             fallback_hubs_json = excluded.fallback_hubs_json,
+            home_hub_url = excluded.home_hub_url,
             signature = excluded.signature",
     )
     .bind(&cert.master_pubkey)
@@ -177,6 +180,7 @@ pub async fn post_device(
     .bind(cert.issued_at as i64)
     .bind(cert.not_after.map(|t| t as i64))
     .bind(&fallback_json)
+    .bind(&home_hub_url)
     .bind(&cert.signature)
     .bind(now_secs())
     .execute(&state.db)
@@ -188,16 +192,23 @@ pub async fn post_device(
 
 // --- Revocations ---
 
+#[derive(serde::Deserialize, Default)]
+pub struct RevocationsQuery {
+    pub since: Option<i64>,
+}
+
 pub async fn list_revocations(
     State(state): State<Arc<AppState>>,
     Path(master): Path<String>,
+    Query(params): Query<RevocationsQuery>,
 ) -> Result<Json<Vec<RevocationEntry>>, (StatusCode, String)> {
     let rows = sqlx::query(
         "SELECT master_pubkey, subkey_pubkey, revoked_at, signature
-         FROM subkey_revocations WHERE master_pubkey = $1
+         FROM subkey_revocations WHERE master_pubkey = $1 AND revoked_at >= $2
          ORDER BY revoked_at",
     )
     .bind(&master)
+    .bind(params.since.unwrap_or(0))
     .fetch_all(&state.db)
     .await
     .map_err(db_err)?;

@@ -15,4 +15,5 @@ pub mod search;
 pub mod server;
 pub mod settings;
 pub mod state;
+pub mod subkey_revocation_worker;
 pub mod web_client;
