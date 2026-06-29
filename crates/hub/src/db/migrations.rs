@@ -1302,6 +1302,18 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Cert revocation relay ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS cert_revocation_sync (
+            issuer_pubkey  TEXT PRIMARY KEY,
+            issuer_url     TEXT NOT NULL,
+            last_synced_at BIGINT NOT NULL DEFAULT 0
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     // ---- Cleanup phantom zero-sender rows (H1) ----
     let _ = sqlx::query(
         "DELETE FROM users
