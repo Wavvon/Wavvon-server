@@ -220,14 +220,18 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                                 if !to_pubkeys.contains(&cs.public_key) { continue; }
                             }
 
-                            let json = pre_json.to_string();
-                            // Track when screen_share_started reaches this client
-                            // so the chunk-relay arm never races ahead of it.
+                            // If the screen_share_rx arm already sent screen_share_started
+                            // proactively (race-guard), suppress the duplicate here.
                             if let crate::routes::chat_models::ChatEvent::ScreenShareStarted {
                                 channel_id, stream_id, ..
                             } = &event {
-                                cs.notified_streams.insert((channel_id.clone(), stream_id.clone()));
+                                let key = (channel_id.clone(), stream_id.clone());
+                                if cs.notified_streams.contains(&key) {
+                                    continue;
+                                }
+                                cs.notified_streams.insert(key);
                             }
+                            let json = pre_json.to_string();
                             if cs.is_replaying {
                                 cs.replay_buffer.push(json);
                             } else if ws_tx.send(Message::Text(json.into())).await.is_err() {
