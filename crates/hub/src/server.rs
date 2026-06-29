@@ -98,6 +98,30 @@ pub fn create_router_full(
         .route("/auth/challenge", post(auth::handlers::challenge))
         .route("/auth/verify", post(auth::handlers::verify))
         .route("/auth/renew", post(auth::handlers::renew))
+        .route(
+            "/auth/webauthn/begin",
+            post(routes::webauthn::register_begin),
+        )
+        .route(
+            "/auth/webauthn/finish",
+            post(routes::webauthn::register_finish),
+        )
+        .route(
+            "/auth/webauthn/assert/begin",
+            post(routes::webauthn::assert_begin),
+        )
+        .route(
+            "/auth/webauthn/assert/finish",
+            post(routes::webauthn::assert_finish),
+        )
+        .route(
+            "/auth/device-token/create",
+            post(routes::webauthn::device_token_create),
+        )
+        .route(
+            "/auth/device-token/redeem",
+            post(routes::webauthn::device_token_redeem),
+        )
         .layer(from_fn(move |req, next| {
             let l = auth_limiter.clone();
             async move { rate_limit::enforce(l, req, next).await }
@@ -173,6 +197,13 @@ pub fn create_router_full(
         .merge(auth_routes)
         .merge(write_routes)
         .route("/me", get(routes::me::me).patch(routes::me::update_me))
+        .route("/me/credentials", get(routes::webauthn::list_credentials))
+        .route(
+            "/me/credentials/{id}",
+            patch(routes::webauthn::rename_credential).delete(routes::webauthn::delete_credential),
+        )
+        .route("/me/devices", get(routes::webauthn::list_devices))
+        .route("/me/devices/{id}", delete(routes::webauthn::revoke_device))
         .route("/channels", get(routes::channels::list_channels))
         .route(
             "/channels/{channel_id}",

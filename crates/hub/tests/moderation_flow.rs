@@ -310,6 +310,19 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        webauthn: {
+            let origin = url::Url::parse("http://localhost:3000").unwrap();
+            std::sync::Arc::new(
+                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
+                    .unwrap()
+                    .rp_name("test-hub")
+                    .build()
+                    .unwrap(),
+            )
+        },
+        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        device_token_ttl_secs: 30 * 86400,
     });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

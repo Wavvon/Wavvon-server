@@ -1332,6 +1332,39 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- WebAuthn passkey credentials ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS webauthn_credentials (
+            credential_id  TEXT PRIMARY KEY,
+            user_pubkey    TEXT NOT NULL,
+            passkey_json   TEXT NOT NULL,
+            friendly_name  TEXT,
+            aaguid         TEXT,
+            created_at     BIGINT NOT NULL,
+            last_used_at   BIGINT
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // ---- Device tokens (Trust this device) ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS device_tokens (
+            id            TEXT PRIMARY KEY,
+            token_hash    TEXT NOT NULL UNIQUE,
+            user_pubkey   TEXT NOT NULL,
+            device_name   TEXT,
+            created_at    BIGINT NOT NULL,
+            expires_at    BIGINT NOT NULL,
+            last_used_at  BIGINT,
+            revoked       BOOLEAN NOT NULL DEFAULT FALSE
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     // ---- Cleanup phantom zero-sender rows (H1) ----
     let _ = sqlx::query(
         "DELETE FROM users

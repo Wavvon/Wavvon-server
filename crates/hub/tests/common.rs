@@ -7,12 +7,14 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
+use url::Url;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
+use webauthn_rs::WebauthnBuilder;
 
 /// Base PostgreSQL URL for the test database server.
 /// Override with the `TEST_DATABASE_URL` environment variable.
@@ -57,6 +59,17 @@ pub async fn create_test_db() -> PgPool {
         .expect("Failed to run migrations on test database");
 
     pool
+}
+
+fn make_test_webauthn() -> Arc<webauthn_rs::Webauthn> {
+    let origin = Url::parse("http://localhost:3000").unwrap();
+    Arc::new(
+        WebauthnBuilder::new("localhost", &origin)
+            .unwrap()
+            .rp_name("test-hub")
+            .build()
+            .unwrap(),
+    )
 }
 
 pub async fn setup() -> TestServer {
@@ -106,6 +119,10 @@ pub async fn setup() -> TestServer {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        webauthn: make_test_webauthn(),
+        webauthn_reg_challenges: RwLock::new(HashMap::new()),
+        webauthn_auth_challenges: RwLock::new(HashMap::new()),
+        device_token_ttl_secs: 30 * 86400,
     });
     let app = server::create_router(state);
     TestServer::new(app)

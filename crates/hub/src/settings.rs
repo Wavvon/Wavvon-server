@@ -110,6 +110,25 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          receive camera access in the client webview/iframe sandbox. Defaults to false; \
          operators who trust all registered bots on this hub can enable it hub-wide.",
     ),
+    (
+        "WAVVON_PUBLIC_URL",
+        "(unset)",
+        "Public HTTPS URL of this hub (e.g. https://wavvon.example.com). \
+         Used to derive the WebAuthn relying-party ID from the hostname. \
+         Required for passkey auth on non-localhost deployments",
+    ),
+    (
+        "WAVVON_WEBAUTHN_RP_ID",
+        "(unset)",
+        "WebAuthn Relying Party ID override (e.g. example.com). \
+         Defaults to the hostname extracted from WAVVON_PUBLIC_URL, \
+         or `localhost` when neither is set",
+    ),
+    (
+        "WAVVON_DEVICE_TOKEN_TTL_DAYS",
+        "30",
+        "Lifetime of 'Trust this device' tokens in days. Default: 30",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +206,15 @@ pub struct Settings {
     ///
     /// Env: WAVVON_BOTS_ALLOW_CAMERA
     pub bots_allow_camera: bool,
+    /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
+    /// Env: WAVVON_PUBLIC_URL
+    pub public_url: Option<String>,
+    /// WebAuthn Relying Party ID override. Falls back to public_url hostname.
+    /// Env: WAVVON_WEBAUTHN_RP_ID
+    pub webauthn_rp_id: Option<String>,
+    /// Device token TTL in days. Default: 30.
+    /// Env: WAVVON_DEVICE_TOKEN_TTL_DAYS
+    pub device_token_ttl_days: u64,
 }
 
 /// Load hub settings from (in priority order, highest last):
@@ -202,6 +230,7 @@ pub fn load() -> Result<Settings> {
         .set_default("discovery_url", "https://discovery.wavvon.io")?
         .set_default("trusted_proxy", false)?
         .set_default("bots_allow_camera", false)?
+        .set_default("device_token_ttl_days", 30u64)?
         .add_source(config::File::with_name("hub").required(false))
         .add_source(config::Environment::with_prefix("WAVVON"))
         .build()?

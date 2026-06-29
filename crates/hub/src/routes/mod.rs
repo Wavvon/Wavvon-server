@@ -46,5 +46,6 @@ pub mod tags;
 pub mod uploads;
 pub mod users;
 pub mod voice_ws;
+pub mod webauthn;
 pub mod webhooks;
 pub mod ws;

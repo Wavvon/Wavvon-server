@@ -8,6 +8,7 @@ use sqlx::postgres::PgPoolOptions;
 use store::PostgresStore;
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
+use url::Url;
 use wavvon_hub::bots::token_expiry;
 use wavvon_hub::cert_worker;
 use wavvon_hub::db;
@@ -16,6 +17,7 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::{AppState, ConsumedVoiceToken};
 use wavvon_identity::Identity;
+use webauthn_rs::WebauthnBuilder;
 
 /// Print the `--help` text to stdout.
 fn print_help() {
@@ -741,6 +743,46 @@ async fn main() -> Result<()> {
 
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
 
+    // ---- WebAuthn / passkey setup ----
+    let rp_id: String = settings
+        .webauthn_rp_id
+        .clone()
+        .or_else(|| {
+            settings.public_url.as_deref().and_then(|u| {
+                Url::parse(u)
+                    .ok()
+                    .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
+            })
+        })
+        .unwrap_or_else(|| "localhost".to_string());
+
+    let rp_origin: Url = settings
+        .public_url
+        .as_deref()
+        .and_then(|u| Url::parse(u).ok())
+        .unwrap_or_else(|| {
+            Url::parse(&format!("http://localhost:{}", settings.http_port)).unwrap()
+        });
+
+    let hub_display_name = "Wavvon Hub";
+
+    let webauthn = Arc::new(
+        WebauthnBuilder::new(&rp_id, &rp_origin)
+            .expect("Invalid WebAuthn rp_id/origin combination")
+            .rp_name(hub_display_name)
+            .build()
+            .expect("Failed to build Webauthn instance"),
+    );
+
+    let device_token_ttl_secs = (settings.device_token_ttl_days as i64) * 86400;
+
+    if rp_id != "localhost" && settings.tls_cert.is_none() {
+        tracing::warn!(
+            "WebAuthn requires HTTPS for non-localhost rp_id '{rp_id}'; \
+             passkey registration/assertion will fail on plain HTTP"
+        );
+    }
+
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),
         hub_identity,
@@ -782,6 +824,10 @@ async fn main() -> Result<()> {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
         bots_allow_camera: settings.bots_allow_camera,
+        webauthn,
+        webauthn_reg_challenges: RwLock::new(HashMap::new()),
+        webauthn_auth_challenges: RwLock::new(HashMap::new()),
+        device_token_ttl_secs,
     });
 
     // Bind voice UDP socket and start forwarding task

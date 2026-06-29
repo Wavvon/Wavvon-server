@@ -9,6 +9,7 @@ use sqlx::PgPool;
 use store::StoreError;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_identity::Identity;
+use webauthn_rs::prelude::{PasskeyAuthentication, PasskeyRegistration, Webauthn};
 
 use crate::federation::client::FederationClient;
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
@@ -206,6 +207,20 @@ impl Default for RateLimiters {
     }
 }
 
+/// In-flight WebAuthn registration: session_id → (user_pubkey, state).
+pub struct RegChallenge {
+    pub user_pubkey: String,
+    pub state: PasskeyRegistration,
+}
+
+/// In-flight WebAuthn authentication: session_id → (user_pubkey, state, passkeys).
+/// Passkeys are stored so the sign_count can be updated after a successful assertion.
+pub struct AuthChallenge {
+    pub user_pubkey: String,
+    pub state: PasskeyAuthentication,
+    pub passkeys: Vec<webauthn_rs::prelude::Passkey>,
+}
+
 pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
@@ -360,6 +375,15 @@ pub struct AppState {
     /// When true, bot mini-apps that declare `requires_camera` receive camera
     /// access in the client webview/iframe sandbox.
     pub bots_allow_camera: bool,
+
+    /// WebAuthn relying-party instance. Shared across all requests.
+    pub webauthn: Arc<Webauthn>,
+    /// In-flight registration challenges: session_id → RegChallenge.
+    pub webauthn_reg_challenges: RwLock<HashMap<String, RegChallenge>>,
+    /// In-flight authentication challenges: session_id → AuthChallenge.
+    pub webauthn_auth_challenges: RwLock<HashMap<String, AuthChallenge>>,
+    /// Device token TTL in seconds (from settings).
+    pub device_token_ttl_secs: i64,
 }
 
 pub struct PendingChallenge {

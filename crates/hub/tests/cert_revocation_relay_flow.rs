@@ -14,10 +14,12 @@ use serde_json::json;
 use store::PostgresStore;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
+use url::Url;
 use wavvon_hub::cert_revocation_worker;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
+use webauthn_rs::WebauthnBuilder;
 
 #[path = "common.rs"]
 mod common;
@@ -30,6 +32,13 @@ async fn make_state() -> Arc<AppState> {
     let db = common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
+    let webauthn = Arc::new(
+        WebauthnBuilder::new("localhost", &Url::parse("http://localhost:3000").unwrap())
+            .unwrap()
+            .rp_name("test-hub")
+            .build()
+            .unwrap(),
+    );
     Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
@@ -71,6 +80,10 @@ async fn make_state() -> Arc<AppState> {
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        webauthn,
+        webauthn_reg_challenges: RwLock::new(HashMap::new()),
+        webauthn_auth_challenges: RwLock::new(HashMap::new()),
+        device_token_ttl_secs: 30 * 86400,
     })
 }
 

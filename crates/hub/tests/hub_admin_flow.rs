@@ -60,6 +60,19 @@ async fn setup(startup_name: &str) -> TestServer {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        webauthn: {
+            let origin = url::Url::parse("http://localhost:3000").unwrap();
+            std::sync::Arc::new(
+                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
+                    .unwrap()
+                    .rp_name("test-hub")
+                    .build()
+                    .unwrap(),
+            )
+        },
+        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        device_token_ttl_secs: 30 * 86400,
     });
     let app = server::create_router(state);
     TestServer::new(app)
