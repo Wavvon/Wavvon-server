@@ -42,6 +42,10 @@ pub struct SendDmRequest {
     pub plaintext_signature: Option<String>,
 }
 
+fn default_envelope_version() -> u8 {
+    1
+}
+
 /// Wire envelope for an E2E encrypted 1:1 DM.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EncryptedDmEnvelope {
@@ -51,6 +55,15 @@ pub struct EncryptedDmEnvelope {
     pub nonce_hex: String,
     pub dh_pubkey_hex: String,
     pub signature_hex: String,
+    /// Protocol version: 1 = static ECDH (v1, default), 2 = Double Ratchet.
+    #[serde(default = "default_envelope_version")]
+    pub v: u8,
+    /// DR only: index of this message within the current sending chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u32>,
+    /// DR only: number of messages in the previous sending chain (for out-of-order).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_count: Option<u32>,
 }
 
 /// Wire envelope for a group E2E encrypted DM.

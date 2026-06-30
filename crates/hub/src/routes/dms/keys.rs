@@ -16,12 +16,22 @@ use crate::state::AppState;
 pub(super) fn envelope_signing_bytes(
     env: &crate::routes::dm_models::EncryptedDmEnvelope,
 ) -> Vec<u8> {
-    wavvon_identity::dm_envelope_signing_bytes(
-        &env.conv_id,
-        &env.ciphertext_hex,
-        &env.nonce_hex,
-        &env.dh_pubkey_hex,
-    )
+    if env.v == 2 {
+        wavvon_identity::dr_envelope_signing_bytes(
+            &env.conv_id,
+            env.message_index.unwrap_or(0),
+            env.prev_count.unwrap_or(0),
+            &env.ciphertext_hex,
+            &env.dh_pubkey_hex,
+        )
+    } else {
+        wavvon_identity::dm_envelope_signing_bytes(
+            &env.conv_id,
+            &env.ciphertext_hex,
+            &env.nonce_hex,
+            &env.dh_pubkey_hex,
+        )
+    }
 }
 
 pub(super) fn group_envelope_signing_bytes(

@@ -358,6 +358,27 @@ pub fn dm_envelope_signing_bytes(
     buf
 }
 
+/// Signing bytes for a Double Ratchet (v2) encrypted DM envelope.
+/// Domain tag: "wavvon/dm-ciphertext/v2\0"
+/// Fields: conv_id, message_index (u32 LE), prev_count (u32 LE),
+///         ciphertext_hex, dh_pubkey_hex.
+/// No nonce_hex — the nonce is derived from the message key, not transmitted.
+pub fn dr_envelope_signing_bytes(
+    conv_id: &str,
+    message_index: u32,
+    prev_count: u32,
+    ciphertext_hex: &str,
+    dh_pubkey_hex: &str,
+) -> Vec<u8> {
+    let mut buf = b"wavvon/dm-ciphertext/v2\0".to_vec();
+    write_str(&mut buf, conv_id);
+    write_u32_le(&mut buf, message_index);
+    write_u32_le(&mut buf, prev_count);
+    write_str(&mut buf, ciphertext_hex);
+    write_str(&mut buf, dh_pubkey_hex);
+    buf
+}
+
 /// Signing bytes for a group encrypted DM envelope
 /// (`GroupEncryptedEnvelope`). The u32 fields are encoded as
 /// length-prefixed **decimal strings**, not raw integers.
