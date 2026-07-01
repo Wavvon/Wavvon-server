@@ -176,11 +176,8 @@ async fn template_applies_channels_roles_settings_and_welcome_message() {
             async move { axum::Json(t) }
         }),
     );
-    let mock_server = TestServer::new(app).unwrap();
-    let url = mock_server
-        .server_url("/template.json")
-        .expect("mock server URL")
-        .to_string();
+    let mock_server = TestServer::new(app);
+    let url = mock_server.server_url("/template.json");
 
     let http = reqwest::Client::new();
     let cfg = config_with_template(&url);
