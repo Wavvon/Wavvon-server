@@ -79,6 +79,9 @@ async fn setup_with_cors(cors_origins: &str) -> TestServer {
         webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         device_token_ttl_secs: 30 * 86400,
+        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
+            wavvon_hub::state::WebhookCircuit::default(),
+        )),
     });
 
     let app = create_router_with_cors(state, cors_origins);

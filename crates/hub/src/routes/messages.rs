@@ -191,7 +191,9 @@ pub async fn send_message(
         }
     }
 
-    // Auto-mod webhook check (fail-open: allow on timeout, error, or any non-403 response).
+    // Auto-mod webhook check (fail-open: allow on timeout, error, or any non-block response).
+    // Circuit breaker opens after 3 consecutive 5xx responses within 60s; skips the call
+    // for 10 minutes while open (fail-open during backoff, consistent with timeout path).
     // Runs BEFORE the INSERT so a block never stores anything.
     {
         let webhook_url = sqlx::query_scalar::<_, String>(
@@ -204,55 +206,116 @@ pub async fn send_message(
         .unwrap_or_default();
 
         if !webhook_url.is_empty() {
-            let secret = sqlx::query_scalar::<_, String>(
-                "SELECT value FROM hub_settings WHERE key = 'moderation_webhook_secret'",
-            )
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-
-            let payload = serde_json::json!({
-                "message_id": &id,
-                "channel_id": &channel_id,
-                "sender_pubkey": &user.public_key,
-                "content": &req.content,
-                "attachments_count": req.attachments.len(),
-                "timestamp": now,
-            });
-            let payload_str = serde_json::to_string(&payload).unwrap_or_default();
-
-            // HMAC-SHA256 signature over the payload bytes.
-            use hmac::{Hmac, Mac};
-            use sha2::Sha256;
-            let sig = if !secret.is_empty() {
-                let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-                mac.update(payload_str.as_bytes());
-                hex::encode(mac.finalize().into_bytes())
-            } else {
-                String::new()
+            // Check the circuit breaker before doing anything else.
+            let circuit_open = {
+                let circuit = state.webhook_circuit.lock().await;
+                match circuit.open_until {
+                    Some(until) => crate::auth::handlers::unix_timestamp() < until,
+                    None => false,
+                }
             };
 
-            let result = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                state
-                    .http_client
-                    .post(&webhook_url)
-                    .header("X-Wavvon-Signature", &sig)
-                    .header("Content-Type", "application/json")
-                    .body(payload_str)
-                    .send(),
-            )
-            .await;
+            if !circuit_open {
+                let secret = sqlx::query_scalar::<_, String>(
+                    "SELECT value FROM hub_settings WHERE key = 'moderation_webhook_secret'",
+                )
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
 
-            // Block only on an explicit 403 from the webhook; everything else is fail-open.
-            if let Ok(Ok(resp)) = result {
-                if resp.status() == reqwest::StatusCode::FORBIDDEN {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        "Message blocked by moderation policy".to_string(),
-                    ));
+                let payload = serde_json::json!({
+                    "message_id": &id,
+                    "channel_id": &channel_id,
+                    "sender_pubkey": &user.public_key,
+                    "content": &req.content,
+                    "attachments_count": req.attachments.len(),
+                    "timestamp": now,
+                });
+                let payload_str = serde_json::to_string(&payload).unwrap_or_default();
+
+                // HMAC-SHA256 signature over the payload bytes.
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                let sig = if !secret.is_empty() {
+                    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+                    mac.update(payload_str.as_bytes());
+                    hex::encode(mac.finalize().into_bytes())
+                } else {
+                    String::new()
+                };
+
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    state
+                        .http_client
+                        .post(&webhook_url)
+                        .header("X-Wavvon-Signature", &sig)
+                        .header("Content-Type", "application/json")
+                        .body(payload_str)
+                        .send(),
+                )
+                .await;
+
+                match result {
+                    Ok(Ok(resp)) => {
+                        let status = resp.status();
+                        if status.is_server_error() {
+                            // 5xx: increment failure counter and potentially open the circuit.
+                            let mut circuit = state.webhook_circuit.lock().await;
+                            let ts_now = crate::auth::handlers::unix_timestamp();
+                            let streak_start = circuit.streak_started_at.get_or_insert(ts_now);
+                            let streak_age = ts_now - *streak_start;
+                            circuit.consecutive_failures += 1;
+
+                            if circuit.consecutive_failures >= 3 && streak_age <= 60 {
+                                circuit.open_until = Some(ts_now + 600);
+                                tracing::warn!(
+                                    "Auto-mod webhook returned 5xx three times within 60s — \
+                                     circuit open for 10 minutes (url={})",
+                                    &webhook_url
+                                );
+                            } else if streak_age > 60 {
+                                // Streak expired; start a fresh window.
+                                circuit.consecutive_failures = 1;
+                                circuit.streak_started_at = Some(ts_now);
+                            }
+                        } else {
+                            // Non-5xx: close/reset the circuit.
+                            {
+                                let mut circuit = state.webhook_circuit.lock().await;
+                                circuit.consecutive_failures = 0;
+                                circuit.open_until = None;
+                                circuit.streak_started_at = None;
+                            }
+
+                            // Block only on an explicit `block` action in the response body.
+                            // The spec says the webhook responds with
+                            // { "action": "allow" | "block", "reason"?: "..." }.
+                            // A 403 HTTP status is also honored for backward compatibility.
+                            if status == reqwest::StatusCode::FORBIDDEN {
+                                return Err((
+                                    StatusCode::FORBIDDEN,
+                                    "Message blocked by moderation policy".to_string(),
+                                ));
+                            }
+                            if status.is_success() {
+                                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                    if body.get("action").and_then(|v| v.as_str()) == Some("block")
+                                    {
+                                        let reason = body
+                                            .get("reason")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("Message blocked by moderation policy");
+                                        return Err((StatusCode::FORBIDDEN, reason.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Timeout or connection error: fail-open, no circuit change.
+                    _ => {}
                 }
             }
         }

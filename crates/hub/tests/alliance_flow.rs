@@ -75,6 +75,9 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         device_token_ttl_secs: 30 * 86400,
+        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
+            wavvon_hub::state::WebhookCircuit::default(),
+        )),
     });
 
     let app = server::create_router(state.clone());

@@ -829,6 +829,9 @@ async fn main() -> Result<()> {
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
         device_token_ttl_secs,
+        webhook_circuit: Arc::new(tokio::sync::Mutex::new(
+            wavvon_hub::state::WebhookCircuit::default(),
+        )),
     });
 
     // Bind voice UDP socket and start forwarding task

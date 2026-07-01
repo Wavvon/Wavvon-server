@@ -226,20 +226,66 @@ pub async fn verify(
         return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
     }
 
-    // Federated bans: check against the master pubkey (or canonical pubkey for
-    // legacy single-key users) so a new subkey cert can't bypass the ban.
+    // Federated bans: check overrides first, then per-source policy.
+    // Override 'whitelist' → always admit. Override 'blacklist' → always deny.
+    // Otherwise: if any hard-reject source lists the user, deny.
+    // If only soft-flag sources list the user, admit (flag is a future UI concern).
     {
         let check_pubkey = master_pubkey.as_deref().unwrap_or(&canonical_pubkey);
-        let fed_ban_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = $1",
+
+        // Check local overrides.
+        let override_type: Option<String> = sqlx::query_scalar(
+            "SELECT override_type FROM federated_ban_overrides WHERE target_pubkey = $1",
         )
         .bind(check_pubkey)
-        .fetch_one(&state.db)
+        .fetch_optional(&state.db)
         .await
-        .unwrap_or(0);
+        .unwrap_or(None);
 
-        if fed_ban_count > 0 {
-            return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+        match override_type.as_deref() {
+            Some("whitelist") => {
+                // Always admit — skip all federated ban checks.
+            }
+            Some("blacklist") => {
+                return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+            }
+            _ => {
+                // No local override: check federated_bans joined with source policy.
+                // A hard-reject from any source is sufficient to deny.
+                let hard_reject_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM federated_bans fb
+                     JOIN federated_ban_sources fbs ON fbs.issuer_pubkey = fb.source_hub_pubkey
+                     WHERE fb.target_master_pubkey = $1
+                       AND fbs.policy = 'hard-reject'",
+                )
+                .bind(check_pubkey)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(0);
+
+                if hard_reject_count > 0 {
+                    return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+                }
+
+                // For sources not in federated_ban_sources (legacy banlist_sources path),
+                // fall back to treating any federated ban as hard-reject.
+                let legacy_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM federated_bans fb
+                     WHERE fb.target_master_pubkey = $1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM federated_ban_sources fbs
+                           WHERE fbs.issuer_pubkey = fb.source_hub_pubkey
+                       )",
+                )
+                .bind(check_pubkey)
+                .fetch_one(&state.db)
+                .await
+                .unwrap_or(0);
+
+                if legacy_count > 0 {
+                    return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+                }
+            }
         }
     }
 

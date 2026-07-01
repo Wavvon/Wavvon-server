@@ -176,7 +176,29 @@ pub fn create_router_full(
         )
         .route(
             "/admin/settings/moderation",
-            patch(routes::hub::patch_moderation_settings),
+            get(routes::hub::get_moderation_settings).patch(routes::hub::patch_moderation_settings),
+        )
+        // ---- ME1: Federated ban list admin routes ----
+        .route(
+            "/admin/banlist/sources",
+            get(routes::banlist::list_sources)
+                .post(routes::banlist::add_source)
+                .delete(routes::banlist::delete_source)
+                .patch(routes::banlist::update_source),
+        )
+        .route("/admin/banlist/entries", get(routes::banlist::list_entries))
+        .route(
+            "/admin/banlist/overrides",
+            get(routes::banlist::list_overrides).post(routes::banlist::add_override),
+        )
+        .route(
+            "/admin/banlist/overrides/{pubkey}",
+            delete(routes::banlist::delete_override),
+        )
+        .route(
+            "/admin/settings/banlist",
+            get(routes::banlist::get_banlist_settings)
+                .patch(routes::banlist::patch_banlist_settings),
         )
         .route(
             "/admin/settings/listing",

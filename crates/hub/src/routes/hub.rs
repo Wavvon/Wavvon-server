@@ -280,6 +280,51 @@ pub struct HubBranding {
     pub icon: Option<String>,
 }
 
+/// GET /admin/settings/moderation — returns moderation settings and circuit-breaker state.
+///
+/// Never returns the webhook secret; only a boolean indicating whether one is set.
+pub async fn get_moderation_settings(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<ModerationSettingsResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ADMIN)?;
+
+    let webhook_url = read_setting(&state.db, "moderation_webhook_url").await;
+    let webhook_secret_set = read_setting(&state.db, "moderation_webhook_secret")
+        .await
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    let (circuit_open, circuit_open_until) = {
+        let circuit = state.webhook_circuit.lock().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        match circuit.open_until {
+            Some(until) if now < until => (true, Some(until)),
+            _ => (false, None),
+        }
+    };
+
+    Ok(Json(ModerationSettingsResponse {
+        webhook_url: webhook_url.filter(|s| !s.is_empty()),
+        webhook_secret_set,
+        circuit_open,
+        circuit_open_until,
+    }))
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ModerationSettingsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<String>,
+    pub webhook_secret_set: bool,
+    pub circuit_open: bool,
+    pub circuit_open_until: Option<i64>,
+}
+
 /// PATCH /admin/settings/moderation — sets the auto-mod webhook URL and HMAC secret.
 pub async fn patch_moderation_settings(
     State(state): State<Arc<AppState>>,

@@ -186,6 +186,31 @@ pub struct ConsumedVoiceToken {
     pub pubkey: String,
 }
 
+/// Circuit breaker state for the auto-moderation webhook (ME2).
+///
+/// Opened after 3 consecutive 5xx responses within 60 seconds.
+/// While open, the webhook call is skipped entirely (fail-open).
+/// Resets to closed on any successful (non-5xx) response.
+pub struct WebhookCircuit {
+    /// Number of consecutive 5xx failures in the current window.
+    pub consecutive_failures: u32,
+    /// Unix timestamp after which the circuit re-closes. `None` = closed.
+    pub open_until: Option<i64>,
+    /// Wall-clock time of the first failure in the current streak.
+    /// Used to enforce the 60-second window requirement.
+    pub streak_started_at: Option<i64>,
+}
+
+impl Default for WebhookCircuit {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: 0,
+            open_until: None,
+            streak_started_at: None,
+        }
+    }
+}
+
 pub struct RateLimiters {
     /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
     pub messages: Mutex<HashMap<String, (u32, Instant)>>,
@@ -390,6 +415,12 @@ pub struct AppState {
     pub webauthn_auth_challenges: RwLock<HashMap<String, AuthChallenge>>,
     /// Device token TTL in seconds (from settings).
     pub device_token_ttl_secs: i64,
+
+    /// ME2: Circuit breaker for the auto-moderation webhook.
+    ///
+    /// Shared across all request handlers so consecutive failures from any
+    /// concurrent request accumulate in a single counter.
+    pub webhook_circuit: Arc<tokio::sync::Mutex<WebhookCircuit>>,
 }
 
 pub struct PendingChallenge {

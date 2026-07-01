@@ -1411,6 +1411,37 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             .execute(pool)
             .await;
 
+    // ---- ME1: Federated ban list admin tables ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS federated_ban_sources (
+            url           TEXT PRIMARY KEY,
+            policy        TEXT NOT NULL DEFAULT 'hard-reject',
+            added_at      BIGINT NOT NULL,
+            issuer_pubkey TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS federated_ban_overrides (
+            target_pubkey TEXT PRIMARY KEY,
+            override_type TEXT NOT NULL,
+            reason        TEXT,
+            created_at    BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Toggle: does this hub publish its own /federation/banlist?
+    sqlx::query(
+        "INSERT INTO hub_settings(key,value) VALUES('publish_banlist','false') ON CONFLICT(key) DO NOTHING",
+    )
+    .execute(pool)
+    .await?;
+
     // ---- Cleanup phantom zero-sender rows (H1) ----
     let _ = sqlx::query(
         "DELETE FROM users
