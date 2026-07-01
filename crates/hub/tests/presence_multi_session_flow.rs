@@ -67,6 +67,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         voice_pending_binds: RwLock::new(HashMap::new()),
         voice_consumed_tokens: RwLock::new(HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(HashMap::new()),

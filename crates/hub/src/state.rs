@@ -339,6 +339,12 @@ pub struct AppState {
     /// serialised ReceivedVoicePacket bytes. These clients bypass UDP.
     pub voice_ws_senders: RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
 
+    /// Per-user WS sender for targeted voice key distribution messages (V4).
+    /// Registered on WS connect, deregistered on disconnect.
+    /// Key: user public key hex.
+    pub ws_key_senders:
+        RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>>,
+
     /// The hub's UDP voice socket, shared so the voice_ws handler can
     /// fan out WS-originated frames to UDP participants.
     pub voice_udp_socket: Arc<RwLock<Option<Arc<tokio::net::UdpSocket>>>>,

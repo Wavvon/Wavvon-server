@@ -486,6 +486,18 @@ pub enum WsClientMessage {
     #[serde(rename = "voice_position_update")]
     VoicePositionUpdate { zone_id: String, position: Vec<f64> },
 
+    // ---- V4 voice encryption: client → hub ----
+    /// Client distributes a sender key bundle to one or more participants.
+    /// The AES sender key is encrypted with X25519 ECDH using each
+    /// recipient's public key; the hub forwards bundles without inspecting
+    /// the ciphertext.
+    #[serde(rename = "voice_key_offer")]
+    VoiceKeyOffer {
+        channel_id: String,
+        /// One bundle per recipient.
+        bundles: Vec<VoiceKeyBundle>,
+    },
+
     // ---- Bot mini-apps: client → hub ----
     /// Bot announces a mini-app session in a channel. Hub fans to all
     /// channel subscribers as BotAppLaunch. Only valid from bot connections.
@@ -815,6 +827,29 @@ pub enum WsServerMessage {
     #[serde(rename = "member_offline")]
     MemberOffline { public_key: String },
 
+    // ---- V4 voice encryption: hub → client ----
+    /// Targeted delivery: another participant's encrypted sender-key bundle.
+    /// The AES key ciphertext was encrypted by the sender using X25519 ECDH
+    /// with this client's public key; the hub forwards it verbatim.
+    #[serde(rename = "voice_key_received")]
+    VoiceKeyReceived {
+        channel_id: String,
+        from_sender_id: u16,
+        from_pubkey: String,
+        /// AES key ciphertext (hex), encrypted with X25519 ECDH.
+        ciphertext_hex: String,
+        nonce_hex: String,
+    },
+
+    /// Broadcast to existing voice participants: a new sender joined and needs
+    /// each participant to send their current AES key to that new participant.
+    #[serde(rename = "voice_key_request")]
+    VoiceKeyRequest {
+        channel_id: String,
+        new_sender_id: u16,
+        new_pubkey: String,
+    },
+
     // ---- Bot mini-apps: hub → client ----
     /// Hub fans a bot's announce to all subscribers of that channel.
     #[serde(rename = "bot_app_launch")]
@@ -914,6 +949,16 @@ pub struct VoiceZoneSnapshot {
     pub attenuation: AttenuationConfigMsg,
     /// pubkey → position
     pub positions: std::collections::HashMap<String, Vec<f64>>,
+}
+
+/// One encrypted sender-key bundle destined for a single recipient.
+/// Carried inside `VoiceKeyOffer`; forwarded verbatim as `VoiceKeyReceived`.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct VoiceKeyBundle {
+    pub recipient_pubkey: String,
+    /// AES key ciphertext (hex), encrypted with X25519 ECDH.
+    pub ciphertext_hex: String,
+    pub nonce_hex: String,
 }
 
 /// One active stream entry returned by `HubStreams`.

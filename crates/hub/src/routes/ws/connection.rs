@@ -33,6 +33,16 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
 
     let (bot_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
 
+    // V4 voice encryption: per-connection unbounded channel for targeted key
+    // distribution messages.  Registered in ws_key_senders so other connections
+    // can send directly to this one without going through the broadcast bus.
+    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<WsServerMessage>();
+    state
+        .ws_key_senders
+        .write()
+        .await
+        .insert(public_key.clone(), key_tx);
+
     // Unique id for this specific WS session — used to discriminate
     // bot_sessions entries so a newer session does not overwrite the older
     // sender, and so the first disconnect does not evict the second session.
@@ -264,6 +274,16 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                 }
             }
 
+            // ── V4 voice-key targeted delivery ───────────────────────────
+            key_msg = key_rx.recv() => {
+                if let Some(msg) = key_msg {
+                    let json = serde_json::to_string(&msg).unwrap();
+                    if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+
             // ── Inbound client frame ──────────────────────────────────────
             msg = ws_rx.next() => {
                 match msg {
@@ -430,6 +450,9 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     }
 
     // ── Disconnect cleanup ───────────────────────────────────────────────────
+
+    // V4 voice encryption: deregister this connection's key sender.
+    state.ws_key_senders.write().await.remove(&public_key);
 
     if let Some(ch_id) = cs.voice_channel {
         leave_voice(&state, &public_key, &ch_id).await;
@@ -678,6 +701,11 @@ async fn dispatch_client_msg(
         }
         WsClientMessage::BotAppDismiss { .. } => {
             mini_app::handle_bot_app_dismiss(cs, state, msg).await
+        }
+
+        // ── V4 voice encryption ────────────────────────────────────────────
+        WsClientMessage::VoiceKeyOffer { .. } => {
+            voice::handle_voice_key_offer(cs, state, msg).await
         }
 
         // ── Bots ───────────────────────────────────────────────────────────

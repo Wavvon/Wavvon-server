@@ -247,6 +247,33 @@ pub(in crate::routes::ws) async fn handle_voice_join(
 
     re_resolve_whisper_sessions(state).await;
 
+    // V4 voice encryption: notify existing voice participants that a new
+    // sender joined so they can forward their AES sender keys to it.
+    {
+        let existing_pubkeys: Vec<String> = {
+            let vc = state.voice_channels.read().await;
+            vc.get(&channel_id)
+                .map(|m| {
+                    m.keys()
+                        .filter(|pk| *pk != &cs.public_key)
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let req = WsServerMessage::VoiceKeyRequest {
+            channel_id: channel_id.clone(),
+            new_sender_id: sender_id,
+            new_pubkey: cs.public_key.clone(),
+        };
+        let senders = state.ws_key_senders.read().await;
+        for pk in &existing_pubkeys {
+            if let Some(tx) = senders.get(pk) {
+                let _ = tx.send(req.clone());
+            }
+        }
+    }
+
     // Send current voice zone state snapshot to the joining participant.
     let zones_snapshot: Vec<crate::routes::chat_models::VoiceZoneSnapshot> = {
         let zones = state.voice_zones.read().await;
@@ -837,5 +864,48 @@ pub(in crate::routes::ws) fn handle_video_ice(
     let json: std::sync::Arc<str> =
         std::sync::Arc::from(serde_json::to_string(&reply).unwrap().as_str());
     let _ = state.chat_tx.send((ev, json));
+    DispatchResult::Continue
+}
+
+/// V4 voice encryption: forward an AES sender-key bundle to each named
+/// recipient.  The hub never inspects the ciphertext — it only routes the
+/// bundle from sender to the recipient's WS connection via `ws_key_senders`.
+pub(in crate::routes::ws) async fn handle_voice_key_offer(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let (channel_id, bundles) = match msg {
+        WsClientMessage::VoiceKeyOffer {
+            channel_id,
+            bundles,
+        } => (channel_id, bundles),
+        _ => return DispatchResult::Continue,
+    };
+
+    // Resolve the numeric sender_id for this client in the channel.
+    let from_sender_id = state
+        .voice_sender_ids
+        .read()
+        .await
+        .get(&channel_id)
+        .and_then(|m| m.get(&cs.public_key))
+        .copied()
+        .unwrap_or(0);
+
+    let senders = state.ws_key_senders.read().await;
+    for bundle in bundles {
+        if let Some(tx) = senders.get(&bundle.recipient_pubkey) {
+            let delivery = WsServerMessage::VoiceKeyReceived {
+                channel_id: channel_id.clone(),
+                from_sender_id,
+                from_pubkey: cs.public_key.clone(),
+                ciphertext_hex: bundle.ciphertext_hex,
+                nonce_hex: bundle.nonce_hex,
+            };
+            let _ = tx.send(delivery);
+        }
+        // Unknown recipients are silently dropped — not an error.
+    }
     DispatchResult::Continue
 }
