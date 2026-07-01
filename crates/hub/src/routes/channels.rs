@@ -844,7 +844,7 @@ pub async fn mark_channel_read(
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
-    let now = crate::auth::handlers::unix_timestamp();
+    let now = crate::auth::handlers::unix_timestamp_ms();
     sqlx::query(
         "INSERT INTO channel_last_read (user_pubkey, channel_id, last_read_at)
          VALUES ($1, $2, $3)

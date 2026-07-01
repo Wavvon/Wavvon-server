@@ -142,6 +142,40 @@ pub async fn validate_and_use_invite(
     Ok(())
 }
 
+/// GET /join/:code — public; returns hub info so a visitor can preview before joining.
+pub async fn get_join_info(
+    State(state): State<Arc<AppState>>,
+    Path(code): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let invite = sqlx::query_as::<_, InviteRow>(
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at FROM invites WHERE code = $1",
+    )
+    .bind(&code)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    .ok_or((StatusCode::NOT_FOUND, "Invite not found".to_string()))?;
+
+    let member_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let hub_name =
+        sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_name'")
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| state.hub_name.clone());
+
+    Ok(Json(serde_json::json!({
+        "hub_name": hub_name,
+        "member_count": member_count,
+        "code": invite.code,
+    })))
+}
+
 /// POST /join/:code — requires a valid session token.
 /// Validates the invite, increments use_count, and auto-approves the user
 /// (bypasses the require_approval gate even when the hub has it enabled).

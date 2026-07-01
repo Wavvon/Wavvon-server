@@ -413,7 +413,10 @@ pub fn create_router_full(
             axum::routing::delete(routes::invites::revoke_invite),
         )
         // ---- Join links (Feature 5) ----
-        .route("/join/{code}", post(routes::invites::join_with_invite))
+        .route(
+            "/join/{code}",
+            get(routes::invites::get_join_info).post(routes::invites::join_with_invite),
+        )
         // ---- Unread counts (Feature 2) ----
         // Must be registered before /channels/{channel_id} to avoid "unread" being matched as a path param.
         .route("/channels/unread", get(routes::channels::get_unread_counts))
