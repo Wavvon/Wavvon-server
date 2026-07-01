@@ -498,6 +498,15 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+        // system user required by channels.created_by FK constraint.
+        sqlx::query(
+            "INSERT INTO users(public_key, first_seen_at, last_seen_at)
+             VALUES('system', $1, $1) ON CONFLICT (public_key) DO NOTHING",
+        )
+        .bind(now)
+        .execute(&db)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO channels(id, name, created_by, is_category, display_order, created_at)
              VALUES('ch-existing', 'existing', 'system', false, 0, $1)",
