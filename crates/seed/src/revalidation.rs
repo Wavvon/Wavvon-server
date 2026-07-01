@@ -66,7 +66,7 @@ pub async fn tick(state: &SeedState) -> anyhow::Result<(usize, usize)> {
         });
 
         let Some(info) = info else {
-            sqlx::query("DELETE FROM registered_farms WHERE farm_url = ?")
+            sqlx::query("DELETE FROM registered_farms WHERE farm_url = $1")
                 .bind(&farm_url)
                 .execute(&state.db)
                 .await?;
@@ -79,8 +79,8 @@ pub async fn tick(state: &SeedState) -> anyhow::Result<(usize, usize)> {
 
         let _ = sqlx::query(
             "UPDATE registered_farms
-             SET hub_count = ?, max_hubs_total = ?, capacity_pct = ?, last_verified_at = ?
-             WHERE farm_url = ?",
+             SET hub_count = $1, max_hubs_total = $2, capacity_pct = $3, last_verified_at = $4
+             WHERE farm_url = $5",
         )
         .bind(hub_count)
         .bind(max_hubs_total)
