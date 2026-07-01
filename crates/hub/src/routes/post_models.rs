@@ -16,6 +16,7 @@ pub struct PostRow {
     pub reply_count: i64,
     pub last_activity_at: i64,
     pub deleted_at: Option<i64>,
+    pub attachments: String,
 }
 
 #[derive(sqlx::FromRow)]
@@ -28,9 +29,28 @@ pub struct ReplyRow {
     pub edited_at: Option<i64>,
     pub reply_to_id: Option<String>,
     pub deleted_at: Option<i64>,
+    pub attachments: String,
 }
 
 // ── Wire types (Serialize / Deserialize) ────────────────────────────────────
+
+/// Aggregated emoji reaction count with viewer-own flag.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ReactionCount {
+    pub emoji: String,
+    pub count: i64,
+    /// Whether the requesting user has reacted with this emoji.
+    pub me: bool,
+}
+
+/// File attachment metadata stored as JSON in the DB.
+#[derive(Serialize, Deserialize, Clone, Debug, sqlx::FromRow)]
+pub struct Attachment {
+    pub url: String,
+    pub name: String,
+    pub mime: String,
+    pub size: i64,
+}
 
 /// Summary of a post as it appears in the list view.
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -51,6 +71,8 @@ pub struct PostSummary {
     /// post. `None` when the request was made without authentication.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unread_reply_count: Option<i64>,
+    pub reactions: Vec<ReactionCount>,
+    pub attachments: Vec<Attachment>,
 }
 
 /// Full post including body and first page of replies.
@@ -77,6 +99,8 @@ pub struct ReplyView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_id: Option<String>,
     pub is_deleted: bool,
+    pub reactions: Vec<ReactionCount>,
+    pub attachments: Vec<Attachment>,
 }
 
 /// Paged list of posts.
@@ -92,6 +116,8 @@ pub struct PostListResponse {
 pub struct CreatePostRequest {
     pub title: String,
     pub body: String,
+    #[serde(default)]
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 /// Edit an existing post's title and/or body.
@@ -109,6 +135,8 @@ pub struct CreateReplyRequest {
     pub body: String,
     #[serde(default)]
     pub reply_to_id: Option<String>,
+    #[serde(default)]
+    pub attachments: Option<Vec<Attachment>>,
 }
 
 /// Edit a reply body.
@@ -163,9 +191,21 @@ pub struct SearchParams {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+fn parse_attachments(json: &str) -> Vec<Attachment> {
+    if json.is_empty() || json == "[]" {
+        return Vec::new();
+    }
+    serde_json::from_str(json).unwrap_or_default()
+}
+
 /// Convert a PostRow to a PostSummary. `viewer_can_moderate` controls whether
-/// the author field is preserved for tombstoned rows.
-pub fn post_to_summary(row: &PostRow, viewer_can_moderate: bool) -> PostSummary {
+/// the author field is preserved for tombstoned rows. Reactions and attachments
+/// are always passed in by the caller (fetched separately).
+pub fn post_to_summary(
+    row: &PostRow,
+    viewer_can_moderate: bool,
+    reactions: Vec<ReactionCount>,
+) -> PostSummary {
     let is_deleted = row.deleted_at.is_some();
     PostSummary {
         id: row.id.clone(),
@@ -188,11 +228,17 @@ pub fn post_to_summary(row: &PostRow, viewer_can_moderate: bool) -> PostSummary 
         last_activity_at: row.last_activity_at,
         is_deleted,
         unread_reply_count: None,
+        reactions,
+        attachments: parse_attachments(&row.attachments),
     }
 }
 
 /// Convert a ReplyRow to a ReplyView.
-pub fn reply_to_view(row: &ReplyRow, viewer_can_moderate: bool) -> ReplyView {
+pub fn reply_to_view(
+    row: &ReplyRow,
+    viewer_can_moderate: bool,
+    reactions: Vec<ReactionCount>,
+) -> ReplyView {
     let is_deleted = row.deleted_at.is_some();
     ReplyView {
         id: row.id.clone(),
@@ -211,5 +257,7 @@ pub fn reply_to_view(row: &ReplyRow, viewer_can_moderate: bool) -> ReplyView {
         edited_at: row.edited_at,
         reply_to_id: row.reply_to_id.clone(),
         is_deleted,
+        reactions,
+        attachments: parse_attachments(&row.attachments),
     }
 }

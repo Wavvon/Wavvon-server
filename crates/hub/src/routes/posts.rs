@@ -9,16 +9,15 @@ use crate::auth::middleware::AuthUser;
 use crate::permissions;
 use crate::routes::chat_models::ChatEvent;
 use crate::routes::post_models::{
-    post_to_summary, reply_to_view, CreatePostRequest, CreateReplyRequest, EditPostRequest,
-    EditReplyRequest, PostDetail, PostListParams, PostListResponse, PostRow, PostSearchHit,
-    PostSearchResponse, ReplyListParams, ReplyRow, SearchParams,
+    post_to_summary, reply_to_view, Attachment, CreatePostRequest, CreateReplyRequest,
+    EditPostRequest, EditReplyRequest, PostDetail, PostListParams, PostListResponse, PostRow,
+    PostSearchHit, PostSearchResponse, ReactionCount, ReplyListParams, ReplyRow, SearchParams,
 };
 use crate::state::AppState;
 
 // ── Guard helper ─────────────────────────────────────────────────────────────
 
 /// Load a channel row and verify it is a forum channel.
-/// Returns `(channel_type,)` on success or a typed error.
 async fn require_forum_channel(
     db: &sqlx::PgPool,
     channel_id: &str,
@@ -47,7 +46,8 @@ async fn require_post(
     let row = sqlx::query_as::<_, PostRow>(
         "SELECT id, channel_id, author_pubkey, title, body,
                 created_at, edited_at, is_pinned, is_locked,
-                reply_count, last_activity_at, deleted_at
+                reply_count, last_activity_at, deleted_at,
+                COALESCE(attachments, '[]') AS attachments
          FROM posts WHERE id = $1",
     )
     .bind(post_id)
@@ -70,7 +70,8 @@ async fn require_reply(
 ) -> Result<ReplyRow, (StatusCode, String)> {
     let row = sqlx::query_as::<_, ReplyRow>(
         "SELECT id, post_id, author_pubkey, body,
-                created_at, edited_at, reply_to_id, deleted_at
+                created_at, edited_at, reply_to_id, deleted_at,
+                COALESCE(attachments, '[]') AS attachments
          FROM post_replies WHERE id = $1",
     )
     .bind(reply_id)
@@ -107,6 +108,70 @@ fn broadcast_forum_event(state: &AppState, channel_id: &str, event: serde_json::
     }
 }
 
+// ── Reaction helpers ─────────────────────────────────────────────────────────
+
+/// Load aggregated reaction counts for a post, with `me` set for the viewer.
+async fn load_post_reactions(db: &sqlx::PgPool, post_id: &str, viewer: &str) -> Vec<ReactionCount> {
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT emoji, COUNT(*) as cnt,
+                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+         FROM post_reactions
+         WHERE post_id = $2
+         GROUP BY emoji
+         ORDER BY MIN(created_at) ASC",
+    )
+    .bind(viewer)
+    .bind(post_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .map(|(emoji, count, mine)| ReactionCount {
+            emoji,
+            count,
+            me: mine != 0,
+        })
+        .collect()
+}
+
+/// Load aggregated reaction counts for a reply, with `me` set for the viewer.
+async fn load_reply_reactions(
+    db: &sqlx::PgPool,
+    reply_id: &str,
+    viewer: &str,
+) -> Vec<ReactionCount> {
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT emoji, COUNT(*) as cnt,
+                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+         FROM reply_reactions
+         WHERE reply_id = $2
+         GROUP BY emoji
+         ORDER BY MIN(created_at) ASC",
+    )
+    .bind(viewer)
+    .bind(reply_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .map(|(emoji, count, mine)| ReactionCount {
+            emoji,
+            count,
+            me: mine != 0,
+        })
+        .collect()
+}
+
+fn encode_attachments(attachments: &Option<Vec<Attachment>>) -> String {
+    attachments
+        .as_deref()
+        .filter(|a| !a.is_empty())
+        .map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()))
+        .unwrap_or_else(|| "[]".to_string())
+}
+
 // ── GET /channels/:cid/posts ─────────────────────────────────────────────────
 
 pub async fn list_posts(
@@ -138,7 +203,8 @@ pub async fn list_posts(
         sqlx::query_as::<_, PostRow>(
             "SELECT id, channel_id, author_pubkey, title, body,
                     created_at, edited_at, is_pinned, is_locked,
-                    reply_count, last_activity_at, deleted_at
+                    reply_count, last_activity_at, deleted_at,
+                    COALESCE(attachments, '[]') AS attachments
              FROM posts
              WHERE channel_id = $1
                AND (last_activity_at < $2 OR (last_activity_at = $3 AND id < $4))
@@ -158,7 +224,8 @@ pub async fn list_posts(
         sqlx::query_as::<_, PostRow>(
             "SELECT id, channel_id, author_pubkey, title, body,
                     created_at, edited_at, is_pinned, is_locked,
-                    reply_count, last_activity_at, deleted_at
+                    reply_count, last_activity_at, deleted_at,
+                    COALESCE(attachments, '[]') AS attachments
              FROM posts
              WHERE channel_id = $1 AND deleted_at IS NULL
              ORDER BY is_pinned DESC, last_activity_at DESC, id DESC
@@ -181,12 +248,12 @@ pub async fn list_posts(
         None
     };
 
-    // Populate unread_reply_count for each post using the caller's read cursor.
-    let mut posts: Vec<_> = rows
-        .iter()
-        .map(|r| post_to_summary(r, can_moderate))
-        .collect();
-    for (summary, row) in posts.iter_mut().zip(rows.iter()) {
+    // Populate unread_reply_count and reactions for each post.
+    let mut posts: Vec<_> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let reactions = load_post_reactions(&state.db, &row.id, &user.public_key).await;
+        let mut summary = post_to_summary(row, can_moderate, reactions);
+
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM post_replies
              WHERE post_id = $1 AND created_at > COALESCE(
@@ -201,6 +268,8 @@ pub async fn list_posts(
         .await
         .unwrap_or(0);
         summary.unread_reply_count = Some(count);
+
+        posts.push(summary);
     }
 
     Ok(Json(PostListResponse { posts, cursor }))
@@ -230,16 +299,18 @@ pub async fn create_post(
 
     let id = Uuid::new_v4().to_string();
     let now = unix_now();
+    let attachments_json = encode_attachments(&req.attachments);
 
     sqlx::query(
-        "INSERT INTO posts (id, channel_id, author_pubkey, title, body, created_at, last_activity_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO posts (id, channel_id, author_pubkey, title, body, attachments, created_at, last_activity_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(&channel_id)
     .bind(&user.public_key)
     .bind(&title)
     .bind(&body)
+    .bind(&attachments_json)
     .bind(now)
     .bind(now)
     .execute(&state.db)
@@ -248,7 +319,8 @@ pub async fn create_post(
 
     let row = require_post(&state.db, &channel_id, &id).await?;
     let can_moderate = perms.has(permissions::MANAGE_POSTS);
-    let summary = post_to_summary(&row, can_moderate);
+    let reactions = load_post_reactions(&state.db, &id, &user.public_key).await;
+    let summary = post_to_summary(&row, can_moderate, reactions);
     let detail = PostDetail {
         body: Some(row.body.clone()),
         replies: Vec::new(),
@@ -283,7 +355,8 @@ pub async fn get_post(
     let can_moderate = perms.has(permissions::MANAGE_POSTS);
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
-    let mut summary = post_to_summary(&row, can_moderate);
+    let reactions = load_post_reactions(&state.db, &post_id, &user.public_key).await;
+    let mut summary = post_to_summary(&row, can_moderate, reactions);
 
     // Populate unread_reply_count using the caller's read cursor.
     let unread: i64 = sqlx::query_scalar(
@@ -305,7 +378,8 @@ pub async fn get_post(
 
     let reply_rows: Vec<ReplyRow> = if let Some(after_id) = &params.after {
         sqlx::query_as::<_, ReplyRow>(
-            "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at
+            "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at,
+                    COALESCE(attachments, '[]') AS attachments
              FROM post_replies
              WHERE post_id = $1
                AND created_at > (SELECT created_at FROM post_replies WHERE id = $2)
@@ -320,7 +394,8 @@ pub async fn get_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     } else {
         sqlx::query_as::<_, ReplyRow>(
-            "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at
+            "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at,
+                    COALESCE(attachments, '[]') AS attachments
              FROM post_replies
              WHERE post_id = $1
              ORDER BY created_at ASC, id ASC
@@ -341,10 +416,11 @@ pub async fn get_post(
         None
     };
 
-    let replies = reply_rows
-        .iter()
-        .map(|r| reply_to_view(r, can_moderate))
-        .collect();
+    let mut replies = Vec::with_capacity(reply_rows.len());
+    for r in &reply_rows {
+        let r_reactions = load_reply_reactions(&state.db, &r.id, &user.public_key).await;
+        replies.push(reply_to_view(r, can_moderate, r_reactions));
+    }
 
     Ok(Json(PostDetail {
         body: if row.deleted_at.is_some() {
@@ -401,7 +477,8 @@ pub async fn edit_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let updated_row = require_post(&state.db, &channel_id, &post_id).await?;
-    let summary = post_to_summary(&updated_row, can_moderate);
+    let reactions = load_post_reactions(&state.db, &post_id, &user.public_key).await;
+    let summary = post_to_summary(&updated_row, can_moderate, reactions);
     let detail = PostDetail {
         body: Some(updated_row.body.clone()),
         replies: Vec::new(),
@@ -504,15 +581,17 @@ pub async fn create_reply(
 
     let id = Uuid::new_v4().to_string();
     let now = unix_now();
+    let attachments_json = encode_attachments(&req.attachments);
 
     sqlx::query(
-        "INSERT INTO post_replies (id, post_id, author_pubkey, body, created_at, reply_to_id)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO post_replies (id, post_id, author_pubkey, body, attachments, created_at, reply_to_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&id)
     .bind(&post_id)
     .bind(&user.public_key)
     .bind(&body)
+    .bind(&attachments_json)
     .bind(now)
     .bind(&req.reply_to_id)
     .execute(&state.db)
@@ -531,7 +610,8 @@ pub async fn create_reply(
 
     let reply_row = require_reply(&state.db, &post_id, &id).await?;
     let can_moderate = perms.has(permissions::MANAGE_POSTS);
-    let view = reply_to_view(&reply_row, can_moderate);
+    let reactions = load_reply_reactions(&state.db, &id, &user.public_key).await;
+    let view = reply_to_view(&reply_row, can_moderate, reactions);
 
     broadcast_forum_event(
         &state,
@@ -584,7 +664,8 @@ pub async fn edit_reply(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let updated = require_reply(&state.db, &post_id, &reply_id).await?;
-    let view = reply_to_view(&updated, can_moderate);
+    let reactions = load_reply_reactions(&state.db, &reply_id, &user.public_key).await;
+    let view = reply_to_view(&updated, can_moderate, reactions);
 
     broadcast_forum_event(
         &state,
@@ -815,6 +896,168 @@ pub async fn mark_post_read(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── POST /channels/:cid/posts/:pid/reactions ─────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct ReactionRequest {
+    pub emoji: String,
+}
+
+pub async fn add_post_reaction(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, post_id)): Path<(String, String)>,
+    Json(req): Json<ReactionRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    let _ = require_post(&state.db, &channel_id, &post_id).await?;
+
+    let emoji = req.emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "emoji must be 1..8 chars".to_string(),
+        ));
+    }
+
+    let now = unix_now();
+    sqlx::query(
+        "INSERT INTO post_reactions (post_id, emoji, user_key, created_at)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (post_id, emoji, user_key) DO NOTHING",
+    )
+    .bind(&post_id)
+    .bind(emoji)
+    .bind(&user.public_key)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    broadcast_forum_event(
+        &state,
+        &channel_id,
+        serde_json::json!({
+            "type": "post_updated",
+            "channel_id": channel_id,
+            "post_id": post_id,
+        }),
+    );
+
+    Ok(StatusCode::CREATED)
+}
+
+// ── DELETE /channels/:cid/posts/:pid/reactions/:emoji ─────────────────────────
+
+pub async fn remove_post_reaction(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, post_id, emoji)): Path<(String, String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    let _ = require_post(&state.db, &channel_id, &post_id).await?;
+
+    sqlx::query("DELETE FROM post_reactions WHERE post_id = $1 AND emoji = $2 AND user_key = $3")
+        .bind(&post_id)
+        .bind(&emoji)
+        .bind(&user.public_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    broadcast_forum_event(
+        &state,
+        &channel_id,
+        serde_json::json!({
+            "type": "post_updated",
+            "channel_id": channel_id,
+            "post_id": post_id,
+        }),
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── POST /posts/:rid/reactions ────────────────────────────────────────────────
+// Note: these routes are registered at /channels/:cid/posts/:pid/replies/:rid/reactions
+
+pub async fn add_reply_reaction(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, post_id, reply_id)): Path<(String, String, String)>,
+    Json(req): Json<ReactionRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    let _ = require_post(&state.db, &channel_id, &post_id).await?;
+    let _ = require_reply(&state.db, &post_id, &reply_id).await?;
+
+    let emoji = req.emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > 8 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "emoji must be 1..8 chars".to_string(),
+        ));
+    }
+
+    let now = unix_now();
+    sqlx::query(
+        "INSERT INTO reply_reactions (reply_id, emoji, user_key, created_at)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (reply_id, emoji, user_key) DO NOTHING",
+    )
+    .bind(&reply_id)
+    .bind(emoji)
+    .bind(&user.public_key)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    broadcast_forum_event(
+        &state,
+        &channel_id,
+        serde_json::json!({
+            "type": "reply_updated",
+            "channel_id": channel_id,
+            "post_id": post_id,
+            "reply_id": reply_id,
+        }),
+    );
+
+    Ok(StatusCode::CREATED)
+}
+
+// ── DELETE /posts/:pid/replies/:rid/reactions/:emoji ──────────────────────────
+
+pub async fn remove_reply_reaction(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, post_id, reply_id, emoji)): Path<(String, String, String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    let _ = require_post(&state.db, &channel_id, &post_id).await?;
+    let _ = require_reply(&state.db, &post_id, &reply_id).await?;
+
+    sqlx::query("DELETE FROM reply_reactions WHERE reply_id = $1 AND emoji = $2 AND user_key = $3")
+        .bind(&reply_id)
+        .bind(&emoji)
+        .bind(&user.public_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    broadcast_forum_event(
+        &state,
+        &channel_id,
+        serde_json::json!({
+            "type": "reply_updated",
+            "channel_id": channel_id,
+            "post_id": post_id,
+            "reply_id": reply_id,
+        }),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -389,6 +389,240 @@ async fn forum_search_requires_non_empty_query() {
     assert!(resp.text().contains("q_required"));
 }
 
+// ── Reactions ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn forum_post_reaction_add_and_remove() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    // Create a post (parse as Value to access reactions via indexing).
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "React to me", "body": "body" }))
+        .await;
+    assert_eq!(resp.status_code(), 201);
+    let v: Value = resp.json();
+    let post_id = v["id"].as_str().unwrap().to_string();
+    assert_eq!(v["reactions"].as_array().map(|a| a.len()), Some(0));
+
+    // Add reaction.
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts/{post_id}/reactions"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "emoji": "👍" }))
+        .await;
+    assert_eq!(resp.status_code(), 201, "{}", resp.text());
+
+    // Get post — reactions should include the thumbs-up with count=1, me=true.
+    let resp = server
+        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    assert_eq!(resp.status_code(), 200);
+    let v: Value = resp.json();
+    let reactions = v["reactions"].as_array().unwrap();
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0]["emoji"].as_str(), Some("👍"));
+    assert_eq!(reactions[0]["count"].as_i64(), Some(1));
+    assert_eq!(reactions[0]["me"].as_bool(), Some(true));
+
+    // Remove reaction.
+    let resp = server
+        .delete(&format!(
+            "/channels/{channel_id}/posts/{post_id}/reactions/👍"
+        ))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    assert_eq!(resp.status_code(), 204, "{}", resp.text());
+
+    // Reactions should now be empty.
+    let resp = server
+        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    let v: Value = resp.json();
+    assert_eq!(v["reactions"].as_array().map(|a| a.len()), Some(0));
+}
+
+#[tokio::test]
+async fn forum_reply_reaction_add_and_remove() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "Post", "body": "body" }))
+        .await;
+    let v: Value = resp.json();
+    let post_id = v["id"].as_str().unwrap().to_string();
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts/{post_id}/replies"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "body": "A reply" }))
+        .await;
+    assert_eq!(resp.status_code(), 201);
+    let reply: Value = resp.json();
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+    assert_eq!(reply["reactions"].as_array().map(|a| a.len()), Some(0));
+
+    // Add reaction to reply.
+    let resp = server
+        .post(&format!(
+            "/channels/{channel_id}/posts/{post_id}/replies/{reply_id}/reactions"
+        ))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "emoji": "❤️" }))
+        .await;
+    assert_eq!(resp.status_code(), 201, "{}", resp.text());
+
+    // Fetch post detail — reply should have the reaction.
+    let resp = server
+        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    let v: Value = resp.json();
+    let replies = v["replies"].as_array().unwrap();
+    let found = replies.iter().find(|r| r["id"].as_str() == Some(&reply_id));
+    assert!(found.is_some(), "reply not found in post detail");
+    let reactions = found.unwrap()["reactions"].as_array().unwrap();
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0]["emoji"].as_str(), Some("❤️"));
+    assert_eq!(reactions[0]["count"].as_i64(), Some(1));
+
+    // Remove reply reaction.
+    let resp = server
+        .delete(&format!(
+            "/channels/{channel_id}/posts/{post_id}/replies/{reply_id}/reactions/❤️"
+        ))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    assert_eq!(resp.status_code(), 204, "{}", resp.text());
+
+    let resp = server
+        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    let v: Value = resp.json();
+    let replies = v["replies"].as_array().unwrap();
+    let found = replies
+        .iter()
+        .find(|r| r["id"].as_str() == Some(&reply_id))
+        .unwrap();
+    assert_eq!(found["reactions"].as_array().map(|a| a.len()), Some(0));
+}
+
+#[tokio::test]
+async fn forum_post_reaction_invalid_emoji_rejected() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "T", "body": "b" }))
+        .await;
+    let v: Value = resp.json();
+    let post_id = v["id"].as_str().unwrap().to_string();
+
+    // Empty emoji.
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts/{post_id}/reactions"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "emoji": "" }))
+        .await;
+    assert_eq!(resp.status_code(), 400, "{}", resp.text());
+
+    // Too-long emoji (9 chars).
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts/{post_id}/reactions"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "emoji": "123456789" }))
+        .await;
+    assert_eq!(resp.status_code(), 400, "{}", resp.text());
+}
+
+// ── Attachments ───────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn forum_post_with_attachments() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "title": "With files",
+            "body": "see attachment",
+            "attachments": [
+                { "url": "https://example.com/file.pdf", "name": "file.pdf", "mime": "application/pdf", "size": 12345 }
+            ]
+        }))
+        .await;
+    assert_eq!(resp.status_code(), 201, "{}", resp.text());
+    let v: Value = resp.json();
+    let attachments = v["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(
+        attachments[0]["url"].as_str(),
+        Some("https://example.com/file.pdf")
+    );
+    assert_eq!(attachments[0]["name"].as_str(), Some("file.pdf"));
+
+    // Verify round-trip via GET.
+    let post_id = v["id"].as_str().unwrap().to_string();
+    let resp = server
+        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    let v2: Value = resp.json();
+    assert_eq!(v2["attachments"].as_array().map(|a| a.len()), Some(1));
+}
+
+#[tokio::test]
+async fn forum_reply_with_attachments() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "T", "body": "b" }))
+        .await;
+    let v: Value = resp.json();
+    let post_id = v["id"].as_str().unwrap().to_string();
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts/{post_id}/replies"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "body": "reply with file",
+            "attachments": [
+                { "url": "https://example.com/img.png", "name": "img.png", "mime": "image/png", "size": 9000 }
+            ]
+        }))
+        .await;
+    assert_eq!(resp.status_code(), 201, "{}", resp.text());
+    let reply: Value = resp.json();
+    let attachments = reply["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["mime"].as_str(), Some("image/png"));
+}
+
 #[tokio::test]
 async fn forum_get_post_not_found_returns_404() {
     let server = common::setup().await;

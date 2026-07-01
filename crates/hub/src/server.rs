@@ -701,6 +701,22 @@ pub fn create_router_full(
             "/channels/{channel_id}/posts/{post_id}/read",
             post(routes::posts::mark_post_read),
         )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/reactions",
+            post(routes::posts::add_post_reaction),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/reactions/{emoji}",
+            delete(routes::posts::remove_post_reaction),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/replies/{reply_id}/reactions",
+            post(routes::posts::add_reply_reaction),
+        )
+        .route(
+            "/channels/{channel_id}/posts/{post_id}/replies/{reply_id}/reactions/{emoji}",
+            delete(routes::posts::remove_reply_reaction),
+        )
         // ---- Recovery contacts (Task #24) ----
         .route(
             "/recovery/contacts",

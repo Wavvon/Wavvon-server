@@ -1365,6 +1365,52 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Forum post / reply reactions ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS post_reactions (
+            post_id    TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            emoji      TEXT NOT NULL,
+            user_key   TEXT NOT NULL REFERENCES users(public_key),
+            created_at BIGINT NOT NULL,
+            PRIMARY KEY (post_id, emoji, user_key)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_post_reactions_post ON post_reactions(post_id)")
+        .execute(pool)
+        .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS reply_reactions (
+            reply_id   TEXT NOT NULL REFERENCES post_replies(id) ON DELETE CASCADE,
+            emoji      TEXT NOT NULL,
+            user_key   TEXT NOT NULL REFERENCES users(public_key),
+            created_at BIGINT NOT NULL,
+            PRIMARY KEY (reply_id, emoji, user_key)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_reply_reactions_reply ON reply_reactions(reply_id)",
+    )
+    .execute(pool)
+    .await?;
+
+    // Attachments columns on posts and post_replies (additive).
+    let _ = sqlx::query("ALTER TABLE posts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
+        .execute(pool)
+        .await;
+
+    let _ =
+        sqlx::query("ALTER TABLE post_replies ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'")
+            .execute(pool)
+            .await;
+
     // ---- Cleanup phantom zero-sender rows (H1) ----
     let _ = sqlx::query(
         "DELETE FROM users
