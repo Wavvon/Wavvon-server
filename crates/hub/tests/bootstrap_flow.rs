@@ -177,7 +177,10 @@ async fn template_applies_channels_roles_settings_and_welcome_message() {
         }),
     );
     let mock_server = TestServer::new(app);
-    let url = mock_server.server_url("/template.json");
+    let url = mock_server
+        .server_url("/template.json")
+        .unwrap()
+        .to_string();
 
     let http = reqwest::Client::new();
     let cfg = config_with_template(&url);
