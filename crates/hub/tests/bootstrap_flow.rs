@@ -175,7 +175,6 @@ async fn template_applies_channels_roles_settings_and_welcome_message() {
     // the `axum` test utilities to serve the template.
 
     use axum::{routing::get, Router};
-    use axum_test::TestServer;
 
     let template_clone = template.clone();
     let app = Router::new().route(
@@ -185,11 +184,10 @@ async fn template_applies_channels_roles_settings_and_welcome_message() {
             async move { axum::Json(t) }
         }),
     );
-    let mock_server = TestServer::new(app);
-    let url = mock_server
-        .server_url("/template.json")
-        .unwrap()
-        .to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let url = format!("http://127.0.0.1:{port}/template.json");
 
     let http = reqwest::Client::new();
     let cfg = config_with_template(&url);
