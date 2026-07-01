@@ -75,7 +75,7 @@ pub async fn register_begin(
         let ids = existing
             .iter()
             .filter_map(|id| hex::decode(id).ok())
-            .map(|b| webauthn_rs::prelude::CredentialID::from(b))
+            .map(webauthn_rs::prelude::CredentialID::from)
             .collect::<Vec<_>>();
         if ids.is_empty() {
             None
