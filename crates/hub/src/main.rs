@@ -1286,11 +1286,9 @@ fn restore(src_path: &str) -> anyhow::Result<()> {
     archive.unpack(staging.path())?;
     // The database is PostgreSQL — restore it separately with pg_restore/psql.
     // This command only restores the identity file from the archive.
-    for name in &["hub_identity.json"] {
-        let src = staging.path().join(name);
-        if src.exists() {
-            std::fs::copy(&src, name)?;
-        }
+    let src = staging.path().join("hub_identity.json");
+    if src.exists() {
+        std::fs::copy(&src, "hub_identity.json")?;
     }
     Ok(())
 }
