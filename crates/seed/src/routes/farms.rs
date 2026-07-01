@@ -180,7 +180,7 @@ pub async fn register(
     // Step 3: Geo-verification.
     // TODO: add geo-verification using a maxminddb or similar IP-geolocation DB.
     // For v1 we always set geo_unverified = 0 (treat all as verified).
-    let geo_unverified: i64 = 0;
+    let geo_unverified: bool = false;
 
     // Step 4: Upsert the farm row.
     let now = unix_now();
@@ -206,7 +206,7 @@ pub async fn register(
             (farm_url, farm_pubkey, name, description, country, region,
              languages, tags, hub_count, max_hubs_total, capacity_pct,
              geo_unverified, last_verified_at, registered_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT(farm_url) DO UPDATE SET
             farm_pubkey         = excluded.farm_pubkey,
             name                = excluded.name,
@@ -285,7 +285,7 @@ pub async fn deregister(
 
     // Verify the farm_url is actually in our DB with this pubkey.
     let stored_pk: Option<String> =
-        sqlx::query_scalar("SELECT farm_pubkey FROM registered_farms WHERE farm_url = ?")
+        sqlx::query_scalar("SELECT farm_pubkey FROM registered_farms WHERE farm_url = $1")
             .bind(&req.farm_url)
             .fetch_optional(&state.db)
             .await
@@ -304,7 +304,7 @@ pub async fn deregister(
         _ => {}
     }
 
-    sqlx::query("DELETE FROM registered_farms WHERE farm_url = ?")
+    sqlx::query("DELETE FROM registered_farms WHERE farm_url = $1")
         .bind(&req.farm_url)
         .execute(&state.db)
         .await
@@ -372,7 +372,7 @@ struct FarmRow {
     region: Option<String>,
     languages: String,
     tags: String,
-    geo_unverified: i64,
+    geo_unverified: bool,
     last_verified_at: i64,
 }
 
@@ -438,7 +438,9 @@ pub async fn list_farms(
     // For country/region/language we filter in SQL for efficiency.
     // For tags (repeatable, AND) we post-filter in Rust.
 
-    // Base SQL — always fetches all rows matching country/region/language filters.
+    // Base SQL — fetches all rows matching country/region/language filters.
+    // PostgreSQL placeholders ($1, $2, ...) and json_array_elements_text for
+    // JSON array containment checks on the TEXT-typed languages column.
     let rows: Vec<FarmRow> = if let Some(ref country) = query.country {
         if let Some(ref language) = query.language {
             if let Some(ref region) = query.region {
@@ -448,11 +450,11 @@ pub async fn list_farms(
                             f.country, f.region, f.languages, f.tags,
                             f.geo_unverified, f.last_verified_at
                      FROM registered_farms f
-                     WHERE f.country = ?
-                       AND f.region = ?
+                     WHERE f.country = $1
+                       AND f.region = $2
                        AND EXISTS (
-                           SELECT 1 FROM json_each(f.languages)
-                           WHERE json_each.value = ?
+                           SELECT 1 FROM json_array_elements_text(f.languages::json) AS elem
+                           WHERE elem = $3
                        )
                      ORDER BY f.last_verified_at DESC",
                 )
@@ -468,10 +470,10 @@ pub async fn list_farms(
                             f.country, f.region, f.languages, f.tags,
                             f.geo_unverified, f.last_verified_at
                      FROM registered_farms f
-                     WHERE f.country = ?
+                     WHERE f.country = $1
                        AND EXISTS (
-                           SELECT 1 FROM json_each(f.languages)
-                           WHERE json_each.value = ?
+                           SELECT 1 FROM json_array_elements_text(f.languages::json) AS elem
+                           WHERE elem = $2
                        )
                      ORDER BY f.last_verified_at DESC",
                 )
@@ -487,7 +489,7 @@ pub async fn list_farms(
                         f.country, f.region, f.languages, f.tags,
                         f.geo_unverified, f.last_verified_at
                  FROM registered_farms f
-                 WHERE f.country = ? AND f.region = ?
+                 WHERE f.country = $1 AND f.region = $2
                  ORDER BY f.last_verified_at DESC",
             )
             .bind(country)
@@ -501,7 +503,7 @@ pub async fn list_farms(
                         f.country, f.region, f.languages, f.tags,
                         f.geo_unverified, f.last_verified_at
                  FROM registered_farms f
-                 WHERE f.country = ?
+                 WHERE f.country = $1
                  ORDER BY f.last_verified_at DESC",
             )
             .bind(country)
@@ -516,10 +518,10 @@ pub async fn list_farms(
                         f.country, f.region, f.languages, f.tags,
                         f.geo_unverified, f.last_verified_at
                  FROM registered_farms f
-                 WHERE f.region = ?
+                 WHERE f.region = $1
                    AND EXISTS (
-                       SELECT 1 FROM json_each(f.languages)
-                       WHERE json_each.value = ?
+                       SELECT 1 FROM json_array_elements_text(f.languages::json) AS elem
+                       WHERE elem = $2
                    )
                  ORDER BY f.last_verified_at DESC",
             )
@@ -535,8 +537,8 @@ pub async fn list_farms(
                         f.geo_unverified, f.last_verified_at
                  FROM registered_farms f
                  WHERE EXISTS (
-                     SELECT 1 FROM json_each(f.languages)
-                     WHERE json_each.value = ?
+                     SELECT 1 FROM json_array_elements_text(f.languages::json) AS elem
+                     WHERE elem = $1
                  )
                  ORDER BY f.last_verified_at DESC",
             )
@@ -551,7 +553,7 @@ pub async fn list_farms(
                     f.country, f.region, f.languages, f.tags,
                     f.geo_unverified, f.last_verified_at
              FROM registered_farms f
-             WHERE f.region = ?
+             WHERE f.region = $1
              ORDER BY f.last_verified_at DESC",
         )
         .bind(region)
@@ -616,7 +618,7 @@ pub async fn list_farms(
                 region: row.region,
                 languages: languages_val,
                 tags: tags_val,
-                geo_unverified: row.geo_unverified != 0,
+                geo_unverified: row.geo_unverified,
                 last_verified_at: row.last_verified_at,
                 stale,
             })
