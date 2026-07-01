@@ -187,6 +187,16 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> Result<()>
             .ok();
     }
 
+    // ---- System user — required by channels.created_by FK ----
+    sqlx::query(
+        "INSERT INTO users(public_key, first_seen_at, last_seen_at)
+         VALUES('system', $1, $1) ON CONFLICT (public_key) DO NOTHING",
+    )
+    .bind(now)
+    .execute(db)
+    .await
+    .ok();
+
     // ---- Categories first, then channels ----
     // Two-pass: insert categories first so channels can reference parent_id.
     // We track name→id so channels can reference their category by name.
