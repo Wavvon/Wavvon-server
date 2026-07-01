@@ -817,6 +817,7 @@ async fn main() -> Result<()> {
         voice_pending_binds: RwLock::new(HashMap::new()),
         voice_consumed_tokens: RwLock::new(HashMap::new()),
         voice_ws_senders: RwLock::new(HashMap::new()),
+        ws_key_senders: RwLock::new(HashMap::new()),
         voice_udp_socket: Arc::new(RwLock::new(None)),
         rate_limiters: Default::default(),
         preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
