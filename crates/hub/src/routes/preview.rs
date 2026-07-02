@@ -33,7 +33,11 @@ pub struct PreviewQuery {
 /// Returns true if the IP address falls within a private/loopback/link-local range.
 /// Covers IPv4 private ranges, IPv6 unique-local (fc00::/7), IPv6 link-local
 /// (fe80::/10), and IPv4-mapped IPv6 (::ffff:x.x.x.x treated as their embedded v4).
-fn is_private_ip(ip: IpAddr) -> bool {
+///
+/// `pub(crate)` so other outbound-URL validators (e.g.
+/// `outgoing_webhooks::routes`) can reuse the same private-range rule instead
+/// of duplicating it.
+pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_private_v4(v4),
         IpAddr::V6(v6) => {

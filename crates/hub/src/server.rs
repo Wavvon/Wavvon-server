@@ -336,6 +336,34 @@ pub fn create_router_full(
             "/webhooks/{id}/{token}",
             post(routes::webhooks::post_webhook_message),
         )
+        // ---- Outgoing webhooks (hub -> external URL push) ----
+        .route(
+            "/admin/outgoing-webhooks",
+            get(crate::outgoing_webhooks::routes::list_webhooks)
+                .post(crate::outgoing_webhooks::routes::create_webhook),
+        )
+        .route(
+            "/admin/outgoing-webhooks/{id}",
+            patch(crate::outgoing_webhooks::routes::update_webhook)
+                .delete(crate::outgoing_webhooks::routes::delete_webhook),
+        )
+        .route(
+            "/admin/outgoing-webhooks/{id}/subscriptions",
+            get(crate::outgoing_webhooks::routes::list_subscriptions)
+                .put(crate::outgoing_webhooks::routes::replace_subscriptions),
+        )
+        .route(
+            "/admin/outgoing-webhooks/{id}/rotate-secret",
+            post(crate::outgoing_webhooks::routes::rotate_secret),
+        )
+        .route(
+            "/admin/outgoing-webhooks/{id}/enable",
+            post(crate::outgoing_webhooks::routes::enable_webhook),
+        )
+        .route(
+            "/admin/outgoing-webhooks/{id}/deliveries",
+            get(crate::outgoing_webhooks::routes::list_deliveries),
+        )
         .route("/users", get(routes::users::list_users))
         .route(
             "/users/{pubkey}/profile",

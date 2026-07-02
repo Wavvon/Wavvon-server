@@ -929,6 +929,62 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Outgoing webhooks (hub -> external URL push) ----
+    // Not to be confused with the incoming `webhooks` table above (external
+    // service posting a message into a channel).
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS outgoing_webhooks (
+            id                  TEXT    PRIMARY KEY,
+            url                 TEXT    NOT NULL,
+            display_name        TEXT,
+            signing_key         TEXT    NOT NULL,
+            created_by_pubkey   TEXT    NOT NULL,
+            active              BOOLEAN NOT NULL DEFAULT TRUE,
+            failure_count       BIGINT  NOT NULL DEFAULT 0,
+            last_delivery_at    BIGINT,
+            last_failure_at     BIGINT,
+            created_at          BIGINT  NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // channel_id NULL (represented as '' sentinel, matching bot_subscriptions
+    // convention) = hub-scope subscription.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS outgoing_webhook_subscriptions (
+            webhook_id  TEXT NOT NULL REFERENCES outgoing_webhooks(id) ON DELETE CASCADE,
+            event_type  TEXT NOT NULL,
+            channel_id  TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (webhook_id, event_type, channel_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS outgoing_webhook_deliveries (
+            id              TEXT    PRIMARY KEY,
+            webhook_id      TEXT    NOT NULL REFERENCES outgoing_webhooks(id) ON DELETE CASCADE,
+            event_type      TEXT    NOT NULL,
+            event_seq       BIGINT,
+            attempted_at    BIGINT  NOT NULL,
+            attempt_number  BIGINT  NOT NULL DEFAULT 1,
+            status_code     BIGINT,
+            success         BOOLEAN NOT NULL DEFAULT FALSE,
+            error_msg       TEXT
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_owd_webhook ON outgoing_webhook_deliveries(webhook_id, attempted_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
     // ---- Surveys / onboarding ----
 
     sqlx::query(

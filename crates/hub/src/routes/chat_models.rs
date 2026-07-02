@@ -255,6 +255,14 @@ pub enum ChatEvent {
     MemberOnline { public_key: String },
     /// A user's last WS session disconnected; delivered hub-wide.
     MemberOffline { public_key: String },
+    /// An outgoing webhook auto-disabled itself after too many consecutive
+    /// delivery failures. Hub-wide (admin UI filters/display client-side —
+    /// there is no admin-only WS channel today).
+    WebhookDisabled {
+        webhook_id: String,
+        reason: String,
+        last_error: Option<String>,
+    },
 }
 
 impl ChatEvent {
@@ -282,11 +290,13 @@ impl ChatEvent {
             ChatEvent::StreamSubscriptionEnded {
                 source_channel_id, ..
             } => source_channel_id,
-            // ChannelsUpdated, MemberOnline, MemberOffline are hub-wide; "" is never in any
-            // subscription set — handled as special broadcast-to-all cases.
+            // ChannelsUpdated, MemberOnline, MemberOffline, WebhookDisabled are
+            // hub-wide; "" is never in any subscription set — handled as
+            // special broadcast-to-all cases.
             ChatEvent::ChannelsUpdated
             | ChatEvent::MemberOnline { .. }
-            | ChatEvent::MemberOffline { .. } => "",
+            | ChatEvent::MemberOffline { .. }
+            | ChatEvent::WebhookDisabled { .. } => "",
         }
     }
 }
@@ -876,6 +886,17 @@ pub enum WsServerMessage {
     /// Hub fans a bot's dismiss to all subscribers — clients close open webviews.
     #[serde(rename = "bot_app_close")]
     BotAppClose { bot_id: String, channel_id: String },
+
+    /// An outgoing webhook was auto-disabled after too many consecutive
+    /// delivery failures. Hub-wide; the admin settings UI is the intended
+    /// consumer, other clients ignore unknown fields.
+    #[serde(rename = "webhook_disabled")]
+    WebhookDisabled {
+        webhook_id: String,
+        reason: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_error: Option<String>,
+    },
 }
 
 /// Track metadata carried in `ScreenShareStart.tracks` (v2, additive).

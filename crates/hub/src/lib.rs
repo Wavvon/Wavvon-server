@@ -7,6 +7,7 @@ pub mod cert_worker;
 pub mod db;
 pub mod dm_worker;
 pub mod federation;
+pub mod outgoing_webhooks;
 pub mod permissions;
 pub mod rate_limit;
 pub mod retention_worker;

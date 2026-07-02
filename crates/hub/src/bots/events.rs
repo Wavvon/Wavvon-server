@@ -60,6 +60,15 @@ pub async fn publish_hub_event(
         return;
     }
 
+    // Fan out to outgoing webhooks. This codebase has no broadcast channel
+    // for hub events (see module doc above), so we call directly rather than
+    // subscribing to one. Delivery tasks are spawned internally and never
+    // block this function.
+    crate::outgoing_webhooks::worker::dispatch_event(
+        state, event_type, channel_id, seq, now, &payload,
+    )
+    .await;
+
     // Fetch the hub_url once.
     let hub_url = crate::bots::dispatch::hub_url_public(state).await;
 

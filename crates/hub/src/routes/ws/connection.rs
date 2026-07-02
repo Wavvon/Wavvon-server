@@ -179,6 +179,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                             crate::routes::chat_models::ChatEvent::ChannelsUpdated
                                 | crate::routes::chat_models::ChatEvent::MemberOnline { .. }
                                 | crate::routes::chat_models::ChatEvent::MemberOffline { .. }
+                                | crate::routes::chat_models::ChatEvent::WebhookDisabled { .. }
                         ) {
                             let json = pre_json.to_string();
                             if ws_tx.send(Message::Text(json.into())).await.is_err() {
