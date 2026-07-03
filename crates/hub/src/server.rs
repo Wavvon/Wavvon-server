@@ -236,6 +236,16 @@ pub fn create_router_full(
             "/channels/reorder",
             post(routes::channels::reorder_channels),
         )
+        // ---- Channel permission overwrites (Nested Channels §3.6) ----
+        .route(
+            "/channels/{channel_id}/permissions",
+            get(routes::channel_permissions::get_channel_permissions),
+        )
+        .route(
+            "/channels/{channel_id}/permissions/{role_id}",
+            put(routes::channel_permissions::put_channel_permissions)
+                .delete(routes::channel_permissions::delete_channel_permissions),
+        )
         .route(
             "/channels/{channel_id}/messages",
             get(routes::messages::get_messages),

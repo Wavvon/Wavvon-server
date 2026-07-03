@@ -1510,6 +1510,29 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // ---- Channel permission overwrites (Nested Channels §3) ----
+    // One row per (channel, role, permission). Absence of a row = inherit.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS channel_permission_overwrites (
+            channel_id   TEXT    NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            role_id      TEXT    NOT NULL REFERENCES roles(id)     ON DELETE CASCADE,
+            permission   TEXT    NOT NULL,
+            -- TRUE = allow, FALSE = deny. \"inherit\" is represented by NO ROW.
+            allow        BOOLEAN NOT NULL,
+            created_at   BIGINT  NOT NULL,
+            PRIMARY KEY (channel_id, role_id, permission)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_cpo_channel
+         ON channel_permission_overwrites(channel_id)",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations complete");
 
     Ok(())

@@ -51,7 +51,7 @@ pub async fn send_message(
         entry.0 += 1;
     }
 
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::SEND_MESSAGES)?;
 
     if crate::routes::moderation::is_muted(&state.db, &user.public_key).await? {
@@ -610,6 +610,11 @@ pub async fn get_messages(
     Path(channel_id): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Vec<MessageResponse>>, (StatusCode, String)> {
+    // Read-gating (§3.5): message history is rejected outright for a
+    // channel the caller can't effectively read.
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    perms.require(permissions::READ_MESSAGES)?;
+
     let limit = params.limit.unwrap_or(50).min(100);
     let search = params
         .q
@@ -916,7 +921,7 @@ pub async fn add_reaction(
     Path((channel_id, message_id)): Path<(String, String)>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::SEND_MESSAGES)?;
 
     let emoji = req.emoji.trim();

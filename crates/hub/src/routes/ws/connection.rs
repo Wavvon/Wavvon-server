@@ -94,7 +94,19 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     .into_iter()
     .collect();
 
-    // Auto-subscribe to non-banned channels.
+    // Read-gating (§3.5): a channel the caller can't effectively read is
+    // never auto-subscribed, so no chat/typing/etc. events for it are ever
+    // delivered over this connection.
+    let readable_channels: std::collections::HashSet<String> =
+        crate::permissions::channels_with_permission(
+            &state.db,
+            &public_key,
+            crate::permissions::READ_MESSAGES,
+        )
+        .await
+        .unwrap_or_default();
+
+    // Auto-subscribe to non-banned, readable channels.
     let subscribed: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT id FROM channels
          WHERE is_category = false
@@ -107,6 +119,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     .await
     .unwrap_or_default()
     .into_iter()
+    .filter(|id| readable_channels.contains(id))
     .collect();
 
     // Send `hello` with live_seq.

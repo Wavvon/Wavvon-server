@@ -130,7 +130,16 @@ pub async fn create_channel(
     user: AuthUser,
     Json(req): Json<CreateChannelRequest>,
 ) -> Result<(StatusCode, Json<ChannelResponse>), (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    // Creating a channel under a parent category is "acting on" that
+    // existing channel, so it's gated by the parent's cascaded
+    // MANAGE_CHANNELS. Root-level creation has no channel to cascade
+    // through, so it stays on the hub-wide check.
+    let perms = match &req.parent_id {
+        Some(parent_id) => {
+            permissions::channel_permissions(&state.db, &user.public_key, parent_id).await?
+        }
+        None => permissions::user_permissions(&state.db, &user.public_key).await?,
+    };
     perms.require(permissions::MANAGE_CHANNELS)?;
 
     // Validate parent if specified
@@ -300,7 +309,8 @@ pub async fn update_channel(
     Path(channel_id): Path<String>,
     Json(req): Json<UpdateChannelRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    // Acting on a specific existing channel -- cascade through it.
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
 
     let existing_type: Option<String> =
         sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = $1")
@@ -524,7 +534,7 @@ pub async fn update_channel(
 
 pub async fn list_channels(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> Result<Json<Vec<ChannelResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ChannelRow>(
         "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id
@@ -535,8 +545,20 @@ pub async fn list_channels(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    // Read-gating (§3.5): drop any channel where the caller lacks effective
+    // READ_MESSAGES once the ancestor-chain overwrite cascade is applied.
+    // Hidden channels never reach the client -- no client-side
+    // secret-keeping needed.
+    let readable = permissions::channels_with_permission(
+        &state.db,
+        &user.public_key,
+        permissions::READ_MESSAGES,
+    )
+    .await?;
+
     let channels = rows
         .into_iter()
+        .filter(|r| readable.contains(&r.id))
         .map(|r| ChannelResponse {
             id: r.id,
             name: r.name,
@@ -597,7 +619,8 @@ pub async fn delete_channel(
     user: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    // Acting on a specific existing channel -- cascade through it.
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MANAGE_CHANNELS)?;
 
     // Check if channel exists

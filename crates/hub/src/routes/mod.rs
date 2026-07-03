@@ -7,6 +7,7 @@ pub mod bot_models;
 pub mod bots;
 pub mod certs;
 pub mod challenge;
+pub mod channel_permissions;
 pub mod channels;
 pub mod chat_models;
 pub mod dh_keys;

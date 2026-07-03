@@ -64,6 +64,33 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         return DispatchResult::Continue;
     }
 
+    // Channel visibility gate (§3.4/§3.5): a channel the caller can't
+    // effectively READ_MESSAGES isn't visible to them at all, so voice join
+    // is rejected the same way message history and the channel list are.
+    match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
+        Ok(perms) if !perms.has(crate::permissions::READ_MESSAGES) => {
+            let err = WsServerMessage::Error {
+                context: "voice_join".to_string(),
+                message: "You do not have access to this channel.".to_string(),
+            };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return DispatchResult::Continue;
+        }
+        Err(_) => {
+            let err = WsServerMessage::Error {
+                context: "voice_join".to_string(),
+                message: "Unable to verify channel access.".to_string(),
+            };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return DispatchResult::Continue;
+        }
+        Ok(_) => {}
+    }
+
     // Talk-power check.
     let min_talk_power: i64 =
         sqlx::query_scalar("SELECT COALESCE(min_talk_power, 0) FROM channels WHERE id = $1")
