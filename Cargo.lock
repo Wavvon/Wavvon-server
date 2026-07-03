@@ -891,6 +891,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "discord-import"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wavvon-identity",
+]
+
+[[package]]
 name = "displaydoc"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

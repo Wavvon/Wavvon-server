@@ -8,6 +8,7 @@ members = [
     "crates/agent",
     "crates/store",
     "crates/demo-seed",
+    "crates/discord-import",
 ]
 
 [workspace.dependencies]
