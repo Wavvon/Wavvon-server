@@ -40,6 +40,7 @@ pub mod preview;
 pub mod profile;
 pub mod recovery;
 pub mod reports;
+pub mod role_categories;
 pub mod role_models;
 pub mod roles;
 pub mod search;

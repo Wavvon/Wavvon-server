@@ -453,6 +453,16 @@ pub fn create_router_full(
             axum::routing::patch(routes::roles::update_role).delete(routes::roles::delete_role),
         )
         .route(
+            "/role-categories",
+            get(routes::role_categories::list_role_categories)
+                .post(routes::role_categories::create_role_category),
+        )
+        .route(
+            "/role-categories/{category_id}",
+            axum::routing::patch(routes::role_categories::update_role_category)
+                .delete(routes::role_categories::delete_role_category),
+        )
+        .route(
             "/roles/{role_id}/members",
             get(routes::roles::list_role_members),
         )

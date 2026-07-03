@@ -7,7 +7,9 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, MANAGE_ROLES};
-use crate::routes::role_models::{CreateRoleRequest, RoleResponse, UpdateRoleRequest};
+use crate::routes::role_models::{
+    is_valid_color, is_valid_icon, CreateRoleRequest, RoleResponse, UpdateRoleRequest,
+};
 use crate::state::AppState;
 
 pub async fn list_roles(
@@ -15,7 +17,8 @@ pub async fn list_roles(
     _user: AuthUser,
 ) -> Result<Json<Vec<RoleResponse>>, (StatusCode, String)> {
     let roles = sqlx::query_as::<_, RoleRow>(
-        "SELECT id, name, priority, display_separately, created_at FROM roles ORDER BY priority DESC",
+        "SELECT id, name, priority, display_separately, created_at, color, icon, category_id
+         FROM roles ORDER BY priority DESC",
     )
     .fetch_all(&state.db)
     .await
@@ -31,10 +34,56 @@ pub async fn list_roles(
             priority: role.priority,
             display_separately: role.display_separately,
             created_at: role.created_at,
+            color: role.color,
+            icon: role.icon,
+            category_id: role.category_id,
         });
     }
 
     Ok(Json(result))
+}
+
+/// Validates the optional color/icon/category_id triple shared by role
+/// create and update requests. Returns 400 with a descriptive message on
+/// failure.
+async fn validate_appearance(
+    db: &sqlx::PgPool,
+    color: Option<&str>,
+    icon: Option<&str>,
+    category_id: Option<&str>,
+) -> Result<(), (StatusCode, String)> {
+    if let Some(c) = color {
+        if !is_valid_color(c) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "color must match ^#[0-9a-fA-F]{6}$".to_string(),
+            ));
+        }
+    }
+    if let Some(i) = icon {
+        if !is_valid_icon(i) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "icon must be a single emoji grapheme, max 16 bytes, no whitespace/control chars"
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(cat_id) = category_id {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM role_categories WHERE id = $1)")
+                .bind(cat_id)
+                .fetch_one(db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if !exists {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "category_id does not reference an existing category".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub async fn create_role(
@@ -52,17 +101,29 @@ pub async fn create_role(
         ));
     }
 
+    validate_appearance(
+        &state.db,
+        req.color.as_deref(),
+        req.icon.as_deref(),
+        req.category_id.as_deref(),
+    )
+    .await?;
+
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO roles (id, name, priority, display_separately, created_at) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO roles (id, name, priority, display_separately, created_at, color, icon, category_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
         .bind(&id)
         .bind(&req.name)
         .bind(req.priority)
         .bind(req.display_separately)
         .bind(now)
+        .bind(&req.color)
+        .bind(&req.icon)
+        .bind(&req.category_id)
         .execute(&state.db)
         .await
         .map_err(|e| {
@@ -91,6 +152,9 @@ pub async fn create_role(
             priority: req.priority,
             display_separately: req.display_separately,
             created_at: now,
+            color: req.color,
+            icon: req.icon,
+            category_id: req.category_id,
         }),
     ))
 }
@@ -113,6 +177,16 @@ pub async fn update_role(
             "Cannot modify role with priority >= your own".to_string(),
         ));
     }
+
+    let appearance_touched = req.color.is_some() || req.icon.is_some() || req.category_id.is_some();
+
+    validate_appearance(
+        &state.db,
+        req.color.as_ref().and_then(|c| c.as_deref()),
+        req.icon.as_ref().and_then(|i| i.as_deref()),
+        req.category_id.as_ref().and_then(|c| c.as_deref()),
+    )
+    .await?;
 
     if let Some(new_priority) = req.priority {
         if new_priority >= perms.max_priority {
@@ -163,8 +237,60 @@ pub async fn update_role(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
 
+    if let Some(color) = req.color {
+        sqlx::query("UPDATE roles SET color = $1 WHERE id = $2")
+            .bind(&color)
+            .bind(&role_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    if let Some(icon) = req.icon {
+        sqlx::query("UPDATE roles SET icon = $1 WHERE id = $2")
+            .bind(&icon)
+            .bind(&role_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    if let Some(category_id) = req.category_id {
+        sqlx::query("UPDATE roles SET category_id = $1 WHERE id = $2")
+            .bind(&category_id)
+            .bind(&role_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
     let updated = get_role(&state.db, &role_id).await?;
     let role_perms = role_permissions(&state.db, &role_id).await?;
+
+    if appearance_touched {
+        let state_c = state.clone();
+        let actor = user.public_key.clone();
+        let rid = role_id.clone();
+        let color = updated.color.clone();
+        let icon = updated.icon.clone();
+        let category_id = updated.category_id.clone();
+        tokio::spawn(async move {
+            crate::bots::events::publish_hub_event(
+                &state_c,
+                "role.appearance_updated",
+                Some(&actor),
+                None,
+                None,
+                serde_json::json!({
+                    "role_id": rid,
+                    "color": color,
+                    "icon": icon,
+                    "category_id": category_id,
+                }),
+            )
+            .await;
+        });
+    }
 
     Ok(Json(RoleResponse {
         id: updated.id,
@@ -173,6 +299,9 @@ pub async fn update_role(
         priority: updated.priority,
         display_separately: updated.display_separately,
         created_at: updated.created_at,
+        color: updated.color,
+        icon: updated.icon,
+        category_id: updated.category_id,
     }))
 }
 
@@ -338,7 +467,8 @@ fn require_not_builtin(role_id: &str) -> Result<(), (StatusCode, String)> {
 
 async fn get_role(db: &sqlx::PgPool, role_id: &str) -> Result<RoleRow, (StatusCode, String)> {
     sqlx::query_as::<_, RoleRow>(
-        "SELECT id, name, priority, display_separately, created_at FROM roles WHERE id = $1",
+        "SELECT id, name, priority, display_separately, created_at, color, icon, category_id
+         FROM roles WHERE id = $1",
     )
     .bind(role_id)
     .fetch_optional(db)
@@ -363,7 +493,8 @@ async fn fetch_user_roles_response(
     public_key: &str,
 ) -> Result<Vec<RoleResponse>, (StatusCode, String)> {
     let roles = sqlx::query_as::<_, RoleRow>(
-        "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at
+        "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at,
+                r.color, r.icon, r.category_id
          FROM roles r
          INNER JOIN user_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
@@ -384,16 +515,22 @@ async fn fetch_user_roles_response(
             priority: role.priority,
             display_separately: role.display_separately,
             created_at: role.created_at,
+            color: role.color,
+            icon: role.icon,
+            category_id: role.category_id,
         });
     }
     Ok(result)
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(sqlx::FromRow, Clone)]
 struct RoleRow {
     id: String,
     name: String,
     priority: i64,
     display_separately: bool,
     created_at: i64,
+    color: Option<String>,
+    icon: Option<String>,
+    category_id: Option<String>,
 }

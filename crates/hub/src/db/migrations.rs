@@ -162,6 +162,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // ---- Roles and permissions ----
 
+    // role_categories must exist before roles.category_id references it.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS role_categories (
+            id         TEXT   PRIMARY KEY,
+            name       TEXT   NOT NULL,
+            color      TEXT,
+            icon       TEXT,
+            position   BIGINT NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS roles (
             id                 TEXT PRIMARY KEY,
@@ -174,6 +188,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    // Role appearance + category (additive columns; see docs/docs/role-categories.md §2).
+    let _ = sqlx::query("ALTER TABLE roles ADD COLUMN color TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE roles ADD COLUMN icon TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE roles ADD COLUMN category_id TEXT
+            REFERENCES role_categories(id) ON DELETE SET NULL",
+    )
+    .execute(pool)
+    .await;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS role_permissions (

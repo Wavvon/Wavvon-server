@@ -405,8 +405,20 @@ pub async fn list_members(
     let user_keys: Vec<String> = users.iter().map(|u| u.public_key.clone()).collect();
 
     // One query for all user-role associations + role metadata.
-    let user_role_rows: Vec<(String, String, String, i64, bool, i64)> = sqlx::query_as(
-        "SELECT ur.user_public_key, r.id, r.name, r.priority, r.display_separately, r.created_at
+    #[allow(clippy::type_complexity)]
+    let user_role_rows: Vec<(
+        String,
+        String,
+        String,
+        i64,
+        bool,
+        i64,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT ur.user_public_key, r.id, r.name, r.priority, r.display_separately, r.created_at,
+                r.color, r.icon, r.category_id
          FROM user_roles ur
          INNER JOIN roles r ON r.id = ur.role_id
          WHERE ur.user_public_key = ANY($1)
@@ -441,7 +453,18 @@ pub async fn list_members(
     }
 
     let mut roles_by_user: HashMap<String, Vec<RoleResponse>> = HashMap::new();
-    for (user_key, role_id, role_name, priority, display_separately, created_at) in user_role_rows {
+    for (
+        user_key,
+        role_id,
+        role_name,
+        priority,
+        display_separately,
+        created_at,
+        color,
+        icon,
+        category_id,
+    ) in user_role_rows
+    {
         let permissions = perms_by_role.get(&role_id).cloned().unwrap_or_default();
         roles_by_user
             .entry(user_key)
@@ -453,6 +476,9 @@ pub async fn list_members(
                 display_separately,
                 created_at,
                 permissions,
+                color,
+                icon,
+                category_id,
             });
     }
 
