@@ -77,6 +77,26 @@ pub async fn update_me(
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
+    // Push the change hub-wide so other clients refresh this user's name/avatar
+    // in the member list and on message authors without reconnecting.
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(
+            &crate::routes::chat_models::WsServerMessage::MemberUpdated {
+                public_key: user.public_key.clone(),
+                display_name: display_name.clone(),
+                avatar: avatar.clone(),
+            },
+        )
+        .unwrap_or_default()
+        .as_str(),
+    );
+    let _ = state.chat_tx.send((
+        crate::routes::chat_models::ChatEvent::MemberUpdated {
+            public_key: user.public_key.clone(),
+        },
+        json,
+    ));
+
     Ok(Json(MeResponse {
         public_key: user.public_key,
         display_name,

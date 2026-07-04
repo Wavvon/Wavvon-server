@@ -274,6 +274,10 @@ pub enum ChatEvent {
     MemberOnline { public_key: String },
     /// A user's last WS session disconnected; delivered hub-wide.
     MemberOffline { public_key: String },
+    /// A user changed their profile (display name / avatar); delivered
+    /// hub-wide so other clients refresh the member list and message authors
+    /// without a reconnect.
+    MemberUpdated { public_key: String },
     /// An outgoing webhook auto-disabled itself after too many consecutive
     /// delivery failures. Hub-wide (admin UI filters/display client-side —
     /// there is no admin-only WS channel today).
@@ -316,6 +320,7 @@ impl ChatEvent {
             ChatEvent::ChannelsUpdated
             | ChatEvent::MemberOnline { .. }
             | ChatEvent::MemberOffline { .. }
+            | ChatEvent::MemberUpdated { .. }
             | ChatEvent::WebhookDisabled { .. } => "",
         }
     }
@@ -868,6 +873,14 @@ pub enum WsServerMessage {
     /// A user just went offline (their last WS session disconnected).
     #[serde(rename = "member_offline")]
     MemberOffline { public_key: String },
+    /// A user changed their display name and/or avatar. Carries the fresh
+    /// values so clients update in place without re-fetching /users.
+    #[serde(rename = "member_updated")]
+    MemberUpdated {
+        public_key: String,
+        display_name: Option<String>,
+        avatar: Option<String>,
+    },
 
     // ---- V4 voice encryption: hub → client ----
     /// Targeted delivery: another participant's encrypted sender-key bundle.
