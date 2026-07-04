@@ -33,19 +33,23 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         Err(_) => return,
     };
 
-    let channel_id = params.channel_id.clone();
+    // `channel_id` may be reassigned below by the spawn-on-join path
+    // (temp-voice-channels.md §2) once we know the target is a spawner.
+    let mut channel_id = params.channel_id.clone();
 
-    // Verify the channel exists.
-    let channel_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM channels WHERE id = $1 AND is_category = false")
-            .bind(&channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
-    if channel_exists.is_none() {
+    // Verify the channel exists and capture its type, needed for the
+    // spawn-on-join check below.
+    let channel_type: Option<String> = sqlx::query_scalar(
+        "SELECT channel_type FROM channels WHERE id = $1 AND is_category = false",
+    )
+    .bind(&channel_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some(channel_type) = channel_type else {
         return;
-    }
+    };
 
     let (display_name, is_bot): (Option<String>, bool) = {
         let row: Option<(Option<String>, bool)> =
@@ -85,6 +89,58 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
             Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
             _ => return,
         }
+    }
+
+    // Spawn-on-join (join-to-create temp voice channels,
+    // temp-voice-channels.md §2): mirrors the main hub WS path in
+    // routes/ws/handlers/voice.rs::handle_voice_join. The web client's audio
+    // transport is this separate /voice/ws relay, so it needs the same
+    // detection independently.
+    if channel_type == "spawner" {
+        // The bot branch above already gated on channel-scoped
+        // read_messages against the spawner when applicable; human callers
+        // are gated here, same rule (§3.4/§3.5: no effective READ_MESSAGES
+        // means the channel — and therefore its spawn action — isn't
+        // visible to them at all).
+        if !is_bot {
+            match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await {
+                Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+                _ => return,
+            }
+        }
+
+        match crate::routes::channels::spawn_temp_channel(
+            &state.db,
+            &channel_id,
+            &pubkey,
+            display_name.as_deref(),
+        )
+        .await
+        {
+            Ok(spawned) => {
+                channel_id = spawned.id;
+                let json: std::sync::Arc<str> = std::sync::Arc::from(
+                    serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+                        .unwrap()
+                        .as_str(),
+                );
+                let _ = state
+                    .chat_tx
+                    .send((crate::routes::chat_models::ChatEvent::ChannelsUpdated, json));
+            }
+            Err(_) => return,
+        }
+    } else {
+        // Rejoining an existing temp room cancels any pending GC timer
+        // (temp-voice-channels.md §3), mirroring the main hub WS path.
+        // No-op for ordinary channels since the WHERE clause only ever
+        // matches is_temporary rows.
+        let _ = sqlx::query(
+            "UPDATE channels SET empty_since = NULL WHERE id = $1 AND is_temporary = TRUE",
+        )
+        .bind(&channel_id)
+        .execute(&state.db)
+        .await;
     }
 
     // Reject if already in this voice channel (duplicate join).
@@ -145,6 +201,11 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         "type": "voice_ws_ready",
         "sender_id": sender_id,
         "participants": participants,
+        // Resolved channel id — for a spawner join this is the newly
+        // spawned temp room, not the channel the client requested. The
+        // web client's resolveVoiceChannelId() prefers this field when
+        // present (apps/web/src/platform/voiceReady.ts).
+        "channel_id": channel_id,
     });
 
     // Broadcast VoiceParticipantJoined so other WS chat clients update their UI.

@@ -193,6 +193,35 @@ async fn send_ws(tx: &mut WsSink, msg: Value) {
     tx.send(TsMessage::Text(msg.to_string())).await.unwrap();
 }
 
+/// Denies `permission` for `@everyone` on `channel_id` via the
+/// channel-permission-overwrites admin route (mirrors ws_read_gating_flow.rs).
+async fn deny_everyone(base: &str, owner_token: &str, channel_id: &str, permission: &str) {
+    let resp = reqwest::Client::new()
+        .put(format!(
+            "{base}/channels/{channel_id}/permissions/builtin-everyone"
+        ))
+        .bearer_auth(owner_token)
+        .json(&json!({ "allow": [], "deny": [permission] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+}
+
+/// Connects to `/voice/ws?token=..&channel_id=..` -- the separate transport
+/// the web client uses for voice audio (routes/voice_ws.rs), distinct from
+/// the main hub `/ws` connection's `voice_join` message.
+async fn connect_voice_ws(base: &str, token: &str, channel_id: &str) -> (WsSink, WsStream) {
+    let ws_url = format!(
+        "{}/voice/ws?token={}&channel_id={}",
+        base.replace("http://", "ws://"),
+        token,
+        channel_id
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws.split()
+}
+
 /// Reads WS frames until one of the given types is found, or the timeout
 /// elapses. Skips connect-time housekeeping frames.
 async fn next_frame_of_type(
@@ -592,6 +621,156 @@ async fn channels_updated_broadcast_on_spawn_and_gc() {
 
     let _ = tx.send(TsMessage::Close(None)).await;
     let _ = watcher_tx.send(TsMessage::Close(None)).await;
+}
+
+// ---------------------------------------------------------------------------
+// /voice/ws spawn-on-join (web client transport, routes/voice_ws.rs) --
+// closes the gap where spawn-on-join was only wired into the main hub WS
+// path (routes/ws/handlers/voice.rs), leaving web audio joining the
+// spawner row itself instead of a fresh temp room.
+// ---------------------------------------------------------------------------
+
+/// A web client joining `/voice/ws` against a spawner gets moved into a
+/// freshly spawned temp sibling, not the spawner itself: the `voice_ws_ready`
+/// frame echoes the spawned room's id, the in-memory voice roster is keyed
+/// to that id (never the spawner's), and a `channels_updated` broadcast
+/// fires on the main hub WS so other clients refetch their sidebar.
+#[tokio::test]
+async fn voice_ws_join_to_spawner_creates_temp_sibling() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    let spawner = create_channel(
+        &base,
+        &owner_token,
+        json!({ "name": "web-voice-lobby", "channel_type": "spawner" }),
+    )
+    .await;
+
+    let member = Identity::generate();
+    let member_token = authenticate_http(&base, &member).await;
+    set_display_name(&base, &member_token, "Bob").await;
+
+    // A bystander on the main hub WS should see the channels_updated
+    // broadcast the spawn produces, same as the main-hub-WS spawn path.
+    let (mut watcher_tx, mut watcher_rx) = connect_ws(&base, &owner_token).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(200), watcher_rx.next()).await;
+
+    let (_voice_tx, mut voice_rx) = connect_voice_ws(&base, &member_token, &spawner.id).await;
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), voice_rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let ready: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(ready["type"], "voice_ws_ready");
+    let temp_channel_id = ready["channel_id"]
+        .as_str()
+        .expect("voice_ws_ready must echo the resolved channel_id")
+        .to_string();
+    assert_ne!(
+        temp_channel_id, spawner.id,
+        "voice_ws_ready must carry the spawned room's id, not the spawner's"
+    );
+
+    // The spawner itself must never hold voice participants; the spawned
+    // room does.
+    assert!(
+        !state.voice_channels.read().await.contains_key(&spawner.id),
+        "spawner must not appear in voice_channels"
+    );
+    assert!(
+        state
+            .voice_channels
+            .read()
+            .await
+            .contains_key(&temp_channel_id),
+        "the spawned room should hold the joiner"
+    );
+
+    let channels = list_channels(&base, &owner_token).await;
+    let temp = channels
+        .iter()
+        .find(|c| c.id == temp_channel_id)
+        .expect("spawned room should be listed");
+    assert!(temp.is_temporary);
+    assert_eq!(
+        temp.owner_pubkey.as_deref(),
+        Some(member.public_key_hex().as_str())
+    );
+    assert_eq!(temp.name, "Bob's room");
+
+    let update_frame = next_frame_of_type(
+        &mut watcher_rx,
+        "channels_updated",
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+    assert!(
+        update_frame.is_some(),
+        "expected a channels_updated broadcast after a /voice/ws spawn"
+    );
+
+    let _ = watcher_tx.send(TsMessage::Close(None)).await;
+}
+
+/// A member denied `read_messages` on the spawner cannot spawn a room via
+/// `/voice/ws` -- no `voice_ws_ready` frame arrives and no temp channel is
+/// created. Mirrors the read-gating the main-hub-WS spawn path enforces
+/// (temp-voice-channels.md §2 step 1 / §3.4-3.5).
+#[tokio::test]
+async fn voice_ws_join_to_spawner_denied_without_read_messages() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    let spawner = create_channel(
+        &base,
+        &owner_token,
+        json!({ "name": "locked-voice-lobby", "channel_type": "spawner" }),
+    )
+    .await;
+    deny_everyone(&base, &owner_token, &spawner.id, "read_messages").await;
+
+    let outsider = Identity::generate();
+    let outsider_token = authenticate_http(&base, &outsider).await;
+
+    let (_voice_tx, mut voice_rx) = connect_voice_ws(&base, &outsider_token, &spawner.id).await;
+
+    // The gate makes the server task return without ever sending a frame,
+    // so the connection closes (or the stream ends) instead of yielding a
+    // voice_ws_ready message. Close frame, stream end, or a transport error
+    // are all acceptable "rejected" outcomes.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), voice_rx.next()).await;
+    if let Ok(Some(Ok(TsMessage::Text(t)))) = outcome {
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_ne!(
+            v["type"], "voice_ws_ready",
+            "a caller without read_messages on the spawner must not be able to spawn a room"
+        );
+    }
+
+    // No temp sibling should have been created under the spawner's parent.
+    let siblings: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM channels WHERE is_temporary = TRUE AND owner_pubkey = $1",
+    )
+    .bind(outsider.public_key_hex())
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        siblings, 0,
+        "denied read_messages must not spawn a temp room"
+    );
+    assert!(
+        state.voice_channels.read().await.is_empty(),
+        "no voice roster entry should exist for the denied caller"
+    );
 }
 
 // ---------------------------------------------------------------------------
