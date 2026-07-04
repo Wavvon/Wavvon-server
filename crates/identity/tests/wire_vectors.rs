@@ -148,6 +148,22 @@ fn test_master_pubkey_vector() {
     assert_eq!(hex_pubkey(&master_key()), MASTER_PUB);
 }
 
+// The master signing key derived from the canonical entropy (0x01..0x20) via
+// HKDF-SHA256(info="wavvon/master/v1"). Pins the derivation cross-language so
+// the TS port (packages/core) can reproduce the same master pubkey.
+const MASTER_FROM_ENTROPY_PUB: &str =
+    "8fbafd0f662f225430eed18b132b3de956dc7d75c95b26baa97ada69aab51565";
+
+#[test]
+fn master_from_entropy_vector() {
+    let mut entropy = [0u8; 32];
+    for (i, b) in entropy.iter_mut().enumerate() {
+        *b = (i + 1) as u8;
+    }
+    let master = wavvon_identity::MasterIdentity::derive_from_entropy(&entropy).unwrap();
+    assert_eq!(master.public_key_hex(), MASTER_FROM_ENTROPY_PUB);
+}
+
 #[test]
 fn test_subkey_pubkey_vector() {
     assert_eq!(hex_pubkey(&subkey_signing_key()), SUBKEY_PUB);
