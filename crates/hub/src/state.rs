@@ -330,6 +330,12 @@ pub struct AppState {
     pub whisper_targets: RwLock<HashMap<String, HashSet<SocketAddr>>>,
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
+    /// Pubkey-based whisper targets: sender_pubkey → set of target pubkeys.
+    /// Parallel to `whisper_targets` (which is UDP-addr-based). The WS voice
+    /// relay (`voice_ws.rs`) routes a whispering sender's frames exclusively
+    /// to these pubkeys with packet_type = 0x01, so whisper works for web
+    /// clients (which have no stable UDP addr).
+    pub whisper_target_pubkeys: RwLock<HashMap<String, HashSet<String>>>,
 
     /// Pubkeys that currently own a live UDP relay slot.
     ///

@@ -258,10 +258,18 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
                 if data.len() < 6 {
                     continue;
                 }
-                // Build a ReceivedVoicePacket: [sender_id:u16][0x00][original upload bytes].
+                // If this sender is whispering, route their frames only to the
+                // resolved target pubkeys, tagged 0x01; otherwise normal 0x00
+                // fan-out to the whole channel.
+                let whisper_pks = {
+                    let map = state_recv.whisper_target_pubkeys.read().await;
+                    map.get(&pubkey_recv).filter(|s| !s.is_empty()).cloned()
+                };
+                let packet_type: u8 = if whisper_pks.is_some() { 0x01 } else { 0x00 };
+                // Build a ReceivedVoicePacket: [sender_id:u16][type][original upload bytes].
                 let mut outbound = Vec::with_capacity(3 + data.len());
                 outbound.extend_from_slice(&sender_id.to_be_bytes());
-                outbound.push(0x00u8);
+                outbound.push(packet_type);
                 outbound.extend_from_slice(&data);
 
                 fan_out(
@@ -270,6 +278,7 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
                     &channel_recv,
                     &pubkey_recv,
                     &outbound,
+                    whisper_pks.as_ref(),
                 )
                 .await;
             }
@@ -291,6 +300,9 @@ async fn fan_out(
     channel_id: &str,
     sender_pk: &str,
     outbound: &[u8],
+    // When Some, deliver only to these pubkeys (whisper). When None, deliver
+    // to the whole channel.
+    only_to: Option<&std::collections::HashSet<String>>,
 ) {
     let sentinel: SocketAddr = "0.0.0.0:0".parse().unwrap();
     let addr_map = state.voice_addr_map.read().await;
@@ -301,6 +313,11 @@ async fn fan_out(
         for (pk, addr) in participants {
             if pk == sender_pk {
                 continue;
+            }
+            if let Some(targets) = only_to {
+                if !targets.contains(pk) {
+                    continue;
+                }
             }
             if let Some(tx) = ws_senders.get(pk.as_str()) {
                 let _ = tx.send(outbound.to_vec());

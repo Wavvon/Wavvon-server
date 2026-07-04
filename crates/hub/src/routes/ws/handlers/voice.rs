@@ -539,13 +539,38 @@ pub(in crate::routes::ws) async fn handle_voice_whisper_start(
         .await
         .insert(cs.public_key.clone(), targets.clone());
 
-    let target_pubkeys: Vec<String> = {
-        let addr_map = state.voice_addr_map.read().await;
-        addrs
-            .iter()
-            .filter_map(|a| addr_map.get(a).map(|(_, pk)| pk.clone()))
-            .collect()
+    // Resolve targets to pubkeys directly (works for web clients, which have
+    // no stable UDP addr). "user" → the pubkey; "channel" → everyone in that
+    // voice channel. This set drives both the notification delivery and the
+    // WS voice relay's whisper routing (`voice_ws.rs`).
+    let target_pks: std::collections::HashSet<String> = {
+        let mut set = std::collections::HashSet::new();
+        let vc = state.voice_channels.read().await;
+        for def in &targets {
+            match def.target_type.as_str() {
+                "user" => {
+                    set.insert(def.id.clone());
+                }
+                "channel" => {
+                    if let Some(p) = vc.get(&def.id) {
+                        for pk in p.keys() {
+                            set.insert(pk.clone());
+                        }
+                    }
+                }
+                _ => {} // "role" targets still route via the UDP addr set above.
+            }
+        }
+        set.remove(&cs.public_key); // never whisper to self
+        set
     };
+    state
+        .whisper_target_pubkeys
+        .write()
+        .await
+        .insert(cs.public_key.clone(), target_pks.clone());
+
+    let target_pubkeys: Vec<String> = target_pks.into_iter().collect();
     let reply = WsServerMessage::VoiceWhisperStarted {
         sender_pubkey: cs.public_key.clone(),
     };
@@ -569,15 +594,15 @@ pub(in crate::routes::ws) async fn handle_voice_whisper_stop(
         .write()
         .await
         .remove(&cs.public_key);
+    let prev_pks = state
+        .whisper_target_pubkeys
+        .write()
+        .await
+        .remove(&cs.public_key);
 
-    if let Some(addrs) = prev_addrs {
-        let target_pubkeys: Vec<String> = {
-            let addr_map = state.voice_addr_map.read().await;
-            addrs
-                .iter()
-                .filter_map(|a| addr_map.get(a).map(|(_, pk)| pk.clone()))
-                .collect()
-        };
+    if prev_addrs.is_some() || prev_pks.is_some() {
+        // Notify the pubkey-based target set (covers web + UDP targets).
+        let target_pubkeys: Vec<String> = prev_pks.unwrap_or_default().into_iter().collect();
         let reply = WsServerMessage::VoiceWhisperStopped {
             sender_pubkey: cs.public_key.clone(),
         };

@@ -859,6 +859,11 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     // Clean up the departing user's whisper session.
     state.whisper_targets.write().await.remove(public_key);
     state.whisper_target_defs.write().await.remove(public_key);
+    state
+        .whisper_target_pubkeys
+        .write()
+        .await
+        .remove(public_key);
 
     // Revoke the UDP relay slot.
     state.voice_relay_active.write().await.remove(public_key);
