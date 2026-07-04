@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ALL_PERMISSIONS, MANAGE_ROLES};
+use crate::permissions::{self, ADMIN, ALL_PERMISSIONS, MANAGE_ROLES};
 use crate::state::AppState;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -62,12 +62,15 @@ async fn require_channel_exists(
     Ok(())
 }
 
-/// Returns the role's name if it exists.
-async fn require_role_exists(
+/// Returns the role's (name, priority) if it exists. Priority is needed by
+/// the hub-wide-style guard below: a channel-permission manager must not be
+/// able to edit overwrites for a role at or above their own rank (mirrors
+/// `roles.rs` assign/update/delete).
+async fn require_role(
     db: &sqlx::PgPool,
     role_id: &str,
-) -> Result<String, (StatusCode, String)> {
-    sqlx::query_scalar("SELECT name FROM roles WHERE id = $1")
+) -> Result<(String, i64), (StatusCode, String)> {
+    sqlx::query_as::<_, (String, i64)>("SELECT name, priority FROM roles WHERE id = $1")
         .bind(role_id)
         .fetch_optional(db)
         .await
@@ -167,7 +170,16 @@ pub async fn put_channel_permissions(
     perms.require(MANAGE_ROLES)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
-    let role_name = require_role_exists(&state.db, &role_id).await?;
+    let (role_name, role_priority) = require_role(&state.db, &role_id).await?;
+
+    // Priority guard (mirrors roles.rs assign/update/delete): a channel
+    // manager cannot edit overwrites for a role at or above their own rank.
+    if role_priority >= perms.max_priority {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Cannot edit permission overwrites for a role with priority >= your own".to_string(),
+        ));
+    }
 
     for p in req.allow.iter().chain(req.deny.iter()) {
         if !ALL_PERMISSIONS.contains(&p.as_str()) {
@@ -179,6 +191,27 @@ pub async fn put_channel_permissions(
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!("permission '{p}' cannot be both allowed and denied"),
+            ));
+        }
+    }
+
+    // `admin` immunity is code-not-data: it must never be grantable through
+    // an overwrite, regardless of the caller's own permissions.
+    if req.allow.iter().any(|p| p == ADMIN) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Cannot grant 'admin' via a channel permission overwrite".to_string(),
+        ));
+    }
+
+    // Self-grant guard: a caller can only allow permissions they themselves
+    // effectively hold on this channel -- prevents delegating powers the
+    // caller doesn't have. Denies are unrestricted (removing power is safe).
+    for p in &req.allow {
+        if !perms.has(p) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Cannot grant permission '{p}' you do not hold on this channel"),
             ));
         }
     }
@@ -282,7 +315,16 @@ pub async fn delete_channel_permissions(
     perms.require(MANAGE_ROLES)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
-    require_role_exists(&state.db, &role_id).await?;
+    let (_, role_priority) = require_role(&state.db, &role_id).await?;
+
+    // Priority guard: can't clear overwrites for a role at or above the
+    // caller's own rank either.
+    if role_priority >= perms.max_priority {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Cannot clear permission overwrites for a role with priority >= your own".to_string(),
+        ));
+    }
 
     let before: Vec<(String, bool)> = sqlx::query_as(
         "SELECT permission, allow FROM channel_permission_overwrites

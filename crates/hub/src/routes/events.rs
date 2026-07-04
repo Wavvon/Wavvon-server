@@ -212,9 +212,6 @@ pub async fn create_event(
     user: AuthUser,
     Json(req): Json<CreateEventRequest>,
 ) -> Result<(StatusCode, Json<EventResponse>), (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::CREATE_EVENTS)?;
-
     // Verify channel exists.
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&req.channel_id)
@@ -224,6 +221,14 @@ pub async fn create_event(
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
+
+    // Channel-scoped gate (§3.5): CREATE_EVENTS must be checked against the
+    // ancestor-chain overwrite cascade for the target channel, not the
+    // hub-wide baseline -- otherwise a user denied on this channel could
+    // still create events targeting it.
+    let perms =
+        permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id).await?;
+    perms.require(permissions::CREATE_EVENTS)?;
 
     if req.title.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title is required".to_string()));
@@ -270,7 +275,7 @@ pub async fn create_event(
 /// GET /events
 pub async fn list_events(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Query(params): Query<ListEventsParams>,
 ) -> Result<Json<Vec<EventWithRsvps>>, (StatusCode, String)> {
     let limit = params.limit.unwrap_or(20).min(100);
@@ -297,8 +302,22 @@ pub async fn list_events(
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    // Read-gating (§3.5): drop any event whose channel the caller lacks
+    // effective READ_MESSAGES on, so title/description/location/channel_id
+    // for hidden channels never reach the client (matches `channels.rs`
+    // list_channels' batch-filter approach).
+    let readable = permissions::channels_with_permission(
+        &state.db,
+        &user.public_key,
+        permissions::READ_MESSAGES,
+    )
+    .await?;
+
     let mut result = Vec::with_capacity(rows.len());
     for event in rows {
+        if !readable.contains(&event.channel_id) {
+            continue;
+        }
         let rsvp_counts = load_rsvp_counts(&state.db, &event.id).await?;
         result.push(EventWithRsvps { event, rsvp_counts });
     }
@@ -308,7 +327,7 @@ pub async fn list_events(
 /// GET /events/:id
 pub async fn get_event(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(event_id): Path<String>,
 ) -> Result<Json<EventWithRsvps>, (StatusCode, String)> {
     let event: Option<EventResponse> = sqlx::query_as(
@@ -321,6 +340,16 @@ pub async fn get_event(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let event = event.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
+
+    // Read-gating (§3.5): the event id itself doesn't reveal the channel, so
+    // a hidden-channel event 404s here rather than 403ing -- 403 would
+    // confirm the event's existence to a caller who can't see its channel.
+    let perms =
+        permissions::channel_permissions(&state.db, &user.public_key, &event.channel_id).await?;
+    if !perms.has(permissions::READ_MESSAGES) {
+        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
+    }
+
     let rsvp_counts = load_rsvp_counts(&state.db, &event_id).await?;
     Ok(Json(EventWithRsvps { event, rsvp_counts }))
 }

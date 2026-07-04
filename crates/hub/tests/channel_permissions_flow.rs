@@ -349,6 +349,106 @@ async fn admin_routes_reject_non_admin() {
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
 
+// ---- H2: priority / self-grant / admin-escalation guards ----
+
+/// Sets up a channel plus a "Manager" role (priority 10) holding
+/// `manage_roles` + `send_messages` hub-wide -- MANAGE_ROLES but not admin --
+/// assigned to `user2`. This mirrors the delegated subtree-manager the
+/// channel-permission-overwrites feature exists to enable.
+async fn setup_manager(
+    server: &axum_test::TestServer,
+) -> (String, String, String, RoleResponse, String) {
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(server, &owner).await;
+
+    let user2 = Identity::generate();
+    let user2_token = common::authenticate(server, &user2).await;
+    let user2_key = user2.public_key_hex();
+
+    let chan = create_channel(server, &owner_token, "h2-chan", None, false).await;
+
+    let manager = create_role(
+        server,
+        &owner_token,
+        "Manager",
+        &["manage_roles", "send_messages"],
+        10,
+    )
+    .await;
+    assign_role(server, &owner_token, &user2_key, &manager.id).await;
+
+    (owner_token, user2_token, chan.id, manager, user2_key)
+}
+
+#[tokio::test]
+async fn manager_cannot_grant_admin_via_overwrite() {
+    let server = common::setup().await;
+    let (_owner_token, user2_token, chan_id, _manager, _user2_key) = setup_manager(&server).await;
+
+    server
+        .put(&format!("/channels/{chan_id}/permissions/builtin-everyone"))
+        .authorization_bearer(&user2_token)
+        .json(&json!({ "allow": ["admin"], "deny": [] }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn manager_cannot_grant_permission_they_do_not_hold() {
+    let server = common::setup().await;
+    let (_owner_token, user2_token, chan_id, _manager, _user2_key) = setup_manager(&server).await;
+
+    // Manager holds manage_roles + send_messages, not manage_channels.
+    server
+        .put(&format!("/channels/{chan_id}/permissions/builtin-everyone"))
+        .authorization_bearer(&user2_token)
+        .json(&json!({ "allow": ["manage_channels"], "deny": [] }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn manager_cannot_edit_overwrites_for_higher_priority_role() {
+    let server = common::setup().await;
+    let (owner_token, user2_token, chan_id, _manager, _user2_key) = setup_manager(&server).await;
+
+    // A role ranked above the manager (priority 20 > manager's 10).
+    let senior = create_role(&server, &owner_token, "Senior", &[], 20).await;
+
+    server
+        .put(&format!("/channels/{chan_id}/permissions/{}", senior.id))
+        .authorization_bearer(&user2_token)
+        .json(&json!({ "allow": ["send_messages"], "deny": [] }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    // DELETE is guarded the same way.
+    server
+        .delete(&format!("/channels/{chan_id}/permissions/{}", senior.id))
+        .authorization_bearer(&user2_token)
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn manager_can_grant_permission_they_hold_on_same_or_lower_role() {
+    let server = common::setup().await;
+    let (_owner_token, user2_token, chan_id, _manager, _user2_key) = setup_manager(&server).await;
+
+    // builtin-everyone (priority 0) is below the manager's 10, and
+    // send_messages is a permission the manager effectively holds.
+    let view = set_overwrite(
+        &server,
+        &user2_token,
+        &chan_id,
+        "builtin-everyone",
+        &["send_messages"],
+        &[],
+    )
+    .await;
+    assert!(view.overwrites.allow.contains(&"send_messages".to_string()));
+}
+
 #[tokio::test]
 async fn admin_routes_reject_unknown_permission() {
     let server = common::setup().await;

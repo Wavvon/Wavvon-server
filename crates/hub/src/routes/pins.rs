@@ -34,8 +34,10 @@ pub async fn pin_message(
     user: AuthUser,
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Require manage_messages or admin.
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    // Require manage_messages or admin, scoped to this channel (§3.5) so a
+    // channel-level deny overwrite is respected the same way it is for
+    // reads.
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MANAGE_MESSAGES)?;
 
     // Verify message belongs to this channel.
@@ -90,7 +92,7 @@ pub async fn unpin_message(
     user: AuthUser,
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MANAGE_MESSAGES)?;
 
     sqlx::query("DELETE FROM channel_pins WHERE channel_id = $1 AND message_id = $2")
@@ -115,7 +117,7 @@ pub async fn unpin_message(
 /// GET /channels/:channel_id/pins
 pub async fn list_pins(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<PinResponse>>, (StatusCode, String)> {
     // Verify channel exists.
@@ -127,6 +129,11 @@ pub async fn list_pins(
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
+
+    // Read-gating (§3.5): pinned message bodies are private-channel content
+    // -- require effective READ_MESSAGES the same way message history does.
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    perms.require(permissions::READ_MESSAGES)?;
 
     #[derive(sqlx::FromRow)]
     struct PinRow {

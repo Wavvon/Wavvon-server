@@ -16,6 +16,19 @@ async fn create_channel(server: &TestServer, token: &str) -> String {
     body["id"].as_str().unwrap().to_string()
 }
 
+/// Denies `permission` for `@everyone` on `channel_id` via the
+/// channel-permission-overwrites admin route (§3.6).
+async fn deny_everyone(server: &TestServer, owner_token: &str, channel_id: &str, permission: &str) {
+    let resp = server
+        .put(&format!(
+            "/channels/{channel_id}/permissions/builtin-everyone"
+        ))
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .json(&json!({ "allow": [], "deny": [permission] }))
+        .await;
+    resp.assert_status_ok();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -176,6 +189,112 @@ async fn event_delete_rejected_for_non_creator() {
         .add_header("Authorization", format!("Bearer {token_other}"))
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+// ---- H3: channel-read-gating ----
+
+/// A member denied `read_messages` on a channel never sees that channel's
+/// events in `list_events` and 404s (not 403 -- the event id alone must not
+/// confirm existence) on `get_event`.
+#[tokio::test]
+async fn denied_member_cannot_list_or_get_hidden_channel_events() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    let channel_id = create_channel(&server, &owner_token).await;
+
+    let resp = server
+        .post("/events")
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .json(&json!({
+            "channel_id": channel_id,
+            "title": "Hidden Channel Event",
+            "starts_at": 9_999_999_999i64,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let event_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
+
+    deny_everyone(&server, &owner_token, &channel_id, "read_messages").await;
+
+    // list_events: the event must be filtered out for the denied member.
+    let resp = server
+        .get("/events?upcoming=true&limit=50")
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .await;
+    resp.assert_status_success();
+    let list: Value = resp.json();
+    let arr = list.as_array().unwrap();
+    assert!(
+        !arr.iter().any(|e| e["id"] == event_id),
+        "denied member must not see the hidden channel's event in the list"
+    );
+
+    // The owner (admin) still sees it.
+    let resp = server
+        .get("/events?upcoming=true&limit=50")
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .await;
+    let list: Value = resp.json();
+    let arr = list.as_array().unwrap();
+    assert!(arr.iter().any(|e| e["id"] == event_id));
+
+    // get_event: 404, not 403, since the event id doesn't reveal the
+    // channel -- a 403 here would confirm the event's existence.
+    let resp = server
+        .get(&format!("/events/{event_id}"))
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .await;
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+
+    // The owner (admin) can still fetch it directly.
+    let resp = server
+        .get(&format!("/events/{event_id}"))
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .await;
+    resp.assert_status_success();
+}
+
+/// `create_event` is gated on the target channel's effective CREATE_EVENTS,
+/// not the hub-wide baseline -- a member denied on the channel cannot
+/// create an event targeting it even though @everyone holds CREATE_EVENTS
+/// hub-wide.
+#[tokio::test]
+async fn create_event_rejected_on_channel_denied_create_events() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    let channel_id = create_channel(&server, &owner_token).await;
+    deny_everyone(&server, &owner_token, &channel_id, "create_events").await;
+
+    let resp = server
+        .post("/events")
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .json(&json!({
+            "channel_id": channel_id,
+            "title": "Should be rejected",
+            "starts_at": 9_999_999_999i64,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    // The owner (admin) is unaffected.
+    let resp = server
+        .post("/events")
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .json(&json!({
+            "channel_id": channel_id,
+            "title": "Owner can still create",
+            "starts_at": 9_999_999_999i64,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
 }
 
 /// Invalid RSVP status is rejected.

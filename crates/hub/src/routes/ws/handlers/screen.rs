@@ -22,6 +22,27 @@ pub(in crate::routes::ws) async fn handle_subscribe(
         _ => return DispatchResult::Continue,
     };
 
+    // Read-gating (§3.5): mirror the auto-subscribe gate in
+    // ws/connection.rs -- a channel the caller can't effectively
+    // READ_MESSAGES must never be inserted into `subscribed`, or its live
+    // messages/edits/typing/reactions/pins would leak over this connection.
+    let can_read =
+        match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await
+        {
+            Ok(perms) => perms.has(crate::permissions::READ_MESSAGES),
+            Err(_) => false,
+        };
+    if !can_read {
+        let err = WsServerMessage::Error {
+            context: "subscribe".to_string(),
+            message: "You do not have access to this channel.".to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
     let newly_subscribed = cs.subscribed.insert(channel_id.clone());
     if !newly_subscribed {
         return DispatchResult::Continue;

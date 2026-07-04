@@ -441,9 +441,21 @@ async fn main() -> Result<()> {
 
     println!("demo-seed: target hub = {hub_url}");
 
-    // Build a reqwest client that doesn't verify TLS for localhost convenience.
-    let client = Client::builder()
-        .danger_accept_invalid_certs(true)
+    // TLS verification is only skipped for a loopback target (the intended
+    // use of this tool is seeding a local demo hub). A HUB_URL pointed at a
+    // real host still gets full certificate verification -- this client
+    // authenticates as the hub owner, so silently trusting any certificate
+    // for a non-local hub would let a network MITM capture that token.
+    let hub_is_loopback = reqwest::Url::parse(&hub_url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .map(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
+        .unwrap_or(false);
+    let mut client_builder = Client::builder();
+    if hub_is_loopback {
+        client_builder = client_builder.danger_accept_invalid_certs(true);
+    }
+    let client = client_builder
         .build()
         .context("failed to build HTTP client")?;
 

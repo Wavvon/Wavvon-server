@@ -57,7 +57,9 @@ async fn main() -> Result<()> {
             eprintln!(
                 "Usage:\n  \
                  discord-import export --guild <id> [--out import-manifest.json]\n  \
-                 discord-import apply --hub <url> [--manifest import-manifest.json] [--report import-report.txt]"
+                 discord-import apply --hub <url> [--manifest import-manifest.json] [--report import-report.txt] [--insecure]\n\n\
+                 --hub must be https:// unless the host is loopback (localhost/127.0.0.1/::1).\n\
+                 --insecure disables TLS certificate verification and is only accepted for a loopback --hub."
             );
             std::process::exit(2);
         }
@@ -137,6 +139,31 @@ async fn run_apply(args: &[String]) -> Result<()> {
     let report_path = get_flag(args, "--report")
         .unwrap_or("import-report.txt")
         .to_string();
+    let insecure = args.iter().any(|a| a == "--insecure");
+
+    // D2: this tool authenticates with an owner-level token -- refuse to
+    // send it over plaintext to a non-local hub. Loopback targets (local
+    // dev/CI) are exempt from the scheme check.
+    let parsed_hub_url =
+        reqwest::Url::parse(&hub_url).with_context(|| format!("invalid --hub URL: {hub_url}"))?;
+    let hub_is_loopback = parsed_hub_url
+        .host_str()
+        .map(|h| matches!(h, "localhost" | "127.0.0.1" | "::1"))
+        .unwrap_or(false);
+    if parsed_hub_url.scheme() != "https" && !hub_is_loopback {
+        bail!(
+            "--hub must use https:// (got '{}://') unless the host is loopback \
+             (localhost/127.0.0.1/::1) -- refusing to send the owner token in cleartext \
+             to a non-local hub.",
+            parsed_hub_url.scheme()
+        );
+    }
+    if insecure && !hub_is_loopback {
+        bail!(
+            "--insecure is only accepted when --hub targets a loopback host \
+             (localhost/127.0.0.1/::1)."
+        );
+    }
 
     let manifest_json = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read manifest from {manifest_path}"))?;
@@ -151,8 +178,15 @@ async fn run_apply(args: &[String]) -> Result<()> {
 
     println!("discord-import apply: target hub = {hub_url}");
 
-    let client = Client::builder()
-        .danger_accept_invalid_certs(true)
+    // D1: TLS verification is on by default. It is disabled only for an
+    // explicit --insecure run against a loopback hub (checked above) --
+    // this client authenticates with an owner-level session token, so
+    // silently trusting any certificate would let a network MITM capture it.
+    let mut client_builder = Client::builder();
+    if insecure {
+        client_builder = client_builder.danger_accept_invalid_certs(true);
+    }
+    let client = client_builder
         .build()
         .context("failed to build HTTP client")?;
 
