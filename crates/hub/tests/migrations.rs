@@ -5,7 +5,7 @@ mod common;
 
 #[tokio::test]
 async fn migrations_idempotent_on_fresh_db() {
-    let pool = common::create_test_db().await;
+    let (pool, _guard) = common::create_test_db().await;
 
     // Running migrations again on an already-migrated database must not fail.
     // (create_test_db already ran migrations once; running them again exercises
@@ -31,7 +31,7 @@ async fn migrations_idempotent_on_fresh_db() {
 
 #[tokio::test]
 async fn migrations_data_survives_rerun() {
-    let pool = common::create_test_db().await;
+    let (pool, _guard) = common::create_test_db().await;
 
     // Insert a user so the FK on channels.created_by is satisfied
     sqlx::query(
@@ -61,7 +61,7 @@ async fn migrations_data_survives_rerun() {
 
 #[tokio::test]
 async fn migrations_create_all_core_tables() {
-    let pool = common::create_test_db().await;
+    let (pool, _guard) = common::create_test_db().await;
 
     // Every table we expect to exist
     let expected = [

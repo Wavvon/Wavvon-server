@@ -15,8 +15,8 @@ use wavvon_identity::{DeviceSubkey, Identity, MasterIdentity, SubkeyCert};
 #[path = "common.rs"]
 mod common;
 
-async fn setup() -> (TestServer, PgPool) {
-    let db = crate::common::create_test_db().await;
+async fn setup() -> (common::TestHarness, PgPool) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
 
     let state = Arc::new(AppState {
@@ -79,7 +79,7 @@ async fn setup() -> (TestServer, PgPool) {
         )),
     });
 
-    let server = TestServer::new(server::create_router(state));
+    let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);
     (server, db)
 }
 

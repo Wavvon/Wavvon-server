@@ -22,10 +22,10 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn make_state() -> Arc<AppState> {
-    let db = crate::common::create_test_db().await;
+async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
-    Arc::new(AppState {
+    let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
@@ -83,12 +83,14 @@ async fn make_state() -> Arc<AppState> {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
-    })
+    });
+    (state, guard)
 }
 
-async fn setup() -> (Arc<AppState>, TestServer) {
-    let state = make_state().await;
-    let server = TestServer::new(server::create_router(state.clone()));
+async fn setup() -> (Arc<AppState>, common::TestHarness) {
+    let (state, guard) = make_state().await;
+    let server =
+        common::TestHarness::new(TestServer::new(server::create_router(state.clone())), guard);
     (state, server)
 }
 
@@ -216,7 +218,7 @@ async fn expired_bot_session_is_rejected() {
 /// Sessions expiring within the 72-hour window get the warning pushed.
 #[tokio::test]
 async fn tick_sends_warning_for_near_expiry_session() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let bot = Identity::generate();
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
@@ -255,7 +257,7 @@ async fn tick_sends_warning_for_near_expiry_session() {
 /// Sessions beyond the 72-hour window should NOT receive a warning.
 #[tokio::test]
 async fn tick_does_not_warn_session_with_distant_expiry() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let bot = Identity::generate();
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
@@ -283,7 +285,7 @@ async fn tick_does_not_warn_session_with_distant_expiry() {
 /// Already-warned sessions (within 24 h) should not be re-warned.
 #[tokio::test]
 async fn tick_does_not_rewarn_recently_warned_session() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let bot = Identity::generate();
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
@@ -323,7 +325,7 @@ async fn tick_does_not_rewarn_recently_warned_session() {
 /// Expired sessions get the bot_removed message and are deleted.
 #[tokio::test]
 async fn tick_closes_and_deletes_expired_session() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let bot = Identity::generate();
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;
@@ -363,7 +365,7 @@ async fn tick_closes_and_deletes_expired_session() {
 /// Non-expired sessions are left alone by the expiry sweep.
 #[tokio::test]
 async fn tick_does_not_touch_live_sessions() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let bot = Identity::generate();
     let pk = bot.public_key_hex();
     insert_bot_user(&state.db, &pk).await;

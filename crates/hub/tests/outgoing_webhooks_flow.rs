@@ -21,8 +21,8 @@ mod common;
 /// database directly — needed here because the create route rejects
 /// non-https / private-range URLs, but the delivery test must point a
 /// webhook at a local mock receiver.
-async fn setup_with_pool() -> (TestServer, PgPool) {
-    let db = common::create_test_db().await;
+async fn setup_with_pool() -> (common::TestHarness, PgPool) {
+    let (db, guard) = common::create_test_db().await;
     let pool_handle = db.clone();
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
@@ -88,7 +88,10 @@ async fn setup_with_pool() -> (TestServer, PgPool) {
         )),
     });
     let app = server::create_router(state);
-    (TestServer::new(app), pool_handle)
+    (
+        common::TestHarness::new(TestServer::new(app), guard),
+        pool_handle,
+    )
 }
 
 // ---------------------------------------------------------------------------

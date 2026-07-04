@@ -27,8 +27,8 @@ mod common;
 // Test harness
 // ---------------------------------------------------------------------------
 
-async fn start_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -99,7 +99,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
     let url = format!("http://127.0.0.1:{port}");
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate_http(base: &str, identity: &Identity) -> String {
@@ -198,7 +198,7 @@ async fn next_msg_of_type(rx: &mut WsStream, msg_type: &str) -> Value {
 /// `voice_key_received` with the correct `from_pubkey`.
 #[tokio::test]
 async fn key_offer_routed_to_recipient() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let id_a = Identity::generate();
     let id_b = Identity::generate();
@@ -264,7 +264,7 @@ async fn key_offer_routed_to_recipient() {
 /// `voice_key_request` carrying B's pubkey and sender_id.
 #[tokio::test]
 async fn voice_join_sends_key_request_to_existing_participants() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let id_a = Identity::generate();
     let id_b = Identity::generate();
@@ -307,7 +307,7 @@ async fn voice_join_sends_key_request_to_existing_participants() {
 /// and must not crash the handler.
 #[tokio::test]
 async fn key_offer_unknown_recipient_is_silently_dropped() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let id_a = Identity::generate();
     let token_a = authenticate_http(&base, &id_a).await;
@@ -365,7 +365,7 @@ async fn key_offer_unknown_recipient_is_silently_dropped() {
 /// delivered to A must carry a non-zero `from_sender_id` matching B's assigned ID.
 #[tokio::test]
 async fn sender_id_present_in_key_received() {
-    let (base, state) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let id_a = Identity::generate();
     let id_b = Identity::generate();

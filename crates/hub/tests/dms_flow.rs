@@ -18,8 +18,8 @@ mod common;
 /// Same as common::setup() but also returns the PgPool so tests can poke the
 /// database directly (e.g. to mark a dm_outbox row as bounced for a test
 /// that exercises the delivery_failed reporting path).
-async fn setup_with_pool() -> (TestServer, PgPool) {
-    let db = crate::common::create_test_db().await;
+async fn setup_with_pool() -> (common::TestHarness, PgPool) {
+    let (db, guard) = crate::common::create_test_db().await;
     let pool_handle = db.clone();
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
@@ -85,7 +85,10 @@ async fn setup_with_pool() -> (TestServer, PgPool) {
         )),
     });
     let app = server::create_router(state);
-    (TestServer::new(app), pool_handle)
+    (
+        common::TestHarness::new(TestServer::new(app), guard),
+        pool_handle,
+    )
 }
 
 #[tokio::test]
@@ -240,8 +243,8 @@ async fn cannot_create_empty_conversation() {
 
 // --- Cross-hub federated DM tests ---
 
-async fn start_real_hub(name: &str) -> String {
-    let db = crate::common::create_test_db().await;
+async fn start_real_hub(name: &str) -> (String, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -317,7 +320,7 @@ async fn start_real_hub(name: &str) -> String {
         .await
         .unwrap();
     });
-    url
+    (url, guard)
 }
 
 async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
@@ -371,8 +374,8 @@ fn make_plaintext_sig(
 }
 
 /// Return the AppState together with the URL so tests can drive the worker manually.
-async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -448,13 +451,13 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>) {
         .await
         .unwrap();
     });
-    (url, state)
+    (url, state, guard)
 }
 
 #[tokio::test]
 async fn dm_delivered_across_hubs() {
-    let hub_a = start_real_hub("hub-a").await;
-    let hub_b = start_real_hub("hub-b").await;
+    let (hub_a, _hub_a_guard) = start_real_hub("hub-a").await;
+    let (hub_b, _hub_b_guard) = start_real_hub("hub-b").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -522,7 +525,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     use wavvon_hub::dm_worker;
 
     // Hub A is up from the start.
-    let (hub_a, hub_a_state) = start_real_hub_with_state("hub-a").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub_with_state("hub-a").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -577,7 +580,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     );
 
     // Bring Hub B up on the previously-chosen port.
-    let hub_b_db = crate::common::create_test_db().await;
+    let (hub_b_db, _hub_b_guard) = crate::common::create_test_db().await;
     let hub_b_store: Arc<dyn store::HubStore> =
         Arc::new(store::PostgresStore::new(hub_b_db.clone()));
     let (chat_tx_b, _) = broadcast::channel(256);
@@ -786,8 +789,8 @@ async fn list_dm_messages_returns_delivery_failed_false_for_local_conversation()
 /// each URL in hubs_json instead of conversation_members.hub_url.
 #[tokio::test]
 async fn send_dm_uses_home_hub_designation_when_present() {
-    let (hub_a, hub_a_state) = start_real_hub_with_state("hub-a-desig").await;
-    let hub_b = start_real_hub("hub-b-desig").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub_with_state("hub-a-desig").await;
+    let (hub_b, _hub_b_guard) = start_real_hub("hub-b-desig").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -878,8 +881,8 @@ async fn send_dm_uses_home_hub_designation_when_present() {
 /// hub_url from conversation_members (existing behaviour, no regression).
 #[tokio::test]
 async fn send_dm_falls_back_to_hub_url_when_no_designation() {
-    let hub_a = start_real_hub("hub-a-fallback").await;
-    let hub_b = start_real_hub("hub-b-fallback").await;
+    let (hub_a, _hub_a_guard) = start_real_hub("hub-a-fallback").await;
+    let (hub_b, _hub_b_guard) = start_real_hub("hub-b-fallback").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -1321,7 +1324,7 @@ async fn sender_key_upsert_replaces_old_entry() {
 /// doesn't belong to a key in the `peers` table.
 #[tokio::test]
 async fn federated_dm_rejects_normal_user() {
-    let hub = start_real_hub("hub-h4-reject").await;
+    let (hub, _guard) = start_real_hub("hub-h4-reject").await;
     let client = reqwest::Client::new();
 
     // Register a normal user on this hub.
@@ -1364,7 +1367,7 @@ async fn federated_dm_rejects_normal_user() {
 /// invalid signature, because only the victim can sign with the victim's key.
 #[tokio::test]
 async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
-    let hub = start_real_hub("hub-h4-bypass").await;
+    let (hub, _guard) = start_real_hub("hub-h4-bypass").await;
     let client = reqwest::Client::new();
 
     // Attacker generates their own keypair and authenticates with is_hub=true
@@ -1470,7 +1473,7 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
 /// path of the signature check.
 #[tokio::test]
 async fn federated_dm_accepts_correctly_signed_plaintext() {
-    let hub = start_real_hub("hub-h4-signed").await;
+    let (hub, _guard) = start_real_hub("hub-h4-signed").await;
     let client = reqwest::Client::new();
 
     // Register the "sending hub" via is_hub=true.
@@ -1546,8 +1549,8 @@ async fn federated_dm_accepts_registered_peer_hub() {
     // This test reuses the cross-hub DM flow which exercises the full
     // federation path.  If the PeerHub extractor incorrectly rejects a
     // registered peer, the message will not appear on Hub B.
-    let hub_a = start_real_hub("hub-h4-a").await;
-    let hub_b = start_real_hub("hub-h4-b").await;
+    let (hub_a, _hub_a_guard) = start_real_hub("hub-h4-a").await;
+    let (hub_b, _hub_b_guard) = start_real_hub("hub-h4-b").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();

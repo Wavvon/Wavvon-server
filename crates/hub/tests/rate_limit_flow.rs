@@ -14,8 +14,8 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn start_real_hub() -> String {
-    let db = crate::common::create_test_db().await;
+async fn start_real_hub() -> (String, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -92,11 +92,11 @@ async fn start_real_hub() -> String {
         .await
         .unwrap();
     });
-    url
+    (url, guard)
 }
 
-async fn setup_server() -> TestServer {
-    let db = crate::common::create_test_db().await;
+async fn setup_server() -> common::TestHarness {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -162,7 +162,7 @@ async fn setup_server() -> TestServer {
     });
 
     let app = server::create_router(state);
-    TestServer::new(app)
+    common::TestHarness::new(TestServer::new(app), guard)
 }
 
 async fn authenticate_server(server: &TestServer, identity: &Identity) -> String {
@@ -263,7 +263,7 @@ async fn message_rate_limit_blocks_31st() {
 
 #[tokio::test]
 async fn auth_challenge_rate_limits_burst() {
-    let hub = start_real_hub().await;
+    let (hub, _guard) = start_real_hub().await;
     let client = reqwest::Client::new();
     let pk = Identity::generate().public_key_hex();
 

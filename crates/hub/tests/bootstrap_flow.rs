@@ -30,7 +30,7 @@ fn config_with_template(template_url: &str) -> BootstrapConfig {
 
 #[tokio::test]
 async fn bootstrap_skipped_when_marker_already_set() {
-    let db = common::create_test_db().await;
+    let (db, _guard) = common::create_test_db().await;
 
     // Simulate a previously bootstrapped hub.
     sqlx::query("UPDATE hub_settings SET value = '1000000' WHERE key = 'bootstrapped_at'")
@@ -57,7 +57,7 @@ async fn bootstrap_skipped_when_marker_already_set() {
 
 #[tokio::test]
 async fn bootstrap_skipped_when_channels_exist() {
-    let db = common::create_test_db().await;
+    let (db, _guard) = common::create_test_db().await;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -105,7 +105,7 @@ async fn bootstrap_skipped_when_channels_exist() {
 
 #[tokio::test]
 async fn bootstrap_noop_when_no_config() {
-    let db = common::create_test_db().await;
+    let (db, _guard) = common::create_test_db().await;
     let http = reqwest::Client::new();
     maybe_bootstrap(&db, &http, &no_config()).await.unwrap();
 
@@ -132,7 +132,7 @@ async fn bootstrap_noop_when_no_config() {
 
 #[tokio::test]
 async fn template_applies_channels_roles_settings_and_welcome_message() {
-    let db = common::create_test_db().await;
+    let (db, _guard) = common::create_test_db().await;
 
     // Inject the template directly via apply_template (bypasses HTTP).
     let template = json!({

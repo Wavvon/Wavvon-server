@@ -14,8 +14,8 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn start_hub(name: &str) -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -94,7 +94,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         .unwrap();
     });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
@@ -133,8 +133,8 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
 
 #[tokio::test]
 async fn two_hubs_form_alliance() {
-    let (hub_a_url, hub_a_state) = start_hub("hub-a").await;
-    let (hub_b_url, _hub_b_state) = start_hub("hub-b").await;
+    let (hub_a_url, hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 
     // Create users (owners) on each hub
@@ -355,8 +355,8 @@ async fn two_hubs_form_alliance() {
 async fn push_invite_happy_path() {
     // Hub A creates an alliance and pushes an invite directly to Hub B.
     // Hub B sees it as a pending invite and can accept it.
-    let (hub_a_url, _hub_a_state) = start_hub("hub-a").await;
-    let (hub_b_url, _hub_b_state) = start_hub("hub-b").await;
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 
     // First users on each hub automatically receive the Owner (admin) role.
@@ -471,8 +471,8 @@ async fn push_invite_happy_path() {
 async fn push_invite_decline() {
     // Hub B declines an invite — it should be removed from the pending list
     // and Hub B should not appear in the alliance.
-    let (hub_a_url, _hub_a_state) = start_hub("hub-a").await;
-    let (hub_b_url, _hub_b_state) = start_hub("hub-b").await;
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 
     let user_a = Identity::generate();
@@ -560,8 +560,8 @@ async fn push_invite_decline() {
 
 #[tokio::test]
 async fn push_invite_nonexistent_alliance_rejected() {
-    let (hub_a_url, _) = start_hub("hub-a").await;
-    let (hub_b_url, _) = start_hub("hub-b").await;
+    let (hub_a_url, _, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 
     let user_a = Identity::generate();

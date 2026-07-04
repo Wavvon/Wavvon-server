@@ -27,8 +27,8 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn start_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -101,7 +101,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate(base: &str, identity: &Identity) -> String {
@@ -169,7 +169,7 @@ async fn close_ws(mut ws: WsStream) {
 /// Only after the second session closes should the user go offline.
 #[tokio::test]
 async fn h2_presence_refcount_two_sessions() {
-    let (base, state) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
     let identity = Identity::generate();
     let pk = identity.public_key_hex();
 
@@ -233,7 +233,7 @@ async fn h2_presence_refcount_two_sessions() {
 /// and offline once all sessions close.
 #[tokio::test]
 async fn h2_users_endpoint_reflects_refcount() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
     let identity = Identity::generate();
     let pk = identity.public_key_hex();
 
@@ -324,7 +324,7 @@ async fn h2_users_endpoint_reflects_refcount() {
 /// session's sender must still be present and functional.
 #[tokio::test]
 async fn h3_bot_sessions_second_session_survives_first_disconnect() {
-    let (base, state) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
     let _ = base; // not needed for this state-level test
 
     let pk = "aabbccdd".repeat(8); // fake pubkey, 64 hex chars
@@ -406,7 +406,7 @@ async fn h3_bot_sessions_second_session_survives_first_disconnect() {
 /// publish_hub_event delivers to all active sessions for a bot, not just one.
 #[tokio::test]
 async fn h3_publish_hub_event_reaches_all_sessions() {
-    let (base, state) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
     let _ = base;
 
     // Insert a real bot user row (publish_hub_event queries the DB for

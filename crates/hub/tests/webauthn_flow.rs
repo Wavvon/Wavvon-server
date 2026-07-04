@@ -47,8 +47,8 @@ fn gen_token() -> String {
     hex::encode(bytes)
 }
 
-async fn make_state() -> Arc<AppState> {
-    let db = common::create_test_db().await;
+async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let webauthn = Arc::new(
@@ -58,7 +58,7 @@ async fn make_state() -> Arc<AppState> {
             .build()
             .unwrap(),
     );
-    Arc::new(AppState {
+    let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
@@ -107,12 +107,13 @@ async fn make_state() -> Arc<AppState> {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
-    })
+    });
+    (state, guard)
 }
 
-async fn setup_server() -> TestServer {
-    let state = make_state().await;
-    TestServer::new(server::create_router(state))
+async fn setup_server() -> common::TestHarness {
+    let (state, guard) = make_state().await;
+    common::TestHarness::new(TestServer::new(server::create_router(state)), guard)
 }
 
 /// Insert a user + session row so subsequent authenticated requests succeed.
@@ -214,7 +215,7 @@ async fn device_token_rotates_on_redeem() {
 /// A device token with `expires_at` in the past must be rejected.
 #[tokio::test]
 async fn device_token_expired_rejected() {
-    let state = make_state().await;
+    let (state, guard) = make_state().await;
     let db = &state.db;
 
     let now = unix_now();
@@ -247,7 +248,7 @@ async fn device_token_expired_rejected() {
     .await
     .unwrap();
 
-    let server = TestServer::new(server::create_router(state));
+    let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);
     let res = server
         .post("/auth/device-token/redeem")
         .json(&json!({"token": raw_token}))
@@ -258,7 +259,7 @@ async fn device_token_expired_rejected() {
 /// A revoked device token must be rejected.
 #[tokio::test]
 async fn device_token_revoked_rejected() {
-    let state = make_state().await;
+    let (state, guard) = make_state().await;
     let db = &state.db;
 
     let now = unix_now();
@@ -289,7 +290,7 @@ async fn device_token_revoked_rejected() {
     .await
     .unwrap();
 
-    let server = TestServer::new(server::create_router(state));
+    let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);
     let res = server
         .post("/auth/device-token/redeem")
         .json(&json!({"token": raw_token}))
@@ -320,7 +321,7 @@ async fn list_credentials_empty() {
 /// Inserting a webauthn_credentials row then calling PATCH /me/credentials/:id renames it.
 #[tokio::test]
 async fn rename_credential() {
-    let state = make_state().await;
+    let (state, guard) = make_state().await;
     let db = &state.db;
     let now = unix_now();
 
@@ -350,7 +351,7 @@ async fn rename_credential() {
     .await
     .unwrap();
 
-    let server = TestServer::new(server::create_router(state));
+    let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);
     let token = common::authenticate(&server, &identity).await;
 
     // Rename.
@@ -376,7 +377,7 @@ async fn rename_credential() {
 /// Deleting a credential removes it from the database.
 #[tokio::test]
 async fn delete_credential() {
-    let state = make_state().await;
+    let (state, guard) = make_state().await;
     let db = &state.db;
     let now = unix_now();
 
@@ -404,7 +405,7 @@ async fn delete_credential() {
     .await
     .unwrap();
 
-    let server = TestServer::new(server::create_router(state));
+    let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);
     let token = common::authenticate(&server, &identity).await;
 
     // Delete.
@@ -431,7 +432,7 @@ async fn delete_credential() {
 /// GET /me/devices excludes expired tokens.
 #[tokio::test]
 async fn list_devices_excludes_expired() {
-    let state = make_state().await;
+    let (state, guard) = make_state().await;
     let db = &state.db;
     let now = unix_now();
 
@@ -480,7 +481,7 @@ async fn list_devices_excludes_expired() {
     .await
     .unwrap();
 
-    let server = TestServer::new(server::create_router(state));
+    let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);
     let token = common::authenticate(&server, &identity).await;
 
     let res = server

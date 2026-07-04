@@ -21,11 +21,11 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn make_state() -> Arc<AppState> {
-    let db = crate::common::create_test_db().await;
+async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
-    Arc::new(AppState {
+    let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
@@ -83,13 +83,14 @@ async fn make_state() -> Arc<AppState> {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
-    })
+    });
+    (state, guard)
 }
 
-async fn setup() -> (Arc<AppState>, TestServer) {
-    let state = make_state().await;
+async fn setup() -> (Arc<AppState>, common::TestHarness) {
+    let (state, guard) = make_state().await;
     let app = server::create_router(state.clone());
-    let server = TestServer::new(app);
+    let server = common::TestHarness::new(TestServer::new(app), guard);
     (state, server)
 }
 
@@ -239,8 +240,9 @@ async fn issue_unknown_pubkey_returns_404() {
 /// Cert worker tick issues certs to members whose first_seen_at is old enough.
 #[tokio::test]
 async fn cert_worker_issues_on_tick() {
-    let state = make_state().await;
-    let server = TestServer::new(server::create_router(state.clone()));
+    let (state, guard) = make_state().await;
+    let server =
+        common::TestHarness::new(TestServer::new(server::create_router(state.clone())), guard);
 
     // Register a member.
     let member = Identity::generate();

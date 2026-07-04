@@ -13,8 +13,8 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn setup() -> (TestServer, Identity) {
-    let db = crate::common::create_test_db().await;
+async fn setup() -> (common::TestHarness, Identity) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -81,7 +81,7 @@ async fn setup() -> (TestServer, Identity) {
         )),
     });
     let app = server::create_router(state);
-    let server = TestServer::new(app);
+    let server = common::TestHarness::new(TestServer::new(app), guard);
     let identity = Identity::generate();
     (server, identity)
 }

@@ -17,8 +17,8 @@ mod common;
 
 /// Build a TestServer backed by a real TantivySearch on a temp directory.
 /// Returns the TempDir too — drop it after the test to clean up.
-async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
-    let db = crate::common::create_test_db().await;
+async fn setup_with_search() -> (common::TestHarness, tempfile::TempDir) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -84,7 +84,10 @@ async fn setup_with_search() -> (TestServer, tempfile::TempDir) {
             wavvon_hub::state::WebhookCircuit::default(),
         )),
     });
-    (TestServer::new(server::create_router(state)), tmp)
+    (
+        common::TestHarness::new(TestServer::new(server::create_router(state)), guard),
+        tmp,
+    )
 }
 
 async fn authenticate(server: &TestServer, identity: &Identity) -> String {

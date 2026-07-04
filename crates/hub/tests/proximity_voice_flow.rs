@@ -24,8 +24,8 @@ mod common;
 // Harness — mirrors voice_relay_flow.rs so WS upgrades work.
 // ---------------------------------------------------------------------------
 
-async fn start_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -96,7 +96,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
     let url = format!("http://127.0.0.1:{port}");
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate_http(base: &str, identity: &Identity) -> String {
@@ -196,7 +196,7 @@ fn make_zone(zone_id: &str, channel_id: &str, creator: &str) -> VoiceZone {
 /// A zone inserted into AppState persists with all fields intact.
 #[tokio::test]
 async fn zone_inserted_into_state_is_retrievable() {
-    let (_url, state) = start_hub().await;
+    let (_url, state, _guard) = start_hub().await;
 
     let creator = "aaaa".repeat(16); // 64 hex chars
     let zone = make_zone("z1", "ch1", &creator);
@@ -220,7 +220,7 @@ async fn zone_inserted_into_state_is_retrievable() {
 /// Removing a zone from state leaves no entry behind.
 #[tokio::test]
 async fn zone_destroy_removes_entry() {
-    let (_url, state) = start_hub().await;
+    let (_url, state, _guard) = start_hub().await;
 
     let zone = make_zone("z2", "ch1", "creator");
     state
@@ -246,7 +246,7 @@ async fn zone_destroy_removes_entry() {
 /// Position data stored in a zone is keyed by pubkey and holds the coordinate vec.
 #[tokio::test]
 async fn position_stored_and_retrieved_from_zone() {
-    let (_url, state) = start_hub().await;
+    let (_url, state, _guard) = start_hub().await;
 
     let creator = "bbbb".repeat(16);
     let mut zone = make_zone("z3", "ch1", &creator);
@@ -268,7 +268,7 @@ async fn position_stored_and_retrieved_from_zone() {
 /// `voice_zone_state` snapshot to the joining client over WS.
 #[tokio::test]
 async fn voice_join_delivers_zone_snapshot() {
-    let (base, state) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     // Authenticate and create a channel via HTTP.
     let identity = Identity::generate();

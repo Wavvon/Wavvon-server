@@ -22,8 +22,8 @@ mod common;
 /// Boot a real TCP listener on a random port and return the base URL.
 /// Mirrors `screen_share_flow.rs`'s `start_hub` -- a real socket is needed
 /// because `tokio_tungstenite` speaks actual TCP, unlike `axum_test`.
-async fn start_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -97,7 +97,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate_http(base: &str, identity: &Identity) -> String {
@@ -222,7 +222,7 @@ async fn next_meaningful_frame(rx: &mut WsStream, timeout: std::time::Duration) 
 /// subscribed set.
 #[tokio::test]
 async fn subscribe_to_denied_channel_is_rejected_and_no_events_leak() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let owner_id = Identity::generate();
     let member_id = Identity::generate();
@@ -263,7 +263,7 @@ async fn subscribe_to_denied_channel_is_rejected_and_no_events_leak() {
 /// and delivers events (guards against over-tightening the gate).
 #[tokio::test]
 async fn subscribe_to_readable_channel_still_delivers_events() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let owner_id = Identity::generate();
     let member_id = Identity::generate();

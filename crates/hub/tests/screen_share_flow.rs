@@ -16,8 +16,8 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn start_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -91,7 +91,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate_http(base: &str, identity: &Identity) -> String {
@@ -224,7 +224,7 @@ async fn next_raw(
 /// Happy path: sharer sends start + chunk + stop; viewer receives them all.
 #[tokio::test]
 async fn screen_share_start_chunk_stop_fan_out() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let sharer_id = Identity::generate();
     let viewer_id = Identity::generate();
@@ -320,7 +320,7 @@ async fn screen_share_start_chunk_stop_fan_out() {
 /// Late joiner: viewer connects after the init chunk is cached and receives it on subscribe.
 #[tokio::test]
 async fn late_joiner_receives_init_chunk() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let sharer_id = Identity::generate();
     let viewer_id = Identity::generate();
@@ -400,7 +400,7 @@ async fn late_joiner_receives_init_chunk() {
 /// Each gets their own slot keyed by (channel_id, pubkey); a viewer sees both.
 #[tokio::test]
 async fn multiple_concurrent_sharers_allowed() {
-    let (base, _state) = start_hub().await;
+    let (base, _state, _guard) = start_hub().await;
 
     let alice = Identity::generate();
     let bob = Identity::generate();

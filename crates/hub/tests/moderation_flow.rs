@@ -266,8 +266,8 @@ use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Spin up a real listener so we can connect a WebSocket client to it.
-async fn spawn_real_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn spawn_real_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
@@ -339,7 +339,7 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         .await
         .unwrap();
     });
-    (format!("http://127.0.0.1:{port}"), state)
+    (format!("http://127.0.0.1:{port}"), state, guard)
 }
 
 async fn http_authenticate(hub_url: &str, identity: &Identity) -> String {
@@ -410,7 +410,7 @@ async fn ws_voice_join_and_recv(hub_url: &str, token: &str, channel_id: &str) ->
 
 #[tokio::test]
 async fn voice_mute_blocks_voice_join() {
-    let (hub_url, _state) = spawn_real_hub().await;
+    let (hub_url, _state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     // Owner first to get the Owner role + permissions
@@ -451,7 +451,7 @@ async fn voice_mute_blocks_voice_join() {
 
 #[tokio::test]
 async fn talk_power_blocks_low_priority_user() {
-    let (hub_url, state) = spawn_real_hub().await;
+    let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     // Owner sets up the channel + talk power
@@ -610,7 +610,7 @@ async fn channel_ban_v2_rejected_without_permission() {
 
 #[tokio::test]
 async fn channel_voice_mute_blocks_voice_join() {
-    let (hub_url, _state) = spawn_real_hub().await;
+    let (hub_url, _state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     let owner = Identity::generate();
@@ -765,7 +765,7 @@ async fn raise_hand_and_lower_hand_flow() {
 
 #[tokio::test]
 async fn raise_hand_allows_voice_join_below_threshold() {
-    let (hub_url, state) = spawn_real_hub().await;
+    let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     let owner = Identity::generate();
@@ -826,7 +826,7 @@ async fn raise_hand_allows_voice_join_below_threshold() {
 #[tokio::test]
 async fn federated_ban_blocks_message_posting() {
     // Use spawn_real_hub so we have access to the DB to insert the ban row.
-    let (hub_url, state) = spawn_real_hub().await;
+    let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     let owner = Identity::generate();

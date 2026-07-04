@@ -21,8 +21,8 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn start_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -96,7 +96,7 @@ async fn start_hub() -> (String, Arc<AppState>) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate_http(base: &str, identity: &Identity) -> String {
@@ -228,7 +228,7 @@ async fn sim_register(state: &AppState, pubkey: &str, channel_id: &str, addr: So
 /// After voice_join the pubkey is present in voice_relay_active.
 #[tokio::test]
 async fn voice_join_activates_relay_slot() {
-    let (_base, state) = start_hub().await;
+    let (_base, state, _guard) = start_hub().await;
     let pk = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111";
     sim_join(&state, pk, "ch1").await;
 
@@ -242,7 +242,7 @@ async fn voice_join_activates_relay_slot() {
 /// After WS disconnect (simulated via leave_voice) the slot is removed.
 #[tokio::test]
 async fn ws_disconnect_removes_relay_slot() {
-    let (_base, state) = start_hub().await;
+    let (_base, state, _guard) = start_hub().await;
     let pk = "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222";
     let channel_id = "ch-test";
     let bound_addr: SocketAddr = "127.0.0.1:19001".parse().unwrap();
@@ -280,7 +280,7 @@ async fn ws_disconnect_removes_relay_slot() {
 /// A second join by the same pubkey (re-connect) re-activates the slot.
 #[tokio::test]
 async fn rejoin_reactivates_relay_slot() {
-    let (_base, state) = start_hub().await;
+    let (_base, state, _guard) = start_hub().await;
     let pk = "cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333cccc3333";
     let ch = "ch-rejoin";
 
@@ -341,7 +341,7 @@ async fn drain_until_voice_joined(
 /// reply carries a udp_register_token; after explicit voice_leave the slot is gone.
 #[tokio::test]
 async fn ws_voice_join_leave_updates_relay_active() {
-    let (base, state) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let user = Identity::generate();
     let token = authenticate_http(&base, &user).await;
@@ -403,7 +403,7 @@ async fn ws_voice_join_leave_updates_relay_active() {
 /// removes the relay slot.
 #[tokio::test]
 async fn ws_close_removes_relay_slot_without_explicit_leave() {
-    let (base, state) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let user = Identity::generate();
     let token = authenticate_http(&base, &user).await;
@@ -459,8 +459,8 @@ async fn ws_close_removes_relay_slot_without_explicit_leave() {
 
 /// Extended harness that also starts the UDP relay loop from main.rs.
 /// Returns (http_base_url, udp_port, Arc<AppState>).
-async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub_with_udp() -> (String, u16, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -656,7 +656,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
         axum::serve(listener, app).await.unwrap();
     });
 
-    (url, udp_port, state)
+    (url, udp_port, state, guard)
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +666,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>) {
 /// 7a: voice_joined reply carries a udp_register_token (64 hex chars).
 #[tokio::test]
 async fn voice_joined_carries_udp_register_token() {
-    let (base, _udp_port, _state) = start_hub_with_udp().await;
+    let (base, _udp_port, _state, _guard) = start_hub_with_udp().await;
 
     let user = Identity::generate();
     let token = authenticate_http(&base, &user).await;
@@ -708,7 +708,7 @@ async fn voice_joined_carries_udp_register_token() {
 /// relays to B's real socket (not loopback).
 #[tokio::test]
 async fn two_clients_register_and_audio_relays() {
-    let (base, udp_port, state) = start_hub_with_udp().await;
+    let (base, udp_port, state, _guard) = start_hub_with_udp().await;
     let hub_addr: SocketAddr = format!("127.0.0.1:{udp_port}").parse().unwrap();
 
     let user_a = Identity::generate();
@@ -827,7 +827,7 @@ async fn two_clients_register_and_audio_relays() {
 /// an unregistered address.
 #[tokio::test]
 async fn audio_before_register_not_relayed() {
-    let (base, udp_port, state) = start_hub_with_udp().await;
+    let (base, udp_port, state, _guard) = start_hub_with_udp().await;
     let hub_addr: SocketAddr = format!("127.0.0.1:{udp_port}").parse().unwrap();
 
     let user_a = Identity::generate();
@@ -919,7 +919,7 @@ async fn audio_before_register_not_relayed() {
 /// 7d: A register packet with a garbage token gets no reply and no binding.
 #[tokio::test]
 async fn garbage_token_gets_no_reply() {
-    let (base, udp_port, state) = start_hub_with_udp().await;
+    let (base, udp_port, state, _guard) = start_hub_with_udp().await;
     let hub_addr: SocketAddr = format!("127.0.0.1:{udp_port}").parse().unwrap();
 
     let user = Identity::generate();
@@ -984,7 +984,7 @@ async fn garbage_token_gets_no_reply() {
 /// (original binding intact, no ack to the new address).
 #[tokio::test]
 async fn consumed_token_from_different_addr_does_not_rebind() {
-    let (base, udp_port, state) = start_hub_with_udp().await;
+    let (base, udp_port, state, _guard) = start_hub_with_udp().await;
     let hub_addr: SocketAddr = format!("127.0.0.1:{udp_port}").parse().unwrap();
 
     let user = Identity::generate();

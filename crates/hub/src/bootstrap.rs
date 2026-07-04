@@ -405,10 +405,54 @@ mod tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
 
+    /// Drops the ephemeral `wavvon_test_bootstrap_*` database created by
+    /// [`make_test_db`] once the test is done with it — including on panic,
+    /// since `Drop` runs on unwind. Mirrors the guard in
+    /// `hub/tests/common.rs`; kept local here because `src/` unit tests
+    /// can't depend on the integration-test harness module.
+    struct TestDbGuard {
+        db_name: String,
+        base_url: String,
+    }
+
+    impl Drop for TestDbGuard {
+        fn drop(&mut self) {
+            let db_name = self.db_name.clone();
+            let base_url = self.base_url.clone();
+            // Drop from a dedicated OS thread + throwaway runtime: `Drop`
+            // can't be async, and the calling thread may already be inside
+            // a (non-nestable) Tokio runtime.
+            let joined = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                rt.block_on(async move {
+                    let admin = PgPoolOptions::new()
+                        .max_connections(1)
+                        .connect(&format!("{base_url}/postgres"))
+                        .await?;
+                    sqlx::query(&format!(
+                        "DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"
+                    ))
+                    .execute(&admin)
+                    .await?;
+                    Ok::<(), sqlx::Error>(())
+                })
+            })
+            .join();
+            if let Ok(Err(err)) = joined {
+                eprintln!(
+                    "warning: failed to drop test database {}: {err}",
+                    self.db_name
+                );
+            }
+        }
+    }
+
     /// Minimal in-test DB helper.  Tests that call this need a live PostgreSQL
     /// instance (same as the rest of the integration suite — TEST_DATABASE_URL
     /// or the default postgres://postgres:postgres@localhost:5432).
-    async fn make_test_db() -> PgPool {
+    async fn make_test_db() -> (PgPool, TestDbGuard) {
         let base_url = std::env::var("TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
         let admin = PgPoolOptions::new()
@@ -421,13 +465,17 @@ mod tests {
             .execute(&admin)
             .await
             .expect("create db");
+        let guard = TestDbGuard {
+            db_name: db_name.clone(),
+            base_url: base_url.clone(),
+        };
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .connect(&format!("{base_url}/{db_name}"))
             .await
             .expect("connect test db");
         crate::db::migrations::run(&pool).await.expect("migrations");
-        pool
+        (pool, guard)
     }
 
     fn default_cfg() -> BootstrapConfig {
@@ -464,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn already_bootstrapped_is_noop() {
-        let db = make_test_db().await;
+        let (db, _guard) = make_test_db().await;
         sqlx::query("UPDATE hub_settings SET value = '1000' WHERE key = 'bootstrapped_at'")
             .execute(&db)
             .await
@@ -492,7 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn existing_channels_is_noop() {
-        let db = make_test_db().await;
+        let (db, _guard) = make_test_db().await;
         // Insert a channel so the hub looks non-blank.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -534,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_config_is_noop() {
-        let db = make_test_db().await;
+        let (db, _guard) = make_test_db().await;
         let http = reqwest::Client::new();
         maybe_bootstrap(&db, &http, &default_cfg()).await.unwrap();
 
@@ -549,7 +597,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_template_creates_channels_and_roles() {
-        let db = make_test_db().await;
+        let (db, _guard) = make_test_db().await;
         let template = sample_template();
         apply_template(&db, &template).await.unwrap();
 

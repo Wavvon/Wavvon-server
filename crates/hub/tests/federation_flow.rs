@@ -16,8 +16,8 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-async fn start_hub(name: &str) -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
 
@@ -97,7 +97,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>) {
         .unwrap();
     });
 
-    (url, state)
+    (url, state, guard)
 }
 
 async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
@@ -136,8 +136,8 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
 
 #[tokio::test]
 async fn two_hubs_federate() {
-    let (hub_a_url, _hub_a_state) = start_hub("hub-a").await;
-    let (hub_b_url, hub_b_state) = start_hub("hub-b").await;
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 
     // Create users on each hub

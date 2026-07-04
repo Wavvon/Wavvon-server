@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use axum_test::TestServer;
@@ -25,12 +26,103 @@ fn base_db_url() -> String {
         .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Ephemeral database teardown
+// ---------------------------------------------------------------------------
+//
+// Every test gets its own `wavvon_test_<uuid>` database via `create_test_db`.
+// Historically nothing ever dropped these, and they piled up in the target
+// PostgreSQL container indefinitely (thousands of stale databases have been
+// observed, at one point exhausting the container's /dev/shm and crashing
+// Postgres mid-suite).
+//
+// `TestDbGuard` (returned alongside the pool by `create_test_db`, and
+// bundled into `TestHarness` for HTTP-level tests) drops the database when
+// the last handle referencing it goes out of scope. Because `Drop` cannot
+// be `async`, and the caller may already be inside a `#[tokio::test]`
+// current-thread runtime (which cannot nest another `block_on`), teardown
+// runs on a dedicated OS thread with its own throwaway Tokio runtime. This
+// also means teardown fires on test panic/failure (unlike an explicit
+// "please clean up" call at the end of a test, which is skipped on unwind).
+//
+// `DROP DATABASE ... WITH (FORCE)` (Postgres 13+) is used so a connection
+// leaked from the test's own pool can't block cleanup.
+//
+// One-shot backlog sweep: if the target Postgres instance has accumulated a
+// backlog of stale `wavvon_test_*` databases (e.g. from runs before this
+// fix, or from a hard-killed test process), clear it with:
+//
+//   cargo test -p wavvon-hub --test db_sweep -- --ignored --nocapture
+//
+// or manually via psql:
+//
+//   psql -U postgres -c "SELECT 'DROP DATABASE IF EXISTS \"' || datname || '\" WITH (FORCE);' FROM pg_database WHERE datname LIKE 'wavvon_test_%'" -t | psql -U postgres
+
+struct TestDbGuardInner {
+    db_name: String,
+    base_url: String,
+}
+
+impl Drop for TestDbGuardInner {
+    fn drop(&mut self) {
+        let db_name = self.db_name.clone();
+        let base_url = self.base_url.clone();
+
+        // Escape to a fresh OS thread so we can drive a throwaway runtime
+        // to completion, regardless of what runtime (if any) is active on
+        // the thread that's dropping us.
+        let join_result = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            rt.block_on(async move {
+                let admin_pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .connect(&format!("{base_url}/postgres"))
+                    .await?;
+                sqlx::query(&format!(
+                    "DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"
+                ))
+                .execute(&admin_pool)
+                .await?;
+                Ok::<(), sqlx::Error>(())
+            })
+        })
+        .join();
+
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                eprintln!(
+                    "warning: failed to drop test database {}: {err}",
+                    self.db_name
+                );
+            }
+            Err(_) => {
+                eprintln!(
+                    "warning: teardown thread panicked while dropping test database {}",
+                    self.db_name
+                );
+            }
+        }
+    }
+}
+
+/// Cheaply cloneable handle whose last drop tears down the ephemeral test
+/// database. Hold on to it (even via `let _guard = ...`) for as long as the
+/// pool/server backed by that database is in use.
+#[derive(Clone)]
+#[must_use = "dropping this immediately tears down the test database while it may still be in use"]
+pub struct TestDbGuard(#[allow(dead_code)] Arc<TestDbGuardInner>);
+
 /// Create a new, isolated PostgreSQL database for a single test, run
-/// migrations against it, and return the pool.
+/// migrations against it, and return the pool together with a guard that
+/// drops the database once the test (and anything sharing the guard) is
+/// done with it.
 ///
 /// The database name is derived from a UUID to ensure isolation across
 /// parallel test runs.
-pub async fn create_test_db() -> PgPool {
+pub async fn create_test_db() -> (PgPool, TestDbGuard) {
     let base_url = base_db_url();
 
     // Connect to the `postgres` maintenance database to issue CREATE DATABASE.
@@ -47,6 +139,11 @@ pub async fn create_test_db() -> PgPool {
         .await
         .expect("Failed to create test database");
 
+    let guard = TestDbGuard(Arc::new(TestDbGuardInner {
+        db_name: db_name.clone(),
+        base_url: base_url.clone(),
+    }));
+
     // Connect to the newly created test database.
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -58,7 +155,72 @@ pub async fn create_test_db() -> PgPool {
         .await
         .expect("Failed to run migrations on test database");
 
-    pool
+    (pool, guard)
+}
+
+/// One-shot maintenance helper: drops every leftover `wavvon_test_*`
+/// database on the target Postgres server. Safe to run at any time — each
+/// test run uses a fresh UUID-derived name, so a backlog left behind by
+/// earlier crashed/killed/pre-fix runs is always safe to clear.
+///
+/// Run explicitly with:
+///   cargo test -p wavvon-hub --test db_sweep -- --ignored --nocapture
+#[allow(dead_code)]
+pub async fn sweep_stale_test_databases() -> usize {
+    let base_url = base_db_url();
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("Failed to connect to PostgreSQL (admin)");
+
+    let names: Vec<String> =
+        sqlx::query_scalar("SELECT datname FROM pg_database WHERE datname LIKE 'wavvon_test_%'")
+            .fetch_all(&admin_pool)
+            .await
+            .expect("Failed to list stale test databases");
+
+    let mut dropped = 0usize;
+    for name in names {
+        let result = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+            .execute(&admin_pool)
+            .await;
+        match result {
+            Ok(_) => dropped += 1,
+            Err(err) => eprintln!("warning: failed to drop stale test database {name}: {err}"),
+        }
+    }
+    dropped
+}
+
+/// Wraps `axum_test::TestServer` together with the `TestDbGuard` for the
+/// database backing it, so the database is torn down exactly when the
+/// server (and everything derived from it) goes out of scope — including
+/// on test panic. `Deref`s to `TestServer` so existing call sites that use
+/// `server.get(...)`, `server.post(...)`, or pass `&server` around keep
+/// working unchanged.
+#[allow(dead_code)]
+pub struct TestHarness {
+    server: TestServer,
+    _guard: TestDbGuard,
+}
+
+impl TestHarness {
+    #[allow(dead_code)]
+    pub fn new(server: TestServer, guard: TestDbGuard) -> Self {
+        TestHarness {
+            server,
+            _guard: guard,
+        }
+    }
+}
+
+impl Deref for TestHarness {
+    type Target = TestServer;
+
+    fn deref(&self) -> &TestServer {
+        &self.server
+    }
 }
 
 fn make_test_webauthn() -> Arc<webauthn_rs::Webauthn> {
@@ -72,8 +234,8 @@ fn make_test_webauthn() -> Arc<webauthn_rs::Webauthn> {
     )
 }
 
-pub async fn setup() -> TestServer {
-    let db = create_test_db().await;
+pub async fn setup() -> TestHarness {
+    let (db, guard) = create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -129,7 +291,7 @@ pub async fn setup() -> TestServer {
         )),
     });
     let app = server::create_router(state);
-    TestServer::new(app)
+    TestHarness::new(TestServer::new(app), guard)
 }
 
 #[allow(dead_code)]
@@ -154,7 +316,7 @@ pub async fn authenticate(server: &TestServer, identity: &Identity) -> String {
 }
 
 #[allow(dead_code)]
-pub async fn setup_with_owner() -> (TestServer, String) {
+pub async fn setup_with_owner() -> (TestHarness, String) {
     let server = setup().await;
     let owner = Identity::generate();
     let token = authenticate(&server, &owner).await;

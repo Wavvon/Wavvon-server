@@ -188,7 +188,7 @@ async fn delete_source_removes_rows() {
 // GET /admin/banlist/entries — list federated ban entries
 #[tokio::test]
 async fn list_entries_returns_synced_bans() {
-    let (hub_url, state) = spawn_real_hub().await;
+    let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     let owner = Identity::generate();
@@ -361,7 +361,7 @@ async fn banlist_publish_toggle() {
 // Whitelist override admits user even when they're in federated_bans
 #[tokio::test]
 async fn whitelist_override_admits_federated_banned_user() {
-    let (hub_url, state) = spawn_real_hub().await;
+    let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     let owner = Identity::generate();
@@ -440,7 +440,7 @@ async fn whitelist_override_admits_federated_banned_user() {
 // Blacklist override denies user even when NOT in federated_bans
 #[tokio::test]
 async fn blacklist_override_denies_user_at_auth() {
-    let (hub_url, state) = spawn_real_hub().await;
+    let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     let owner = Identity::generate();
@@ -553,7 +553,7 @@ async fn get_moderation_settings_with_webhook_set() {
 
 #[tokio::test]
 async fn get_moderation_settings_circuit_open() {
-    let (hub_url, state) = spawn_real_hub().await;
+    let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
     let owner = Identity::generate();
@@ -693,8 +693,8 @@ mod common_helpers {
     }
 }
 
-async fn spawn_real_hub() -> (String, Arc<AppState>) {
-    let db = crate::common::create_test_db().await;
+async fn spawn_real_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
@@ -766,7 +766,7 @@ async fn spawn_real_hub() -> (String, Arc<AppState>) {
         .await
         .unwrap();
     });
-    (format!("http://127.0.0.1:{port}"), state)
+    (format!("http://127.0.0.1:{port}"), state, guard)
 }
 
 async fn http_authenticate(hub_url: &str, identity: &Identity) -> String {

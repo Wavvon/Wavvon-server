@@ -26,11 +26,11 @@ mod common;
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn make_state() -> Arc<AppState> {
-    let db = common::create_test_db().await;
+async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
-    Arc::new(AppState {
+    let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
@@ -88,7 +88,8 @@ async fn make_state() -> Arc<AppState> {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
-    })
+    });
+    (state, guard)
 }
 
 fn unix_now() -> i64 {
@@ -179,7 +180,7 @@ async fn revocation_exists(db: &sqlx::PgPool, master_pubkey: &str, subkey_pubkey
 /// A revoked subkey is inserted into subkey_revocations after one tick.
 #[tokio::test]
 async fn revoked_subkey_inserted_after_tick() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
 
     let identity = Identity::generate();
     let master_key = identity.master().unwrap();
@@ -211,7 +212,7 @@ async fn revoked_subkey_inserted_after_tick() {
 /// successful sync.
 #[tokio::test]
 async fn sync_cursor_advances() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
 
     let identity = Identity::generate();
     let master_key = identity.master().unwrap();
@@ -248,7 +249,7 @@ async fn sync_cursor_advances() {
 /// tick() is a no-op when subkey_certs is empty (no home hubs to discover).
 #[tokio::test]
 async fn no_op_when_no_subkey_certs() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     subkey_revocation_worker::tick(&state).await;
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocation_sync")
         .fetch_one(&state.db)
@@ -261,7 +262,7 @@ async fn no_op_when_no_subkey_certs() {
 /// extra rows in subkey_revocations for identity B.
 #[tokio::test]
 async fn only_matching_master_revocations_inserted() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
 
     // Identity A — has a revocation.
     let identity_a = Identity::generate();
@@ -297,7 +298,7 @@ async fn only_matching_master_revocations_inserted() {
 /// subkey_revocations stays empty.
 #[tokio::test]
 async fn unreachable_hub_does_not_panic() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
 
     let identity = Identity::generate();
     let master_key = identity.master().unwrap();

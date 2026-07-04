@@ -28,8 +28,8 @@ mod common;
 // Helpers
 // ---------------------------------------------------------------------------
 
-async fn make_state() -> Arc<AppState> {
-    let db = common::create_test_db().await;
+async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let webauthn = Arc::new(
@@ -39,7 +39,7 @@ async fn make_state() -> Arc<AppState> {
             .build()
             .unwrap(),
     );
-    Arc::new(AppState {
+    let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
@@ -88,7 +88,8 @@ async fn make_state() -> Arc<AppState> {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
-    })
+    });
+    (state, guard)
 }
 
 /// Starts a minimal axum server on a random port that always returns the given
@@ -163,7 +164,7 @@ async fn cert_exists(db: &sqlx::PgPool, id: &str) -> bool {
 /// Revoked cert is deleted from user_certs after one tick.
 #[tokio::test]
 async fn revoked_cert_removed() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let now = unix_now();
 
     let issuer_pubkey = "a".repeat(64);
@@ -200,7 +201,7 @@ async fn revoked_cert_removed() {
 /// The sync cursor is recorded and advances after a successful sync.
 #[tokio::test]
 async fn sync_cursor_advances() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let now = unix_now();
 
     let issuer_pubkey = "c".repeat(64);
@@ -242,7 +243,7 @@ async fn sync_cursor_advances() {
 /// tick() is a no-op when user_certs is empty (no issuers to discover).
 #[tokio::test]
 async fn no_op_when_no_user_certs() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     cert_revocation_worker::tick(&state).await;
     // No panic and no rows added
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cert_revocation_sync")
@@ -256,7 +257,7 @@ async fn no_op_when_no_user_certs() {
 /// that had no revocations are left intact.
 #[tokio::test]
 async fn only_matching_issuer_certs_removed() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let now = unix_now();
 
     let issuer_a_pubkey = "e".repeat(64);
@@ -303,7 +304,7 @@ async fn only_matching_issuer_certs_removed() {
 /// When the remote issuer is unreachable, existing certs are left untouched.
 #[tokio::test]
 async fn unreachable_issuer_does_not_delete_certs() {
-    let state = make_state().await;
+    let (state, _guard) = make_state().await;
     let now = unix_now();
 
     let issuer_pubkey = "h".repeat(64);
