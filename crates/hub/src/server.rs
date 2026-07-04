@@ -337,10 +337,13 @@ pub fn create_router_full(
             delete(routes::bots::screenshare::bot_screenshare_stop),
         )
         // ---- Incoming webhooks ----
-        .route("/admin/webhooks", post(routes::webhooks::create_webhook))
+        .route(
+            "/admin/webhooks",
+            get(routes::webhooks::list_webhooks).post(routes::webhooks::create_webhook),
+        )
         .route(
             "/admin/webhooks/{id}",
-            delete(routes::webhooks::delete_webhook),
+            delete(routes::webhooks::delete_webhook).patch(routes::webhooks::regenerate_webhook),
         )
         .route(
             "/webhooks/{id}/{token}",

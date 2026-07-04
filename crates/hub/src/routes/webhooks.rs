@@ -55,6 +55,35 @@ pub struct CreateWebhookResponse {
     pub display_name: String,
 }
 
+#[derive(Serialize)]
+pub struct WebhookInfoResponse {
+    pub id: String,
+    pub display_name: String,
+    pub channel_id: String,
+    pub channel_name: Option<String>,
+    /// Base URL only — the secret token is not recoverable (stored hashed).
+    /// Use regenerate to obtain a fresh, working URL.
+    pub webhook_url: String,
+    pub created_by: String,
+    pub created_at: i64,
+}
+
+/// Read `hub_url` from settings, mirroring create_webhook / dispatch.rs.
+async fn hub_base_url(db: &sqlx::PgPool) -> String {
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_url'")
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "https://unknown-hub".to_string())
+}
+
+fn new_secret_token() -> String {
+    let mut bytes = vec![0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
 #[derive(Deserialize)]
 pub struct WebhookPostRequest {
     pub content: String,
@@ -108,7 +137,7 @@ pub async fn create_webhook(
 
     sqlx::query(
         "INSERT INTO webhooks(id, channel_id, secret_token_hash, display_name, avatar_url, created_by_pubkey, rate_limit, active, created_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,1,$8)",
+         VALUES($1,$2,$3,$4,$5,$6,$7,TRUE,$8)",
     )
     .bind(&id)
     .bind(&req.channel_id)
@@ -157,6 +186,90 @@ pub async fn create_webhook(
             display_name: req.display_name,
         }),
     ))
+}
+
+/// GET /admin/webhooks — list active webhooks for the hub. The returned
+/// `webhook_url` is the base URL without the secret token (which is stored
+/// hashed and not recoverable); use regenerate to get a working URL.
+pub async fn list_webhooks(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<WebhookInfoResponse>>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(permissions::ADMIN)?;
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: String,
+        display_name: String,
+        channel_id: String,
+        channel_name: Option<String>,
+        created_by_pubkey: String,
+        created_at: i64,
+    }
+
+    let rows = sqlx::query_as::<_, Row>(
+        "SELECT w.id, w.display_name, w.channel_id, c.name AS channel_name,
+                w.created_by_pubkey, w.created_at
+         FROM webhooks w
+         LEFT JOIN channels c ON c.id = w.channel_id
+         WHERE w.active = TRUE
+         ORDER BY w.created_at DESC",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let hub_base = hub_base_url(&state.db).await;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| WebhookInfoResponse {
+                webhook_url: format!("{hub_base}/webhooks/{}", r.id),
+                id: r.id,
+                display_name: r.display_name,
+                channel_id: r.channel_id,
+                channel_name: r.channel_name,
+                created_by: r.created_by_pubkey,
+                created_at: r.created_at,
+            })
+            .collect(),
+    ))
+}
+
+/// PATCH /admin/webhooks/:id — rotate the secret token, returning a fresh
+/// working URL. Reactivates the webhook if it was deactivated.
+pub async fn regenerate_webhook(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(webhook_id): Path<String>,
+) -> Result<Json<CreateWebhookResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(permissions::ADMIN)?;
+
+    let secret_token = new_secret_token();
+    let token_hash = sha256_hex(secret_token.as_bytes());
+
+    let display_name: Option<String> = sqlx::query_scalar(
+        "UPDATE webhooks SET secret_token_hash = $1, active = TRUE
+         WHERE id = $2 RETURNING display_name",
+    )
+    .bind(&token_hash)
+    .bind(&webhook_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let display_name =
+        display_name.ok_or((StatusCode::NOT_FOUND, "Webhook not found".to_string()))?;
+
+    let hub_base = hub_base_url(&state.db).await;
+    let webhook_url = format!("{hub_base}/webhooks/{webhook_id}/{secret_token}");
+
+    Ok(Json(CreateWebhookResponse {
+        id: webhook_id,
+        webhook_url,
+        display_name,
+    }))
 }
 
 /// DELETE /admin/webhooks/:id — admin deactivates a webhook.
