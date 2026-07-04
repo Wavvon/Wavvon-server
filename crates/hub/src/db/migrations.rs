@@ -1332,6 +1332,45 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Event role-slot sign-ups (events.md §2) ----
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS event_slots (
+            id         TEXT   PRIMARY KEY,
+            event_id   TEXT   NOT NULL REFERENCES hub_events(id) ON DELETE CASCADE,
+            name       TEXT   NOT NULL,
+            capacity   BIGINT,
+            position   BIGINT NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_event_slots_event ON event_slots(event_id)")
+        .execute(pool)
+        .await?;
+
+    // Slot claim on an RSVP (additive column; see docs/docs/events.md §2).
+    // `ON DELETE SET NULL` demotes claimants to a plain "going" RSVP instead
+    // of losing their row when the slot itself is deleted.
+    let _ = sqlx::query(
+        "ALTER TABLE event_rsvps ADD COLUMN slot_id TEXT
+            REFERENCES event_slots(id) ON DELETE SET NULL",
+    )
+    .execute(pool)
+    .await;
+
+    // Reminder columns on hub_events (additive; see docs/docs/events.md §3).
+    // `reminder_minutes` NULL = no reminder configured; `reminder_sent_at`
+    // NULL = not yet sent (set once by the reminder worker).
+    let _ = sqlx::query("ALTER TABLE hub_events ADD COLUMN reminder_minutes BIGINT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE hub_events ADD COLUMN reminder_sent_at BIGINT")
+        .execute(pool)
+        .await;
+
     // ---- Polls ----
 
     sqlx::query(

@@ -26,6 +26,14 @@ pub struct CreateEventRequest {
     pub ends_at: Option<i64>,
     #[serde(default)]
     pub location: Option<String>,
+    /// Minutes before `starts_at` to post a reminder card. NULL/absent = no
+    /// reminder (events.md §3).
+    #[serde(default)]
+    pub reminder_minutes: Option<i64>,
+    /// Role-slot sign-up buckets (events.md §2), created in array order —
+    /// `position` is assigned sequentially starting at 0.
+    #[serde(default)]
+    pub slots: Vec<CreateSlotRequest>,
 }
 
 #[derive(Deserialize, Default)]
@@ -40,11 +48,49 @@ pub struct UpdateEventRequest {
     pub ends_at: Option<i64>,
     #[serde(default)]
     pub location: Option<String>,
+    /// Tri-state: absent = don't touch, `Some(Some(n))` = set the reminder
+    /// offset (minutes before start), `Some(None)` = clear it. Either way,
+    /// providing this field resets `reminder_sent_at` to NULL so a
+    /// newly-picked (or re-picked) offset can fire again -- see
+    /// `update_event` below.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub reminder_minutes: Option<Option<i64>>,
+}
+
+/// Lets us distinguish "field missing" from "field explicitly null" in JSON
+/// (see `UpdateEventRequest::reminder_minutes` and `UpdateSlotRequest::capacity`).
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
 pub struct RsvpRequest {
     pub status: String,
+    /// Slot claim (events.md §2). Only meaningful when `status == "going"`;
+    /// ignored (treated as no slot) otherwise.
+    #[serde(default)]
+    pub slot_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateSlotRequest {
+    pub name: String,
+    #[serde(default)]
+    pub capacity: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct UpdateSlotRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Tri-state: absent = don't touch, `Some(Some(n))` = resize,
+    /// `Some(None)` = clear (unlimited).
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub capacity: Option<Option<i64>>,
 }
 
 #[derive(Serialize, Clone, sqlx::FromRow)]
@@ -58,6 +104,8 @@ pub struct EventResponse {
     pub ends_at: Option<i64>,
     pub location: Option<String>,
     pub created_at: i64,
+    pub reminder_minutes: Option<i64>,
+    pub reminder_sent_at: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -65,6 +113,17 @@ pub struct EventWithRsvps {
     #[serde(flatten)]
     pub event: EventResponse,
     pub rsvp_counts: RsvpCounts,
+    pub slots: Vec<SlotResponse>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct SlotResponse {
+    pub id: String,
+    pub name: String,
+    pub capacity: Option<i64>,
+    pub position: i64,
+    pub claimed: i64,
+    pub claimants: Vec<String>,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -143,21 +202,17 @@ async fn load_rsvp_counts(
     Ok(counts)
 }
 
-/// Insert a card message into the channel and broadcast it over WS.
+/// Insert a card message into the channel and broadcast it over WS. Shared
+/// by the "event created" card and the reminder card (events.md §3).
 /// The creator's users row is guaranteed to exist (they just authenticated).
-async fn post_event_card(
+async fn post_card_message(
     state: &AppState,
     channel_id: &str,
-    event: &EventResponse,
+    sender: &str,
+    content: String,
 ) -> Result<(), (StatusCode, String)> {
-    // Format starts_at as a simple UTC string for the card content.
-    // We avoid pulling in chrono — a direct conversion is fine for display.
-    let dt = format_unix_utc(event.starts_at);
-
-    let content = format!("**{}** — {}", event.title, dt);
     let msg_id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
-    let sender = &event.creator_pubkey;
 
     sqlx::query(
         "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES ($1, $2, $3, $4, $5)",
@@ -202,6 +257,158 @@ async fn post_event_card(
     Ok(())
 }
 
+/// "Event created" card: title + formatted start time.
+async fn post_event_card(
+    state: &AppState,
+    channel_id: &str,
+    event: &EventResponse,
+) -> Result<(), (StatusCode, String)> {
+    // Format starts_at as a simple UTC string for the card content.
+    // We avoid pulling in chrono — a direct conversion is fine for display.
+    let dt = format_unix_utc(event.starts_at);
+    let content = format!("**{}** — {}", event.title, dt);
+    post_card_message(state, channel_id, &event.creator_pubkey, content).await
+}
+
+/// Reminder card (events.md §3): posted by the reminder worker when
+/// `starts_at - reminder_minutes * 60 <= now`. `pub(crate)` so
+/// `reminder_worker` can call it.
+pub(crate) async fn post_event_reminder_card(
+    state: &AppState,
+    channel_id: &str,
+    event: &EventResponse,
+    reminder_minutes: i64,
+) -> Result<(), (StatusCode, String)> {
+    let content = format!(
+        "**{}** — starts in {} minutes",
+        event.title, reminder_minutes
+    );
+    post_card_message(state, channel_id, &event.creator_pubkey, content).await
+}
+
+/// Slots for an event, ordered by `position`, each carrying its current
+/// claimants (`status = 'going'` rows pointed at it). Used to build
+/// `EventWithRsvps.slots`.
+async fn load_slots(
+    db: &sqlx::PgPool,
+    event_id: &str,
+) -> Result<Vec<SlotResponse>, (StatusCode, String)> {
+    #[derive(sqlx::FromRow)]
+    struct SlotRow {
+        id: String,
+        name: String,
+        capacity: Option<i64>,
+        position: i64,
+    }
+
+    let slots: Vec<SlotRow> = sqlx::query_as(
+        "SELECT id, name, capacity, position FROM event_slots
+         WHERE event_id = $1 ORDER BY position ASC, created_at ASC",
+    )
+    .bind(event_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let claims: Vec<(String, String)> = sqlx::query_as(
+        "SELECT slot_id, user_pubkey FROM event_rsvps
+         WHERE event_id = $1 AND status = 'going' AND slot_id IS NOT NULL",
+    )
+    .bind(event_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(slots
+        .into_iter()
+        .map(|slot| {
+            let claimants: Vec<String> = claims
+                .iter()
+                .filter(|(slot_id, _)| slot_id == &slot.id)
+                .map(|(_, pubkey)| pubkey.clone())
+                .collect();
+            SlotResponse {
+                id: slot.id,
+                name: slot.name,
+                capacity: slot.capacity,
+                position: slot.position,
+                claimed: claimants.len() as i64,
+                claimants,
+            }
+        })
+        .collect())
+}
+
+/// Row of an existing slot, verified to belong to `event_id`. 404s otherwise
+/// (covers both "slot doesn't exist" and "slot belongs to a different
+/// event").
+async fn fetch_slot_row(
+    db: &sqlx::PgPool,
+    event_id: &str,
+    slot_id: &str,
+) -> Result<(String, Option<i64>, i64), (StatusCode, String)> {
+    let row: Option<(String, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT name, capacity, position FROM event_slots WHERE id = $1 AND event_id = $2",
+    )
+    .bind(slot_id)
+    .bind(event_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    row.ok_or((StatusCode::NOT_FOUND, "Slot not found".to_string()))
+}
+
+async fn count_slot_claims(db: &sqlx::PgPool, slot_id: &str) -> Result<i64, (StatusCode, String)> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM event_rsvps WHERE slot_id = $1 AND status = 'going'")
+        .bind(slot_id)
+        .fetch_one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+}
+
+async fn slot_claimants(
+    db: &sqlx::PgPool,
+    slot_id: &str,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    sqlx::query_scalar(
+        "SELECT user_pubkey FROM event_rsvps WHERE slot_id = $1 AND status = 'going'",
+    )
+    .bind(slot_id)
+    .fetch_all(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+}
+
+/// Authorization for slot management routes: the event's creator, or a
+/// holder of `CREATE_EVENTS` resolved through the event's channel-scoped
+/// permission cascade (`channel_permissions`) -- matches the channel-aware
+/// gate `create_event` uses, rather than the hub-wide `ADMIN` check
+/// `update_event`/`delete_event` use today. Returns the event's channel id.
+async fn require_slot_management_access(
+    state: &AppState,
+    user: &AuthUser,
+    event_id: &str,
+) -> Result<String, (StatusCode, String)> {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT creator_pubkey, channel_id FROM hub_events WHERE id = $1")
+            .bind(event_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let (creator, channel_id) =
+        row.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
+
+    if creator != user.public_key {
+        let perms =
+            permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+        perms.require(permissions::CREATE_EVENTS)?;
+    }
+
+    Ok(channel_id)
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -234,13 +441,19 @@ pub async fn create_event(
         return Err((StatusCode::BAD_REQUEST, "title is required".to_string()));
     }
 
+    for slot in &req.slots {
+        if slot.name.trim().is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "slot name is required".to_string()));
+        }
+    }
+
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
     let description = req.description.unwrap_or_default();
 
     sqlx::query(
-        "INSERT INTO hub_events (id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO hub_events (id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(&id)
     .bind(&req.channel_id)
@@ -251,9 +464,26 @@ pub async fn create_event(
     .bind(req.ends_at)
     .bind(&req.location)
     .bind(now)
+    .bind(req.reminder_minutes)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for (position, slot) in req.slots.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO event_slots (id, event_id, name, capacity, position, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(&id)
+        .bind(&slot.name)
+        .bind(slot.capacity)
+        .bind(position as i64)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
 
     let event = EventResponse {
         id,
@@ -265,6 +495,8 @@ pub async fn create_event(
         ends_at: req.ends_at,
         location: req.location,
         created_at: now,
+        reminder_minutes: req.reminder_minutes,
+        reminder_sent_at: None,
     };
 
     post_event_card(&state, &event.channel_id, &event).await?;
@@ -284,7 +516,7 @@ pub async fn list_events(
 
     let rows: Vec<EventResponse> = if upcoming {
         sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
+            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
              FROM hub_events WHERE starts_at >= $1 ORDER BY starts_at ASC LIMIT $2",
         )
         .bind(now)
@@ -293,7 +525,7 @@ pub async fn list_events(
         .await
     } else {
         sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
+            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
              FROM hub_events ORDER BY starts_at ASC LIMIT $1",
         )
         .bind(limit)
@@ -319,7 +551,12 @@ pub async fn list_events(
             continue;
         }
         let rsvp_counts = load_rsvp_counts(&state.db, &event.id).await?;
-        result.push(EventWithRsvps { event, rsvp_counts });
+        let slots = load_slots(&state.db, &event.id).await?;
+        result.push(EventWithRsvps {
+            event,
+            rsvp_counts,
+            slots,
+        });
     }
     Ok(Json(result))
 }
@@ -331,7 +568,7 @@ pub async fn get_event(
     Path(event_id): Path<String>,
 ) -> Result<Json<EventWithRsvps>, (StatusCode, String)> {
     let event: Option<EventResponse> = sqlx::query_as(
-        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
          FROM hub_events WHERE id = $1",
     )
     .bind(&event_id)
@@ -351,7 +588,12 @@ pub async fn get_event(
     }
 
     let rsvp_counts = load_rsvp_counts(&state.db, &event_id).await?;
-    Ok(Json(EventWithRsvps { event, rsvp_counts }))
+    let slots = load_slots(&state.db, &event_id).await?;
+    Ok(Json(EventWithRsvps {
+        event,
+        rsvp_counts,
+        slots,
+    }))
 }
 
 /// PUT /events/:id
@@ -415,9 +657,24 @@ pub async fn update_event(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
+    // events.md §3: providing `reminder_minutes` at all (whether setting a
+    // new offset or explicitly clearing it with `null`) resets
+    // `reminder_sent_at` to NULL, so a previously-sent reminder can fire
+    // again for the newly-picked offset. This is the documented composer
+    // behavior for "clearing and re-picking the reminder offset".
+    if let Some(reminder_minutes) = req.reminder_minutes {
+        sqlx::query(
+            "UPDATE hub_events SET reminder_minutes = $1, reminder_sent_at = NULL WHERE id = $2",
+        )
+        .bind(reminder_minutes)
+        .bind(&event_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
 
     let updated: EventResponse = sqlx::query_as(
-        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
          FROM hub_events WHERE id = $1",
     )
     .bind(&event_id)
@@ -484,17 +741,81 @@ pub async fn rsvp_event(
         return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
     }
 
+    // events.md §2: a slot claim only exists alongside status == "going".
+    // Any other status (or an RSVP with no slot_id) clears the claim.
+    let slot_id = if req.status == "going" {
+        req.slot_id.clone()
+    } else {
+        None
+    };
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if let Some(slot_id) = &slot_id {
+        // Lock the slot row so two concurrent claims on the same slot can't
+        // both pass the capacity check (events.md §2). Also validates the
+        // slot belongs to this event.
+        let capacity: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT capacity FROM event_slots WHERE id = $1 AND event_id = $2 FOR UPDATE",
+        )
+        .bind(slot_id)
+        .bind(&event_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        let capacity = match capacity {
+            Some(cap) => cap,
+            None => {
+                let _ = tx.rollback().await;
+                return Err((StatusCode::NOT_FOUND, "Slot not found".to_string()));
+            }
+        };
+
+        if let Some(cap) = capacity {
+            // Exclude the caller's own existing claim so switching between
+            // slots (or re-claiming the same slot) never counts against
+            // themselves.
+            let claimed: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM event_rsvps
+                 WHERE slot_id = $1 AND status = 'going' AND user_pubkey <> $2",
+            )
+            .bind(slot_id)
+            .bind(&user.public_key)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+            if claimed >= cap {
+                let _ = tx.rollback().await;
+                return Err((
+                    StatusCode::CONFLICT,
+                    format!("slot is full ({claimed}/{cap})"),
+                ));
+            }
+        }
+    }
+
     sqlx::query(
-        "INSERT INTO event_rsvps (event_id, user_pubkey, status)
-         VALUES ($1, $2, $3)
-         ON CONFLICT(event_id, user_pubkey) DO UPDATE SET status = excluded.status",
+        "INSERT INTO event_rsvps (event_id, user_pubkey, status, slot_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT(event_id, user_pubkey) DO UPDATE SET status = excluded.status, slot_id = excluded.slot_id",
     )
     .bind(&event_id)
     .bind(&user.public_key)
     .bind(&req.status)
-    .execute(&state.db)
+    .bind(&slot_id)
+    .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -522,4 +843,149 @@ pub async fn list_rsvps(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(Json(entries))
+}
+
+// ---------------------------------------------------------------------------
+// Slot management (events.md §2)
+// ---------------------------------------------------------------------------
+
+/// POST /events/:id/slots
+pub async fn create_slot(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(event_id): Path<String>,
+    Json(req): Json<CreateSlotRequest>,
+) -> Result<(StatusCode, Json<SlotResponse>), (StatusCode, String)> {
+    require_slot_management_access(&state, &user, &event_id).await?;
+
+    if req.name.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "slot name is required".to_string()));
+    }
+
+    let position: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(position) + 1, 0) FROM event_slots WHERE event_id = $1",
+    )
+    .bind(&event_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let id = Uuid::new_v4().to_string();
+    let now = crate::auth::handlers::unix_timestamp();
+
+    sqlx::query(
+        "INSERT INTO event_slots (id, event_id, name, capacity, position, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(&id)
+    .bind(&event_id)
+    .bind(&req.name)
+    .bind(req.capacity)
+    .bind(position)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SlotResponse {
+            id,
+            name: req.name,
+            capacity: req.capacity,
+            position,
+            claimed: 0,
+            claimants: Vec::new(),
+        }),
+    ))
+}
+
+/// PATCH /events/:id/slots/:slot_id
+pub async fn update_slot(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((event_id, slot_id)): Path<(String, String)>,
+    Json(req): Json<UpdateSlotRequest>,
+) -> Result<Json<SlotResponse>, (StatusCode, String)> {
+    require_slot_management_access(&state, &user, &event_id).await?;
+    fetch_slot_row(&state.db, &event_id, &slot_id).await?;
+
+    if let Some(name) = &req.name {
+        if name.trim().is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "slot name cannot be empty".to_string(),
+            ));
+        }
+    }
+
+    // Reject shrinking capacity below the current claim count (events.md
+    // §2) -- demote-first via the RSVP/slot-switch path, not a silent drop.
+    if let Some(Some(new_capacity)) = req.capacity {
+        let claimed = count_slot_claims(&state.db, &slot_id).await?;
+        if new_capacity < claimed {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("capacity {new_capacity} is below current claim count {claimed}"),
+            ));
+        }
+    }
+
+    if let Some(name) = &req.name {
+        sqlx::query("UPDATE event_slots SET name = $1 WHERE id = $2")
+            .bind(name)
+            .bind(&slot_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    if let Some(capacity) = req.capacity {
+        sqlx::query("UPDATE event_slots SET capacity = $1 WHERE id = $2")
+            .bind(capacity)
+            .bind(&slot_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    let (name, capacity, position) = fetch_slot_row(&state.db, &event_id, &slot_id).await?;
+    let claimants = slot_claimants(&state.db, &slot_id).await?;
+
+    Ok(Json(SlotResponse {
+        id: slot_id,
+        name,
+        capacity,
+        position,
+        claimed: claimants.len() as i64,
+        claimants,
+    }))
+}
+
+/// DELETE /events/:id/slots/:slot_id
+pub async fn delete_slot(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((event_id, slot_id)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_slot_management_access(&state, &user, &event_id).await?;
+    fetch_slot_row(&state.db, &event_id, &slot_id).await?;
+
+    // Demote-first is deliberate (events.md §2 decisions): deleting claims
+    // as a side effect of structure editing is silent data loss a raid
+    // organizer would discover at raid time.
+    let claimed = count_slot_claims(&state.db, &slot_id).await?;
+    if claimed > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("slot has {claimed} claimant(s); move them off the slot before deleting"),
+        ));
+    }
+
+    sqlx::query("DELETE FROM event_slots WHERE id = $1")
+        .bind(&slot_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }

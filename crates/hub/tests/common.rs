@@ -203,6 +203,11 @@ pub async fn sweep_stale_test_databases() -> usize {
 pub struct TestHarness {
     server: TestServer,
     _guard: TestDbGuard,
+    /// Only populated by `setup()` / `setup_with_owner()`, which build the
+    /// `AppState` themselves. Callers that hand-roll their own `AppState`
+    /// and call `TestHarness::new` directly don't get one -- use `state()`
+    /// only from tests that went through `setup()`.
+    state: Option<Arc<AppState>>,
 }
 
 impl TestHarness {
@@ -211,7 +216,18 @@ impl TestHarness {
         TestHarness {
             server,
             _guard: guard,
+            state: None,
         }
+    }
+
+    /// Access the `AppState` backing this harness, for tests that need to
+    /// drive a background-worker `tick()` directly rather than through HTTP.
+    /// Panics if this harness wasn't built via `setup()`.
+    #[allow(dead_code)]
+    pub fn state(&self) -> &AppState {
+        self.state
+            .as_deref()
+            .expect("TestHarness::state() requires a harness built via setup()")
     }
 }
 
@@ -290,8 +306,12 @@ pub async fn setup() -> TestHarness {
             wavvon_hub::state::WebhookCircuit::default(),
         )),
     });
-    let app = server::create_router(state);
-    TestHarness::new(TestServer::new(app), guard)
+    let app = server::create_router(state.clone());
+    TestHarness {
+        server: TestServer::new(app),
+        _guard: guard,
+        state: Some(state),
+    }
 }
 
 #[allow(dead_code)]

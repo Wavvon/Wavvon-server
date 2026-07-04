@@ -846,6 +846,14 @@ pub fn create_router_full(
         )
         .route("/events/{event_id}/rsvp", post(routes::events::rsvp_event))
         .route("/events/{event_id}/rsvps", get(routes::events::list_rsvps))
+        .route(
+            "/events/{event_id}/slots",
+            post(routes::events::create_slot),
+        )
+        .route(
+            "/events/{event_id}/slots/{slot_id}",
+            patch(routes::events::update_slot).delete(routes::events::delete_slot),
+        )
         // ---- File uploads ----
         .route(
             "/channels/{channel_id}/upload",
