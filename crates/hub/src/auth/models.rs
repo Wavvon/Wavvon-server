@@ -72,6 +72,12 @@ pub struct VerifyResponse {
     /// otherwise "member".
     #[serde(default)]
     pub scope: String,
+    /// The canonical user identity this session acts as. For a legacy
+    /// single-key auth this equals the auth pubkey, but for a paired device
+    /// (auth via subkey cert) it is the shared master/legacy pubkey the hub
+    /// attributes the device's actions to. Clients use it to self-identify.
+    #[serde(default)]
+    pub canonical_pubkey: String,
 }
 
 /// Optional challenge token presented during auth/verify when challenge_mode != 'off'.

@@ -682,7 +682,11 @@ pub async fn verify(
         );
     }
 
-    Ok(Json(VerifyResponse { token, scope }))
+    Ok(Json(VerifyResponse {
+        token,
+        scope,
+        canonical_pubkey,
+    }))
 }
 
 /// Validate a hub session token for WebSocket connections.
