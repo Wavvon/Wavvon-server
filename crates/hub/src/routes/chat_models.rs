@@ -262,6 +262,10 @@ pub enum ChatEvent {
     },
     /// Bot mini-app announce/dismiss event. Routed to channel subscribers.
     BotApp { channel_id: String },
+    /// Soundboard clip-played attribution event (soundboard.md §1). Routed
+    /// to channel subscribers -- the same audience as the voice roster the
+    /// chip renders into.
+    Soundboard { channel_id: String },
     /// Hub-wide notification that the channel list changed (created/updated/deleted/reordered).
     /// Returns "" from channel_id() so the subscription filter never matches; the WS
     /// dispatch loop handles it as a special broadcast-to-all case.
@@ -298,7 +302,8 @@ impl ChatEvent {
             | ChatEvent::MessagePinned { channel_id }
             | ChatEvent::MessageUnpinned { channel_id }
             | ChatEvent::WhisperSignal { channel_id, .. }
-            | ChatEvent::BotApp { channel_id } => channel_id,
+            | ChatEvent::BotApp { channel_id }
+            | ChatEvent::Soundboard { channel_id } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
             // (delivery is handled via the dedicated to_pubkey check below).
@@ -836,6 +841,18 @@ pub enum WsServerMessage {
     /// Hub-wide signal that the channel list changed; clients should re-fetch /channels.
     #[serde(rename = "channels_updated")]
     ChannelsUpdated,
+
+    /// Soundboard clip-played attribution (soundboard.md §1). Purely
+    /// informational -- the server does not verify the clip was actually
+    /// mixed into the sender's stream; clients render a transient
+    /// "🔊 X played *name*" chip in the voice roster.
+    #[serde(rename = "soundboard_played")]
+    SoundboardPlayed {
+        channel_id: String,
+        clip_id: String,
+        clip_name: String,
+        public_key: String,
+    },
 
     /// Sent when the hub dropped messages destined for this connection because
     /// it was consuming the broadcast channel too slowly. The client should

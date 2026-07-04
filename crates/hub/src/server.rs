@@ -860,6 +860,23 @@ pub fn create_router_full(
             post(routes::uploads::upload_file),
         )
         .route("/uploads/{filename}", get(routes::uploads::serve_upload))
+        // ---- Soundboard (soundboard.md §1) ----
+        .route(
+            "/soundboard",
+            get(routes::soundboard::list_clips).post(routes::soundboard::upload_clip),
+        )
+        .route(
+            "/soundboard/{id}",
+            axum::routing::delete(routes::soundboard::delete_clip),
+        )
+        .route(
+            "/soundboard/{id}/audio",
+            get(routes::soundboard::get_clip_audio),
+        )
+        .route(
+            "/soundboard/{id}/played",
+            post(routes::soundboard::mark_played),
+        )
         // ---- Message pinning ----
         .route(
             "/channels/{channel_id}/pins/{message_id}",

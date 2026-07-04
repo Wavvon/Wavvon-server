@@ -44,6 +44,7 @@ pub mod role_categories;
 pub mod role_models;
 pub mod roles;
 pub mod search;
+pub mod soundboard;
 pub mod survey;
 pub mod tags;
 pub mod uploads;

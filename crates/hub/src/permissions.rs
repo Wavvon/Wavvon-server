@@ -20,6 +20,8 @@ pub const CREATE_POSTS: &str = "create_posts";
 pub const MANAGE_POSTS: &str = "manage_posts";
 pub const START_GAME: &str = "start_game";
 pub const CREATE_EVENTS: &str = "create_events";
+pub const USE_SOUNDBOARD: &str = "use_soundboard";
+pub const MANAGE_SOUNDBOARD: &str = "manage_soundboard";
 
 /// Every permission string recognized by the server. Used to validate
 /// admin-supplied permission strings for channel overwrites (see
@@ -42,6 +44,8 @@ pub const ALL_PERMISSIONS: &[&str] = &[
     MANAGE_POSTS,
     START_GAME,
     CREATE_EVENTS,
+    USE_SOUNDBOARD,
+    MANAGE_SOUNDBOARD,
 ];
 
 #[derive(sqlx::FromRow)]

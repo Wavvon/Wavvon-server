@@ -1621,6 +1621,23 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // ---- Soundboard (soundboard.md §1) ----
+    // Audio bytes live on disk under WAVVON_UPLOADS_DIR (same storage as
+    // uploads.rs); this table is metadata only.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS soundboard_clips (
+            id          TEXT   PRIMARY KEY,
+            name        TEXT   NOT NULL,
+            emoji       TEXT,
+            uploader    TEXT   NOT NULL REFERENCES users(public_key),
+            size_bytes  BIGINT NOT NULL,
+            duration_ms BIGINT NOT NULL,
+            created_at  BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations complete");
 
     Ok(())

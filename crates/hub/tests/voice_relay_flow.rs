@@ -1058,3 +1058,194 @@ async fn consumed_token_from_different_addr_does_not_rebind() {
 
     let _ = tx.send(TsMessage::Close(None)).await;
 }
+
+// ---------------------------------------------------------------------------
+// Bot audio injection (soundboard.md §2) — /voice/ws gate on can_speak_voice
+// ---------------------------------------------------------------------------
+
+/// Invites `bot_identity` as an external bot (admin_token must belong to a
+/// member with manage_roles/admin), then completes the normal Ed25519
+/// challenge/verify flow with `is_bot: true` and the given capabilities,
+/// returning the bot's session token. That token is valid on both `/ws`
+/// and `/voice/ws`, exactly like a human session token.
+async fn invite_and_auth_bot(
+    base: &str,
+    admin_token: &str,
+    bot_identity: &Identity,
+    capabilities: &[&str],
+) -> String {
+    let client = reqwest::Client::new();
+    let pub_key = bot_identity.public_key_hex();
+
+    let invite_resp = client
+        .post(format!("{base}/bots"))
+        .bearer_auth(admin_token)
+        .json(&json!({ "pubkey": pub_key }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        invite_resp.status().is_success(),
+        "bot invite should succeed: {}",
+        invite_resp.status()
+    );
+
+    let challenge: ChallengeResponse = client
+        .post(format!("{base}/auth/challenge"))
+        .json(&json!({ "public_key": pub_key }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+    let signature = bot_identity.sign(&challenge_bytes);
+
+    let verify_resp = client
+        .post(format!("{base}/auth/verify"))
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+            "is_bot": true,
+            "bot_meta": {
+                "name": "VoiceInjectionBot",
+                "capabilities": capabilities,
+            },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        verify_resp.status().is_success(),
+        "bot auth/verify should succeed: {}",
+        verify_resp.status()
+    );
+    let verify: VerifyResponse = verify_resp.json().await.unwrap();
+    verify.token
+}
+
+/// Connects to `/voice/ws?token=..&channel_id=..`, the same wire format
+/// `/voice/ws` uses for human web clients.
+async fn connect_voice_ws(
+    base: &str,
+    token: &str,
+    channel_id: &str,
+) -> (
+    futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TsMessage,
+    >,
+    futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+) {
+    let ws_url = format!(
+        "{}/voice/ws?token={}&channel_id={}",
+        base.replace("http://", "ws://"),
+        token,
+        channel_id
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    ws.split()
+}
+
+/// A bot session with the `can_speak_voice` capability can join `/voice/ws`
+/// as a first-class participant: it receives `voice_ws_ready` and shows up
+/// in the HTTP voice roster.
+#[tokio::test]
+async fn bot_with_can_speak_voice_registers_as_voice_sender() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "bot-voice-ok").await;
+
+    let bot = Identity::generate();
+    let bot_token = invite_and_auth_bot(&base, &owner_token, &bot, &["can_speak_voice"]).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &bot_token, &ch.id).await;
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["type"], "voice_ws_ready");
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let members = roster
+        .get(&ch.id)
+        .expect("bot's channel should have a voice roster entry");
+    assert!(
+        members
+            .iter()
+            .any(|m| m["public_key"] == bot.public_key_hex()),
+        "capable bot should appear in the voice roster"
+    );
+}
+
+/// A bot session WITHOUT `can_speak_voice` is refused registration: no
+/// `voice_ws_ready` frame, and it never appears in the voice roster.
+#[tokio::test]
+async fn bot_without_can_speak_voice_capability_is_rejected() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "bot-voice-denied").await;
+
+    let bot = Identity::generate();
+    // No capabilities at all.
+    let bot_token = invite_and_auth_bot(&base, &owner_token, &bot, &[]).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &bot_token, &ch.id).await;
+
+    // The gate makes the server task return without ever sending a frame,
+    // so the connection closes (or the stream ends) instead of yielding a
+    // voice_ws_ready message.
+    // Close frame, stream end, or a transport error are all acceptable
+    // "rejected" outcomes -- the important thing is no ready frame.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rx.next()).await;
+    if let Ok(Some(Ok(TsMessage::Text(t)))) = outcome {
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_ne!(
+            v["type"], "voice_ws_ready",
+            "uncapable bot must not be registered as a voice sender"
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == bot.public_key_hex()))
+            .unwrap_or(false),
+        "uncapable bot must not appear in the voice roster"
+    );
+}

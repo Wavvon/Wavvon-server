@@ -47,6 +47,46 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         return;
     }
 
+    let (display_name, is_bot): (Option<String>, bool) = {
+        let row: Option<(Option<String>, bool)> =
+            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
+                .bind(&pubkey)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        match row {
+            Some((dn, b)) => (dn, b),
+            None => (None, false),
+        }
+    };
+
+    // Bot audio injection (soundboard.md §2): a bot session joins this same
+    // WS voice relay as a first-class participant, gated on the
+    // `can_speak_voice` capability plus channel-scoped `read_messages` like
+    // any other voice joiner. Human callers are unaffected by this branch.
+    if is_bot {
+        let caps_json: Option<String> =
+            sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = $1")
+                .bind(&pubkey)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+        let capabilities: Vec<String> = caps_json
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+        if !capabilities.iter().any(|c| c == "can_speak_voice") {
+            return;
+        }
+
+        match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await {
+            Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+            _ => return,
+        }
+    }
+
     // Reject if already in this voice channel (duplicate join).
     {
         let channels = state.voice_channels.read().await;
@@ -108,19 +148,6 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
     });
 
     // Broadcast VoiceParticipantJoined so other WS chat clients update their UI.
-    let (display_name, is_bot): (Option<String>, bool) = {
-        let row: Option<(Option<String>, bool)> =
-            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
-                .bind(&pubkey)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-        match row {
-            Some((dn, b)) => (dn, b),
-            None => (None, false),
-        }
-    };
     let join_broadcast = WsServerMessage::VoiceParticipantJoined {
         channel_id: channel_id.clone(),
         participant: VoiceParticipantInfo {
