@@ -184,7 +184,7 @@ pub async fn create_channel(
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
 
-    // Validate channel_type: "text", "forum", or "banner" on leaf channels.
+    // Validate channel_type: "text", "forum", "banner", or "spawner" on leaf channels.
     let channel_type = if req.is_category {
         "text".to_string()
     } else {
@@ -192,6 +192,7 @@ pub async fn create_channel(
             None | Some("text") => "text".to_string(),
             Some("forum") => "forum".to_string(),
             Some("banner") => "banner".to_string(),
+            Some("spawner") => "spawner".to_string(),
             Some(other) => {
                 return Err((
                     StatusCode::BAD_REQUEST,
@@ -200,6 +201,13 @@ pub async fn create_channel(
             }
         }
     };
+
+    if req.spawner_name_template.is_some() && channel_type != "spawner" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "spawner_name_template is only valid for spawner channels".to_string(),
+        ));
+    }
 
     if channel_type == "banner" {
         if req.banner_url.is_some() && req.banner_file_id.is_some() {
@@ -233,8 +241,8 @@ pub async fn create_channel(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, channel_type, created_at, banner_url, banner_file_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        "INSERT INTO channels (id, name, created_by, parent_id, is_category, display_order, description, channel_type, created_at, banner_url, banner_file_id, spawner_name_template)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&id)
     .bind(&req.name)
@@ -247,6 +255,7 @@ pub async fn create_channel(
     .bind(now)
     .bind(&req.banner_url)
     .bind(&req.banner_file_id)
+    .bind(&req.spawner_name_template)
     .execute(&state.db)
     .await
     .map_err(|e| {
@@ -272,6 +281,9 @@ pub async fn create_channel(
         channel_type,
         banner_url: req.banner_url.clone(),
         banner_file_id: req.banner_file_id.clone(),
+        is_temporary: false,
+        owner_pubkey: None,
+        spawner_name_template: req.spawner_name_template.clone(),
     };
 
     // Publish channel.created audit event.
@@ -312,14 +324,15 @@ pub async fn update_channel(
     // Acting on a specific existing channel -- cascade through it.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
 
-    let existing_type: Option<String> =
-        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = $1")
-            .bind(&channel_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let existing_type =
-        existing_type.ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
+    let existing_row: Option<(String, bool, Option<String>)> = sqlx::query_as(
+        "SELECT channel_type, is_temporary, owner_pubkey FROM channels WHERE id = $1",
+    )
+    .bind(&channel_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let (existing_type, is_temporary, owner_pubkey) =
+        existing_row.ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
 
     let changing_structure = req.name.is_some()
         || req.description.is_some()
@@ -331,7 +344,18 @@ pub async fn update_channel(
     let changing_talk_power = req.min_talk_power.is_some();
     let changing_retention = req.retention_days.is_some();
 
-    if changing_structure {
+    // Owner powers, v1: rename only (temp-voice-channels.md §3). A temp
+    // channel's owner may change its name without MANAGE_CHANNELS, but any
+    // other structural field in the same request still requires it.
+    let owner_rename_only = is_temporary
+        && owner_pubkey.as_deref() == Some(user.public_key.as_str())
+        && req.name.is_some()
+        && req.description.is_none()
+        && req.parent_id.is_none()
+        && req.banner_url.is_none()
+        && req.banner_file_id.is_none();
+
+    if changing_structure && !owner_rename_only {
         perms.require(permissions::MANAGE_CHANNELS)?;
     }
     if changing_appearance {
@@ -537,7 +561,7 @@ pub async fn list_channels(
     user: AuthUser,
 ) -> Result<Json<Vec<ChannelResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id
+        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id, is_temporary, owner_pubkey, spawner_name_template
          FROM channels
          ORDER BY display_order, created_at",
     )
@@ -574,6 +598,9 @@ pub async fn list_channels(
             channel_type: r.channel_type,
             banner_url: r.banner_url,
             banner_file_id: r.banner_file_id,
+            is_temporary: r.is_temporary,
+            owner_pubkey: r.owner_pubkey,
+            spawner_name_template: r.spawner_name_template,
         })
         .collect();
 
@@ -723,6 +750,9 @@ struct ChannelRow {
     channel_type: String,
     banner_url: Option<String>,
     banner_file_id: Option<String>,
+    is_temporary: bool,
+    owner_pubkey: Option<String>,
+    spawner_name_template: Option<String>,
 }
 
 /// Returns the code-depth a new item would sit at if placed under `parent_id`
@@ -783,6 +813,115 @@ async fn is_ancestor(
         }
     }
     Ok(false)
+}
+
+// ---------------------------------------------------------------------------
+// Join-to-create temporary voice channels (temp-voice-channels.md §2)
+// ---------------------------------------------------------------------------
+
+/// Result of successfully spawning a join-to-create temp voice room.
+pub struct SpawnedTempChannel {
+    pub id: String,
+    pub name: String,
+}
+
+/// Creates a personal temp voice room as a sibling of `spawner_id` for
+/// `joiner_pubkey`. The room takes the spawner's `parent_id` and is placed
+/// immediately after it in display order, so the ancestor-chain permission
+/// cascade applies unchanged and depth can never exceed the spawner's own.
+///
+/// The name comes from the spawner's `spawner_name_template` (default
+/// `"{user}'s room"`), with `{user}` substituted by `joiner_display_name`
+/// (or a short slice of the pubkey if the joiner has none set). Because
+/// `channels.name` is UNIQUE, a collision appends " 2", " 3", ... up to a
+/// bounded retry.
+///
+/// Called from the voice-join WS handler; factored out here so it's
+/// unit-testable independent of the WS transport.
+pub async fn spawn_temp_channel(
+    db: &sqlx::PgPool,
+    spawner_id: &str,
+    joiner_pubkey: &str,
+    joiner_display_name: Option<&str>,
+) -> Result<SpawnedTempChannel, (StatusCode, String)> {
+    let row: Option<(Option<String>, i64, String, Option<String>)> = sqlx::query_as(
+        "SELECT parent_id, display_order, channel_type, spawner_name_template
+         FROM channels WHERE id = $1",
+    )
+    .bind(spawner_id)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let (parent_id, spawner_order, channel_type, template) = row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "Spawner channel not found".to_string(),
+        )
+    })?;
+    if channel_type != "spawner" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Channel is not a spawner".to_string(),
+        ));
+    }
+
+    let template = template.unwrap_or_else(|| "{user}'s room".to_string());
+    let fallback_label = &joiner_pubkey[..8.min(joiner_pubkey.len())];
+    let user_label = joiner_display_name
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(fallback_label);
+    let base_name = template.replace("{user}", user_label);
+
+    // Make room right after the spawner among its siblings.
+    sqlx::query(
+        "UPDATE channels SET display_order = display_order + 1
+         WHERE parent_id IS NOT DISTINCT FROM $1 AND display_order > $2",
+    )
+    .bind(&parent_id)
+    .bind(spawner_order)
+    .execute(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let new_order = spawner_order + 1;
+    let now = crate::auth::handlers::unix_timestamp();
+
+    let mut name = base_name.clone();
+    let mut attempt = 0u32;
+    loop {
+        let id = Uuid::new_v4().to_string();
+        let result = sqlx::query(
+            "INSERT INTO channels
+                (id, name, created_by, parent_id, is_category, display_order, channel_type, created_at, is_temporary, owner_pubkey)
+             VALUES ($1, $2, $3, $4, FALSE, $5, 'text', $6, TRUE, $7)",
+        )
+        .bind(&id)
+        .bind(&name)
+        .bind(joiner_pubkey)
+        .bind(&parent_id)
+        .bind(new_order)
+        .bind(now)
+        .bind(joiner_pubkey)
+        .execute(db)
+        .await;
+
+        match result {
+            Ok(_) => return Ok(SpawnedTempChannel { id, name }),
+            Err(sqlx::Error::Database(dbe)) if dbe.code().is_some_and(|c| c == "23505") => {
+                attempt += 1;
+                if attempt > 50 {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        "Could not allocate a unique room name".to_string(),
+                    ));
+                }
+                name = format!("{base_name} {}", attempt + 1);
+            }
+            Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))),
+        }
+    }
 }
 
 async fn read_max_depth(db: &sqlx::PgPool) -> u32 {

@@ -9,13 +9,18 @@ pub struct CreateChannelRequest {
     pub is_category: bool,
     #[serde(default)]
     pub description: Option<String>,
-    /// "text" (default), "forum", or "banner". Ignored for categories.
+    /// "text" (default), "forum", "banner", or "spawner". Ignored for categories.
     #[serde(default)]
     pub channel_type: Option<String>,
     #[serde(default)]
     pub banner_url: Option<String>,
     #[serde(default)]
     pub banner_file_id: Option<String>,
+    /// Only valid for `channel_type = "spawner"`. Name template for rooms it
+    /// spawns; `{user}` is substituted with the joiner's display name.
+    /// Defaults to `"{user}'s room"` when absent (see temp-voice-channels.md §2).
+    #[serde(default)]
+    pub spawner_name_template: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -31,12 +36,22 @@ pub struct ChannelResponse {
     pub color: Option<String>,
     pub custom_icon_svg: Option<String>,
     pub created_at: i64,
-    /// "text", "forum", or "banner". Always "text" for categories.
+    /// "text", "forum", "banner", or "spawner". Always "text" for categories.
     pub channel_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub banner_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub banner_file_id: Option<String>,
+    /// TRUE for a join-to-create personal room spawned from a spawner
+    /// channel (temp-voice-channels.md).
+    #[serde(default)]
+    pub is_temporary: bool,
+    /// Set only on temp channels: the joiner who owns (and may rename) it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_pubkey: Option<String>,
+    /// Set only on spawner channels: the name template used for rooms it spawns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawner_name_template: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

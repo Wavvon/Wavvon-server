@@ -1059,6 +1059,9 @@ async fn main() -> Result<()> {
     // Post event reminder cards a configured number of minutes before start.
     wavvon_hub::reminder_worker::spawn(state.clone());
 
+    // Sweep join-to-create temp voice channels past their empty-grace period.
+    wavvon_hub::temp_channel_worker::spawn(state.clone());
+
     // Farm heartbeat: POST /farm/heartbeat every 60 seconds when WAVVON_FARM_URL is set.
     if let Some(ref farm_url_for_hb) = state.farm_url {
         let hb_state = state.clone();

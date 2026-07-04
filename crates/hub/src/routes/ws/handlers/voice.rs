@@ -25,7 +25,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     // udp_port is kept for wire-format compatibility but is no longer used
     // to fabricate a loopback address.  The real source address is learned
     // via the VXRG UDP register packet after voice_join completes.
-    let (channel_id, _udp_port) = match msg {
+    let (mut channel_id, _udp_port) = match msg {
         WsClientMessage::VoiceJoin {
             channel_id,
             udp_port,
@@ -89,6 +89,70 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             return DispatchResult::Continue;
         }
         Ok(_) => {}
+    }
+
+    // Spawn-on-join (join-to-create temp voice channels,
+    // temp-voice-channels.md §2): if the target is a spawner, create a
+    // personal sibling room and join that instead. The read gate above
+    // already ran against the spawner, and the sibling inherits the same
+    // ancestor-chain cascade, so no further permission check is needed.
+    let target_channel_type: Option<String> =
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = $1")
+            .bind(&channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+    if target_channel_type.as_deref() == Some("spawner") {
+        let joiner_display_name: Option<String> =
+            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
+                .bind(&cs.public_key)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
+
+        match crate::routes::channels::spawn_temp_channel(
+            &state.db,
+            &channel_id,
+            &cs.public_key,
+            joiner_display_name.as_deref(),
+        )
+        .await
+        {
+            Ok(spawned) => {
+                channel_id = spawned.id;
+                let json: std::sync::Arc<str> = std::sync::Arc::from(
+                    serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+                        .unwrap()
+                        .as_str(),
+                );
+                let _ = state
+                    .chat_tx
+                    .send((crate::routes::chat_models::ChatEvent::ChannelsUpdated, json));
+            }
+            Err((_, message)) => {
+                let err = WsServerMessage::Error {
+                    context: "voice_join".to_string(),
+                    message,
+                };
+                let _ = ws_tx
+                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .await;
+                return DispatchResult::Continue;
+            }
+        }
+    } else {
+        // Rejoining an existing temp room cancels any pending GC timer
+        // (temp-voice-channels.md §3). No-op for ordinary channels since
+        // the WHERE clause only ever matches is_temporary rows.
+        let _ = sqlx::query(
+            "UPDATE channels SET empty_since = NULL WHERE id = $1 AND is_temporary = TRUE",
+        )
+        .bind(&channel_id)
+        .execute(&state.db)
+        .await;
     }
 
     // Talk-power check.

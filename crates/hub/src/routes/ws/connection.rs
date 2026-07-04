@@ -740,18 +740,35 @@ pub async fn leave_voice_for_test(state: &AppState, public_key: &str, channel_id
 }
 
 pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
-    let removed_addr = {
+    let (removed_addr, became_empty) = {
         let mut channels = state.voice_channels.write().await;
         let addr = channels
             .get_mut(channel_id)
             .and_then(|participants| participants.remove(public_key));
+        let mut became_empty = false;
         if let Some(participants) = channels.get(channel_id) {
             if participants.is_empty() {
+                became_empty = true;
                 channels.remove(channel_id);
             }
         }
-        addr
+        (addr, became_empty)
     };
+
+    if became_empty {
+        // Stamp temp-channel GC bookkeeping (temp-voice-channels.md §3); a
+        // no-op for ordinary channels since the WHERE clause only matches
+        // is_temporary rows. `temp_channel_worker` sweeps rooms stamped
+        // this way once past the grace period.
+        let now = crate::auth::handlers::unix_timestamp();
+        let _ = sqlx::query(
+            "UPDATE channels SET empty_since = $1 WHERE id = $2 AND is_temporary = TRUE",
+        )
+        .bind(now)
+        .bind(channel_id)
+        .execute(&state.db)
+        .await;
+    }
     // Remove from voice_addr_map if this was a real bound address (not the sentinel 0.0.0.0:0).
     if let Some(addr) = removed_addr {
         let sentinel: std::net::SocketAddr = "0.0.0.0:0".parse().unwrap();

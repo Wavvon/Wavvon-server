@@ -1600,6 +1600,27 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Join-to-create temporary voice channels (temp-voice-channels.md) ----
+    // `is_temporary` + `owner_pubkey` mark a normal channel as a personal
+    // room spawned by joining a `channel_type = 'spawner'` channel.
+    // `spawner_name_template` lives on the spawner itself. `empty_since` is
+    // GC bookkeeping: stamped when a temp room's voice roster drains to
+    // zero, cleared on rejoin, and swept by `temp_channel_worker` once past
+    // the grace period.
+    let _ =
+        sqlx::query("ALTER TABLE channels ADD COLUMN is_temporary BOOLEAN NOT NULL DEFAULT FALSE")
+            .execute(pool)
+            .await;
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN owner_pubkey TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN spawner_name_template TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN empty_since BIGINT")
+        .execute(pool)
+        .await;
+
     tracing::info!("Database migrations complete");
 
     Ok(())
