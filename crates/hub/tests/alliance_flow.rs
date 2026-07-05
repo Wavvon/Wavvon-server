@@ -137,7 +137,7 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
 
 #[tokio::test]
 async fn two_hubs_form_alliance() {
-    let (hub_a_url, hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
     let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 

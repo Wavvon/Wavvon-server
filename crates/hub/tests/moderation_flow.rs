@@ -393,9 +393,7 @@ async fn ws_voice_join_and_recv(hub_url: &str, token: &str, channel_id: &str) ->
     assert_eq!(hello["type"], "hello", "first frame should be hello");
 
     tx.send(WsMessage::Text(
-        json!({ "type": "voice_join", "channel_id": channel_id, "udp_port": 12345 })
-            .to_string()
-            .into(),
+        json!({ "type": "voice_join", "channel_id": channel_id, "udp_port": 12345 }).to_string(),
     ))
     .await
     .unwrap();
@@ -892,4 +890,126 @@ async fn federated_ban_blocks_message_posting() {
         403,
         "federally banned user must not post messages"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Membership semantics: kick/ban remove the member from /users
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn kicked_user_leaves_the_member_list_and_can_rejoin() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let target = Identity::generate();
+    let target_token = common::authenticate(&server, &target).await;
+    let target_pk = target.public_key_hex();
+
+    // Present in /users before the kick.
+    let users: serde_json::Value = server
+        .get("/users")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert!(users
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["public_key"].as_str() == Some(target_pk.as_str())));
+
+    server
+        .post("/moderation/kick")
+        .authorization_bearer(&owner_token)
+        .json(&serde_json::json!({ "target_public_key": target_pk }))
+        .await
+        .assert_status_ok();
+
+    // Gone from /users; their session token is dead.
+    let users: serde_json::Value = server
+        .get("/users")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert!(
+        !users
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["public_key"].as_str() == Some(target_pk.as_str())),
+        "kicked user must not appear in /users"
+    );
+    server
+        .get("/me")
+        .authorization_bearer(&target_token)
+        .await
+        .assert_status_unauthorized();
+
+    // Not banned: re-auth works and restores membership.
+    let _new_token = common::authenticate(&server, &target).await;
+    let users: serde_json::Value = server
+        .get("/users")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert!(
+        users
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["public_key"].as_str() == Some(target_pk.as_str())),
+        "re-authenticated (kicked, not banned) user re-joins the member list"
+    );
+}
+
+#[tokio::test]
+async fn banned_user_leaves_the_member_list_and_cannot_return() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let target = Identity::generate();
+    let _target_token = common::authenticate(&server, &target).await;
+    let target_pk = target.public_key_hex();
+
+    server
+        .post("/moderation/bans")
+        .authorization_bearer(&owner_token)
+        .json(&serde_json::json!({ "target_public_key": target_pk, "reason": "test ban" }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    // Gone from /users.
+    let users: serde_json::Value = server
+        .get("/users")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert!(
+        !users
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|u| u["public_key"].as_str() == Some(target_pk.as_str())),
+        "banned user must not appear in /users"
+    );
+
+    // Re-auth is refused entirely (existing ban gate at verify).
+    let resp = server
+        .post("/auth/challenge")
+        .json(&serde_json::json!({ "public_key": target_pk }))
+        .await;
+    resp.assert_status_ok();
+    let challenge: serde_json::Value = resp.json();
+    let ch = challenge["challenge"].as_str().unwrap();
+    let sig = target.sign(&hex::decode(ch).unwrap());
+    server
+        .post("/auth/verify")
+        .json(&serde_json::json!({
+            "public_key": target_pk,
+            "challenge": ch,
+            "signature": hex::encode(sig.to_bytes()),
+        }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
 }

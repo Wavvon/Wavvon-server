@@ -485,7 +485,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
 async fn send_ws_json(ws: &mut WsStream, msg: Value) {
     use futures_util::SinkExt;
     ws.send(tokio_tungstenite::tungstenite::Message::Text(
-        msg.to_string().into(),
+        msg.to_string(),
     ))
     .await
     .unwrap();

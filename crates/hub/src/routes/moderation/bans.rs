@@ -11,6 +11,33 @@ use crate::state::AppState;
 
 use super::models::{require_can_moderate, BanRow, MuteRow};
 
+/// Membership ends on kick/ban: strip the target's roles (member = has
+/// roles; /users hides role-less non-bots) and tell connected clients to
+/// refresh their member list. The users row is deliberately kept so old
+/// messages stay attributed.
+async fn end_membership(state: &AppState, target: &str) -> Result<(), (StatusCode, String)> {
+    sqlx::query("DELETE FROM user_roles WHERE user_public_key = $1")
+        .bind(target)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // MemberOffline prompts clients to drop/grey the row now; the next
+    // /users refetch removes them entirely.
+    let ws_msg = crate::routes::chat_models::WsServerMessage::MemberOffline {
+        public_key: target.to_string(),
+    };
+    let json: std::sync::Arc<str> =
+        std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+    let _ = state.chat_tx.send((
+        crate::routes::chat_models::ChatEvent::MemberOffline {
+            public_key: target.to_string(),
+        },
+        json,
+    ));
+    Ok(())
+}
+
 // --- Ban ---
 
 pub async fn ban_user(
@@ -46,6 +73,8 @@ pub async fn ban_user(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    end_membership(&state, &req.target_public_key).await?;
 
     tracing::info!("Banned user: {}", &req.target_public_key[..16]);
 
@@ -279,6 +308,11 @@ pub async fn kick_user(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Strip membership. On re-auth the target is treated as a brand-new
+    // joiner (initial roles reassigned; invite required on invite-only
+    // hubs) — exactly what "kick" should mean.
+    end_membership(&state, &req.target_public_key).await?;
 
     tracing::info!("Kicked user: {}", &req.target_public_key[..16]);
 

@@ -241,7 +241,7 @@ async fn admin_list_pending_recovery_requests() {
         .await;
     resp.assert_status_ok();
     let arr = resp.json::<serde_json::Value>();
-    assert!(arr.as_array().unwrap().len() >= 1);
+    assert!(!arr.as_array().unwrap().is_empty());
 }
 
 #[tokio::test]

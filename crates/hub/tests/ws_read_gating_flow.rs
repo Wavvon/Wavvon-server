@@ -193,9 +193,7 @@ async fn connect_ws(base: &str, token: &str) -> (WsSink, WsStream) {
 }
 
 async fn send_text(tx: &mut WsSink, msg: Value) {
-    tx.send(TsMessage::Text(msg.to_string().into()))
-        .await
-        .unwrap();
+    tx.send(TsMessage::Text(msg.to_string())).await.unwrap();
 }
 
 /// Reads WS frames until one that isn't a connect-time housekeeping frame

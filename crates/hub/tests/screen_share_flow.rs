@@ -176,9 +176,7 @@ async fn send_text(
     >,
     msg: Value,
 ) {
-    tx.send(TsMessage::Text(msg.to_string().into()))
-        .await
-        .unwrap();
+    tx.send(TsMessage::Text(msg.to_string())).await.unwrap();
 }
 
 async fn next_text(
@@ -289,7 +287,7 @@ async fn screen_share_start_chunk_stop_fan_out() {
     .await;
 
     sharer_tx
-        .send(TsMessage::Binary(b"INIT_SEGMENT_BYTES".to_vec().into()))
+        .send(TsMessage::Binary(b"INIT_SEGMENT_BYTES".to_vec()))
         .await
         .unwrap();
 
@@ -367,7 +365,7 @@ async fn late_joiner_receives_init_chunk() {
     )
     .await;
     sharer_tx
-        .send(TsMessage::Binary(b"WEBM_INIT".to_vec().into()))
+        .send(TsMessage::Binary(b"WEBM_INIT".to_vec()))
         .await
         .unwrap();
 
@@ -491,7 +489,7 @@ async fn multiple_concurrent_sharers_allowed() {
     )
     .await;
     bob_tx
-        .send(TsMessage::Binary(b"BOB_INIT".to_vec().into()))
+        .send(TsMessage::Binary(b"BOB_INIT".to_vec()))
         .await
         .unwrap();
 

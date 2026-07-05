@@ -121,7 +121,7 @@ async fn setup_server() -> common::TestHarness {
 }
 
 /// Insert a user + session row so subsequent authenticated requests succeed.
-async fn seed_user_and_session(server: &TestServer, pubkey: &str) -> String {
+async fn seed_user_and_session(server: &TestServer, _pubkey: &str) -> String {
     // We go through the real /auth/challenge + /auth/verify flow so
     // the sessions FK constraint is satisfied.
     let identity = Identity::generate();

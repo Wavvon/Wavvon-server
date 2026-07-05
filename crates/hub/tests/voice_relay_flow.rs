@@ -180,9 +180,7 @@ async fn send_ws(
     >,
     msg: Value,
 ) {
-    tx.send(TsMessage::Text(msg.to_string().into()))
-        .await
-        .unwrap();
+    tx.send(TsMessage::Text(msg.to_string())).await.unwrap();
 }
 
 // ---------------------------------------------------------------------------

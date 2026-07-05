@@ -60,7 +60,10 @@ pub async fn list_users(
                      WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
                      ORDER BY r.priority DESC LIMIT 1) AS group_role
              FROM users u
-             WHERE u.display_name LIKE $1 OR u.public_key LIKE $2
+             WHERE (u.display_name LIKE $1 OR u.public_key LIKE $2)
+               AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
+               AND (u.is_bot = TRUE OR EXISTS
+                    (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key))
              ORDER BY u.display_name, u.public_key LIMIT 50",
         )
         .bind(&search)
@@ -76,6 +79,9 @@ pub async fn list_users(
                      WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
                      ORDER BY r.priority DESC LIMIT 1) AS group_role
              FROM users u
+             WHERE NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
+               AND (u.is_bot = TRUE OR EXISTS
+                    (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key))
              ORDER BY u.display_name, u.public_key LIMIT 50",
         )
         .fetch_all(&state.db)
@@ -120,6 +126,9 @@ pub async fn channel_members(
          WHERE u.public_key NOT IN (
              SELECT target_public_key FROM channel_bans WHERE channel_id = $1
          )
+           AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
+           AND (u.is_bot = TRUE OR EXISTS
+                (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key))
          ORDER BY u.display_name, u.public_key",
     )
     .bind(&channel_id)
