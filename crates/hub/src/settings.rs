@@ -129,6 +129,33 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "30",
         "Lifetime of 'Trust this device' tokens in days. Default: 30",
     ),
+    (
+        "WAVVON_LAN_MODE",
+        "false",
+        "Explicit opt-in for LAN/offline mode. When true, the hub refuses to start unless its \
+         advertise address is private/loopback/link-local, and self-signed or plaintext trust \
+         become available for that address only. Never inferred, never default — see lan-mode.md",
+    ),
+    (
+        "WAVVON_LAN_ADVERTISE_ADDR",
+        "(unset)",
+        "The literal private IP this LAN-mode hub is reached at (e.g. 192.168.1.50). \
+         Auto-detected when unset. Must be private/loopback/link-local or the hub refuses to start",
+    ),
+    (
+        "WAVVON_LAN_TLS_MODE",
+        "self",
+        "LAN-mode trust tier when no CA cert is configured: `self` (self-signed cert + \
+         fingerprint pinning, default) or `none` (gated plaintext HTTP). Ignored unless \
+         WAVVON_LAN_MODE=true",
+    ),
+    (
+        "WAVVON_LAN_MDNS",
+        "true",
+        "Advertise this hub via mDNS/DNS-SD (`_wavvon._tcp.local`) while in LAN mode. \
+         Set to `false` to keep LAN mode's guard/trust behavior without the multicast \
+         responder (e.g. containers/CI without multicast). Ignored unless WAVVON_LAN_MODE=true",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -213,6 +240,18 @@ pub struct Settings {
     /// Device token TTL in days. Default: 30.
     /// Env: WAVVON_DEVICE_TOKEN_TTL_DAYS
     pub device_token_ttl_days: u64,
+    /// Explicit opt-in for LAN/offline mode. See `crate::lan` and lan-mode.md.
+    /// Env: WAVVON_LAN_MODE
+    pub lan_mode: bool,
+    /// Literal private IP this LAN-mode hub is reached at. Auto-detected when unset.
+    /// Env: WAVVON_LAN_ADVERTISE_ADDR
+    pub lan_advertise_addr: Option<String>,
+    /// LAN-mode trust tier: "self" (self-signed + fingerprint pinning) or "none"
+    /// (gated plaintext). Ignored unless `lan_mode` is true and no CA cert is set.
+    /// Env: WAVVON_LAN_TLS_MODE
+    pub lan_tls_mode: String,
+    /// Advertise via mDNS/DNS-SD while in LAN mode. Env: WAVVON_LAN_MDNS
+    pub lan_mdns: bool,
 }
 
 /// Load hub settings from (in priority order, highest last):
@@ -229,6 +268,9 @@ pub fn load() -> Result<Settings> {
         .set_default("trusted_proxy", false)?
         .set_default("bots_allow_camera", false)?
         .set_default("device_token_ttl_days", 30u64)?
+        .set_default("lan_mode", false)?
+        .set_default("lan_tls_mode", "self")?
+        .set_default("lan_mdns", true)?
         .add_source(config::File::with_name("hub").required(false))
         .add_source(config::Environment::with_prefix("WAVVON"))
         .build()?

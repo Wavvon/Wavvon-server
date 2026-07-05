@@ -79,6 +79,9 @@ async fn start_real_hub() -> (String, common::TestDbGuard) {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
 
     let app = server::create_router(state);
@@ -161,6 +164,9 @@ async fn setup_server() -> common::TestHarness {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
 
     let app = server::create_router(state);

@@ -121,6 +121,9 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         sfu_url: std::env::var("WAVVON_SFU_URL").ok(),
         emoji_count,
         rotation,
+        lan_mode: state.lan_mode,
+        lan_tls: state.lan_tls_mode.clone(),
+        lan_fingerprint: state.lan_fingerprint.clone(),
     })
 }
 
@@ -178,4 +181,19 @@ pub struct InfoResponse {
     /// re-pin the new pubkey. Absent when no rotation is in progress.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rotation: Option<serde_json::Value>,
+    /// True when this hub is running with `WAVVON_LAN_MODE=1` — see lan-mode.md.
+    /// Clients on a LAN use this (plus `lan_fingerprint`) to know a self-signed
+    /// or plaintext connection to this hub is expected, not a downgrade attack.
+    #[serde(default)]
+    pub lan_mode: bool,
+    /// LAN trust tier in effect: `"self"` (self-signed + fingerprint pinning)
+    /// or `"none"` (gated plaintext). Absent when `lan_mode` is false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_tls: Option<String>,
+    /// SHA-256 fingerprint (hex) of the LAN self-signed cert. Present only
+    /// when `lan_mode` is true and `lan_tls == Some("self")`. Compare this
+    /// against the out-of-band value from the invite/QR/mDNS TXT record —
+    /// it is NOT itself a secure channel (see lan-mode.md §3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lan_fingerprint: Option<String>,
 }

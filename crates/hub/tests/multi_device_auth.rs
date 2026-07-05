@@ -78,6 +78,9 @@ async fn setup() -> (common::TestHarness, PgPool) {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
 
     let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);

@@ -186,6 +186,64 @@ async fn run_doctor() -> bool {
         }
     }
 
+    // LAN mode: confirm the advertise address is private, and — for the
+    // self-signed tier — generate/load the cert and print the fingerprint
+    // and join URL an operator would put on an invite/QR (lan-mode.md §4).
+    if settings.lan_mode {
+        println!("\nLAN mode:");
+        match wavvon_hub::lan::resolve_lan_address(settings.lan_advertise_addr.as_deref()) {
+            Ok(ip) => {
+                println!("PASS  LAN advertise address: {ip} (private/loopback/link-local)");
+                let has_ca_cert = settings.tls_cert.is_some() && settings.tls_key.is_some();
+                if has_ca_cert {
+                    println!(
+                        "INFO  trust: CA cert already configured (WAVVON_TLS_CERT/_KEY) — \
+                         LAN self-signed/plaintext bootstrap and mDNS advertisement are skipped"
+                    );
+                } else if settings.lan_tls_mode == "none" {
+                    println!(
+                        "INFO  trust: plaintext (WAVVON_LAN_TLS_MODE=none) — gated to the \
+                         private address above by the LAN-mode guard"
+                    );
+                    println!("INFO  Join URL: http://{ip}:{}", settings.http_port);
+                } else {
+                    match wavvon_hub::lan::load_or_create_self_signed(
+                        std::path::Path::new("lan_cert.pem"),
+                        std::path::Path::new("lan_cert.key"),
+                        ip,
+                    ) {
+                        Ok(cert) => {
+                            println!(
+                                "PASS  self-signed cert: fingerprint {}",
+                                cert.fingerprint_hex
+                            );
+                            println!(
+                                "INFO  Join URL: https://{ip}:{} (client pins fingerprint {} out of band)",
+                                settings.http_port, cert.fingerprint_hex
+                            );
+                        }
+                        Err(e) => {
+                            println!("FAIL  self-signed cert: {e}");
+                            all_pass = false;
+                        }
+                    }
+                }
+                println!(
+                    "INFO  mDNS advertisement: {}",
+                    if settings.lan_mdns {
+                        "enabled"
+                    } else {
+                        "disabled (WAVVON_LAN_MDNS=false)"
+                    }
+                );
+            }
+            Err(e) => {
+                println!("FAIL  LAN advertise address: {e}");
+                all_pass = false;
+            }
+        }
+    }
+
     if all_pass {
         println!("\nAll checks passed.");
     } else {
@@ -539,8 +597,65 @@ async fn main() -> Result<()> {
     let http_port = settings.http_port;
     let voice_udp_port = settings.voice_udp_port;
 
+    let (hub_identity, is_new) = Identity::load_or_create(Path::new("hub_identity.json"))?;
+
+    // ---- LAN mode resolution ----
+    // Must run before the TLS banner below: LAN mode can supply its own
+    // self-signed cert/key when no CA cert is already configured, and it
+    // always applies the hard private-address guard first (lan-mode.md §4)
+    // — this is what makes it structurally impossible for a self-signed or
+    // plaintext LAN hub to end up reachable from the public internet.
+    let has_ca_cert = settings.tls_cert.is_some() && settings.tls_key.is_some();
+    let mut effective_tls_cert = settings.tls_cert.clone();
+    let mut effective_tls_key = settings.tls_key.clone();
+    // "self" | "none", mirrors AppState::lan_tls_mode. None when LAN mode is
+    // off, or when a CA cert is already configured (see has_ca_cert below).
+    let mut lan_tls_tier: Option<String> = None;
+    let mut lan_fingerprint: Option<String> = None;
+    let mut lan_advertise_ip: Option<std::net::IpAddr> = None;
+
+    if settings.lan_mode {
+        match wavvon_hub::lan::resolve_lan_address(settings.lan_advertise_addr.as_deref()) {
+            Ok(ip) => lan_advertise_ip = Some(ip),
+            Err(e) => {
+                eprintln!("LAN mode configuration error: {e}");
+                std::process::exit(1);
+            }
+        }
+        let ip = lan_advertise_ip.expect("set immediately above");
+
+        if has_ca_cert {
+            tracing::info!(
+                "LAN mode: WAVVON_TLS_CERT/WAVVON_TLS_KEY are already configured; the \
+                 private-address guard stays active but self-signed/plaintext trust bootstrap \
+                 and mDNS advertisement are skipped (a CA-issued cert is the 'everyone' tier \
+                 from lan-mode.md and doesn't need LAN mode's help)."
+            );
+        } else if settings.lan_tls_mode == "none" {
+            lan_tls_tier = Some("none".to_string());
+            lan_fingerprint = Some(hub_identity.public_key_hex());
+        } else {
+            match wavvon_hub::lan::load_or_create_self_signed(
+                Path::new("lan_cert.pem"),
+                Path::new("lan_cert.key"),
+                ip,
+            ) {
+                Ok(cert) => {
+                    effective_tls_cert = Some("lan_cert.pem".to_string());
+                    effective_tls_key = Some("lan_cert.key".to_string());
+                    lan_tls_tier = Some("self".to_string());
+                    lan_fingerprint = Some(cert.fingerprint_hex);
+                }
+                Err(e) => {
+                    eprintln!("LAN mode: failed to generate self-signed cert: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     // ---- Startup summary banner ----
-    let tls_enabled = settings.tls_cert.is_some() && settings.tls_key.is_some();
+    let tls_enabled = effective_tls_cert.is_some() && effective_tls_key.is_some();
     let scheme = if tls_enabled { "https" } else { "http" };
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -556,7 +671,10 @@ async fn main() -> Result<()> {
     );
     tracing::info!("data: identity={cwd}/hub_identity.json  database=PostgreSQL");
 
-    if !tls_enabled {
+    // The generic mixed-content warning doesn't apply to LAN plaintext mode
+    // (that tier is documented and gated, not an oversight) — the LAN MODE
+    // banner below covers it instead.
+    if !tls_enabled && lan_tls_tier.as_deref() != Some("none") {
         tracing::warn!(
             "TLS is disabled — browser clients served over HTTPS cannot connect to an http:// hub \
              (mixed-content blocked). Set WAVVON_TLS_CERT and WAVVON_TLS_KEY or terminate TLS at a reverse proxy."
@@ -572,11 +690,25 @@ async fn main() -> Result<()> {
         None => tracing::info!("web client: disabled (set WAVVON_WEB_CLIENT_DIR to enable)"),
     }
 
-    let (hub_identity, is_new) = Identity::load_or_create(Path::new("hub_identity.json"))?;
     if is_new {
         tracing::info!("Generated new hub identity: {}", hub_identity);
     } else {
         tracing::info!("Loaded hub identity: {}", hub_identity);
+    }
+
+    if let (Some(ip), Some(tier)) = (lan_advertise_ip, lan_tls_tier.as_deref()) {
+        let trust_desc = if tier == "self" {
+            format!(
+                "fingerprint {}",
+                lan_fingerprint.as_deref().unwrap_or("(unknown)")
+            )
+        } else {
+            "plaintext".to_string()
+        };
+        tracing::warn!(
+            "LAN MODE — serving {scheme} on {ip}:{http_port}; NOT reachable from the internet; \
+             trust bootstrapped via {trust_desc}"
+        );
     }
 
     let db_url = settings
@@ -833,7 +965,50 @@ async fn main() -> Result<()> {
         webhook_circuit: Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: settings.lan_mode,
+        lan_tls_mode: lan_tls_tier.clone(),
+        lan_fingerprint: lan_fingerprint.clone(),
     });
+
+    // LAN mode: advertise via mDNS/DNS-SD (`_wavvon._tcp.local`), when
+    // enabled and when a no-CA trust tier is actually in play (see the
+    // has_ca_cert skip above). Kept alive for the process lifetime by
+    // holding the returned daemon in this binding — dropping it would
+    // unregister the service. Failure here is non-fatal: mDNS is a
+    // discovery convenience, not part of the safety invariant, and boxes
+    // without multicast (containers, some CI) must not fail to start.
+    let _lan_mdns_daemon = if settings.lan_mode && settings.lan_mdns {
+        match (lan_advertise_ip, lan_tls_tier.as_deref()) {
+            (Some(ip), Some(tier)) => {
+                let hub_name_for_mdns = wavvon_hub::routes::hub::current_hub_name(&state).await;
+                let fp_or_pubkey = lan_fingerprint
+                    .clone()
+                    .unwrap_or_else(|| state.hub_identity.public_key_hex());
+                let params = wavvon_hub::lan::MdnsAnnounceParams {
+                    hub_name: &hub_name_for_mdns,
+                    advertise_ip: ip,
+                    port: http_port,
+                    tls_mode: tier,
+                    fingerprint_or_pubkey: &fp_or_pubkey,
+                };
+                match wavvon_hub::lan::start_mdns_advertiser(&params) {
+                    Ok(daemon) => {
+                        tracing::info!(
+                            "LAN mode: advertising via mDNS as _wavvon._tcp.local (name={hub_name_for_mdns})"
+                        );
+                        Some(daemon)
+                    }
+                    Err(e) => {
+                        tracing::warn!("LAN mode: mDNS advertisement failed (non-fatal): {e}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     // Bind voice UDP socket and start forwarding task
     let voice_socket = Arc::new(UdpSocket::bind(format!("0.0.0.0:{voice_udp_port}")).await?);
@@ -1132,7 +1307,7 @@ async fn main() -> Result<()> {
     );
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
-    if let (Some(cert), Some(key)) = (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {
+    if let (Some(cert), Some(key)) = (effective_tls_cert.as_deref(), effective_tls_key.as_deref()) {
         let cert_path = PathBuf::from(cert);
         let key_path = PathBuf::from(key);
         let rustls_config =

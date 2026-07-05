@@ -84,6 +84,9 @@ async fn setup_with_pool() -> (common::TestHarness, PgPool) {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
     let app = server::create_router(state);
     (
@@ -309,6 +312,9 @@ async fn start_real_hub(name: &str) -> (String, common::TestDbGuard) {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
     let app = server::create_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -441,6 +447,9 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -647,6 +656,9 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
     let app_b = server::create_router(hub_b_state.clone());
     let listener_b = tokio::net::TcpListener::bind(format!("127.0.0.1:{dead_port}"))

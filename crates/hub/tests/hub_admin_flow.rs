@@ -78,6 +78,9 @@ async fn setup(startup_name: &str) -> common::TestHarness {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
     let app = server::create_router(state);
     common::TestHarness::new(TestServer::new(app), guard)

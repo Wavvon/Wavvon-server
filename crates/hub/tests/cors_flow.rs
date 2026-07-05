@@ -83,6 +83,9 @@ async fn setup_with_cors(cors_origins: &str) -> common::TestHarness {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
 
     let app = create_router_with_cors(state, cors_origins);

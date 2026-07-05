@@ -84,6 +84,9 @@ async fn setup_with_search() -> (common::TestHarness, tempfile::TempDir) {
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
     });
     (
         common::TestHarness::new(TestServer::new(server::create_router(state)), guard),

@@ -431,6 +431,18 @@ pub struct AppState {
     /// Shared across all request handlers so consecutive failures from any
     /// concurrent request accumulate in a single counter.
     pub webhook_circuit: Arc<tokio::sync::Mutex<WebhookCircuit>>,
+
+    /// Mirror of `Settings::lan_mode` (`WAVVON_LAN_MODE`). See `crate::lan`
+    /// for the private-address guard and self-signed cert helpers this gates.
+    pub lan_mode: bool,
+    /// Trust tier in effect when `lan_mode` is on: `Some("self")` for
+    /// self-signed + fingerprint pinning, `Some("none")` for gated
+    /// plaintext. `None` when `lan_mode` is off.
+    pub lan_tls_mode: Option<String>,
+    /// SHA-256 fingerprint (hex) of the LAN self-signed cert, present only
+    /// when `lan_mode` is on and `lan_tls_mode == Some("self")`. Surfaced on
+    /// `/info` and in the mDNS `fp` TXT record so clients can pin it TOFU-style.
+    pub lan_fingerprint: Option<String>,
 }
 
 pub struct PendingChallenge {
