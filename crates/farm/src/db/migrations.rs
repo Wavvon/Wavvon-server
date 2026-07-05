@@ -123,6 +123,19 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Serial routing (farm-impl.md "Serial routing — first slice"): the
+    // farm's reverse proxy resolves `/hub/<serial>/...` by looking up
+    // `hub_pubkey`, so it must be unique. Partial (`WHERE hub_pubkey IS NOT
+    // NULL`) because the column is nullable until a hub registers its
+    // pubkey — unregistered rows never collide with each other.
+    sqlx::query(
+        "CREATE UNIQUE INDEX IF NOT EXISTS hubs_hub_pubkey_unique_idx
+             ON hubs (hub_pubkey)
+             WHERE hub_pubkey IS NOT NULL",
+    )
+    .execute(pool)
+    .await?;
+
     // Farm-level game catalogue.
     // One row per installed game; the farm admin installs, hubs enable/disable.
     sqlx::query(

@@ -73,8 +73,10 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         )
         // Farm admin fleet view — requires farm admin auth.
         .route("/farm/admin/fleet", get(routes::heartbeat::get_fleet))
-        // Proxy catch-all — must be last (fallback for all /hub/<id>/... requests).
-        .route("/hub/{hub_id}/{*path}", any(crate::proxy::proxy_handler))
+        // Proxy catch-all — must be last (fallback for all /hub/<serial>/...
+        // requests). Routed by the hub's pubkey ("serial"), not the opaque
+        // `hubs.id` PK — see farm-impl.md "Serial routing — first slice".
+        .route("/hub/{serial}/{*path}", any(crate::proxy::proxy_handler))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

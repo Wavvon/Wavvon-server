@@ -4821,6 +4821,8 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "hyper",
+ "hyper-util",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
