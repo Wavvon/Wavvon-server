@@ -258,64 +258,61 @@ pub async fn send_message(
                 )
                 .await;
 
-                match result {
-                    Ok(Ok(resp)) => {
-                        let status = resp.status();
-                        if status.is_server_error() {
-                            // 5xx: increment failure counter and potentially open the circuit.
-                            let mut circuit = state.webhook_circuit.lock().await;
-                            let ts_now = crate::auth::handlers::unix_timestamp();
-                            let streak_start = circuit.streak_started_at.get_or_insert(ts_now);
-                            let streak_age = ts_now - *streak_start;
-                            circuit.consecutive_failures += 1;
+                // Timeout or connection error fall through: fail-open, no
+                // circuit change.
+                if let Ok(Ok(resp)) = result {
+                    let status = resp.status();
+                    if status.is_server_error() {
+                        // 5xx: increment failure counter and potentially open the circuit.
+                        let mut circuit = state.webhook_circuit.lock().await;
+                        let ts_now = crate::auth::handlers::unix_timestamp();
+                        let streak_start = circuit.streak_started_at.get_or_insert(ts_now);
+                        let streak_age = ts_now - *streak_start;
+                        circuit.consecutive_failures += 1;
 
-                            if circuit.consecutive_failures >= 3 && streak_age <= 60 {
-                                circuit.open_until = Some(ts_now + 600);
-                                tracing::warn!(
-                                    "Auto-mod webhook returned 5xx three times within 60s — \
+                        if circuit.consecutive_failures >= 3 && streak_age <= 60 {
+                            circuit.open_until = Some(ts_now + 600);
+                            tracing::warn!(
+                                "Auto-mod webhook returned 5xx three times within 60s — \
                                      circuit open for 10 minutes (url={})",
-                                    &webhook_url
-                                );
-                            } else if streak_age > 60 {
-                                // Streak expired; start a fresh window.
-                                circuit.consecutive_failures = 1;
-                                circuit.streak_started_at = Some(ts_now);
-                            }
-                        } else {
-                            // Non-5xx: close/reset the circuit.
-                            {
-                                let mut circuit = state.webhook_circuit.lock().await;
-                                circuit.consecutive_failures = 0;
-                                circuit.open_until = None;
-                                circuit.streak_started_at = None;
-                            }
+                                &webhook_url
+                            );
+                        } else if streak_age > 60 {
+                            // Streak expired; start a fresh window.
+                            circuit.consecutive_failures = 1;
+                            circuit.streak_started_at = Some(ts_now);
+                        }
+                    } else {
+                        // Non-5xx: close/reset the circuit.
+                        {
+                            let mut circuit = state.webhook_circuit.lock().await;
+                            circuit.consecutive_failures = 0;
+                            circuit.open_until = None;
+                            circuit.streak_started_at = None;
+                        }
 
-                            // Block only on an explicit `block` action in the response body.
-                            // The spec says the webhook responds with
-                            // { "action": "allow" | "block", "reason"?: "..." }.
-                            // A 403 HTTP status is also honored for backward compatibility.
-                            if status == reqwest::StatusCode::FORBIDDEN {
-                                return Err((
-                                    StatusCode::FORBIDDEN,
-                                    "Message blocked by moderation policy".to_string(),
-                                ));
-                            }
-                            if status.is_success() {
-                                if let Ok(body) = resp.json::<serde_json::Value>().await {
-                                    if body.get("action").and_then(|v| v.as_str()) == Some("block")
-                                    {
-                                        let reason = body
-                                            .get("reason")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("Message blocked by moderation policy");
-                                        return Err((StatusCode::FORBIDDEN, reason.to_string()));
-                                    }
+                        // Block only on an explicit `block` action in the response body.
+                        // The spec says the webhook responds with
+                        // { "action": "allow" | "block", "reason"?: "..." }.
+                        // A 403 HTTP status is also honored for backward compatibility.
+                        if status == reqwest::StatusCode::FORBIDDEN {
+                            return Err((
+                                StatusCode::FORBIDDEN,
+                                "Message blocked by moderation policy".to_string(),
+                            ));
+                        }
+                        if status.is_success() {
+                            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                                if body.get("action").and_then(|v| v.as_str()) == Some("block") {
+                                    let reason = body
+                                        .get("reason")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Message blocked by moderation policy");
+                                    return Err((StatusCode::FORBIDDEN, reason.to_string()));
                                 }
                             }
                         }
                     }
-                    // Timeout or connection error: fail-open, no circuit change.
-                    _ => {}
                 }
             }
         }

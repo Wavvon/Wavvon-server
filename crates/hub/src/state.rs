@@ -191,6 +191,7 @@ pub struct ConsumedVoiceToken {
 /// Opened after 3 consecutive 5xx responses within 60 seconds.
 /// While open, the webhook call is skipped entirely (fail-open).
 /// Resets to closed on any successful (non-5xx) response.
+#[derive(Default)]
 pub struct WebhookCircuit {
     /// Number of consecutive 5xx failures in the current window.
     pub consecutive_failures: u32,
@@ -199,16 +200,6 @@ pub struct WebhookCircuit {
     /// Wall-clock time of the first failure in the current streak.
     /// Used to enforce the 60-second window requirement.
     pub streak_started_at: Option<i64>,
-}
-
-impl Default for WebhookCircuit {
-    fn default() -> Self {
-        Self {
-            consecutive_failures: 0,
-            open_until: None,
-            streak_started_at: None,
-        }
-    }
 }
 
 pub struct RateLimiters {
