@@ -346,8 +346,13 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                         _ => false,
                     };
                     // Joined/Left go to every client so sidebar rosters stay
-                    // up-to-date even for clients not in any voice channel.
-                    // Speaking events stay scoped to same-channel clients only.
+                    // up-to-date even for clients not in any voice channel —
+                    // INCLUDING the actor themselves: suppressing self-echo
+                    // here left the actor's own sidebar stale on channel
+                    // switch/leave (they never saw their own Left event for
+                    // the previous channel). Clients dedupe their own Joined.
+                    // Speaking events stay scoped to same-channel clients and
+                    // do skip self (that echo is pure noise).
                     let is_roster_event = matches!(
                         &msg,
                         WsServerMessage::VoiceParticipantJoined { .. }
@@ -355,7 +360,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                     );
                     let in_same_channel =
                         cs.voice_channel.as_deref() == Some(channel_id.as_str());
-                    if (in_same_channel || is_roster_event) && !is_self {
+                    if is_roster_event || (in_same_channel && !is_self) {
                         let json = serde_json::to_string(&msg).unwrap();
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {
                             break;
