@@ -131,6 +131,43 @@ async fn role_view(
     })
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct MyChannelPermissionsResponse {
+    pub channel_id: String,
+    /// The caller's resolved effective permission set on this channel
+    /// (hub-wide baseline + ancestor-chain overwrite cascade), sorted.
+    pub permissions: Vec<String>,
+    /// Convenience flag: `admin` short-circuits every permission check, so
+    /// clients should treat everything as allowed when this is true.
+    pub is_admin: bool,
+}
+
+/// GET /channels/:id/my-permissions
+///
+/// The caller's own effective channel-scoped permissions. Deliberately NOT
+/// gated on `manage_roles` — a member may always learn what they themselves
+/// can do here. This is a UX/visibility endpoint (soundboard play button,
+/// Permissions tab reachability, composer affordances); servers still
+/// enforce the real checks per action.
+pub async fn get_my_channel_permissions(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(channel_id): Path<String>,
+) -> Result<Json<MyChannelPermissionsResponse>, (StatusCode, String)> {
+    require_channel_exists(&state.db, &channel_id).await?;
+
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    let is_admin = perms.effective.contains(ADMIN);
+    let mut permissions: Vec<String> = perms.effective.into_iter().collect();
+    permissions.sort();
+
+    Ok(Json(MyChannelPermissionsResponse {
+        channel_id,
+        permissions,
+        is_admin,
+    }))
+}
+
 /// GET /channels/:id/permissions
 pub async fn get_channel_permissions(
     State(state): State<Arc<AppState>>,

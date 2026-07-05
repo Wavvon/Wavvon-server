@@ -247,6 +247,10 @@ pub fn create_router_full(
                 .delete(routes::channel_permissions::delete_channel_permissions),
         )
         .route(
+            "/channels/{channel_id}/my-permissions",
+            get(routes::channel_permissions::get_my_channel_permissions),
+        )
+        .route(
             "/channels/{channel_id}/messages",
             get(routes::messages::get_messages),
         )

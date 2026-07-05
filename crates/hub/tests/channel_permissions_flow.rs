@@ -506,3 +506,83 @@ async fn send_messages_deny_blocks_one_channel_not_sibling() {
         .await
         .assert_status(axum::http::StatusCode::CREATED);
 }
+
+// ---- GET /channels/:id/my-permissions ----
+
+#[tokio::test]
+async fn my_permissions_reflects_channel_overwrites_without_manage_roles() {
+    use wavvon_hub::routes::channel_permissions::MyChannelPermissionsResponse;
+
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let user2 = Identity::generate();
+    let user2_token = common::authenticate(&server, &user2).await;
+
+    let stage = create_channel(&server, &owner_token, "stage", None, false).await;
+    let lounge = create_channel(&server, &owner_token, "lounge", None, false).await;
+
+    // user2 gets a role granting use_soundboard hub-wide…
+    let dj = create_role(&server, &owner_token, "dj", &["use_soundboard"], 1).await;
+    assign_role(&server, &owner_token, &user2.public_key_hex(), &dj.id).await;
+
+    // …which the stage channel explicitly denies for that role.
+    set_overwrite(
+        &server,
+        &owner_token,
+        &stage.id,
+        &dj.id,
+        &[],
+        &["use_soundboard"],
+    )
+    .await;
+
+    // user2 holds NO manage_roles — the endpoint must still answer (that's
+    // its whole point; the admin variant of this route is manage_roles-gated).
+    let resp = server
+        .get(&format!("/channels/{}/my-permissions", stage.id))
+        .authorization_bearer(&user2_token)
+        .await;
+    resp.assert_status_ok();
+    let on_stage: MyChannelPermissionsResponse = resp.json();
+    assert!(!on_stage.is_admin);
+    assert!(
+        !on_stage.permissions.contains(&"use_soundboard".to_string()),
+        "stage denies use_soundboard for dj: {:?}",
+        on_stage.permissions
+    );
+
+    // The other channel has no overwrite — the hub-wide grant applies.
+    let resp = server
+        .get(&format!("/channels/{}/my-permissions", lounge.id))
+        .authorization_bearer(&user2_token)
+        .await;
+    resp.assert_status_ok();
+    let on_lounge: MyChannelPermissionsResponse = resp.json();
+    assert!(on_lounge
+        .permissions
+        .contains(&"use_soundboard".to_string()));
+
+    // The owner is admin: flag set.
+    let resp = server
+        .get(&format!("/channels/{}/my-permissions", stage.id))
+        .authorization_bearer(&owner_token)
+        .await;
+    resp.assert_status_ok();
+    let owner_view: MyChannelPermissionsResponse = resp.json();
+    assert!(owner_view.is_admin);
+}
+
+#[tokio::test]
+async fn my_permissions_unknown_channel_is_404() {
+    let server = common::setup().await;
+    let user = Identity::generate();
+    let token = common::authenticate(&server, &user).await;
+
+    server
+        .get("/channels/does-not-exist/my-permissions")
+        .authorization_bearer(&token)
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
