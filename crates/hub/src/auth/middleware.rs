@@ -10,6 +10,13 @@ use crate::state::AppState;
 
 pub struct AuthUser {
     pub public_key: String,
+    /// Session scope: "member" (full access, subject to normal role/permission
+    /// checks) or "lobby" (lobby-bot-survey.md Feature 1 — confined to
+    /// `LOBBY_ALLOWED_PATHS` below, regardless of any roles held). Defaults to
+    /// "member" for token paths that predate scoping (bot tokens, farm
+    /// tokens, webauthn/device-token/mini-app logins) — none of those are
+    /// subject to the lobby gate.
+    pub scope: String,
 }
 
 /// Extractor for federation endpoints that must only be called by a registered
@@ -65,6 +72,22 @@ impl FromRequestParts<Arc<AppState>> for PeerHub {
 /// Paths that pending (not-yet-approved) users are allowed to hit.
 /// They can see their own status at /me and nothing else.
 const PENDING_ALLOWED_PATHS: &[&str] = &["/me"];
+
+/// Paths a `scope: "lobby"` session may reach (lobby-bot-survey.md Feature
+/// 1). Everything else 403s — "anything not explicitly allowed for lobby
+/// scope is denied" is the documented default-deny posture, enforced here
+/// once for every route rather than per-handler. A lobby user can check
+/// their own identity, poll/advance their lobby status, read the welcome
+/// blurb, and take the onboarding survey (Feature 3, which explicitly runs
+/// "in the lobby if Feature 1 is active"). No messaging, channels, or voice.
+const LOBBY_ALLOWED_PATHS: &[&str] = &[
+    "/me",
+    "/lobby/status",
+    "/lobby/submit-pow",
+    "/lobby/welcome",
+    "/survey/current",
+    "/survey/submit",
+];
 
 /// Minimum seconds between farm pubkey re-fetch attempts (handles key rotation
 /// without hammering the farm on every bad-token request).
@@ -180,6 +203,13 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             "Invalid Authorization format".to_string(),
         ))?;
 
+        // Session scope (lobby-bot-survey.md Feature 1). Defaults to
+        // "member" for every path except the legacy hub-token session
+        // lookup below, which reads the actual value persisted on the
+        // session row at `/auth/verify` time. Farm-token and bot-token
+        // sessions are never lobby-confined.
+        let mut scope = "member".to_string();
+
         // -----------------------------------------------------------------
         // Dispatch: farm token (contains '.') vs legacy opaque hub token.
         // -----------------------------------------------------------------
@@ -255,8 +285,8 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         } else {
             // --- Legacy opaque hub-token path (unchanged) ---
             // Try sessions first.
-            let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
-                "SELECT s.public_key, u.approval_status, s.expires_at
+            let row: Option<(String, String, Option<i64>, String)> = sqlx::query_as(
+                "SELECT s.public_key, u.approval_status, s.expires_at, s.scope
                  FROM sessions s
                  INNER JOIN users u ON s.public_key = u.public_key
                  WHERE s.token = $1",
@@ -266,7 +296,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            let (pk, approval_status) = if let Some((pk, status, expires_at)) = row {
+            let (pk, approval_status) = if let Some((pk, status, expires_at, sess_scope)) = row {
                 // Enforce session expiry. NULL expires_at means the session
                 // never expires (human sessions). Non-NULL must be in the
                 // future.
@@ -282,6 +312,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                         ));
                     }
                 }
+                scope = sess_scope;
                 (pk, status)
             } else {
                 // Try bot tokens.
@@ -402,7 +433,19 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             }
         }
 
-        Ok(AuthUser { public_key })
+        // Lobby confinement (lobby-bot-survey.md Feature 1): a lobby-scoped
+        // session may only reach the small allowlist above — every other
+        // route 403s, regardless of any roles the underlying user holds.
+        // Checked last so it composes with (rather than replaces) the
+        // pending-approval, ban, and revocation gates above.
+        if scope == "lobby" {
+            let path = parts.uri.path();
+            if !LOBBY_ALLOWED_PATHS.contains(&path) {
+                return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
+            }
+        }
+
+        Ok(AuthUser { public_key, scope })
     }
 }
 

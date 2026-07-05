@@ -194,6 +194,24 @@ pub async fn submit_pow(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    // Promote lobby -> member in place. `lobby_status` above is a
+    // client-facing display flag; `sessions.scope` is what the AuthUser
+    // extractor actually enforces (lobby-bot-survey.md Feature 1), so it
+    // must flip too or the just-promoted user stays confined until their
+    // next full /auth/verify. Every currently-lobby-scoped session for this
+    // pubkey is promoted, not just the one behind this request's token,
+    // since a device that finished PoW should unlock every session the same
+    // identity is holding.
+    if promoted {
+        sqlx::query(
+            "UPDATE sessions SET scope = 'member' WHERE public_key = $1 AND scope = 'lobby'",
+        )
+        .bind(&user.public_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
     Ok(Json(SubmitPowResponse {
         promoted,
         new_level,

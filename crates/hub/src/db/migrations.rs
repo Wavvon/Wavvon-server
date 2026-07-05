@@ -1611,6 +1611,16 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Session scope (lobby-bot-survey.md Feature 1). "member" (default) or
+    // "lobby" — a lobby-scoped session is confined by the `AuthUser`
+    // extractor to a small allowlist of paths until the user's PoW level
+    // reaches `min_security_level` and the session is promoted in place
+    // (see routes/lobby.rs submit_pow). Backfilled to 'member' for every
+    // pre-existing session row so nothing already issued becomes confined.
+    let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'member'")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

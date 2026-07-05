@@ -571,13 +571,14 @@ pub mod presets {
                   "permissions": ["manage_messages", "mute_members", "kick_members", "manage_channels"] }
             ],
             "settings": {
-                // Deliberately NOT setting min_security_level: the "lobby"
-                // soft-landing (join confined, PoW in the background,
-                // auto-promote — lobby-bot-survey.md Feature 1) is not wired
-                // end-to-end yet, so a nonzero value here is a hard 403 wall
-                // that locks the OWNER out of their own first join (found
-                // live 2026-07-06). Re-add once the lobby admits sub-level
-                // joiners instead of rejecting them.
+                // Re-added (was pulled in a4e57f9 as a stopgap: the lobby
+                // soft-landing — lobby-bot-survey.md Feature 1 — hard-403'd
+                // every sub-level join instead of admitting them, which
+                // locked the OWNER out of their own first join). /auth/verify
+                // now admits a sub-level joiner into scope="lobby" instead of
+                // rejecting them, and the owner/first user are exempt from
+                // the gate entirely, so this is safe to re-enable.
+                "min_security_level": 8,
                 "require_approval": false
             },
             "welcome_message": "Welcome! Check out #announcements for the rules, and jump into voice-lounge to play.",

@@ -250,7 +250,32 @@ pub async fn verify(
         }
     }
 
-    // Check security level requirement
+    // First-ever user on a hub is implicitly approved (they'll become
+    // Owner below). Excludes the 'system' sentinel that bootstrap inserts
+    // as channels' created_by — otherwise a preset-seeded hub always has
+    // one "user" and the real first joiner never becomes owner (found live
+    // 2026-07-06).
+    let existing_users: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE public_key <> 'system'")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // The hub owner (already holds builtin-owner) and the implicit first
+    // user are never lobby-confined or hard-rejected by min_security_level
+    // on their own hub. Without this, a nonzero min_security_level preset
+    // locks the owner out of their own first join (found live 2026-07-06 —
+    // see bootstrap.rs presets::gaming and lobby-bot-survey.md Feature 1).
+    let already_owner: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_public_key = $1 AND role_id = 'builtin-owner')",
+    )
+    .bind(&canonical_pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let owner_exempt = existing_users == 0 || already_owner;
+
+    // Check security level requirement (lobby-bot-survey.md Feature 1).
     let min_level: u32 = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'min_security_level'",
     )
@@ -260,16 +285,27 @@ pub async fn verify(
     .and_then(|v| v.parse().ok())
     .unwrap_or(0);
 
-    if min_level > 0 {
+    let lobby_enabled: bool = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'lobby_enabled'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .map(|v| v == "1")
+    .unwrap_or(true);
+
+    // Claimed level presented directly at /auth/verify (as opposed to the
+    // progressive /lobby/submit-pow path). Always verified when the gate is
+    // active so a forged claim can't inflate `users.pow_level` below —
+    // claimed_level == 0 (the default, no proof presented) always verifies
+    // trivially (see `verify_security_level`), so an absent proof is a
+    // harmless no-op here.
+    let mut claimed_security_level: u32 = 0;
+
+    if min_level > 0 && !owner_exempt {
         let nonce = req.security_nonce.unwrap_or(0);
         let claimed_level = req.security_level.unwrap_or(0);
-
-        if claimed_level < min_level {
-            return Err((
-                StatusCode::FORBIDDEN,
-                format!("Security level {claimed_level} is below minimum {min_level}"),
-            ));
-        }
 
         if !wavvon_identity::verify_security_level(&req.public_key, nonce, claimed_level) {
             return Err((
@@ -277,6 +313,20 @@ pub async fn verify(
                 "Invalid security level proof".to_string(),
             ));
         }
+
+        if claimed_level < min_level && !lobby_enabled {
+            // No lobby to soft-land in: keep the pre-lobby hard-reject
+            // behavior. When the lobby IS enabled, admission proceeds below
+            // and the session is tagged scope="lobby" instead of being
+            // rejected outright — this used to hard-403 every sub-level
+            // join (including the owner's) before the lobby existed.
+            return Err((
+                StatusCode::FORBIDDEN,
+                format!("Security level {claimed_level} is below minimum {min_level}"),
+            ));
+        }
+
+        claimed_security_level = claimed_level;
     }
 
     // Check min_pow_level requirement (structured pow_proof field).
@@ -410,16 +460,8 @@ pub async fn verify(
     .map(|v| v == "true")
     .unwrap_or(false);
 
-    // First-ever user on a hub is implicitly approved (they'll become Owner).
-    // Exclude the 'system' sentinel that bootstrap inserts as channels'
-    // created_by — otherwise a preset-seeded hub always has one "user" and
-    // the real first joiner never becomes owner (found live 2026-07-06).
-    let existing_users: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE public_key <> 'system'")
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
+    // `existing_users` was already computed above (before the
+    // security-level gate) for the owner-exemption check; reused here.
     let initial_status = if require_approval && existing_users > 0 {
         "pending"
     } else {
@@ -446,6 +488,45 @@ pub async fn verify(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    // Compute session scope (lobby-bot-survey.md Feature 1): a session is
+    // "lobby"-scoped when the lobby is enabled and the user's persisted PoW
+    // level is below min_security_level. The owner/first-user exemption
+    // computed above means those two identities always land at "member"
+    // here regardless of level. Must run after the user upsert above (needs
+    // the row to exist) and before the session is created below (the scope
+    // is stored on the session).
+    let stored_pow_level: u32 =
+        sqlx::query_scalar::<_, i64>("SELECT pow_level FROM users WHERE public_key = $1")
+            .bind(&canonical_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0) as u32;
+
+    let effective_pow_level = stored_pow_level.max(claimed_security_level);
+
+    // Persist any improvement so /lobby/status and future logins see it even
+    // when the higher level came directly through /auth/verify's
+    // security_level/security_nonce fields rather than the progressive
+    // /lobby/submit-pow path.
+    if effective_pow_level > stored_pow_level {
+        sqlx::query("UPDATE users SET pow_level = $1 WHERE public_key = $2")
+            .bind(effective_pow_level as i64)
+            .bind(&canonical_pubkey)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    let scope = if owner_exempt {
+        "member".to_string()
+    } else if lobby_enabled && effective_pow_level < min_level {
+        "lobby".to_string()
+    } else {
+        "member".to_string()
+    };
+
     let token = hex::encode({
         let mut bytes = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);
@@ -460,12 +541,13 @@ pub async fn verify(
     };
 
     sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&token)
     .bind(&canonical_pubkey)
     .bind(now)
     .bind(bot_expires_at)
+    .bind(&scope)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -586,32 +668,6 @@ pub async fn verify(
         }
     }
 
-    // Compute session scope: "lobby" if lobby is enabled and user's pow_level < min_security_level
-    let lobby_enabled: bool = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM hub_settings WHERE key = 'lobby_enabled'",
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .map(|v| v == "1")
-    .unwrap_or(true);
-
-    let pow_level: u32 =
-        sqlx::query_scalar::<_, i64>("SELECT pow_level FROM users WHERE public_key = $1")
-            .bind(&canonical_pubkey)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(0) as u32;
-
-    let scope = if lobby_enabled && pow_level < min_level {
-        "lobby".to_string()
-    } else {
-        "member".to_string()
-    };
-
     // Hub federation path: when is_hub=true, register the caller in the
     // `peers` table so the `PeerHub` extractor can route hub sessions
     // separately from human/bot sessions.  We still complete the full
@@ -662,6 +718,12 @@ pub async fn verify(
 ///   2. Subkey revocation check
 ///   3. `approval_status` gate (bots are always "approved")
 ///   4. Local ban check (bans table)
+///   5. Lobby scope gate: a lobby-scoped session (lobby-bot-survey.md
+///      Feature 1) cannot open a WebSocket at all — channel messaging,
+///      presence, and voice signaling all ride the WS connection, and none
+///      of that is on the lobby allowlist. WS push for lobby promotion is
+///      deferred (v1 polls `/lobby/status`), so there is nothing a lobby
+///      session legitimately needs a WS for yet.
 ///
 /// Returns the canonical public key on success.
 pub async fn validate_ws_token(
@@ -671,8 +733,8 @@ pub async fn validate_ws_token(
     use axum::http::StatusCode;
 
     // Try session table first.
-    let row: Option<(String, String, Option<i64>)> = sqlx::query_as(
-        "SELECT s.public_key, u.approval_status, s.expires_at
+    let row: Option<(String, String, Option<i64>, String)> = sqlx::query_as(
+        "SELECT s.public_key, u.approval_status, s.expires_at, s.scope
          FROM sessions s
          INNER JOIN users u ON s.public_key = u.public_key
          WHERE s.token = $1",
@@ -682,7 +744,7 @@ pub async fn validate_ws_token(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (pk, approval_status) = if let Some((pk, status, expires_at)) = row {
+    let (pk, approval_status) = if let Some((pk, status, expires_at, scope)) = row {
         if let Some(exp) = expires_at {
             let now_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -694,6 +756,9 @@ pub async fn validate_ws_token(
                     r#"{"error":"token_expired"}"#.to_string(),
                 ));
             }
+        }
+        if scope == "lobby" {
+            return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
         }
         (pk, status)
     } else {
