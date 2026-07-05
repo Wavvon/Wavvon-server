@@ -90,6 +90,25 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     let branding = crate::routes::hub::read_branding(&state).await;
     let cert_requirement = crate::routes::certs::load_cert_requirement(&state).await;
 
+    // Welcome invite banner (operator-configurable, both optional).
+    let welcome_label: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'welcome_label'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s| !s.is_empty());
+
+    let welcome_invite_url: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'welcome_invite_url'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s| !s.is_empty());
+
     let emoji_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hub_emojis")
         .fetch_optional(&state.db)
         .await
@@ -124,6 +143,8 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         lan_mode: state.lan_mode,
         lan_tls: state.lan_tls_mode.clone(),
         lan_fingerprint: state.lan_fingerprint.clone(),
+        welcome_label,
+        welcome_invite_url,
     })
 }
 
@@ -196,4 +217,13 @@ pub struct InfoResponse {
     /// it is NOT itself a secure channel (see lan-mode.md §3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lan_fingerprint: Option<String>,
+    /// Operator-configured welcome banner label, e.g. "a server by Acme Co."
+    /// Absent when unset. See `welcome_invite_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub welcome_label: Option<String>,
+    /// Operator-configured invite link shown alongside `welcome_label`, so
+    /// clients can render "join one of our hubs" before or at join time.
+    /// Always `https://` or `wavvon://` when present. Absent when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub welcome_invite_url: Option<String>,
 }

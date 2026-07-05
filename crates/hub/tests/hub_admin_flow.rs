@@ -184,3 +184,110 @@ async fn alliance_member_row_falls_back_to_startup_name() {
     let members = detail["members"].as_array().unwrap();
     assert_eq!(members[0]["hub_name"], "Original Name");
 }
+
+// ---------------------------------------------------------------------------
+// Welcome invite banner (operator-configurable, PATCH /hub + GET /info).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn welcome_banner_absent_by_default() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    common::authenticate(&server, &owner).await;
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert!(
+        info.get("welcome_label").is_none(),
+        "welcome_label should be absent when unset"
+    );
+    assert!(
+        info.get("welcome_invite_url").is_none(),
+        "welcome_invite_url should be absent when unset"
+    );
+}
+
+#[tokio::test]
+async fn welcome_banner_set_and_read_back_via_info() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "welcome_label": "Acme Co.",
+            "welcome_invite_url": "https://example.com/invite/abc123",
+        }))
+        .await
+        .assert_status_ok();
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert_eq!(info["welcome_label"], "Acme Co.");
+    assert_eq!(
+        info["welcome_invite_url"],
+        "https://example.com/invite/abc123"
+    );
+}
+
+#[tokio::test]
+async fn welcome_banner_accepts_wavvon_scheme_invite() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({ "welcome_invite_url": "wavvon://join/abc123" }))
+        .await
+        .assert_status_ok();
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert_eq!(info["welcome_invite_url"], "wavvon://join/abc123");
+}
+
+#[tokio::test]
+async fn welcome_banner_invalid_url_rejected() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    // Not a URL at all.
+    let resp = server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({ "welcome_invite_url": "not a url" }))
+        .await;
+    assert!(!resp.status_code().is_success());
+
+    // Valid URL but wrong scheme.
+    let resp = server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({ "welcome_invite_url": "ftp://example.com/invite" }))
+        .await;
+    assert!(!resp.status_code().is_success());
+
+    // Confirm the rejected value never got persisted.
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert!(info.get("welcome_invite_url").is_none());
+}
+
+#[tokio::test]
+async fn welcome_banner_label_too_long_rejected() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    let long_label = "x".repeat(101);
+    let resp = server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({ "welcome_label": long_label }))
+        .await;
+    assert!(!resp.status_code().is_success());
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert!(info.get("welcome_label").is_none());
+}

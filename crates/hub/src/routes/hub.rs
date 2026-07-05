@@ -49,8 +49,46 @@ pub async fn update_hub(
     if let Some(d) = req.max_channel_depth {
         upsert_setting(&state.db, "max_channel_depth", &d.to_string()).await?;
     }
+    if let Some(label) = req.welcome_label.as_deref() {
+        if label.chars().count() > 100 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "welcome_label must be at most 100 characters".to_string(),
+            ));
+        }
+        upsert_setting(&state.db, "welcome_label", label).await?;
+    }
+    if let Some(invite_url) = req.welcome_invite_url.as_deref() {
+        if !invite_url.is_empty() {
+            validate_welcome_invite_url(invite_url)?;
+        }
+        upsert_setting(&state.db, "welcome_invite_url", invite_url).await?;
+    }
 
     Ok(StatusCode::OK)
+}
+
+/// Validates the operator-supplied welcome invite link (Feature: welcome
+/// invite banner). Must parse as a URL and use either `https://` (a
+/// federation-style invite to another hub) or `wavvon://` (an in-app deep
+/// link). Callers should skip this check for an empty string, which clears
+/// the setting.
+fn validate_welcome_invite_url(raw: &str) -> Result<(), (StatusCode, String)> {
+    let parsed = url::Url::parse(raw).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "welcome_invite_url is not a valid URL".to_string(),
+        )
+    })?;
+
+    if parsed.scheme() != "https" && parsed.scheme() != "wavvon" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "welcome_invite_url must use https:// or wavvon://".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// List all users awaiting admin approval.
@@ -271,6 +309,14 @@ pub struct UpdateHubRequest {
     pub min_security_level: Option<u32>,
     #[serde(default)]
     pub max_channel_depth: Option<u32>,
+    /// Label for the welcome invite banner, e.g. "a server by Acme Co."
+    /// Max 100 chars. Empty string clears the setting.
+    #[serde(default)]
+    pub welcome_label: Option<String>,
+    /// Invite link shown alongside `welcome_label`. Must be `https://` or
+    /// `wavvon://`. Empty string clears the setting.
+    #[serde(default)]
+    pub welcome_invite_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
