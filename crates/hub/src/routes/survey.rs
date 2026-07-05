@@ -390,9 +390,21 @@ pub async fn submit_survey(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
     }
 
-    // Insert answers and collect applied roles
+    // Free-text always routes to manual review (see lobby-bot-survey.md
+    // Feature 3 decisions: "the hub cannot mechanically decide if a
+    // free-text answer earns roles"). Auto-assignment of mapped roles only
+    // happens when every *answered* question in this submission is
+    // multiple-choice; if any answered question is free-text, no roles are
+    // auto-applied here — admins assign roles manually when they review.
+    let has_text = req.answers.iter().any(|a| {
+        a.text_answer
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    });
+
+    // Insert answers and, when eligible, collect applied roles
     let mut applied_roles: Vec<String> = Vec::new();
-    let mut has_text = false;
 
     for a in &req.answers {
         sqlx::query(
@@ -406,12 +418,8 @@ pub async fn submit_survey(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-        if a.text_answer
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-        {
-            has_text = true;
+        if has_text {
+            continue; // no auto-assignment on this submission — goes to review
         }
 
         // Apply role mappings for choice answers
@@ -490,6 +498,59 @@ pub async fn admin_get_survey(
     Ok(Json(survey))
 }
 
+/// Validates every role referenced by a choice's `role_ids`: the role must
+/// exist, and it must not hold the `admin` permission (directly or via
+/// `builtin-owner`, which is granted `admin` at bootstrap). A survey is a
+/// self-service onboarding gate — it must never be able to grant admin.
+async fn validate_role_mappings(
+    db: &sqlx::PgPool,
+    req: &SurveyAdmin,
+) -> Result<(), (StatusCode, String)> {
+    let mut role_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for q in &req.questions {
+        if let Some(choices) = &q.choices {
+            for c in choices {
+                for role_id in &c.role_ids {
+                    role_ids.insert(role_id.as_str());
+                }
+            }
+        }
+    }
+
+    for role_id in role_ids {
+        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM roles WHERE id = $1")
+            .bind(role_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if exists.is_none() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Role '{role_id}' does not exist"),
+            ));
+        }
+
+        let has_admin: Option<String> = sqlx::query_scalar(
+            "SELECT permission FROM role_permissions WHERE role_id = $1 AND permission = $2",
+        )
+        .bind(role_id)
+        .bind(permissions::ADMIN)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if has_admin.is_some() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "Role '{role_id}' holds the admin permission and cannot be used in a survey mapping"
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// PUT /admin/survey
 pub async fn admin_put_survey(
     State(state): State<Arc<AppState>>,
@@ -498,6 +559,8 @@ pub async fn admin_put_survey(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
+
+    validate_role_mappings(&state.db, &req).await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
