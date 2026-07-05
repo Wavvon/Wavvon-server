@@ -114,7 +114,7 @@ fn broadcast_forum_event(state: &AppState, channel_id: &str, event: serde_json::
 async fn load_post_reactions(db: &sqlx::PgPool, post_id: &str, viewer: &str) -> Vec<ReactionCount> {
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
         "SELECT emoji, COUNT(*) as cnt,
-                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END)::BIGINT as mine
          FROM post_reactions
          WHERE post_id = $2
          GROUP BY emoji
@@ -124,7 +124,10 @@ async fn load_post_reactions(db: &sqlx::PgPool, post_id: &str, viewer: &str) -> 
     .bind(post_id)
     .fetch_all(db)
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        tracing::warn!("load_post_reactions failed for {post_id}: {e}");
+        Vec::new()
+    });
 
     rows.into_iter()
         .map(|(emoji, count, mine)| ReactionCount {
@@ -143,7 +146,7 @@ async fn load_reply_reactions(
 ) -> Vec<ReactionCount> {
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
         "SELECT emoji, COUNT(*) as cnt,
-                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END)::BIGINT as mine
          FROM reply_reactions
          WHERE reply_id = $2
          GROUP BY emoji
@@ -153,7 +156,10 @@ async fn load_reply_reactions(
     .bind(reply_id)
     .fetch_all(db)
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|e| {
+        tracing::warn!("load_reply_reactions failed for {reply_id}: {e}");
+        Vec::new()
+    });
 
     rows.into_iter()
         .map(|(emoji, count, mine)| ReactionCount {

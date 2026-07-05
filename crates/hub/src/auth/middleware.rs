@@ -361,16 +361,17 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            // One combined query collects everything needed for the admission
-            // checks below (role_count, ban, federated ban, approval_status).
-            // This replaces 5 separate sequential reads with a single round-trip.
+            // One combined query collects most of what the admission checks
+            // below need (role_count, ban, approval_status) in a single
+            // round-trip. The federated-ban decision is NOT inlined here: it
+            // has override + per-source-policy rules that live in
+            // moderation::is_federated_banned — duplicating them as SQL once
+            // let the overrides drift out of this path.
             let checks: FarmTokenChecks = sqlx::query_as(
                 "SELECT
                      u.approval_status,
                      (SELECT COUNT(*) FROM user_roles      WHERE user_public_key  = $1) AS role_count,
-                     (SELECT COUNT(*) FROM bans            WHERE target_public_key = $1) AS ban_count,
-                     (SELECT COUNT(*) FROM federated_bans  WHERE target_master_pubkey
-                          = COALESCE(u.master_pubkey, $1)) AS fed_ban_count
+                     (SELECT COUNT(*) FROM bans            WHERE target_public_key = $1) AS ban_count
                  FROM users u WHERE u.public_key = $1",
             )
             .bind(&public_key)
@@ -386,7 +387,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
             }
 
-            if checks.fed_ban_count > 0 {
+            if crate::routes::moderation::is_federated_banned(&state.db, &public_key).await? {
                 return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
             }
 
@@ -410,5 +411,4 @@ struct FarmTokenChecks {
     approval_status: String,
     role_count: i64,
     ban_count: i64,
-    fed_ban_count: i64,
 }

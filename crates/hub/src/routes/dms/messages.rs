@@ -579,13 +579,19 @@ pub async fn receive_federated_dm(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if conv_exists.is_none() {
-        sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES ($1, $2, $3)")
-            .bind(&req.conversation_id)
-            .bind(&req.conv_type)
-            .bind(req.created_at)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        // Federated delivery is at-least-once (the sender retries on failure),
+        // so creation must be idempotent — a concurrent or repeated delivery
+        // of the same conversation is a no-op, not an error.
+        sqlx::query(
+            "INSERT INTO conversations (id, conv_type, created_at) VALUES ($1, $2, $3)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&req.conversation_id)
+        .bind(&req.conv_type)
+        .bind(req.created_at)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
         for member in &req.members {
             ensure_user_stub(&state.db, member, req.created_at).await?;
@@ -634,7 +640,8 @@ pub async fn receive_federated_dm(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, NULL, $4, $5, $6, TRUE, $7, FALSE)",
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, TRUE, $7, FALSE)
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -675,7 +682,8 @@ pub async fn receive_federated_dm(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, NULL, $4, $5, $6, FALSE, $7, TRUE)",
+             VALUES ($1, $2, $3, NULL, $4, $5, $6, FALSE, $7, TRUE)
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -717,7 +725,8 @@ pub async fn receive_federated_dm(
 
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL, FALSE)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, NULL, FALSE)
+             ON CONFLICT (id) DO NOTHING",
         )
         .bind(&req.message_id)
         .bind(&req.conversation_id)
@@ -829,7 +838,9 @@ async fn deliver_federated_dm(
         .map_err(|e| format!("deliver: {e}"))?;
 
     if !resp.status().is_success() {
-        return Err(format!("remote hub returned {}", resp.status()));
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("remote hub returned {status}: {body}"));
     }
     Ok(())
 }

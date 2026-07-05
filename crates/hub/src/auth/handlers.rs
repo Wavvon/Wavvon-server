@@ -84,14 +84,17 @@ pub async fn challenge(
     let challenge_hex = hex::encode(&challenge_bytes);
 
     let pending = PendingChallenge {
+        public_key: req.public_key,
         challenge_bytes,
         expires_at: Instant::now() + Duration::from_secs(60),
     };
-    state
-        .pending_challenges
-        .write()
-        .await
-        .insert(req.public_key, pending);
+    {
+        let mut map = state.pending_challenges.write().await;
+        // Lazy prune so abandoned challenges don't accumulate.
+        let now = Instant::now();
+        map.retain(|_, p| now <= p.expires_at);
+        map.insert(challenge_hex.clone(), pending);
+    }
 
     Ok((
         StatusCode::OK,
@@ -109,11 +112,18 @@ pub async fn verify(
         .pending_challenges
         .write()
         .await
-        .remove(&req.public_key)
+        .remove(&req.challenge)
         .ok_or((
             StatusCode::UNAUTHORIZED,
             "No pending challenge for this key".to_string(),
         ))?;
+
+    if pending.public_key != req.public_key {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Challenge was issued to a different key".to_string(),
+        ));
+    }
 
     if Instant::now() > pending.expires_at {
         return Err((StatusCode::UNAUTHORIZED, "Challenge expired".to_string()));
@@ -226,66 +236,17 @@ pub async fn verify(
         return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
     }
 
-    // Federated bans: check overrides first, then per-source policy.
-    // Override 'whitelist' → always admit. Override 'blacklist' → always deny.
-    // Otherwise: if any hard-reject source lists the user, deny.
-    // If only soft-flag sources list the user, admit (flag is a future UI concern).
+    // Federated bans: shared policy (overrides, then per-source policy) —
+    // see moderation::is_denied_by_federated_policy for the rules. A DB error
+    // here fails closed (500) rather than silently admitting.
     {
         let check_pubkey = master_pubkey.as_deref().unwrap_or(&canonical_pubkey);
-
-        // Check local overrides.
-        let override_type: Option<String> = sqlx::query_scalar(
-            "SELECT override_type FROM federated_ban_overrides WHERE target_pubkey = $1",
-        )
-        .bind(check_pubkey)
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-
-        match override_type.as_deref() {
-            Some("whitelist") => {
-                // Always admit — skip all federated ban checks.
-            }
-            Some("blacklist") => {
-                return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
-            }
-            _ => {
-                // No local override: check federated_bans joined with source policy.
-                // A hard-reject from any source is sufficient to deny.
-                let hard_reject_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM federated_bans fb
-                     JOIN federated_ban_sources fbs ON fbs.issuer_pubkey = fb.source_hub_pubkey
-                     WHERE fb.target_master_pubkey = $1
-                       AND fbs.policy = 'hard-reject'",
-                )
-                .bind(check_pubkey)
-                .fetch_one(&state.db)
+        let denied =
+            crate::routes::moderation::is_denied_by_federated_policy(&state.db, check_pubkey)
                 .await
-                .unwrap_or(0);
-
-                if hard_reject_count > 0 {
-                    return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
-                }
-
-                // For sources not in federated_ban_sources (legacy banlist_sources path),
-                // fall back to treating any federated ban as hard-reject.
-                let legacy_count: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM federated_bans fb
-                     WHERE fb.target_master_pubkey = $1
-                       AND NOT EXISTS (
-                           SELECT 1 FROM federated_ban_sources fbs
-                           WHERE fbs.issuer_pubkey = fb.source_hub_pubkey
-                       )",
-                )
-                .bind(check_pubkey)
-                .fetch_one(&state.db)
-                .await
-                .unwrap_or(0);
-
-                if legacy_count > 0 {
-                    return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
-                }
-            }
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if denied {
+            return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
         }
     }
 
@@ -869,11 +830,18 @@ pub async fn renew(
         .pending_challenges
         .write()
         .await
-        .remove(&req.public_key)
+        .remove(&req.challenge)
         .ok_or((
             StatusCode::UNAUTHORIZED,
             "No pending challenge for this key".to_string(),
         ))?;
+
+    if pending.public_key != req.public_key {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Challenge was issued to a different key".to_string(),
+        ));
+    }
 
     if Instant::now() > pending.expires_at {
         return Err((StatusCode::UNAUTHORIZED, "Challenge expired".to_string()));

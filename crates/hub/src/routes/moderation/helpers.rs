@@ -86,12 +86,67 @@ pub async fn has_raised_hand(db: &sqlx::PgPool, channel_id: &str, pubkey: &str) 
         > 0
 }
 
-/// Returns true if the user's master key (or canonical pubkey for users with
-/// no paired master) appears in `federated_bans`.
+/// The single source of truth for the federated-ban admission policy, given
+/// the already-resolved check key (master pubkey, or canonical for users with
+/// no paired master):
 ///
-/// Mirrors the check in `auth/middleware.rs` so the same policy is enforced
-/// at the message-submission layer. One indexed query on
-/// `idx_federated_bans_target`; no cache needed since federated bans are rare.
+/// 1. Local override `whitelist` → always admit.
+/// 2. Local override `blacklist` → always deny.
+/// 3. A ban from any `hard-reject` source → deny.
+/// 4. A ban from a source not in `federated_ban_sources` (legacy path) → deny.
+/// 5. Otherwise (incl. soft-flag-only sources) → admit.
+///
+/// Every enforcement point (auth verify, farm-token middleware, message
+/// submission) must call this — the overrides were once missed at the message
+/// layer because the policy was duplicated inline.
+pub async fn is_denied_by_federated_policy(
+    db: &sqlx::PgPool,
+    check_key: &str,
+) -> Result<bool, sqlx::Error> {
+    let override_type: Option<String> = sqlx::query_scalar(
+        "SELECT override_type FROM federated_ban_overrides WHERE target_pubkey = $1",
+    )
+    .bind(check_key)
+    .fetch_optional(db)
+    .await?;
+
+    match override_type.as_deref() {
+        Some("whitelist") => return Ok(false),
+        Some("blacklist") => return Ok(true),
+        _ => {}
+    }
+
+    let hard_reject_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM federated_bans fb
+         JOIN federated_ban_sources fbs ON fbs.issuer_pubkey = fb.source_hub_pubkey
+         WHERE fb.target_master_pubkey = $1
+           AND fbs.policy = 'hard-reject'",
+    )
+    .bind(check_key)
+    .fetch_one(db)
+    .await?;
+    if hard_reject_count > 0 {
+        return Ok(true);
+    }
+
+    let legacy_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM federated_bans fb
+         WHERE fb.target_master_pubkey = $1
+           AND NOT EXISTS (
+               SELECT 1 FROM federated_ban_sources fbs
+               WHERE fbs.issuer_pubkey = fb.source_hub_pubkey
+           )",
+    )
+    .bind(check_key)
+    .fetch_one(db)
+    .await?;
+    Ok(legacy_count > 0)
+}
+
+/// Returns true if the federated-ban policy denies this user, resolving the
+/// user's master key first (or canonical pubkey for users with no paired
+/// master). Thin wrapper over [`is_denied_by_federated_policy`] for callers
+/// that only have the session pubkey.
 pub async fn is_federated_banned(
     db: &sqlx::PgPool,
     public_key: &str,
@@ -106,14 +161,9 @@ pub async fn is_federated_banned(
 
     let check_key = master_pk.as_deref().unwrap_or(public_key);
 
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM federated_bans WHERE target_master_pubkey = $1")
-            .bind(check_key)
-            .fetch_one(db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    Ok(count > 0)
+    is_denied_by_federated_policy(db, check_key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
 }
 
 // ---- Federated ban list endpoint ----

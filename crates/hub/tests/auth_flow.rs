@@ -46,6 +46,73 @@ async fn full_auth_flow() {
 }
 
 #[tokio::test]
+async fn concurrent_challenges_for_same_key_do_not_stomp() {
+    // Regression: pending challenges used to be keyed by pubkey, so a second
+    // challenge request overwrote the first and the earlier auth flow died
+    // with "No pending challenge" — e.g. two simultaneous federated DM
+    // deliveries to the same peer hub. Both outstanding challenges must now
+    // be independently verifiable.
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let pub_key = identity.public_key_hex();
+
+    let first: ChallengeResponse = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await
+        .json();
+    let second: ChallengeResponse = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await
+        .json();
+    assert_ne!(first.challenge, second.challenge);
+
+    // Verify the FIRST challenge (issued before the second overwrote it in
+    // the old scheme) — must still succeed.
+    for challenge in [&first, &second] {
+        let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+        let resp = server
+            .post("/auth/verify")
+            .json(&json!({
+                "public_key": pub_key,
+                "challenge": challenge.challenge,
+                "signature": hex::encode(signature.to_bytes()),
+            }))
+            .await;
+        resp.assert_status_ok();
+        let verify: VerifyResponse = resp.json();
+        assert!(!verify.token.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn challenge_cannot_be_verified_by_a_different_key() {
+    // A challenge is bound to the pubkey it was issued to; another identity
+    // must not be able to consume it, even with a valid signature of its own.
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let mallory = Identity::generate();
+
+    let challenge: ChallengeResponse = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": alice.public_key_hex() }))
+        .await
+        .json();
+
+    let signature = mallory.sign(&hex::decode(&challenge.challenge).unwrap());
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": mallory.public_key_hex(),
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .await;
+    resp.assert_status_unauthorized();
+}
+
+#[tokio::test]
 async fn me_rejects_no_token() {
     let server = common::setup().await;
     let resp = server.get("/me").await;

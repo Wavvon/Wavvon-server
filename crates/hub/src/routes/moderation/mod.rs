@@ -17,5 +17,5 @@ pub use channel_mod::{
 // messages.rs, dms.rs, and auth middleware can call them without path changes.
 pub use helpers::{
     get_federation_banlist, has_raised_hand, is_banned, is_channel_banned, is_channel_voice_muted,
-    is_federated_banned, is_muted, is_voice_muted,
+    is_denied_by_federated_policy, is_federated_banned, is_muted, is_voice_muted,
 };

@@ -257,6 +257,10 @@ pub struct AppState {
     /// may still use `state.db` directly while the per-handler migration
     /// proceeds incrementally.
     pub store: Arc<dyn store::HubStore>,
+    /// Outstanding auth challenges, keyed by the challenge hex (NOT the
+    /// pubkey) so concurrent auth flows for the same key don't stomp each
+    /// other's challenge — e.g. two simultaneous federated DM deliveries to
+    /// the same peer hub.
     pub pending_challenges: RwLock<HashMap<String, PendingChallenge>>,
     pub chat_tx: broadcast::Sender<(ChatEvent, Arc<str>)>,
     pub federation_client: FederationClient,
@@ -430,6 +434,8 @@ pub struct AppState {
 }
 
 pub struct PendingChallenge {
+    /// The pubkey the challenge was issued to; verify must present the same.
+    pub public_key: String,
     pub challenge_bytes: Vec<u8>,
     pub expires_at: Instant,
 }
