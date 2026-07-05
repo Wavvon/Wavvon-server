@@ -3,48 +3,24 @@
 /// Spins up a real local HTTP server playing the farm role so `tick` probes
 /// `GET /farm/public-info` exactly as it does in production. A request
 /// counter on the stub pins the "one fetch per farm per sweep" contract.
+#[path = "common.rs"]
+mod common;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use axum::{routing::get, Json, Router};
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use uuid::Uuid;
 use wavvon_seed::db;
 use wavvon_seed::revalidation;
 use wavvon_seed::state::SeedState;
 
-fn base_db_url() -> String {
-    std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string())
-}
-
-async fn create_test_db() -> sqlx::PgPool {
-    let base_url = base_db_url();
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&format!("{base_url}/postgres"))
-        .await
-        .expect("Failed to connect to PostgreSQL (admin)");
-    let db_name = format!("seed_test_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("Failed to create test database");
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("{base_url}/{db_name}"))
-        .await
-        .expect("Failed to connect to test database");
-    db::migrations::run(&pool)
+async fn setup_state() -> (Arc<SeedState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
+    db::migrations::run(&db)
         .await
         .expect("Failed to run migrations on test database");
-    pool
-}
-
-async fn setup_state() -> Arc<SeedState> {
-    let db = create_test_db().await;
-    Arc::new(SeedState::new(db))
+    (Arc::new(SeedState::new(db)), guard)
 }
 
 fn unix_now() -> i64 {
@@ -99,7 +75,7 @@ async fn spawn_farm_stub(body: Value) -> (String, Arc<AtomicUsize>) {
 
 #[tokio::test]
 async fn tick_fetches_each_farm_once_and_updates_counts() {
-    let state = setup_state().await;
+    let (state, _guard) = setup_state().await;
     let (farm_url, hits) = spawn_farm_stub(json!({
         "allow_discovery_listing": true,
         "hub_count": 7,
@@ -141,7 +117,7 @@ async fn tick_fetches_each_farm_once_and_updates_counts() {
 
 #[tokio::test]
 async fn tick_removes_opted_out_and_unreachable_farms() {
-    let state = setup_state().await;
+    let (state, _guard) = setup_state().await;
 
     // Reachable but opted out of discovery listing.
     let (opted_out_url, _hits) = spawn_farm_stub(json!({ "allow_discovery_listing": false })).await;

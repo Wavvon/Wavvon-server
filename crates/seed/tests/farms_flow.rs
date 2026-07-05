@@ -12,14 +12,15 @@
 /// exercise registration use direct DB inserts to bypass the HTTP callback, then
 /// test the listing and deregistration paths independently. The signature
 /// verification path is tested separately.
+#[path = "common.rs"]
+mod common;
+
 use std::sync::Arc;
 
 use axum_test::TestServer;
 use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use uuid::Uuid;
 use wavvon_seed::db;
 use wavvon_seed::server;
 use wavvon_seed::state::SeedState;
@@ -28,39 +29,14 @@ use wavvon_seed::state::SeedState;
 // Setup
 // ---------------------------------------------------------------------------
 
-fn base_db_url() -> String {
-    std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string())
-}
-
-async fn create_test_db() -> sqlx::PgPool {
-    let base_url = base_db_url();
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&format!("{base_url}/postgres"))
-        .await
-        .expect("Failed to connect to PostgreSQL (admin)");
-    let db_name = format!("seed_test_{}", Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("Failed to create test database");
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("{base_url}/{db_name}"))
-        .await
-        .expect("Failed to connect to test database");
-    db::migrations::run(&pool)
+async fn setup() -> (TestServer, Arc<SeedState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
+    db::migrations::run(&db)
         .await
         .expect("Failed to run migrations on test database");
-    pool
-}
-
-async fn setup() -> (TestServer, Arc<SeedState>) {
-    let db = create_test_db().await;
     let state = Arc::new(SeedState::new(db));
     let app = server::create_router(state.clone());
-    (TestServer::new(app), state)
+    (TestServer::new(app), state, guard)
 }
 
 fn unix_now() -> i64 {
@@ -122,7 +98,7 @@ async fn insert_farm(
 
 #[tokio::test]
 async fn info_returns_discovery_role() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
 
     let resp = server.get("/info").await;
     resp.assert_status_ok();
@@ -138,7 +114,7 @@ async fn info_returns_discovery_role() {
 
 #[tokio::test]
 async fn farms_empty_list() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
 
     let resp = server.get("/farms").await;
     resp.assert_status_ok();
@@ -154,7 +130,7 @@ async fn farms_empty_list() {
 
 #[tokio::test]
 async fn farms_lists_registered_entries() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     insert_farm(
@@ -220,7 +196,7 @@ async fn farms_lists_registered_entries() {
 
 #[tokio::test]
 async fn farms_filter_by_country() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     insert_farm(
@@ -267,7 +243,7 @@ async fn farms_filter_by_country() {
 
 #[tokio::test]
 async fn farms_filter_by_region() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     insert_farm(
@@ -313,7 +289,7 @@ async fn farms_filter_by_region() {
 
 #[tokio::test]
 async fn farms_filter_by_language() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     insert_farm(
@@ -359,7 +335,7 @@ async fn farms_filter_by_language() {
 
 #[tokio::test]
 async fn farms_filter_by_tag_and_logic() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     // Farm with gaming+community
@@ -426,7 +402,7 @@ async fn farms_filter_by_tag_and_logic() {
 
 #[tokio::test]
 async fn farms_stale_flag() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
 
     let now = unix_now();
     let stale_time = now - 90000; // 25 hours ago
@@ -484,7 +460,7 @@ async fn farms_stale_flag() {
 
 #[tokio::test]
 async fn register_rejects_missing_farm_url() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
 
     let resp = server
         .post("/farms/register")
@@ -502,7 +478,7 @@ async fn register_rejects_missing_farm_url() {
 
 #[tokio::test]
 async fn register_rejects_invalid_pubkey_length() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
 
     let resp = server
         .post("/farms/register")
@@ -520,7 +496,7 @@ async fn register_rejects_invalid_pubkey_length() {
 
 #[tokio::test]
 async fn register_rejects_empty_name() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
 
     let resp = server
         .post("/farms/register")
@@ -542,7 +518,7 @@ async fn register_rejects_empty_name() {
 
 #[tokio::test]
 async fn deregister_rejects_invalid_signature() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -586,7 +562,7 @@ async fn deregister_rejects_invalid_signature() {
 
 #[tokio::test]
 async fn deregister_with_valid_signature_removes_farm() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -643,7 +619,7 @@ async fn deregister_with_valid_signature_removes_farm() {
 
 #[tokio::test]
 async fn deregister_returns_404_for_unknown_farm() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
 
     let keypair = SigningKey::generate(&mut OsRng);
     let pubkey_hex = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
@@ -676,7 +652,7 @@ async fn deregister_returns_404_for_unknown_farm() {
 
 #[tokio::test]
 async fn farms_filter_combined_country_and_language() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let now = unix_now();
 
     // IT farm with Italian

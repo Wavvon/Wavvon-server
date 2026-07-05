@@ -8,6 +8,9 @@
 /// - POST /farm/users/:pk/revoke-sessions (admin-only)
 /// - GET  /farm/public-info      (unauthenticated; respects allow_discovery_listing)
 /// - POST /farm/hubs creation policy enforcement
+#[path = "common.rs"]
+mod common;
+
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
@@ -15,8 +18,6 @@ use axum_test::TestServer;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
@@ -25,35 +26,11 @@ use wavvon_farm::unix_now;
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
-// Test database helper
-// ---------------------------------------------------------------------------
-
-async fn create_test_db() -> PgPool {
-    let base_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&format!("{base_url}/postgres"))
-        .await
-        .expect("connect to postgres admin");
-    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("create test database");
-    PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("{base_url}/{db_name}"))
-        .await
-        .expect("connect to test database")
-}
-
-// ---------------------------------------------------------------------------
 // Setup helpers
 // ---------------------------------------------------------------------------
 
-async fn setup() -> (TestServer, Arc<FarmState>) {
-    let db = create_test_db().await;
+async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -84,7 +61,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
         "/tmp/hubs-test".to_string(),
     ));
     let app = server::create_router(state.clone());
-    (TestServer::new(app), state)
+    (TestServer::new(app), state, guard)
 }
 
 async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identity) -> String {
@@ -134,7 +111,7 @@ fn bearer(token: &str) -> HeaderValue {
 
 #[tokio::test]
 async fn get_settings_requires_admin() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
@@ -155,7 +132,7 @@ async fn get_settings_requires_admin() {
 
 #[tokio::test]
 async fn get_settings_returns_full_row_for_admin() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -180,7 +157,7 @@ async fn get_settings_returns_full_row_for_admin() {
 
 #[tokio::test]
 async fn patch_settings_requires_admin() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
@@ -196,7 +173,7 @@ async fn patch_settings_requires_admin() {
 
 #[tokio::test]
 async fn patch_settings_updates_fields() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -229,7 +206,7 @@ async fn patch_settings_updates_fields() {
 
 #[tokio::test]
 async fn patch_settings_rejects_invalid_creation_policy() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -245,7 +222,7 @@ async fn patch_settings_rejects_invalid_creation_policy() {
 
 #[tokio::test]
 async fn patch_settings_rejects_unknown_tag() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -261,7 +238,7 @@ async fn patch_settings_rejects_unknown_tag() {
 
 #[tokio::test]
 async fn patch_settings_rejects_too_many_tags() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -277,7 +254,7 @@ async fn patch_settings_rejects_too_many_tags() {
 
 #[tokio::test]
 async fn patch_settings_rejects_invalid_language_code() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -297,14 +274,14 @@ async fn patch_settings_rejects_invalid_language_code() {
 
 #[tokio::test]
 async fn hub_quota_requires_auth() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
     let resp = server.get("/farm/me/hub-quota").await;
     resp.assert_status_unauthorized();
 }
 
 #[tokio::test]
 async fn hub_quota_returns_unlimited_when_zero() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
     let token = authenticate(&server, &state, &user).await;
 
@@ -323,7 +300,7 @@ async fn hub_quota_returns_unlimited_when_zero() {
 
 #[tokio::test]
 async fn hub_quota_reflects_owned_hubs_and_limit() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
 
     // Set per-user limit to 3.
@@ -366,7 +343,7 @@ async fn hub_quota_reflects_owned_hubs_and_limit() {
 
 #[tokio::test]
 async fn create_hub_blocked_when_policy_disabled() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
     set_policy(&state, "disabled").await;
@@ -384,7 +361,7 @@ async fn create_hub_blocked_when_policy_disabled() {
 
 #[tokio::test]
 async fn create_hub_blocked_for_non_admin_when_policy_admin_only() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     let user = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
@@ -402,7 +379,7 @@ async fn create_hub_blocked_for_non_admin_when_policy_admin_only() {
 
 #[tokio::test]
 async fn create_hub_allowed_for_admin_when_policy_admin_only() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
     set_policy(&state, "admin_only").await;
@@ -418,7 +395,7 @@ async fn create_hub_allowed_for_admin_when_policy_admin_only() {
 
 #[tokio::test]
 async fn create_hub_enforces_per_user_quota() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
 
     // Set per-user limit to 1.
@@ -451,7 +428,7 @@ async fn create_hub_enforces_per_user_quota() {
 
 #[tokio::test]
 async fn create_hub_enforces_farm_total_quota() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
     let other = Identity::generate();
 
@@ -489,7 +466,7 @@ async fn create_hub_enforces_farm_total_quota() {
 
 #[tokio::test]
 async fn list_users_requires_admin() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
@@ -509,7 +486,7 @@ async fn list_users_requires_admin() {
 
 #[tokio::test]
 async fn list_users_returns_users_with_counts() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     let user = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
@@ -549,7 +526,7 @@ async fn list_users_returns_users_with_counts() {
 
 #[tokio::test]
 async fn list_users_cursor_pagination() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -599,7 +576,7 @@ async fn list_users_cursor_pagination() {
 
 #[tokio::test]
 async fn revoke_sessions_requires_admin() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let user = Identity::generate();
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
@@ -617,7 +594,7 @@ async fn revoke_sessions_requires_admin() {
 
 #[tokio::test]
 async fn revoke_sessions_returns_404_for_unknown_user() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
 
@@ -632,7 +609,7 @@ async fn revoke_sessions_returns_404_for_unknown_user() {
 
 #[tokio::test]
 async fn revoke_sessions_marks_active_sessions_revoked() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     let user = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
@@ -674,7 +651,7 @@ async fn revoke_sessions_marks_active_sessions_revoked() {
 
 #[tokio::test]
 async fn public_info_returns_404_when_discovery_disabled() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
     // allow_discovery_listing defaults to 0.
     let resp = server.get("/farm/public-info").await;
     resp.assert_status_not_found();
@@ -683,7 +660,7 @@ async fn public_info_returns_404_when_discovery_disabled() {
 
 #[tokio::test]
 async fn public_info_returns_body_when_discovery_enabled() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     sqlx::query(
         "UPDATE farms SET allow_discovery_listing = TRUE, name = 'Test Farm',
          languages = '[\"it\",\"en\"]', tags = '[\"gaming\"]' WHERE id = 1",
@@ -708,7 +685,7 @@ async fn public_info_returns_body_when_discovery_enabled() {
 
 #[tokio::test]
 async fn public_info_does_not_expose_admin_pubkey() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
     sqlx::query("UPDATE farms SET allow_discovery_listing = TRUE WHERE id = 1")
@@ -727,7 +704,7 @@ async fn public_info_does_not_expose_admin_pubkey() {
 
 #[tokio::test]
 async fn public_info_exposes_farm_public_key() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     sqlx::query("UPDATE farms SET allow_discovery_listing = TRUE WHERE id = 1")
         .execute(&state.db)
         .await

@@ -2,6 +2,9 @@
 ///
 /// Each test spins up an isolated PostgreSQL database and hits the API through
 /// axum-test's TestServer — no network, fast and hermetic.
+#[path = "common.rs"]
+mod common;
+
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
@@ -9,8 +12,6 @@ use axum_test::TestServer;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
@@ -19,35 +20,11 @@ use wavvon_farm::token::verify_token;
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
-// Test database helper
-// ---------------------------------------------------------------------------
-
-async fn create_test_db() -> PgPool {
-    let base_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&format!("{base_url}/postgres"))
-        .await
-        .expect("connect to postgres admin");
-    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("create test database");
-    PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("{base_url}/{db_name}"))
-        .await
-        .expect("connect to test database")
-}
-
-// ---------------------------------------------------------------------------
 // Test setup helper
 // ---------------------------------------------------------------------------
 
-async fn setup() -> (TestServer, Arc<FarmState>) {
-    let db = create_test_db().await;
+async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -79,7 +56,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
         "/tmp/hubs-test".to_string(),
     ));
     let app = server::create_router(state.clone());
-    (TestServer::new(app), state)
+    (TestServer::new(app), state, guard)
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +65,7 @@ async fn setup() -> (TestServer, Arc<FarmState>) {
 
 #[tokio::test]
 async fn farm_info_returns_correct_shape() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let resp = server.get("/farm/info").await;
     resp.assert_status_ok();
     let body: Value = resp.json();
@@ -105,7 +82,7 @@ async fn farm_info_returns_correct_shape() {
 
 #[tokio::test]
 async fn challenge_returns_hex_nonce() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     let identity = Identity::generate();
     let resp = server
         .post("/auth/challenge")
@@ -124,7 +101,7 @@ async fn challenge_returns_hex_nonce() {
 
 #[tokio::test]
 async fn challenge_replaces_existing_pending() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     let pubkey = Identity::generate().public_key_hex();
 
     let r1 = server
@@ -158,7 +135,7 @@ async fn challenge_replaces_existing_pending() {
 
 #[tokio::test]
 async fn verify_happy_path_returns_farm_token() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let identity = Identity::generate();
     let pubkey = identity.public_key_hex();
 
@@ -196,7 +173,7 @@ async fn verify_happy_path_returns_farm_token() {
 
 #[tokio::test]
 async fn verify_rejects_bad_signature() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     let identity = Identity::generate();
     let pubkey = identity.public_key_hex();
 
@@ -227,7 +204,7 @@ async fn verify_rejects_bad_signature() {
 
 #[tokio::test]
 async fn verify_rejects_no_pending_challenge() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     let identity = Identity::generate();
     let pubkey = identity.public_key_hex();
 
@@ -239,13 +216,72 @@ async fn verify_rejects_no_pending_challenge() {
     vr.assert_status_unauthorized();
 }
 
+#[tokio::test]
+async fn verify_two_outstanding_challenges_both_succeed_when_echoed() {
+    let (server, _, _guard) = setup().await;
+    let identity = Identity::generate();
+    let pubkey = identity.public_key_hex();
+
+    // Request two challenges for the same pubkey without verifying either.
+    let cr1 = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pubkey }))
+        .await;
+    cr1.assert_status_ok();
+    let challenge1_hex = cr1.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let cr2 = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pubkey }))
+        .await;
+    cr2.assert_status_ok();
+    let challenge2_hex = cr2.json::<Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_ne!(challenge1_hex, challenge2_hex);
+
+    // Verify the FIRST challenge, explicitly echoing it back — must succeed
+    // even though it's no longer the newest pending challenge.
+    let challenge1_bytes = hex::decode(&challenge1_hex).unwrap();
+    let sig1_hex = hex::encode(identity.sign(&challenge1_bytes).to_bytes());
+    let vr1 = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pubkey,
+            "signature": sig1_hex,
+            "challenge": challenge1_hex,
+        }))
+        .await;
+    vr1.assert_status_ok();
+    assert!(!vr1.json::<Value>()["token"].as_str().unwrap().is_empty());
+
+    // Verify the SECOND challenge the same way — must also succeed.
+    let challenge2_bytes = hex::decode(&challenge2_hex).unwrap();
+    let sig2_hex = hex::encode(identity.sign(&challenge2_bytes).to_bytes());
+    let vr2 = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pubkey,
+            "signature": sig2_hex,
+            "challenge": challenge2_hex,
+        }))
+        .await;
+    vr2.assert_status_ok();
+    assert!(!vr2.json::<Value>()["token"].as_str().unwrap().is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // POST /auth/renew
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn renew_returns_new_token_with_different_jti() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let identity = Identity::generate();
     let pubkey = identity.public_key_hex();
 
@@ -290,7 +326,7 @@ async fn renew_returns_new_token_with_different_jti() {
 
 #[tokio::test]
 async fn renew_rejects_missing_auth_header() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     let resp = server.post("/auth/renew").await;
     resp.assert_status_unauthorized();
 }
@@ -301,7 +337,7 @@ async fn renew_rejects_missing_auth_header() {
 
 #[tokio::test]
 async fn revoke_check_returns_false_for_active_session() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let identity = Identity::generate();
     let pubkey = identity.public_key_hex();
 
@@ -334,7 +370,7 @@ async fn revoke_check_returns_false_for_active_session() {
 
 #[tokio::test]
 async fn revoke_check_returns_true_for_unknown_jti() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     let resp = server
         .post("/farm/auth/revoke-check")
         .json(&json!({ "jti": "nonexistent_jti_value" }))
@@ -349,7 +385,7 @@ async fn revoke_check_returns_true_for_unknown_jti() {
 
 #[tokio::test]
 async fn heartbeat_rejects_unknown_hub_pubkey() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     // A hub_pubkey not in the hubs table should be rejected.
     let resp = server
         .post("/farm/heartbeat")
@@ -365,7 +401,7 @@ async fn heartbeat_rejects_unknown_hub_pubkey() {
 
 #[tokio::test]
 async fn heartbeat_accepts_known_hub_pubkey() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     // Insert a hub with a known hub_pubkey.
     let hub_pubkey = "ccddeeffe".repeat(7) + "c"; // 64 chars
     let now = std::time::SystemTime::now()
@@ -396,7 +432,7 @@ async fn heartbeat_accepts_known_hub_pubkey() {
 
 #[tokio::test]
 async fn heartbeat_rejects_missing_hub_pubkey() {
-    let (server, _) = setup().await;
+    let (server, _, _guard) = setup().await;
     // Omit hub_pubkey entirely — should get 400.
     let resp = server
         .post("/farm/heartbeat")

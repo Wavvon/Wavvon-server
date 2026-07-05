@@ -7,6 +7,9 @@
 /// - PATCH /farm/hubs/:hub_id/suspend (admin-only)
 /// - DELETE /farm/hubs/:hub_id (admin or owner)
 /// - GET /farm/info includes hosted_hubs count
+#[path = "common.rs"]
+mod common;
+
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
@@ -14,8 +17,6 @@ use axum_test::TestServer;
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
@@ -23,39 +24,15 @@ use wavvon_farm::state::FarmState;
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
-// Test database helper
-// ---------------------------------------------------------------------------
-
-async fn create_test_db() -> PgPool {
-    let base_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&format!("{base_url}/postgres"))
-        .await
-        .expect("connect to postgres admin");
-    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("create test database");
-    PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("{base_url}/{db_name}"))
-        .await
-        .expect("connect to test database")
-}
-
-// ---------------------------------------------------------------------------
 // Setup helpers
 // ---------------------------------------------------------------------------
 
-async fn setup() -> (TestServer, Arc<FarmState>) {
+async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
     setup_with_farm_url("https://farm.test").await
 }
 
-async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>) {
-    let db = create_test_db().await;
+async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -90,7 +67,7 @@ async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>) {
         "/tmp/hubs-test".to_string(),
     ));
     let app = server::create_router(state.clone());
-    (TestServer::new(app), state)
+    (TestServer::new(app), state, guard)
 }
 
 /// Perform the full auth flow and return a Bearer token string.
@@ -157,7 +134,7 @@ async fn insert_hub(
 
 #[tokio::test]
 async fn farm_info_hosted_hubs_zero_on_empty() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
     let resp = server.get("/farm/info").await;
     resp.assert_status_ok();
     let body: Value = resp.json();
@@ -166,7 +143,7 @@ async fn farm_info_hosted_hubs_zero_on_empty() {
 
 #[tokio::test]
 async fn farm_info_hosted_hubs_counts_active_only() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     insert_hub(
         &state,
@@ -208,7 +185,7 @@ async fn farm_info_hosted_hubs_counts_active_only() {
 
 #[tokio::test]
 async fn list_hubs_unauthenticated_empty_when_directory_private() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     insert_hub(
         &state,
@@ -228,7 +205,7 @@ async fn list_hubs_unauthenticated_empty_when_directory_private() {
 
 #[tokio::test]
 async fn list_hubs_unauthenticated_returns_public_when_directory_public() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     insert_hub(
         &state,
@@ -263,7 +240,7 @@ async fn list_hubs_unauthenticated_returns_public_when_directory_public() {
 
 #[tokio::test]
 async fn list_hubs_authenticated_returns_owned_plus_public() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     let other = Identity::generate();
 
@@ -345,7 +322,7 @@ async fn list_hubs_authenticated_returns_owned_plus_public() {
 
 #[tokio::test]
 async fn create_hub_requires_auth() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
     let resp = server
         .post("/farm/hubs")
         .json(&json!({ "name": "Test Hub" }))
@@ -355,7 +332,7 @@ async fn create_hub_requires_auth() {
 
 #[tokio::test]
 async fn create_hub_rejects_empty_name() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let identity = Identity::generate();
     let token = authenticate(&server, &state, &identity).await;
 
@@ -373,7 +350,7 @@ async fn create_hub_rejects_empty_name() {
 
 #[tokio::test]
 async fn create_hub_rejects_name_with_invalid_chars() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let identity = Identity::generate();
     let token = authenticate(&server, &state, &identity).await;
 
@@ -391,7 +368,7 @@ async fn create_hub_rejects_name_with_invalid_chars() {
 
 #[tokio::test]
 async fn create_hub_happy_path() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let identity = Identity::generate();
     let token = authenticate(&server, &state, &identity).await;
 
@@ -433,7 +410,7 @@ async fn create_hub_happy_path() {
 
 #[tokio::test]
 async fn get_hub_returns_correct_info() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     insert_hub(
         &state,
@@ -455,7 +432,7 @@ async fn get_hub_returns_correct_info() {
 
 #[tokio::test]
 async fn get_hub_returns_404_for_unknown() {
-    let (server, _state) = setup().await;
+    let (server, _state, _guard) = setup().await;
     let resp = server.get("/farm/hubs/doesnotexist").await;
     resp.assert_status_not_found();
     assert_eq!(resp.json::<Value>()["error"], "hub_not_found");
@@ -467,7 +444,7 @@ async fn get_hub_returns_404_for_unknown() {
 
 #[tokio::test]
 async fn suspend_hub_requires_auth() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     insert_hub(&state, "hubsus", &owner.public_key_hex(), "Hub", "public").await;
 
@@ -480,7 +457,7 @@ async fn suspend_hub_requires_auth() {
 
 #[tokio::test]
 async fn suspend_hub_requires_admin() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     let non_admin = Identity::generate();
 
@@ -502,7 +479,7 @@ async fn suspend_hub_requires_admin() {
 
 #[tokio::test]
 async fn suspend_hub_happy_path() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
 
     insert_hub(&state, "hubsus", &admin.public_key_hex(), "Hub", "public").await;
@@ -533,7 +510,7 @@ async fn suspend_hub_happy_path() {
 
 #[tokio::test]
 async fn suspend_hub_returns_404_for_unknown() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
     let token = authenticate(&server, &state, &admin).await;
@@ -555,7 +532,7 @@ async fn suspend_hub_returns_404_for_unknown() {
 
 #[tokio::test]
 async fn delete_hub_requires_auth() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     insert_hub(&state, "hubdel", &owner.public_key_hex(), "Hub", "public").await;
 
@@ -565,7 +542,7 @@ async fn delete_hub_requires_auth() {
 
 #[tokio::test]
 async fn delete_hub_by_owner_succeeds() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     insert_hub(&state, "hubdel", &owner.public_key_hex(), "Hub", "public").await;
 
@@ -590,7 +567,7 @@ async fn delete_hub_by_owner_succeeds() {
 
 #[tokio::test]
 async fn delete_hub_by_non_owner_non_admin_is_forbidden() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     let other = Identity::generate();
     let admin = Identity::generate();
@@ -611,7 +588,7 @@ async fn delete_hub_by_non_owner_non_admin_is_forbidden() {
 
 #[tokio::test]
 async fn delete_hub_by_admin_succeeds() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let owner = Identity::generate();
     let admin = Identity::generate();
 
@@ -631,7 +608,7 @@ async fn delete_hub_by_admin_succeeds() {
 
 #[tokio::test]
 async fn delete_hub_returns_404_for_unknown() {
-    let (server, state) = setup().await;
+    let (server, state, _guard) = setup().await;
     let admin = Identity::generate();
     set_admin(&state, &admin.public_key_hex()).await;
     let token = authenticate(&server, &state, &admin).await;

@@ -43,10 +43,27 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // Short-lived challenge nonces (60s TTL, swept on read).
+    //
+    // Superseded 2026-07-05 by pending_challenges_v2 (below): keying by
+    // pubkey meant one slot per key, so two concurrent auth flows for the
+    // same key stomped each other's challenge — the same race fixed hub-side.
+    // Kept (additive-only rule) but no longer written.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS pending_challenges (
             public_key    TEXT PRIMARY KEY,
             challenge_hex TEXT NOT NULL,
+            expires_at    BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    // v2: keyed by the nonce itself so any number of challenges can be
+    // outstanding per pubkey. Expired rows are pruned lazily on issue.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS pending_challenges_v2 (
+            challenge_hex TEXT PRIMARY KEY,
+            public_key    TEXT NOT NULL,
             expires_at    BIGINT NOT NULL
         )",
     )

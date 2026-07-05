@@ -13,6 +13,9 @@
 ///   7. Mock agent reads the `spawn_hub` command and replies `hub_spawned`.
 ///   8. Hub row in DB has `server_id` set (proves delegation, not local spawn).
 ///   9. TOTP setup → confirm → admin re-auth requires TOTP code.
+#[path = "common.rs"]
+mod common;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,8 +24,6 @@ use futures_util::{SinkExt, StreamExt};
 use rand::rngs::OsRng;
 use reqwest::Client;
 use serde_json::{json, Value};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -30,35 +31,11 @@ use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_no
 use wavvon_identity::Identity;
 
 // ---------------------------------------------------------------------------
-// Test database helper
-// ---------------------------------------------------------------------------
-
-async fn create_test_db() -> PgPool {
-    let base_url = std::env::var("TEST_DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432".to_string());
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&format!("{base_url}/postgres"))
-        .await
-        .expect("connect to postgres admin");
-    let db_name = format!("wavvon_farm_test_{}", uuid::Uuid::new_v4().simple());
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("create test database");
-    PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&format!("{base_url}/{db_name}"))
-        .await
-        .expect("connect to test database")
-}
-
-// ---------------------------------------------------------------------------
 // Test server setup
 // ---------------------------------------------------------------------------
 
-async fn start_farm() -> (String, Arc<FarmState>) {
-    let db = create_test_db().await;
+async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
     let keypair = SigningKey::generate(&mut OsRng);
@@ -100,7 +77,7 @@ async fn start_farm() -> (String, Arc<FarmState>) {
     // Brief pause so the server is ready to accept connections.
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    (farm_url, state)
+    (farm_url, state, guard)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +122,7 @@ async fn authenticate(client: &Client, base: &str, identity: &Identity) -> Strin
 
 #[tokio::test]
 async fn server_agent_connects_and_receives_hub_spawn() {
-    let (base, state) = start_farm().await;
+    let (base, state, _guard) = start_farm().await;
     let client = Client::new();
 
     // --- 1. Auth as admin user ---
@@ -272,7 +249,7 @@ async fn server_agent_connects_and_receives_hub_spawn() {
 
 #[tokio::test]
 async fn totp_setup_confirm_and_login_enforcement() {
-    let (base, state) = start_farm().await;
+    let (base, state, _guard) = start_farm().await;
     let client = Client::new();
 
     // Auth as admin.
@@ -332,6 +309,7 @@ async fn totp_setup_confirm_and_login_enforcement() {
         .json(&json!({
             "public_key": admin.public_key_hex(),
             "signature": hex::encode(sig.to_bytes()),
+            "challenge": challenge_hex,
         }))
         .send()
         .await
@@ -363,6 +341,7 @@ async fn totp_setup_confirm_and_login_enforcement() {
         .json(&json!({
             "public_key": admin.public_key_hex(),
             "signature": hex::encode(sig2.to_bytes()),
+            "challenge": ch2,
             "totp_code": code2,
         }))
         .send()

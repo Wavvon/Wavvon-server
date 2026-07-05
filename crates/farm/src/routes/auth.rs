@@ -35,6 +35,11 @@ pub struct ChallengeResponse {
 pub struct VerifyRequest {
     pub public_key: String,
     pub signature: String,
+    /// The challenge being answered. Optional for backward compatibility:
+    /// when present the lookup is race-free (keyed by nonce); when absent
+    /// the farm falls back to "the newest challenge for this pubkey".
+    #[serde(default)]
+    pub challenge: Option<String>,
     /// Optional scope override. Clients may request `"lobby"` explicitly; the
     /// farm will honour `"member"` or `"lobby"` (anything else defaults to
     /// `"member"`).
@@ -68,16 +73,18 @@ pub async fn challenge(
     let challenge_hex = hex::encode(&nonce);
     let expires_at = unix_now() + 60;
 
-    // Upsert: one pending challenge per pubkey (replacing any stale one).
+    // Keyed by the nonce so concurrent auth flows for the same pubkey never
+    // stomp each other; prune expired rows lazily while we're here.
+    let _ = sqlx::query("DELETE FROM pending_challenges_v2 WHERE expires_at < $1")
+        .bind(unix_now())
+        .execute(&state.db)
+        .await;
     sqlx::query(
-        "INSERT INTO pending_challenges (public_key, challenge_hex, expires_at)
-         VALUES ($1, $2, $3)
-         ON CONFLICT(public_key) DO UPDATE SET
-             challenge_hex = EXCLUDED.challenge_hex,
-             expires_at    = EXCLUDED.expires_at",
+        "INSERT INTO pending_challenges_v2 (challenge_hex, public_key, expires_at)
+         VALUES ($1, $2, $3)",
     )
-    .bind(&req.public_key)
     .bind(&challenge_hex)
+    .bind(&req.public_key)
     .bind(expires_at)
     .execute(&state.db)
     .await
@@ -98,14 +105,29 @@ pub async fn verify(
 ) -> Result<Json<TokenResponse>, (StatusCode, String)> {
     let now = unix_now();
 
-    // Pull and validate the pending challenge.
-    let row: Option<(String, i64)> = sqlx::query_as(
-        "SELECT challenge_hex, expires_at FROM pending_challenges WHERE public_key = $1",
-    )
-    .bind(&req.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Pull and validate the pending challenge. When the client echoes the
+    // challenge back (new wire shape) the lookup is race-free; otherwise
+    // fall back to the newest challenge issued to this pubkey.
+    let row: Option<(String, i64)> = if let Some(ch) = &req.challenge {
+        sqlx::query_as(
+            "SELECT challenge_hex, expires_at FROM pending_challenges_v2
+             WHERE challenge_hex = $1 AND public_key = $2",
+        )
+        .bind(ch)
+        .bind(&req.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    } else {
+        sqlx::query_as(
+            "SELECT challenge_hex, expires_at FROM pending_challenges_v2
+             WHERE public_key = $1 ORDER BY expires_at DESC LIMIT 1",
+        )
+        .bind(&req.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    };
 
     let (challenge_hex, expires_at) = row.ok_or((
         StatusCode::UNAUTHORIZED,
@@ -114,8 +136,8 @@ pub async fn verify(
 
     if now >= expires_at {
         // Delete expired challenge before returning.
-        let _ = sqlx::query("DELETE FROM pending_challenges WHERE public_key = $1")
-            .bind(&req.public_key)
+        let _ = sqlx::query("DELETE FROM pending_challenges_v2 WHERE challenge_hex = $1")
+            .bind(&challenge_hex)
             .execute(&state.db)
             .await;
         return Err((StatusCode::UNAUTHORIZED, "Challenge expired".to_string()));
@@ -184,9 +206,9 @@ pub async fn verify(
         }
     }
 
-    // Delete the used challenge.
-    sqlx::query("DELETE FROM pending_challenges WHERE public_key = $1")
-        .bind(&req.public_key)
+    // Delete the used challenge (single-use).
+    sqlx::query("DELETE FROM pending_challenges_v2 WHERE challenge_hex = $1")
+        .bind(&challenge_hex)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
