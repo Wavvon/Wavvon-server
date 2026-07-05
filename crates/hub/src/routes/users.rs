@@ -20,6 +20,13 @@ pub struct UserInfo {
     #[serde(default)]
     pub avatar: Option<String>,
     pub online: bool,
+    /// Presence status for online users: None = plain online, "away", "dnd".
+    /// Always None while offline (the stored value is not surfaced).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional short custom status text; only surfaced while online.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_custom: Option<String>,
     /// Name of the highest-priority role with display_separately=true assigned
     /// to this user. Used by the client to group members in the sidebar.
     #[serde(default)]
@@ -47,6 +54,7 @@ pub async fn list_users(
         let search = format!("%{q}%");
         sqlx::query_as::<_, UserRowWithRole>(
             "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                    u.presence_status, u.presence_custom,
                     (SELECT r.name FROM roles r
                      INNER JOIN user_roles ur ON r.id = ur.role_id
                      WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
@@ -62,6 +70,7 @@ pub async fn list_users(
     } else {
         sqlx::query_as::<_, UserRowWithRole>(
             "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                    u.presence_status, u.presence_custom,
                     (SELECT r.name FROM roles r
                      INNER JOIN user_roles ur ON r.id = ur.role_id
                      WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
@@ -76,13 +85,18 @@ pub async fn list_users(
 
     let result: Vec<UserInfo> = rows
         .into_iter()
-        .map(|r| UserInfo {
-            online: online.contains_key(&r.public_key),
-            public_key: r.public_key,
-            display_name: r.display_name,
-            avatar: r.avatar,
-            group_role: r.group_role,
-            is_bot: r.is_bot,
+        .map(|r| {
+            let is_online = online.contains_key(&r.public_key);
+            UserInfo {
+                online: is_online,
+                status: r.presence_status.filter(|_| is_online),
+                status_custom: r.presence_custom.filter(|_| is_online),
+                public_key: r.public_key,
+                display_name: r.display_name,
+                avatar: r.avatar,
+                group_role: r.group_role,
+                is_bot: r.is_bot,
+            }
         })
         .collect();
 
@@ -100,7 +114,9 @@ pub async fn channel_members(
     let online = state.online_users.read().await;
 
     let rows = sqlx::query_as::<_, UserRow>(
-        "SELECT u.public_key, u.display_name, u.avatar, u.is_bot FROM users u
+        "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                u.presence_status, u.presence_custom
+         FROM users u
          WHERE u.public_key NOT IN (
              SELECT target_public_key FROM channel_bans WHERE channel_id = $1
          )
@@ -113,13 +129,18 @@ pub async fn channel_members(
 
     Ok(Json(
         rows.into_iter()
-            .map(|r| UserInfo {
-                online: online.contains_key(&r.public_key),
-                public_key: r.public_key,
-                display_name: r.display_name,
-                avatar: r.avatar,
-                group_role: None,
-                is_bot: r.is_bot,
+            .map(|r| {
+                let is_online = online.contains_key(&r.public_key);
+                UserInfo {
+                    online: is_online,
+                    status: r.presence_status.filter(|_| is_online),
+                    status_custom: r.presence_custom.filter(|_| is_online),
+                    public_key: r.public_key,
+                    display_name: r.display_name,
+                    avatar: r.avatar,
+                    group_role: None,
+                    is_bot: r.is_bot,
+                }
             })
             .collect(),
     ))
@@ -131,6 +152,8 @@ struct UserRow {
     display_name: Option<String>,
     avatar: Option<String>,
     is_bot: bool,
+    presence_status: Option<String>,
+    presence_custom: Option<String>,
 }
 
 /// Like UserRow but includes the pre-joined group_role column.
@@ -140,6 +163,8 @@ struct UserRowWithRole {
     display_name: Option<String>,
     avatar: Option<String>,
     is_bot: bool,
+    presence_status: Option<String>,
+    presence_custom: Option<String>,
     group_role: Option<String>,
 }
 

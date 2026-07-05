@@ -1596,6 +1596,22 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await?;
 
     // =======================================================================
+    // Post-v0.3.0-baseline additive migrations
+    // =======================================================================
+    // The additive-only rule (see the file header): ALTER TABLE ADD COLUMN,
+    // wrapped in `let _ =` so "already exists" errors are ignored.
+
+    // Presence status (away/dnd + custom text), set over WS `set_status`.
+    // NULL presence_status = plain online. Persisted so it survives
+    // reconnects; only meaningful for currently-online users.
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN presence_status TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN presence_custom TEXT")
+        .execute(pool)
+        .await;
+
+    // =======================================================================
     // One-time data cleanup
     // =======================================================================
 

@@ -59,6 +59,58 @@ pub(in crate::routes::ws) async fn handle_typing(
     DispatchResult::Continue
 }
 
+/// Presence status (away/dnd + optional custom text). Persisted on the
+/// users row so it survives reconnects; "online" clears it. Broadcast
+/// hub-wide like member_online/member_offline.
+pub(in crate::routes::ws) async fn handle_set_status(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let (status, custom) = match msg {
+        WsClientMessage::SetStatus { status, custom } => (status, custom),
+        _ => return DispatchResult::Continue,
+    };
+
+    let status = match status.as_str() {
+        "online" => None,
+        "away" | "dnd" => Some(status),
+        // Unknown status value — drop silently, same policy as other
+        // malformed ephemeral WS messages.
+        _ => return DispatchResult::Continue,
+    };
+    // Keep custom text short; whitespace-only clears it.
+    let custom = custom
+        .map(|c| c.trim().chars().take(100).collect::<String>())
+        .filter(|c| !c.is_empty());
+
+    if sqlx::query(
+        "UPDATE users SET presence_status = $1, presence_custom = $2 WHERE public_key = $3",
+    )
+    .bind(&status)
+    .bind(&custom)
+    .bind(&cs.public_key)
+    .execute(&state.db)
+    .await
+    .is_err()
+    {
+        return DispatchResult::Continue;
+    }
+
+    let ev = crate::routes::chat_models::ChatEvent::MemberStatus {
+        public_key: cs.public_key.clone(),
+    };
+    let ws_msg = WsServerMessage::MemberStatus {
+        public_key: cs.public_key.clone(),
+        status,
+        custom,
+    };
+    let json: std::sync::Arc<str> =
+        std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+    let _ = state.chat_tx.send((ev, json));
+    DispatchResult::Continue
+}
+
 pub(in crate::routes::ws) async fn handle_dm_typing(
     cs: &ConnState,
     state: &Arc<AppState>,

@@ -474,3 +474,166 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
     assert_eq!(va["type"], "hub_event");
     assert_eq!(vb["type"], "hub_event");
 }
+
+// ---------------------------------------------------------------------------
+// Presence status: set over WS, broadcast, surfaced in /users, cleared
+// ---------------------------------------------------------------------------
+
+async fn send_ws_json(ws: &mut WsStream, msg: Value) {
+    use futures_util::SinkExt;
+    ws.send(tokio_tungstenite::tungstenite::Message::Text(
+        msg.to_string().into(),
+    ))
+    .await
+    .unwrap();
+}
+
+/// Read frames until one with the given `type` arrives (3s per-frame cap).
+async fn wait_for_type(ws: &mut WsStream, ty: &str) -> Value {
+    loop {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+            .await
+            .expect("timed out waiting for WS frame")
+            .unwrap()
+            .unwrap();
+        if let tokio_tungstenite::tungstenite::Message::Text(t) = frame {
+            let v: Value = serde_json::from_str(&t).unwrap();
+            if v["type"].as_str() == Some(ty) {
+                return v;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn set_status_broadcasts_persists_and_clears() {
+    let (base, _state, _guard) = start_hub().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let alice_token = authenticate(&base, &alice).await;
+    let bob_token = authenticate(&base, &bob).await;
+
+    let mut ws_alice = connect_ws(&base, &alice_token).await;
+    let mut ws_bob = connect_ws(&base, &bob_token).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // Alice goes DND with a custom text; Bob sees the broadcast.
+    send_ws_json(
+        &mut ws_alice,
+        json!({ "type": "set_status", "status": "dnd", "custom": "in a meeting" }),
+    )
+    .await;
+    let evt = wait_for_type(&mut ws_bob, "member_status").await;
+    assert_eq!(
+        evt["public_key"].as_str(),
+        Some(alice.public_key_hex().as_str())
+    );
+    assert_eq!(evt["status"].as_str(), Some("dnd"));
+    assert_eq!(evt["custom"].as_str(), Some("in a meeting"));
+
+    // /users surfaces the status for the online user.
+    let client = reqwest::Client::new();
+    let users: Value = client
+        .get(format!("{base}/users"))
+        .bearer_auth(&bob_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["public_key"].as_str() == Some(alice.public_key_hex().as_str()))
+        .expect("alice in /users");
+    assert_eq!(a["status"].as_str(), Some("dnd"));
+    assert_eq!(a["status_custom"].as_str(), Some("in a meeting"));
+
+    // "online" clears both fields.
+    send_ws_json(
+        &mut ws_alice,
+        json!({ "type": "set_status", "status": "online" }),
+    )
+    .await;
+    let evt = wait_for_type(&mut ws_bob, "member_status").await;
+    assert!(evt["status"].is_null());
+    assert!(evt["custom"].is_null());
+
+    let users: Value = client
+        .get(format!("{base}/users"))
+        .bearer_auth(&bob_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["public_key"].as_str() == Some(alice.public_key_hex().as_str()))
+        .unwrap();
+    assert!(a.get("status").is_none(), "cleared status must be absent");
+
+    // Unknown status values are dropped: no broadcast follows.
+    send_ws_json(
+        &mut ws_alice,
+        json!({ "type": "set_status", "status": "invisible" }),
+    )
+    .await;
+    let raced = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        wait_for_type(&mut ws_bob, "member_status").await
+    })
+    .await;
+    assert!(raced.is_err(), "invalid status must not broadcast");
+
+    close_ws(ws_alice).await;
+    close_ws(ws_bob).await;
+}
+
+#[tokio::test]
+async fn status_is_not_surfaced_for_offline_users() {
+    let (base, _state, _guard) = start_hub().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let alice_token = authenticate(&base, &alice).await;
+    let bob_token = authenticate(&base, &bob).await;
+
+    // Alice sets away, then disconnects entirely.
+    let mut ws_alice = connect_ws(&base, &alice_token).await;
+    send_ws_json(
+        &mut ws_alice,
+        json!({ "type": "set_status", "status": "away" }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    close_ws(ws_alice).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The stored status survives in the DB but /users must not surface it
+    // while she is offline.
+    let client = reqwest::Client::new();
+    let users: Value = client
+        .get(format!("{base}/users"))
+        .bearer_auth(&bob_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let a = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["public_key"].as_str() == Some(alice.public_key_hex().as_str()))
+        .expect("alice in /users");
+    assert_eq!(a["online"].as_bool(), Some(false));
+    assert!(
+        a.get("status").is_none(),
+        "offline user must show no status"
+    );
+}

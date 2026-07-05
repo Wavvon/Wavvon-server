@@ -278,6 +278,9 @@ pub enum ChatEvent {
     /// hub-wide so other clients refresh the member list and message authors
     /// without a reconnect.
     MemberUpdated { public_key: String },
+    /// A user changed their presence status (away/DND/custom text);
+    /// delivered hub-wide like MemberOnline/MemberOffline.
+    MemberStatus { public_key: String },
     /// An outgoing webhook auto-disabled itself after too many consecutive
     /// delivery failures. Hub-wide (admin UI filters/display client-side —
     /// there is no admin-only WS channel today).
@@ -321,6 +324,7 @@ impl ChatEvent {
             | ChatEvent::MemberOnline { .. }
             | ChatEvent::MemberOffline { .. }
             | ChatEvent::MemberUpdated { .. }
+            | ChatEvent::MemberStatus { .. }
             | ChatEvent::WebhookDisabled { .. } => "",
         }
     }
@@ -362,6 +366,14 @@ pub enum WsClientMessage {
     VoiceSpeaking { channel_id: String, speaking: bool },
     #[serde(rename = "typing")]
     Typing { channel_id: String, typing: bool },
+    /// Set the sender's presence status. `status` is "online", "away", or
+    /// "dnd" ("online" clears); `custom` is an optional short status text.
+    #[serde(rename = "set_status")]
+    SetStatus {
+        status: String,
+        #[serde(default)]
+        custom: Option<String>,
+    },
     #[serde(rename = "dm_typing")]
     DmTyping {
         conversation_id: String,
@@ -880,6 +892,14 @@ pub enum WsServerMessage {
         public_key: String,
         display_name: Option<String>,
         avatar: Option<String>,
+    },
+    /// A user changed their presence status. `status` is None for plain
+    /// online (away/dnd otherwise); `custom` is optional short status text.
+    #[serde(rename = "member_status")]
+    MemberStatus {
+        public_key: String,
+        status: Option<String>,
+        custom: Option<String>,
     },
 
     // ---- V4 voice encryption: hub → client ----

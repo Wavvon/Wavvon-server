@@ -193,6 +193,7 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                                 | crate::routes::chat_models::ChatEvent::MemberOnline { .. }
                                 | crate::routes::chat_models::ChatEvent::MemberOffline { .. }
                                 | crate::routes::chat_models::ChatEvent::MemberUpdated { .. }
+                                | crate::routes::chat_models::ChatEvent::MemberStatus { .. }
                                 | crate::routes::chat_models::ChatEvent::WebhookDisabled { .. }
                         ) {
                             let json = pre_json.to_string();
@@ -632,6 +633,7 @@ async fn dispatch_client_msg(
 
         // ── Chat ───────────────────────────────────────────────────────────
         WsClientMessage::Typing { .. } => chat::handle_typing(cs, state, msg).await,
+        WsClientMessage::SetStatus { .. } => chat::handle_set_status(cs, state, msg).await,
         WsClientMessage::DmTyping { .. } => chat::handle_dm_typing(cs, state, msg).await,
         WsClientMessage::ComponentInteraction { .. } => {
             chat::handle_component_interaction(cs, state, ws_tx, msg).await
