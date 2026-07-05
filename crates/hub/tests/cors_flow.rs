@@ -36,6 +36,7 @@ async fn setup_with_cors(cors_origins: &str) -> common::TestHarness {
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
         voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),

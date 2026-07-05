@@ -37,6 +37,7 @@ async fn setup_with_pool() -> (common::TestHarness, PgPool) {
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
         voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -261,6 +262,7 @@ async fn start_real_hub(name: &str) -> (String, common::TestDbGuard) {
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
         voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -392,6 +394,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
         voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -597,6 +600,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
         voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -671,9 +675,14 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         .fetch_one(&hub_a_state.db)
         .await
         .unwrap();
+    let last_error: Option<String> = sqlx::query_scalar("SELECT last_error FROM dm_outbox LIMIT 1")
+        .fetch_optional(&hub_a_state.db)
+        .await
+        .unwrap()
+        .flatten();
     assert_eq!(
         queued_after, 0,
-        "worker should have delivered and cleared the outbox"
+        "worker should have delivered and cleared the outbox (last_error: {last_error:?})"
     );
 
     // Hub B should have stored the message.
