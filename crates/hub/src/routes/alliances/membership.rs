@@ -151,6 +151,21 @@ pub(super) async fn do_join_alliance(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     for m in &detail.members {
+        // `m.hub_url` is "self" whenever the inviter reported its OWN row --
+        // that only means "self" from the inviter's point of view. From here
+        // (the joiner), the inviter's real address is `inviter_url`. Without
+        // this correction we'd persist the literal string "self" for the
+        // inviter, which breaks any later federation call this hub makes
+        // back to the inviter (e.g. resolving the inviter's shared-channel
+        // tree) since there's no such reachable URL.
+        let stored_hub_url = if m.hub_public_key == state.hub_identity.public_key_hex() {
+            "self".to_string()
+        } else if m.hub_url == "self" {
+            inviter_url.to_string()
+        } else {
+            m.hub_url.clone()
+        };
+
         sqlx::query(
             "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (alliance_id, hub_public_key) DO NOTHING",
@@ -158,11 +173,7 @@ pub(super) async fn do_join_alliance(
         .bind(&detail.id)
         .bind(&m.hub_public_key)
         .bind(&m.hub_name)
-        .bind(if m.hub_public_key == state.hub_identity.public_key_hex() {
-            "self".to_string()
-        } else {
-            m.hub_url.clone()
-        })
+        .bind(stored_hub_url)
         .bind(m.joined_at)
         .execute(&state.db)
         .await

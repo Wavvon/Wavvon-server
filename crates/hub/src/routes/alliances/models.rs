@@ -16,10 +16,16 @@ pub(super) struct MemberRow {
     pub joined_at: i64,
 }
 
-#[derive(sqlx::FromRow)]
-pub(super) struct SharedChannelRow {
-    pub channel_id: String,
-    pub channel_name: String,
+/// One channel in an alliance's *effective* shared set -- i.e. after
+/// expanding `include_descendants` shares into their subtrees. See
+/// `effective_shared_channels` in `channels.rs`.
+#[derive(sqlx::FromRow, Clone)]
+pub(super) struct EffectiveChannelRow {
+    pub id: String,
+    pub name: String,
+    pub channel_type: String,
+    pub is_category: bool,
+    pub parent_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

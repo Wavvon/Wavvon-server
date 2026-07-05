@@ -33,14 +33,36 @@ pub struct AllianceMemberInfo {
 #[derive(Deserialize)]
 pub struct ShareChannelRequest {
     pub channel_id: String,
+    /// When true, sharing this channel also shares its whole subtree
+    /// (categories/sub-categories/channels beneath it), computed live at
+    /// read time rather than snapshotted. Defaults to false so sharing a
+    /// single leaf channel behaves exactly as before.
+    #[serde(default)]
+    pub include_descendants: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct SharedChannelResponse {
     pub channel_id: String,
     pub channel_name: String,
     pub hub_public_key: String,
     pub hub_name: String,
+    /// "text" | "forum" | "banner" | "spawner". Always "text" for
+    /// categories. Defaults to "text" so responses from peers that haven't
+    /// upgraded yet still parse.
+    #[serde(default = "default_channel_type")]
+    pub channel_type: String,
+    /// Null unless the parent is itself in the effective shared set, so
+    /// entries always form well-rooted trees on the receiving side.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Whether this entry is a container (category) rather than a leaf.
+    #[serde(default)]
+    pub is_category: bool,
+}
+
+fn default_channel_type() -> String {
+    "text".to_string()
 }
 
 #[derive(Serialize, Deserialize)]

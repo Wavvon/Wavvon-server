@@ -163,8 +163,17 @@ impl FederationClient {
         token: &str,
         alliance_id: &str,
     ) -> Result<Vec<SharedChannelResponse>> {
+        // `local_only=true` tells the peer to answer with just its own
+        // shared channels, not a merge of every member it knows about.
+        // Membership lists are already replicated to every hub at join
+        // time, so this hub's own top-level loop will query every other
+        // member directly -- without this flag two (or more) mutually
+        // aware hubs would each try to resolve the other's merged view,
+        // calling back and forth without ever terminating.
         self.http
-            .get(format!("{base_url}/alliances/{alliance_id}/channels"))
+            .get(format!(
+                "{base_url}/alliances/{alliance_id}/channels?local_only=true"
+            ))
             .bearer_auth(token)
             .send()
             .await

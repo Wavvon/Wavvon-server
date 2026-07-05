@@ -1638,6 +1638,17 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // ---- Alliance space-sharing v2 ----
+    // Sharing a container channel (category) can now include its whole
+    // subtree with live semantics: descendants added after the share still
+    // show up, because membership is computed at read time via a recursive
+    // query rather than snapshotted into rows.
+    let _ = sqlx::query(
+        "ALTER TABLE alliance_shared_channels ADD COLUMN include_descendants BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+
     tracing::info!("Database migrations complete");
 
     Ok(())

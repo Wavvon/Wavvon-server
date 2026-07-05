@@ -1,15 +1,71 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
+use serde::Deserialize;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, ADMIN};
 use crate::routes::alliance_models::*;
 use crate::state::AppState;
 
-use super::models::{LocalMessageRow, MemberRow, SharedChannelRow};
+use super::models::{EffectiveChannelRow, LocalMessageRow, MemberRow};
+
+/// Resolves the effective shared-channel set for an alliance: explicit
+/// `alliance_shared_channels` rows, plus (for rows with
+/// `include_descendants = true`) every channel reachable by following
+/// `parent_id` down from the shared root. Depth-guarded at 32 to protect
+/// against pathological parent chains. This is computed at read time (no
+/// descendant rows are materialized), so it gives live semantics: a child
+/// created after the share still shows up, and unsharing the root drops
+/// the whole subtree.
+///
+/// The returned rows form well-rooted trees: `parent_id` is set to `None`
+/// whenever the real parent is not itself part of the effective set.
+/// Order is depth-first-ish (depth, then display_order) so categories tend
+/// to precede their children.
+async fn effective_shared_channels(
+    db: &sqlx::PgPool,
+    alliance_id: &str,
+) -> Result<Vec<EffectiveChannelRow>, sqlx::Error> {
+    let mut rows = sqlx::query_as::<_, EffectiveChannelRow>(
+        "WITH RECURSIVE shared_tree AS (
+            SELECT c.id, c.name, c.channel_type, c.is_category, c.parent_id, c.display_order,
+                   0 AS depth, asc_.include_descendants AS include_descendants
+            FROM alliance_shared_channels asc_
+            JOIN channels c ON c.id = asc_.channel_id
+            WHERE asc_.alliance_id = $1
+            UNION ALL
+            SELECT c.id, c.name, c.channel_type, c.is_category, c.parent_id, c.display_order,
+                   t.depth + 1, t.include_descendants
+            FROM channels c
+            JOIN shared_tree t ON c.parent_id = t.id
+            WHERE t.include_descendants AND t.depth < 32
+        )
+        SELECT id, name, channel_type, is_category, parent_id
+        FROM (
+            SELECT DISTINCT ON (id) id, name, channel_type, is_category, parent_id, display_order, depth
+            FROM shared_tree
+            ORDER BY id, depth
+        ) ranked
+        ORDER BY depth, display_order",
+    )
+    .bind(alliance_id)
+    .fetch_all(db)
+    .await?;
+
+    let ids: std::collections::HashSet<String> = rows.iter().map(|r| r.id.clone()).collect();
+    for row in rows.iter_mut() {
+        if let Some(pid) = &row.parent_id {
+            if !ids.contains(pid) {
+                row.parent_id = None;
+            }
+        }
+    }
+
+    Ok(rows)
+}
 
 pub async fn share_channel(
     State(state): State<Arc<AppState>>,
@@ -30,7 +86,8 @@ pub async fn share_channel(
         return Err((StatusCode::NOT_FOUND, "Alliance not found".to_string()));
     }
 
-    // Verify channel exists
+    // Verify channel exists. Any space type is shareable -- no channel_type
+    // restriction here; sharing a category is what enables `include_descendants`.
     let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&req.channel_id)
         .fetch_optional(&state.db)
@@ -43,12 +100,15 @@ pub async fn share_channel(
     let now = crate::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO alliance_shared_channels (alliance_id, channel_id, shared_at) VALUES ($1, $2, $3)
-         ON CONFLICT (alliance_id, channel_id) DO NOTHING",
+        "INSERT INTO alliance_shared_channels (alliance_id, channel_id, shared_at, include_descendants)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (alliance_id, channel_id)
+         DO UPDATE SET include_descendants = EXCLUDED.include_descendants",
     )
     .bind(&alliance_id)
     .bind(&req.channel_id)
     .bind(now)
+    .bind(req.include_descendants)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -74,35 +134,51 @@ pub async fn unshare_channel(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Query params accepted by `GET /alliances/:id/channels`.
+#[derive(Deserialize, Default)]
+pub struct ListSharedChannelsQuery {
+    /// Set by `FederationClient::get_alliance_shared_channels` when this
+    /// request is itself a federation hop resolving another hub's members.
+    /// Without this, an alliance with mutually-aware members would have
+    /// each hub's remote-merge step call the other's, which calls back into
+    /// the first, and so on -- an unbounded A<->B<->... cycle. Real
+    /// (browser) clients never set this, so they still get the full merged
+    /// view across every member hub.
+    #[serde(default)]
+    pub local_only: bool,
+}
+
 pub async fn list_shared_channels(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
     Path(alliance_id): Path<String>,
+    Query(q): Query<ListSharedChannelsQuery>,
 ) -> Result<Json<Vec<SharedChannelResponse>>, (StatusCode, String)> {
     let hub_key = state.hub_identity.public_key_hex();
 
-    // 1) Locally shared channels
-    let rows = sqlx::query_as::<_, SharedChannelRow>(
-        "SELECT asc_.channel_id, c.name as channel_name
-         FROM alliance_shared_channels asc_
-         INNER JOIN channels c ON asc_.channel_id = c.id
-         WHERE asc_.alliance_id = $1",
-    )
-    .bind(&alliance_id)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // 1) Locally shared channels -- the effective set (explicit shares plus
+    // live-expanded descendants of any include_descendants=true share).
+    let rows = effective_shared_channels(&state.db, &alliance_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let local_hub_name = crate::routes::hub::current_hub_name(&state).await;
     let mut out: Vec<SharedChannelResponse> = rows
         .into_iter()
         .map(|r| SharedChannelResponse {
-            channel_id: r.channel_id,
-            channel_name: r.channel_name,
+            channel_id: r.id,
+            channel_name: r.name,
             hub_public_key: hub_key.clone(),
             hub_name: local_hub_name.clone(),
+            channel_type: r.channel_type,
+            parent_id: r.parent_id,
+            is_category: r.is_category,
         })
         .collect();
+
+    if q.local_only {
+        return Ok(Json(out));
+    }
 
     // 2) Remote members' shared channels via federation. Skip ourselves; if a
     //    peer is unreachable or auth fails, drop them silently — the user gets
@@ -191,17 +267,25 @@ pub async fn post_alliance_channel_message(
 
     let hub_key = state.hub_identity.public_key_hex();
 
-    // Locally-owned alliance channel: reuse the regular send path.
-    let is_local: Option<String> = sqlx::query_scalar(
-        "SELECT channel_id FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2",
-    )
-    .bind(&alliance_id)
-    .bind(&channel_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    if is_local.is_some() {
+    // Locally-owned alliance channel (explicit share, or a descendant of an
+    // include_descendants share)? Reuse the regular send path.
+    let effective = effective_shared_channels(&state.db, &alliance_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some(local) = effective.iter().find(|c| c.id == channel_id) {
+        if local.is_category || (local.channel_type != "text" && local.channel_type != "forum") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "channel type '{}' does not accept alliance messages",
+                    if local.is_category {
+                        "category"
+                    } else {
+                        local.channel_type.as_str()
+                    }
+                ),
+            ));
+        }
         return crate::routes::messages::send_message(
             State(state),
             user,
@@ -299,17 +383,21 @@ pub async fn get_alliance_channel_messages(
 ) -> Result<Json<Vec<crate::routes::chat_models::MessageResponse>>, (StatusCode, String)> {
     let hub_key = state.hub_identity.public_key_hex();
 
-    // Locally-owned alliance channel? Just read directly.
-    let is_local: Option<String> = sqlx::query_scalar(
-        "SELECT channel_id FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2",
-    )
-    .bind(&alliance_id)
-    .bind(&channel_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Locally-owned alliance channel (explicit share, or a descendant of an
+    // include_descendants share)? Just read directly.
+    let effective = effective_shared_channels(&state.db, &alliance_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let local_entry = effective.iter().find(|c| c.id == channel_id);
 
-    if is_local.is_some() {
+    if let Some(local) = local_entry {
+        // Non-message spaces (categories, banners, spawners) don't have a
+        // message history to read -- an empty list is simpler for clients
+        // than special-casing every alliance-channel view.
+        if local.is_category || (local.channel_type != "text" && local.channel_type != "forum") {
+            return Ok(Json(Vec::new()));
+        }
+
         let rows = sqlx::query_as::<_, LocalMessageRow>(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
                     m.content, m.attachments, m.created_at, m.edited_at

@@ -32,6 +32,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
         voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
@@ -579,4 +580,383 @@ async fn push_invite_nonexistent_alliance_rejected() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+// ---------------------------------------------------------------------------
+// Alliance space-sharing v2 -- recursive (include_descendants) sharing
+// ---------------------------------------------------------------------------
+
+/// Creates a channel and returns its `ChannelResponse`. Small helper so the
+/// space-sharing tests below don't repeat the request/response plumbing.
+async fn create_channel(
+    client: &reqwest::Client,
+    hub_url: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> ChannelResponse {
+    client
+        .post(format!("{hub_url}/channels"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn get_shared_channels(
+    client: &reqwest::Client,
+    hub_url: &str,
+    token: &str,
+    alliance_id: &str,
+) -> Vec<SharedChannelResponse> {
+    client
+        .get(format!("{hub_url}/alliances/{alliance_id}/channels"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn share_category_includes_live_descendants_and_unshare_drops_subtree() {
+    let (hub_url, _hub_state, _hub_guard) = start_hub("hub-a").await;
+    let client = reqwest::Client::new();
+
+    let user = Identity::generate();
+    let token = authenticate_user(&hub_url, &user).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_url}/alliances"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "Recursive Share Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // category
+    //   └── strat (text)
+    //   └── loot (category)
+    //         └── rolls (text)
+    let category = create_channel(
+        &client,
+        &hub_url,
+        &token,
+        json!({ "name": "raid-team", "is_category": true }),
+    )
+    .await;
+    let strat = create_channel(
+        &client,
+        &hub_url,
+        &token,
+        json!({ "name": "strat", "parent_id": category.id }),
+    )
+    .await;
+    let loot_category = create_channel(
+        &client,
+        &hub_url,
+        &token,
+        json!({ "name": "loot", "is_category": true, "parent_id": category.id }),
+    )
+    .await;
+    let rolls = create_channel(
+        &client,
+        &hub_url,
+        &token,
+        json!({ "name": "rolls", "parent_id": loot_category.id }),
+    )
+    .await;
+
+    // Share only the top category, but recursively.
+    let resp = client
+        .post(format!("{hub_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token)
+        .json(&json!({ "channel_id": category.id, "include_descendants": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let shared = get_shared_channels(&client, &hub_url, &token, &alliance.id).await;
+    assert_eq!(shared.len(), 4, "expected the whole subtree: {shared:?}");
+
+    let by_id = |id: &str| shared.iter().find(|s| s.channel_id == id).unwrap();
+
+    let cat_entry = by_id(&category.id);
+    assert!(cat_entry.is_category);
+    assert_eq!(cat_entry.channel_type, "text");
+    assert_eq!(
+        cat_entry.parent_id, None,
+        "root of the shared tree has no parent"
+    );
+
+    let strat_entry = by_id(&strat.id);
+    assert!(!strat_entry.is_category);
+    assert_eq!(strat_entry.channel_type, "text");
+    assert_eq!(strat_entry.parent_id, Some(category.id.clone()));
+
+    let loot_entry = by_id(&loot_category.id);
+    assert!(loot_entry.is_category);
+    assert_eq!(loot_entry.parent_id, Some(category.id.clone()));
+
+    let rolls_entry = by_id(&rolls.id);
+    assert!(!rolls_entry.is_category);
+    assert_eq!(rolls_entry.channel_type, "text");
+    assert_eq!(
+        rolls_entry.parent_id,
+        Some(loot_category.id.clone()),
+        "grandchild's parent (loot) is itself in the shared set"
+    );
+
+    // Live semantics: a channel created under the shared category AFTER the
+    // share still shows up without a second share call.
+    let voice_comms = create_channel(
+        &client,
+        &hub_url,
+        &token,
+        json!({ "name": "voice-comms", "parent_id": category.id }),
+    )
+    .await;
+    let shared = get_shared_channels(&client, &hub_url, &token, &alliance.id).await;
+    assert_eq!(
+        shared.len(),
+        5,
+        "newly-created child should be live-included: {shared:?}"
+    );
+    assert!(shared.iter().any(|s| s.channel_id == voice_comms.id));
+
+    // Unsharing the root drops the whole subtree, including the entry we
+    // added after the share.
+    let resp = client
+        .delete(format!(
+            "{hub_url}/alliances/{}/channels/{}",
+            alliance.id, category.id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let shared = get_shared_channels(&client, &hub_url, &token, &alliance.id).await;
+    assert!(
+        shared.is_empty(),
+        "unsharing the root should drop the whole subtree: {shared:?}"
+    );
+}
+
+#[tokio::test]
+async fn two_hubs_alliance_descendant_message_via_federation() {
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+    let user_b = Identity::generate();
+    let token_b = authenticate_user(&hub_b_url, &user_b).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Federated Subtree Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Hub A: category with a descendant text channel two levels down.
+    let category = create_channel(
+        &client,
+        &hub_a_url,
+        &token_a,
+        json!({ "name": "guild-ops", "is_category": true }),
+    )
+    .await;
+    let sub_category = create_channel(
+        &client,
+        &hub_a_url,
+        &token_a,
+        json!({ "name": "raids", "is_category": true, "parent_id": category.id }),
+    )
+    .await;
+    let descendant = create_channel(
+        &client,
+        &hub_a_url,
+        &token_a,
+        json!({ "name": "wipe-log", "parent_id": sub_category.id }),
+    )
+    .await;
+
+    let resp = client
+        .post(format!("{hub_a_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_a)
+        .json(&json!({ "channel_id": category.id, "include_descendants": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let invite: AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Hub B: the merged view should include the descendant channel, even
+    // though only the root category was ever explicitly shared.
+    let shared = get_shared_channels(&client, &hub_b_url, &token_b, &alliance.id).await;
+    let descendant_entry = shared
+        .iter()
+        .find(|s| s.channel_id == descendant.id)
+        .unwrap_or_else(|| panic!("expected descendant channel in {shared:?}"));
+    assert_eq!(descendant_entry.channel_type, "text");
+    assert!(!descendant_entry.is_category);
+
+    // Hub B: post a message on the descendant channel via the alliance
+    // proxy. Hub B doesn't own it, so this federates to Hub A.
+    let resp = client
+        .post(format!(
+            "{hub_b_url}/alliances/{}/channels/{}/messages",
+            alliance.id, descendant.id
+        ))
+        .bearer_auth(&token_b)
+        .json(&json!({ "content": "wiped at 45%" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+
+    // Confirm it landed on Hub A directly.
+    let messages: Vec<MessageResponse> = client
+        .get(format!("{hub_a_url}/channels/{}/messages", descendant.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].content.contains("wiped at 45%"));
+
+    // Hub B: read it back through the alliance proxy too.
+    let messages: Vec<MessageResponse> = client
+        .get(format!(
+            "{hub_b_url}/alliances/{}/channels/{}/messages",
+            alliance.id, descendant.id
+        ))
+        .bearer_auth(&token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].content.contains("wiped at 45%"));
+}
+
+#[tokio::test]
+async fn share_banner_channel_lists_type_but_rejects_messages() {
+    let (hub_url, _hub_state, _hub_guard) = start_hub("hub-a").await;
+    let client = reqwest::Client::new();
+
+    let user = Identity::generate();
+    let token = authenticate_user(&hub_url, &user).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_url}/alliances"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "Banner Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let banner = create_channel(
+        &client,
+        &hub_url,
+        &token,
+        json!({
+            "name": "announcements",
+            "channel_type": "banner",
+            "banner_url": "https://example.com/banner.png",
+        }),
+    )
+    .await;
+    assert_eq!(banner.channel_type, "banner");
+
+    let resp = client
+        .post(format!("{hub_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token)
+        .json(&json!({ "channel_id": banner.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let shared = get_shared_channels(&client, &hub_url, &token, &alliance.id).await;
+    assert_eq!(shared.len(), 1);
+    assert_eq!(shared[0].channel_type, "banner");
+    assert!(!shared[0].is_category);
+
+    // Posting to a banner channel through the alliance endpoint is rejected.
+    let resp = client
+        .post(format!(
+            "{hub_url}/alliances/{}/channels/{}/messages",
+            alliance.id, banner.id
+        ))
+        .bearer_auth(&token)
+        .json(&json!({ "content": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Reading messages on a non-message space returns an empty list rather
+    // than erroring.
+    let messages: Vec<MessageResponse> = client
+        .get(format!(
+            "{hub_url}/alliances/{}/channels/{}/messages",
+            alliance.id, banner.id
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(messages.is_empty());
 }
