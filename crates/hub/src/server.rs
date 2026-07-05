@@ -659,6 +659,10 @@ pub fn create_router_full(
         .route("/admin/certs", get(routes::certs::admin_list))
         .route("/admin/certs/{pubkey}", post(routes::certs::admin_issue))
         .route(
+            "/admin/certs/{pubkey}/badge",
+            post(routes::certs::admin_grant_badge),
+        )
+        .route(
             "/admin/certs/{pubkey}/revoke",
             post(routes::certs::admin_revoke),
         )

@@ -29,6 +29,14 @@ use crate::state::AppState;
 // ---------------------------------------------------------------------------
 
 /// The canonical payload signed by the issuing hub.
+///
+/// The badge fields (`label`/`description`/`icon`) are appended at the end and
+/// omitted entirely when unset (`skip_serializing_if`), so a plain
+/// standing-cert serialises byte-for-byte as before and its signature stays
+/// valid across hub versions. A cert WITH a `label` is an "achievement badge"
+/// ("Raid Leader", "Awesome in Community A") — same signed primitive, richer
+/// claim. `issuer_url` (already present) is the "learn more" link back to the
+/// granting community.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CertPayload {
     pub subject_kind: String, // always "user"
@@ -41,6 +49,14 @@ pub struct CertPayload {
     pub issued_at: i64,
     pub expires_at: i64,
     pub capabilities: Vec<String>,
+    /// Badge display name. Present → this cert is an achievement badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Unicode emoji or short icon for the badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// A certification envelope (payload + hub signature).
@@ -64,6 +80,47 @@ pub async fn admin_issue(
     perms.require(ADMIN)?;
 
     let cert = issue_cert_for(&state, &subject_pubkey).await?;
+    Ok((StatusCode::CREATED, Json(cert)))
+}
+
+/// Request body for granting an achievement badge.
+#[derive(Deserialize)]
+pub struct GrantBadgeRequest {
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+/// POST /admin/certs/:pubkey/badge — grant a named achievement badge to a user.
+/// A badge is a certification carrying a `label` (+ optional description/icon);
+/// it lands in the user's portfolio and links back to this hub via issuer_url.
+pub async fn admin_grant_badge(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(subject_pubkey): Path<String>,
+    Json(req): Json<GrantBadgeRequest>,
+) -> Result<(StatusCode, Json<Certification>), (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ADMIN)?;
+
+    let label = req.label.trim();
+    if label.is_empty() || label.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "label must be 1–64 chars".to_string(),
+        ));
+    }
+
+    let cert = issue_badge_for(
+        &state,
+        &subject_pubkey,
+        label,
+        req.description.as_deref(),
+        req.icon.as_deref(),
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(cert)))
 }
 
@@ -410,6 +467,9 @@ pub async fn issue_cert_for(
         issued_at: now,
         expires_at,
         capabilities: vec![],
+        label: None,
+        description: None,
+        icon: None,
     };
 
     let payload_json = serde_json::to_string(&payload).map_err(|e| {
@@ -446,6 +506,83 @@ pub async fn issue_cert_for(
         &subject_pubkey[..16.min(subject_pubkey.len())],
         validity_days,
     );
+
+    Ok(Certification {
+        payload,
+        signature: sig_hex,
+    })
+}
+
+/// Build, sign, and record an achievement badge (a labelled cert) for a user.
+pub async fn issue_badge_for(
+    state: &AppState,
+    subject_pubkey: &str,
+    label: &str,
+    description: Option<&str>,
+    icon: Option<&str>,
+) -> Result<Certification, (StatusCode, String)> {
+    let now = unix_timestamp();
+
+    let user_row: Option<(i64, String)> =
+        sqlx::query_as("SELECT first_seen_at, approval_status FROM users WHERE public_key = $1")
+            .bind(subject_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let (first_seen_at, approval_status) =
+        user_row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+    if approval_status != "approved" {
+        return Err((StatusCode::FORBIDDEN, "User is not approved".to_string()));
+    }
+    if crate::routes::moderation::is_banned(&state.db, subject_pubkey).await? {
+        return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
+    }
+
+    // Badges are longer-lived than standing certs (they're awards); reuse the
+    // hub's validity setting but default generously.
+    let validity_days: i64 = setting_i64(state, "cert_validity_days", 90).await;
+    let expires_at = now + validity_days.max(365) * 86400;
+
+    let payload = CertPayload {
+        subject_kind: "user".to_string(),
+        issuer_pubkey: state.hub_identity.public_key_hex(),
+        issuer_url: load_hub_url(state).await,
+        subject_pubkey: subject_pubkey.to_string(),
+        member_since: first_seen_at,
+        standing: "good".to_string(),
+        pow_level: None,
+        issued_at: now,
+        expires_at,
+        capabilities: vec![],
+        label: Some(label.to_string()),
+        description: description.map(|s| s.to_string()),
+        icon: icon.map(|s| s.to_string()),
+    };
+
+    let payload_json = serde_json::to_string(&payload).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Serialise error: {e}"),
+        )
+    })?;
+    let sig_hex = hex::encode(state.hub_identity.sign(payload_json.as_bytes()).to_bytes());
+    let id = Uuid::new_v4().to_string();
+
+    sqlx::query(
+        "INSERT INTO cert_issuances
+         (id, subject_pubkey, pow_level, member_since, issued_at, expires_at, standing, payload_json, signature)
+         VALUES ($1, $2, NULL, $3, $4, $5, 'good', $6, $7)",
+    )
+    .bind(&id)
+    .bind(subject_pubkey)
+    .bind(first_seen_at)
+    .bind(now)
+    .bind(expires_at)
+    .bind(&payload_json)
+    .bind(&sig_hex)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(Certification {
         payload,
@@ -496,6 +633,9 @@ pub async fn revoke_cert_for(
             issued_at: now,
             expires_at,
             capabilities: vec![],
+            label: None,
+            description: None,
+            icon: None,
         };
         let payload_json = serde_json::to_string(&payload).map_err(|e| {
             (
@@ -762,6 +902,9 @@ impl From<IssuanceDbRow> for IssuanceRow {
                 issued_at: r.issued_at,
                 expires_at: r.expires_at,
                 capabilities: vec![],
+                label: None,
+                description: None,
+                icon: None,
             });
         Self {
             id: r.id,
