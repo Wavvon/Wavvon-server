@@ -15,6 +15,8 @@ fn no_config() -> BootstrapConfig {
         template_url: None,
         bootstrap_token: None,
         discovery_url: "https://discovery.wavvon.io".into(),
+        template_file: None,
+        preset: None,
     }
 }
 
@@ -23,6 +25,15 @@ fn config_with_template(template_url: &str) -> BootstrapConfig {
         template_url: Some(template_url.into()),
         bootstrap_token: None,
         discovery_url: "https://discovery.wavvon.io".into(),
+        template_file: None,
+        preset: None,
+    }
+}
+
+fn config_with_preset(preset: &str) -> BootstrapConfig {
+    BootstrapConfig {
+        preset: Some(preset.into()),
+        ..no_config()
     }
 }
 
@@ -274,5 +285,179 @@ async fn template_applies_channels_roles_settings_and_welcome_message() {
     assert!(
         marker.is_some(),
         "bootstrapped_at should be set after successful bootstrap"
+    );
+}
+
+// ── Test 5: built-in preset creates the expected channels/categories/roles ──
+
+#[tokio::test]
+async fn preset_creates_channels_categories_and_roles() {
+    let (db, _guard) = common::create_test_db().await;
+
+    let http = reqwest::Client::new();
+    maybe_bootstrap(&db, &http, &config_with_preset("gaming"))
+        .await
+        .unwrap();
+
+    // 2 categories: Text Channels, Voice Channels.
+    let cat_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE is_category = true")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(cat_count, 2, "gaming preset should create 2 categories");
+
+    // general, announcements, voice-lounge, Room Creator.
+    let ch_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE is_category = false")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        ch_count, 4,
+        "gaming preset should create 4 non-category channels"
+    );
+
+    let spawner_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE channel_type = 'spawner'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        spawner_count, 1,
+        "gaming preset should include a Room Creator spawner channel"
+    );
+
+    let role_names: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM roles WHERE name IN ('Member', 'Moderator')")
+            .fetch_all(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        role_names.len(),
+        2,
+        "gaming preset should create Member and Moderator roles"
+    );
+
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM hub_settings WHERE key = 'bootstrapped_at' AND value != ''",
+    )
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    assert!(marker.is_some(), "bootstrapped_at should be set");
+}
+
+// ── Test 6: running bootstrap again after a preset applied is a no-op ───────
+
+#[tokio::test]
+async fn preset_bootstrap_is_idempotent() {
+    let (db, _guard) = common::create_test_db().await;
+    let http = reqwest::Client::new();
+    let cfg = config_with_preset("community");
+
+    maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+    let first_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert!(first_count > 0);
+
+    // Second run: marker is set, so nothing more should be created.
+    maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+    let second_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        first_count, second_count,
+        "re-running bootstrap must not duplicate channels"
+    );
+
+    let role_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE name = 'Moderator'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        role_count, 1,
+        "re-running bootstrap must not duplicate roles"
+    );
+}
+
+// ── Test 7: a non-empty DB (channels already exist) is never touched by a preset ──
+
+#[tokio::test]
+async fn preset_never_touches_a_non_empty_db() {
+    let (db, _guard) = common::create_test_db().await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    sqlx::query(
+        "INSERT INTO users(public_key, first_seen_at, last_seen_at)
+         VALUES('operator', $1, $1) ON CONFLICT (public_key) DO NOTHING",
+    )
+    .bind(now)
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO channels(id, name, created_by, is_category, display_order, created_at)
+         VALUES('pre-existing', 'my-custom-channel', 'operator', false, 0, $1)",
+    )
+    .bind(now)
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let http = reqwest::Client::new();
+    maybe_bootstrap(&db, &http, &config_with_preset("gaming"))
+        .await
+        .unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "a non-empty hub must never be touched by a preset, even if configured"
+    );
+
+    let names: Vec<String> = sqlx::query_scalar("SELECT name FROM channels")
+        .fetch_all(&db)
+        .await
+        .unwrap();
+    assert_eq!(names, vec!["my-custom-channel".to_string()]);
+}
+
+// ── Test 8: unknown WAVVON_TEMPLATE preset name is a clear startup error ────
+
+#[tokio::test]
+async fn unknown_preset_is_a_startup_error() {
+    let (db, _guard) = common::create_test_db().await;
+    let http = reqwest::Client::new();
+
+    let err = maybe_bootstrap(&db, &http, &config_with_preset("does-not-exist"))
+        .await
+        .expect_err("an unrecognized preset name must fail startup, not degrade to blank");
+    assert!(err.to_string().contains("does-not-exist"));
+
+    let ch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(ch_count, 0, "nothing should have been applied");
+
+    let marker: Option<String> = sqlx::query_scalar(
+        "SELECT value FROM hub_settings WHERE key = 'bootstrapped_at' AND value != ''",
+    )
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    assert!(
+        marker.is_none(),
+        "bootstrapped_at must not be set when startup failed"
     );
 }

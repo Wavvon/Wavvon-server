@@ -2,14 +2,39 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 pub struct BootstrapConfig {
+    /// Raw template JSON URL, or a `wavvon://templates/<id>` discovery pointer.
+    /// Second in precedence, behind `bootstrap_token`. See hub-creation-wizard.md
+    /// piece 1/3 (discovery catalog + wizard) — this hub crate only *consumes*
+    /// a resolved template, it never talks to the catalog beyond a plain GET.
     pub template_url: Option<String>,
+    /// Wizard-issued one-use token, redeemed against `discovery_url`. Highest
+    /// precedence — carries the operator's customisations. Deferred here: the
+    /// hub does not verify the JWT itself (see hub-creation-wizard.md §2), it
+    /// only presents it to discovery's redeem endpoint.
     pub bootstrap_token: Option<String>,
     pub discovery_url: String,
+    /// Path to a local template JSON file (`WAVVON_TEMPLATE_FILE`). Third in
+    /// precedence. This is the offline/no-catalog equivalent of `template_url`
+    /// — same document shape, no signature verification (local files are
+    /// already trusted by the operator who placed them on disk). Signature
+    /// verification only matters for templates fetched from the network
+    /// catalog (piece 1); deferred here since piece 1 is out of scope.
+    pub template_file: Option<String>,
+    /// Built-in preset name (`WAVVON_TEMPLATE`): `gaming`, `community`, or
+    /// `minimal`. Lowest precedence — the no-network fallback described in
+    /// hub-creation-wizard.md's "templates hosted on the hub binary"
+    /// alternative (a small built-in set stays in the binary; anything richer
+    /// lives in the catalog).
+    pub preset: Option<String>,
 }
 
-/// Runs on first launch if template_url or bootstrap_token is set and the hub
-/// has no channels yet (blank DB).  Non-fatal — a bad template or unreachable
-/// URL never blocks startup; the caller ignores the error.
+/// Runs on first launch if any bootstrap source is configured and the hub
+/// has no channels *and* no users yet (blank DB). Non-fatal for anything
+/// network- or file-related — a bad template, unreachable URL, or missing
+/// file never blocks startup, the hub just starts blank. The one exception
+/// is an unrecognized `WAVVON_TEMPLATE` preset name, which is a startup
+/// configuration error and is surfaced to the caller as `Err` (see
+/// `presets::resolve`).
 pub async fn maybe_bootstrap(
     db: &PgPool,
     http: &reqwest::Client,
@@ -27,22 +52,41 @@ pub async fn maybe_bootstrap(
         return Ok(());
     }
 
-    // Not a first-run if the hub already has channels.
+    // Not a first-run if the hub already has channels or real users.
     let channel_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
         .fetch_one(db)
         .await
         .unwrap_or(0);
-    if channel_count > 0 {
+    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+    if channel_count > 0 || user_count > 0 {
         return Ok(());
     }
 
-    // Neither bootstrap source configured — start blank.
-    if cfg.bootstrap_token.is_none() && cfg.template_url.is_none() {
+    // No bootstrap source configured — start blank.
+    if cfg.bootstrap_token.is_none()
+        && cfg.template_url.is_none()
+        && cfg.template_file.is_none()
+        && cfg.preset.is_none()
+    {
         tracing::info!("No bootstrap config set; starting blank hub");
         return Ok(());
     }
 
-    // Resolve config JSON: token takes precedence over template_url.
+    // Validate a configured preset name up front — an unrecognized
+    // `WAVVON_TEMPLATE` is a startup configuration mistake, not a transient
+    // network hiccup, so it fails loudly instead of silently degrading to a
+    // blank hub (unlike an unreachable template_url or missing template_file).
+    if let Some(name) = &cfg.preset {
+        presets::resolve(name).map_err(anyhow::Error::msg)?;
+    }
+
+    // Resolve config JSON in precedence order: bootstrap_token (wizard
+    // handoff, carries customisations) > template_url (raw catalog/URL
+    // pointer) > template_file (local offline template) > preset (built-in,
+    // no-network fallback).
     let config_json = if let Some(token) = &cfg.bootstrap_token {
         let url = format!("{}/api/bootstrap/redeem", cfg.discovery_url);
         tracing::info!("Redeeming bootstrap token from {url}");
@@ -57,7 +101,7 @@ pub async fn maybe_bootstrap(
                     Ok(v) => Some(v),
                     Err(e) => {
                         tracing::warn!("Bootstrap token response was not valid JSON ({e}); trying template_url");
-                        fetch_template(&cfg.template_url, &cfg.discovery_url, http).await
+                        resolve_fallback(cfg, http).await
                     }
                 }
             }
@@ -66,15 +110,15 @@ pub async fn maybe_bootstrap(
                     "Bootstrap token redeem returned {}; trying template_url",
                     resp.status()
                 );
-                fetch_template(&cfg.template_url, &cfg.discovery_url, http).await
+                resolve_fallback(cfg, http).await
             }
             Err(e) => {
                 tracing::warn!("Bootstrap token redeem failed ({e}); trying template_url");
-                fetch_template(&cfg.template_url, &cfg.discovery_url, http).await
+                resolve_fallback(cfg, http).await
             }
         }
     } else {
-        fetch_template(&cfg.template_url, &cfg.discovery_url, http).await
+        resolve_fallback(cfg, http).await
     };
 
     let Some(config) = config_json else {
@@ -94,9 +138,61 @@ pub async fn maybe_bootstrap(
         .execute(db)
         .await
         .ok();
-    tracing::info!("Hub bootstrapped from template");
+    let template_id = config
+        .get("template_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_owned())
+        .or_else(|| cfg.preset.clone())
+        .unwrap_or_else(|| "custom".to_string());
+    tracing::info!("Hub bootstrapped from template: {template_id}");
 
     Ok(())
+}
+
+/// Falls back through the local/offline sources in precedence order:
+/// `template_url` (if not already the caller), then `template_file`, then
+/// the built-in `preset`. Returns `None` if every configured source fails
+/// or none are configured — the caller starts a blank hub in that case.
+async fn resolve_fallback(
+    cfg: &BootstrapConfig,
+    http: &reqwest::Client,
+) -> Option<serde_json::Value> {
+    if let Some(v) = fetch_template(&cfg.template_url, &cfg.discovery_url, http).await {
+        return Some(v);
+    }
+    if let Some(path) = &cfg.template_file {
+        if let Some(v) = load_template_file(path) {
+            return Some(v);
+        }
+    }
+    if let Some(name) = &cfg.preset {
+        // Already validated in `maybe_bootstrap`; a second failure here would
+        // mean the name changed between calls, which can't happen within one
+        // invocation — `.ok()` is safe.
+        return presets::resolve(name).ok();
+    }
+    None
+}
+
+/// Reads and parses a local template JSON file (`WAVVON_TEMPLATE_FILE`).
+/// Returns `None` on any I/O or parse error, logging a warning — a bad or
+/// missing file never blocks startup.
+fn load_template_file(path: &str) -> Option<serde_json::Value> {
+    tracing::info!("Loading bootstrap template from local file {path}");
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            tracing::warn!("Failed to read template file {path}: {e}; starting blank hub");
+            return None;
+        }
+    };
+    match serde_json::from_str(&raw) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!("Failed to parse template file {path} as JSON: {e}; starting blank hub");
+            None
+        }
+    }
 }
 
 /// Resolve a template URL and return its JSON payload.
@@ -265,10 +361,20 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> Result<()>
                 .and_then(|v| v.as_str())
                 .and_then(|cat| category_ids.get(cat))
                 .cloned();
+            // Minimum talk power to post in this channel (e.g. a
+            // moderator-only #announcements channel). Defaults to 0 (everyone).
+            let min_talk_power = ch
+                .get("min_talk_power")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            // Only meaningful for `channel_type = "spawner"` — the name
+            // template for rooms it spawns (defaults to "{user}'s room" if
+            // left null, see routes::channels::spawn_temp_channel).
+            let spawner_name_template = ch.get("spawner_name_template").and_then(|v| v.as_str());
 
             sqlx::query(
-                "INSERT INTO channels(id, name, created_by, is_category, display_order, channel_type, description, parent_id, created_at)
-                 VALUES($1, $2, 'system', false, $3, $4, $5, $6, $7)
+                "INSERT INTO channels(id, name, created_by, is_category, display_order, channel_type, description, parent_id, min_talk_power, spawner_name_template, created_at)
+                 VALUES($1, $2, 'system', false, $3, $4, $5, $6, $7, $8, $9)
                  ON CONFLICT (name) DO NOTHING",
             )
             .bind(&id)
@@ -277,6 +383,8 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> Result<()>
             .bind(channel_type)
             .bind(description)
             .bind(&parent_id)
+            .bind(min_talk_power)
+            .bind(spawner_name_template)
             .bind(now)
             .execute(db)
             .await
@@ -400,8 +508,157 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> Result<()>
     Ok(())
 }
 
+/// Built-in config templates selectable via `WAVVON_TEMPLATE=<name>`, applied
+/// on first launch when no discovery-backed source (bootstrap token,
+/// template URL, or local template file) is configured. See
+/// hub-creation-wizard.md's "templates hosted on the hub binary" alternative:
+/// a small built-in set stays in the binary as the no-network fallback,
+/// everything richer lives in the (currently out-of-scope) discovery
+/// catalog. Document shape matches the catalog template shape (piece 1)
+/// minus signing fields (`author_pubkey`, `signature`), which only matter
+/// for templates fetched over the network.
+pub mod presets {
+    use serde_json::{json, Value};
+
+    /// Valid values for `WAVVON_TEMPLATE`.
+    pub const PRESET_NAMES: &[&str] = &["gaming", "community", "minimal"];
+
+    /// Resolves a built-in preset name to its template JSON document.
+    /// Returns `Err` describing the valid options if `name` isn't recognized
+    /// — an unrecognized preset name is a startup configuration mistake, not
+    /// a transient failure, so it isn't silently swallowed like a bad
+    /// template URL would be.
+    pub fn resolve(name: &str) -> Result<Value, String> {
+        match name {
+            "gaming" => Ok(gaming()),
+            "community" => Ok(community()),
+            "minimal" => Ok(minimal()),
+            other => Err(format!(
+                "Unknown WAVVON_TEMPLATE preset '{other}'; valid presets are: {}",
+                PRESET_NAMES.join(", ")
+            )),
+        }
+    }
+
+    /// Gaming community: text channels (general, moderator-only announcements),
+    /// a voice lounge, and a "Room Creator" spawner channel for join-to-create
+    /// personal voice rooms (see docs/docs/temp-voice-channels.md). Roughly
+    /// mirrors the "Gaming Community" example in hub-creation-wizard.md §1,
+    /// extended with the spawner channel that section's illustrative JSON
+    /// didn't include.
+    fn gaming() -> Value {
+        json!({
+            "name": "Gaming Community",
+            "channels": [
+                { "name": "Text Channels", "is_category": true, "display_order": 0 },
+                { "name": "general", "is_category": false, "display_order": 1,
+                  "channel_type": "text", "category": "Text Channels" },
+                { "name": "announcements", "is_category": false, "display_order": 2,
+                  "channel_type": "text", "category": "Text Channels",
+                  "description": "Official announcements. Only moderators can post.",
+                  "min_talk_power": 100 },
+                { "name": "Voice Channels", "is_category": true, "display_order": 3 },
+                { "name": "voice-lounge", "is_category": false, "display_order": 4,
+                  "channel_type": "voice", "category": "Voice Channels" },
+                { "name": "Room Creator", "is_category": false, "display_order": 5,
+                  "channel_type": "spawner", "category": "Voice Channels",
+                  "spawner_name_template": "{user}'s Room" }
+            ],
+            "roles": [
+                { "name": "Member", "priority": 5,
+                  "permissions": ["read_messages", "send_messages", "create_posts", "start_game"] },
+                { "name": "Moderator", "priority": 50,
+                  "permissions": ["manage_messages", "mute_members", "kick_members", "manage_channels"] }
+            ],
+            "settings": {
+                "min_security_level": 8,
+                "require_approval": false
+            },
+            "welcome_message": "Welcome! Check out #announcements for the rules, and jump into voice-lounge to play.",
+            "suggested_bots": []
+        })
+    }
+
+    /// General-purpose community: an info category with announcements, a
+    /// general category with general/off-topic text and a voice lounge, and
+    /// Member/Moderator roles.
+    fn community() -> Value {
+        json!({
+            "name": "Community",
+            "channels": [
+                { "name": "Info", "is_category": true, "display_order": 0 },
+                { "name": "announcements", "is_category": false, "display_order": 1,
+                  "channel_type": "text", "category": "Info",
+                  "description": "Official updates from the moderators.",
+                  "min_talk_power": 50 },
+                { "name": "General", "is_category": true, "display_order": 2 },
+                { "name": "general", "is_category": false, "display_order": 3,
+                  "channel_type": "text", "category": "General" },
+                { "name": "off-topic", "is_category": false, "display_order": 4,
+                  "channel_type": "text", "category": "General" },
+                { "name": "voice-lounge", "is_category": false, "display_order": 5,
+                  "channel_type": "voice", "category": "General" }
+            ],
+            "roles": [
+                { "name": "Member", "priority": 5,
+                  "permissions": ["read_messages", "send_messages", "create_posts", "create_events"] },
+                { "name": "Moderator", "priority": 50,
+                  "permissions": ["manage_messages", "mute_members", "kick_members", "timeout_members", "manage_channels"] }
+            ],
+            "settings": {
+                "require_approval": false
+            },
+            "welcome_message": "Welcome! Check out #announcements for updates, and say hello in #general.",
+            "suggested_bots": []
+        })
+    }
+
+    /// What today's empty hub gives: no channels, no roles beyond the
+    /// built-ins already seeded by migrations, no settings changes. Exists
+    /// so an operator can select it explicitly (and get the
+    /// `bootstrapped_at` marker + startup log line) instead of leaving every
+    /// bootstrap env var unset.
+    fn minimal() -> Value {
+        json!({
+            "channels": [],
+            "roles": [],
+            "settings": {}
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn resolves_all_built_in_names() {
+            for name in PRESET_NAMES {
+                assert!(resolve(name).is_ok(), "preset '{name}' should resolve");
+            }
+        }
+
+        #[test]
+        fn unknown_preset_is_an_error() {
+            let err = resolve("nonexistent").unwrap_err();
+            assert!(err.contains("nonexistent"));
+            assert!(err.contains("gaming"));
+        }
+
+        #[test]
+        fn gaming_has_a_spawner_channel() {
+            let tpl = gaming();
+            let channels = tpl["channels"].as_array().unwrap();
+            let spawner = channels
+                .iter()
+                .find(|c| c["channel_type"] == "spawner")
+                .expect("gaming preset should have a spawner channel");
+            assert_eq!(spawner["name"], "Room Creator");
+        }
+    }
+}
+
 #[cfg(test)]
-mod tests {
+mod bootstrap_tests {
     use super::*;
     use sqlx::postgres::PgPoolOptions;
 
@@ -483,6 +740,8 @@ mod tests {
             template_url: None,
             bootstrap_token: None,
             discovery_url: "https://discovery.wavvon.io".to_owned(),
+            template_file: None,
+            preset: None,
         }
     }
 
@@ -686,5 +945,215 @@ mod tests {
         // The remote will be unreachable in CI — we only assert it doesn't panic
         // and returns None (not an Err that would propagate to kill the hub).
         let _ = result; // None or Some — either is acceptable
+    }
+
+    // ── Test 6: existing users (no channels) is also a no-op ──────────────────
+    // "First launch" requires no channels AND no users — a hub that already
+    // has a real user (e.g. an owner seeded via WAVVON_OWNER_PUBKEY) but no
+    // channels yet is not a blank hub.
+
+    #[tokio::test]
+    async fn existing_users_is_noop() {
+        let (db, _guard) = make_test_db().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        sqlx::query(
+            "INSERT INTO users(public_key, first_seen_at, last_seen_at) VALUES('deadbeef', $1, $1)",
+        )
+        .bind(now)
+        .execute(&db)
+        .await
+        .unwrap();
+
+        let http = reqwest::Client::new();
+        let cfg = BootstrapConfig {
+            preset: Some("gaming".into()),
+            ..default_cfg()
+        };
+        maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "A pre-existing user should block bootstrap even with no channels"
+        );
+    }
+
+    // ── Test 7: built-in preset applies fully, and is idempotent ──────────────
+
+    #[tokio::test]
+    async fn preset_applies_and_is_idempotent() {
+        let (db, _guard) = make_test_db().await;
+        let http = reqwest::Client::new();
+        let cfg = BootstrapConfig {
+            preset: Some("gaming".into()),
+            ..default_cfg()
+        };
+
+        maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+
+        let ch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(ch_count, 6, "gaming preset: 2 categories + 4 channels");
+
+        let spawner: Option<String> =
+            sqlx::query_scalar("SELECT name FROM channels WHERE channel_type = 'spawner'")
+                .fetch_optional(&db)
+                .await
+                .unwrap();
+        assert_eq!(spawner.as_deref(), Some("Room Creator"));
+
+        let announcements_talk_power: i64 =
+            sqlx::query_scalar("SELECT min_talk_power FROM channels WHERE name = 'announcements'")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(announcements_talk_power, 100);
+
+        let moderator_role: Option<String> =
+            sqlx::query_scalar("SELECT id FROM roles WHERE name = 'Moderator'")
+                .fetch_optional(&db)
+                .await
+                .unwrap();
+        assert!(moderator_role.is_some());
+
+        // Re-running with the same (now non-blank) config must not duplicate
+        // anything — the bootstrapped_at marker short-circuits.
+        maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+        let ch_count_again: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(ch_count_again, 6, "second run must not duplicate channels");
+    }
+
+    // ── Test 8: minimal preset is (almost) a true no-op, but still marks bootstrapped ──
+
+    #[tokio::test]
+    async fn minimal_preset_creates_nothing_but_marks_bootstrapped() {
+        let (db, _guard) = make_test_db().await;
+        let http = reqwest::Client::new();
+        let cfg = BootstrapConfig {
+            preset: Some("minimal".into()),
+            ..default_cfg()
+        };
+        maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+
+        let ch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(ch_count, 0, "minimal preset creates no channels");
+
+        let marker: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM hub_settings WHERE key = 'bootstrapped_at' AND value != ''",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        assert!(
+            marker.is_some(),
+            "bootstrapped_at should still be set so this doesn't re-run"
+        );
+    }
+
+    // ── Test 9: unknown preset name is a clear startup error ──────────────────
+
+    #[tokio::test]
+    async fn unknown_preset_name_is_a_startup_error() {
+        let (db, _guard) = make_test_db().await;
+        let http = reqwest::Client::new();
+        let cfg = BootstrapConfig {
+            preset: Some("not-a-real-preset".into()),
+            ..default_cfg()
+        };
+        let err = maybe_bootstrap(&db, &http, &cfg)
+            .await
+            .expect_err("unknown preset must be a hard startup error");
+        assert!(err.to_string().contains("not-a-real-preset"));
+
+        // Nothing should have been applied.
+        let ch_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+        assert_eq!(ch_count, 0);
+    }
+
+    // ── Test 10: local template file is applied and takes precedence over preset ──
+
+    #[tokio::test]
+    async fn template_file_takes_precedence_over_preset() {
+        let (db, _guard) = make_test_db().await;
+        let http = reqwest::Client::new();
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "wavvon_test_template_{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, serde_json::to_vec(&sample_template()).unwrap()).unwrap();
+
+        let cfg = BootstrapConfig {
+            template_file: Some(path.to_string_lossy().into_owned()),
+            preset: Some("gaming".into()),
+            ..default_cfg()
+        };
+        maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // sample_template() (Lobby/general/off-topic/Gamer role) applied, not
+        // the gaming preset (which would create a Moderator role instead).
+        let gamer_role: Option<String> =
+            sqlx::query_scalar("SELECT id FROM roles WHERE name = 'Gamer'")
+                .fetch_optional(&db)
+                .await
+                .unwrap();
+        assert!(
+            gamer_role.is_some(),
+            "template_file's content should win over the preset"
+        );
+        let moderator_role: Option<String> =
+            sqlx::query_scalar("SELECT id FROM roles WHERE name = 'Moderator'")
+                .fetch_optional(&db)
+                .await
+                .unwrap();
+        assert!(
+            moderator_role.is_none(),
+            "the gaming preset should not have been applied"
+        );
+    }
+
+    // ── Test 11: missing template file falls back gracefully to the preset ────
+
+    #[tokio::test]
+    async fn missing_template_file_falls_back_to_preset() {
+        let (db, _guard) = make_test_db().await;
+        let http = reqwest::Client::new();
+        let cfg = BootstrapConfig {
+            template_file: Some("C:/does/not/exist/wavvon-template.json".into()),
+            preset: Some("minimal".into()),
+            ..default_cfg()
+        };
+        // Must not error — a missing file falls back to the next source.
+        maybe_bootstrap(&db, &http, &cfg).await.unwrap();
+
+        let marker: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM hub_settings WHERE key = 'bootstrapped_at' AND value != ''",
+        )
+        .fetch_optional(&db)
+        .await
+        .unwrap();
+        assert!(
+            marker.is_some(),
+            "should have fallen back to the minimal preset and bootstrapped"
+        );
     }
 }

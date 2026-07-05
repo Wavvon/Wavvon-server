@@ -57,6 +57,22 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "Bootstrap token redeemed from the discovery service to fetch a template",
     ),
     (
+        "WAVVON_TEMPLATE_FILE",
+        "(unset)",
+        "Path to a local bootstrap template JSON file, applied on first boot when the \
+         channels table is empty. Third in precedence, behind WAVVON_BOOTSTRAP_TOKEN and \
+         WAVVON_TEMPLATE_URL. No signature verification — local files are already trusted \
+         by the operator who placed them on disk.",
+    ),
+    (
+        "WAVVON_TEMPLATE",
+        "(unset)",
+        "Built-in bootstrap template preset applied on first boot when the channels table \
+         is empty and no other bootstrap source resolved: `gaming`, `community`, or \
+         `minimal`. Lowest precedence, and the only no-network option. An unrecognized \
+         value is a startup error.",
+    ),
+    (
         "WAVVON_LOG_FORMAT",
         "text",
         "Logging format: `text` (default) or `json`",
@@ -192,6 +208,14 @@ pub struct Settings {
     /// Bootstrap token redeemed from the discovery service to fetch a template.
     /// Env: WAVVON_BOOTSTRAP_TOKEN
     pub bootstrap_token: Option<String>,
+    /// Path to a local bootstrap template JSON file applied on first boot.
+    /// Third in precedence, behind bootstrap_token and template_url.
+    /// Env: WAVVON_TEMPLATE_FILE
+    pub template_file: Option<String>,
+    /// Built-in bootstrap template preset: "gaming", "community", or "minimal".
+    /// Lowest precedence, applied on first boot when no other source resolved.
+    /// Env: WAVVON_TEMPLATE
+    pub template: Option<String>,
     /// Logging format: "text" (default) or "json". Env: WAVVON_LOG_FORMAT
     pub log_format: String,
     /// OpenTelemetry OTLP collector endpoint. Leave empty to disable.

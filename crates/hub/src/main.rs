@@ -739,6 +739,30 @@ async fn main() -> Result<()> {
 
     db::migrations::run(&db).await?;
 
+    // First-run bootstrap: applies a template (from a wizard-issued bootstrap
+    // token, a template URL, a local template file, or a built-in preset)
+    // when the hub has no channels and no users yet. Runs before owner_pubkey
+    // seeding below so a template's channels/roles exist by the time the
+    // owner is assigned. Non-fatal for network/file issues — a bad template,
+    // unreachable URL, or missing file never blocks startup, the hub just
+    // starts blank. An unrecognized WAVVON_TEMPLATE preset name is a
+    // configuration mistake and does fail startup (see bootstrap::presets).
+    {
+        let bootstrap_client = reqwest::Client::new();
+        wavvon_hub::bootstrap::maybe_bootstrap(
+            &db,
+            &bootstrap_client,
+            &wavvon_hub::bootstrap::BootstrapConfig {
+                template_url: settings.template_url.clone(),
+                bootstrap_token: settings.bootstrap_token.clone(),
+                discovery_url: settings.discovery_url.clone(),
+                template_file: settings.template_file.clone(),
+                preset: settings.template.clone(),
+            },
+        )
+        .await?;
+    }
+
     // If owner_pubkey is configured, seed that key as the hub owner before
     // serving any traffic. Idempotent: skipped if the key is already owner.
     // The farm sets this when spawning a hub created by a specific user.
@@ -794,24 +818,6 @@ async fn main() -> Result<()> {
              The hub has no owner; set WAVVON_OWNER_PUBKEY and restart, \
              or assign the builtin-owner role manually via the API."
         );
-    }
-
-    // First-run bootstrap: applies a template from template_url or redeems
-    // bootstrap_token when the channels table is empty.
-    // Non-fatal — a bad template or unreachable URL never blocks startup.
-    {
-        let bootstrap_client = reqwest::Client::new();
-        wavvon_hub::bootstrap::maybe_bootstrap(
-            &db,
-            &bootstrap_client,
-            &wavvon_hub::bootstrap::BootstrapConfig {
-                template_url: settings.template_url.clone(),
-                bootstrap_token: settings.bootstrap_token.clone(),
-                discovery_url: settings.discovery_url.clone(),
-            },
-        )
-        .await
-        .unwrap_or_else(|e| tracing::warn!("Bootstrap failed (non-fatal): {e}"));
     }
 
     let search_path = std::path::Path::new("hub.search");
