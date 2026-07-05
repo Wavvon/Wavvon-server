@@ -234,10 +234,11 @@ impl MessageStore for PostgresStore {
         message_id: &str,
         viewer: &str,
     ) -> Result<Vec<(String, i64, bool)>, StoreError> {
-        // PostgreSQL: MAX(CASE WHEN ... THEN 1 ELSE 0 END) returns BIGINT.
+        // PostgreSQL: MAX(CASE WHEN ... THEN 1 ELSE 0 END) is INT4 — cast to
+        // BIGINT explicitly or the i64 decode fails at runtime.
         let rows: Vec<(String, i64, i64)> = sqlx::query_as(
             "SELECT emoji, COUNT(*) as cnt,
-                    MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+                    MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END)::BIGINT as mine
              FROM message_reactions
              WHERE message_id = $2
              GROUP BY emoji

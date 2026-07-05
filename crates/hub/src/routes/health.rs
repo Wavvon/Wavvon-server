@@ -21,7 +21,9 @@ pub struct GetHealthResponse {
 pub async fn get_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let uptime_seconds = state.started_at.elapsed().as_secs();
 
-    let db_status = match sqlx::query_scalar::<_, i64>("SELECT 1")
+    // NOTE: a bare `SELECT 1` is INT4 in Postgres — decoding it as i64 made
+    // db_status report a type error on every health check. Cast explicitly.
+    let db_status = match sqlx::query_scalar::<_, i64>("SELECT 1::BIGINT")
         .fetch_one(&state.db)
         .await
     {

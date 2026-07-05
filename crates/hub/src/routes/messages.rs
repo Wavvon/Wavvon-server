@@ -770,7 +770,7 @@ async fn batch_load_reactions(
     }
     let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
         "SELECT message_id, emoji, COUNT(*) as cnt,
-                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+                MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END)::BIGINT as mine
          FROM message_reactions
          WHERE message_id = ANY($2)
          GROUP BY message_id, emoji
@@ -865,7 +865,7 @@ pub(crate) async fn load_reactions(
     viewer: &str,
 ) -> Result<Vec<ReactionSummary>, (StatusCode, String)> {
     let rows: Vec<(String, i64, i64)> = sqlx::query_as(
-        "SELECT emoji, COUNT(*) as cnt, MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END) as mine
+        "SELECT emoji, COUNT(*) as cnt, MAX(CASE WHEN user_key = $1 THEN 1 ELSE 0 END)::BIGINT as mine
          FROM message_reactions
          WHERE message_id = $2
          GROUP BY emoji

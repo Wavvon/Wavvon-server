@@ -410,3 +410,90 @@ async fn non_author_cannot_edit_other_peoples_messages() {
         .await
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
+
+// ---- Message reactions read-back ----
+//
+// Regression: MAX(CASE WHEN ...) is INT4 in Postgres and every reaction
+// loader decoded it as i64 — any message WITH a reaction made the whole
+// history fetch 500. Nothing covered the read-back path until this test.
+
+#[tokio::test]
+async fn message_reaction_add_read_back_and_remove() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+
+    let resp = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "reactions" }))
+        .await;
+    let channel: ChannelResponse = resp.json();
+
+    let resp = server
+        .post(&format!("/channels/{}/messages", channel.id))
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "react to me", "attachments": [] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let message: serde_json::Value = resp.json();
+    let message_id = message["id"].as_str().unwrap().to_string();
+
+    let resp = server
+        .post(&format!(
+            "/channels/{}/messages/{message_id}/reactions",
+            channel.id
+        ))
+        .authorization_bearer(&token)
+        .json(&json!({ "emoji": "👍" }))
+        .await;
+    assert!(
+        resp.status_code().is_success(),
+        "add reaction failed: {} {}",
+        resp.status_code(),
+        resp.text()
+    );
+
+    // History fetch must still succeed AND carry the reaction.
+    let resp = server
+        .get(&format!("/channels/{}/messages", channel.id))
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status_ok();
+    let messages: serde_json::Value = resp.json();
+    let msg = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(&message_id))
+        .expect("message present in history");
+    let reactions = msg["reactions"].as_array().expect("reactions array");
+    assert_eq!(reactions.len(), 1);
+    assert_eq!(reactions[0]["emoji"].as_str(), Some("👍"));
+    assert_eq!(reactions[0]["count"].as_i64(), Some(1));
+    assert_eq!(reactions[0]["me"].as_bool(), Some(true));
+
+    // Remove; history shows no reactions again.
+    let resp = server
+        .delete(&format!(
+            "/channels/{}/messages/{message_id}/reactions/👍",
+            channel.id
+        ))
+        .authorization_bearer(&token)
+        .await;
+    assert!(resp.status_code().is_success(), "{}", resp.text());
+
+    let resp = server
+        .get(&format!("/channels/{}/messages", channel.id))
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status_ok();
+    let messages: serde_json::Value = resp.json();
+    let msg = messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"].as_str() == Some(&message_id))
+        .unwrap();
+    assert_eq!(msg["reactions"].as_array().map(|a| a.len()), Some(0));
+}
