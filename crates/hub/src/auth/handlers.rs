@@ -411,10 +411,14 @@ pub async fn verify(
     .unwrap_or(false);
 
     // First-ever user on a hub is implicitly approved (they'll become Owner).
-    let existing_users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Exclude the 'system' sentinel that bootstrap inserts as channels'
+    // created_by — otherwise a preset-seeded hub always has one "user" and
+    // the real first joiner never becomes owner (found live 2026-07-06).
+    let existing_users: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE public_key <> 'system'")
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let initial_status = if require_approval && existing_users > 0 {
         "pending"
