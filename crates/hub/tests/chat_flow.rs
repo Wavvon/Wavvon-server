@@ -251,12 +251,12 @@ async fn delete_channel() {
 }
 
 #[tokio::test]
-async fn cannot_delete_non_empty_category() {
+async fn deleting_category_cascades_to_children() {
     let server = common::setup().await;
     let identity = Identity::generate();
     let token = common::authenticate(&server, &identity).await;
 
-    // Category with a child
+    // Category with a nested child.
     let resp = server
         .post("/channels")
         .authorization_bearer(&token)
@@ -264,18 +264,28 @@ async fn cannot_delete_non_empty_category() {
         .await;
     let category: ChannelResponse = resp.json();
 
-    server
+    let resp = server
         .post("/channels")
         .authorization_bearer(&token)
         .json(&json!({ "name": "chess", "parent_id": category.id }))
         .await;
+    let child: ChannelResponse = resp.json();
 
-    // Can't delete category while it has children
+    // Deleting the category removes it and every descendant.
     server
         .delete(&format!("/channels/{}", category.id))
         .authorization_bearer(&token)
         .await
-        .assert_status(axum::http::StatusCode::CONFLICT);
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server.get("/channels").authorization_bearer(&token).await;
+    let channels: Vec<ChannelResponse> = resp.json();
+    assert!(
+        !channels
+            .iter()
+            .any(|c| c.id == category.id || c.id == child.id),
+        "category and child should both be gone"
+    );
 }
 
 #[tokio::test]

@@ -661,47 +661,42 @@ pub async fn delete_channel(
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
-    // Check for children (prevent deleting non-empty categories)
-    let child_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE parent_id = $1")
-        .bind(&channel_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Collect the channel and every descendant (any depth, any type) so
+    // deleting a category/channel removes everything nested under it rather
+    // than refusing. The `seen` set also guards against a malformed cycle.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(channel_id.clone());
+    let mut frontier: Vec<String> = vec![channel_id.clone()];
+    while !frontier.is_empty() {
+        let children: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM channels WHERE parent_id = ANY($1)")
+                .bind(&frontier)
+                .fetch_all(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        frontier = children
+            .into_iter()
+            .filter(|c| seen.insert(c.clone()))
+            .collect();
+    }
+    let ids: Vec<String> = seen.into_iter().collect();
 
-    if child_count > 0 {
-        return Err((
-            StatusCode::CONFLICT,
-            "Cannot delete: category still has channels".to_string(),
-        ));
+    // Clean up related data for the whole subtree, then the channels.
+    for table in [
+        "messages",
+        "channel_bans",
+        "channel_settings",
+        "alliance_shared_channels",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE channel_id = ANY($1)"))
+            .bind(&ids)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
 
-    // Clean up related data
-    sqlx::query("DELETE FROM messages WHERE channel_id = $1")
-        .bind(&channel_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    sqlx::query("DELETE FROM channel_bans WHERE channel_id = $1")
-        .bind(&channel_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    sqlx::query("DELETE FROM channel_settings WHERE channel_id = $1")
-        .bind(&channel_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    sqlx::query("DELETE FROM alliance_shared_channels WHERE channel_id = $1")
-        .bind(&channel_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    sqlx::query("DELETE FROM channels WHERE id = $1")
-        .bind(&channel_id)
+    sqlx::query("DELETE FROM channels WHERE id = ANY($1)")
+        .bind(&ids)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
