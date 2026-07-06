@@ -12,3 +12,7 @@ hub_identity.json
 .env
 # Tantivy search index (runtime artifact)
 **/*.search/
+# Default upload/soundboard storage dir (WAVVON_UPLOADS_DIR); also where
+# `cargo test`'s default cwd writes files for tests that hit upload routes
+# without overriding the env var.
+crates/hub/uploads/

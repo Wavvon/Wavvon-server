@@ -1,0 +1,25 @@
+# Development-only: PostgreSQL for running `cargo test --workspace` locally.
+#
+# Start before running tests:
+#   docker compose -f docker-compose.dev.yml up -d
+#
+# Stop and remove when done:
+#   docker compose -f docker-compose.dev.yml down
+#
+# Credentials match the default in crates/hub/tests/common.rs.
+# Override at test time with the TEST_DATABASE_URL env var.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - dev-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  dev-postgres:

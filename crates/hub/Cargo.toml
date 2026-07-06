@@ -1,0 +1,64 @@
+[package]
+name = "wavvon-hub"
+version = "0.3.0"
+edition = "2021"
+
+[[bin]]
+name = "wavvon-hub"
+path = "src/main.rs"
+
+[lib]
+name = "wavvon_hub"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+tower = "0.5"
+tower-http = { workspace = true }
+hex = "0.4"
+hmac = "0.12"
+hkdf = "0.12"
+rand = "0.8"
+sha2 = "0.10"
+base64 = { workspace = true }
+wavvon-identity = { path = "../identity" }
+store = { path = "../store" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+sqlx = { workspace = true }
+futures-util = "0.3"
+uuid = { workspace = true, features = ["v5"] }
+bytes = "1"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+opentelemetry        = { workspace = true }
+opentelemetry_sdk    = { workspace = true }
+opentelemetry-otlp   = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+
+config = { workspace = true }
+tantivy = { workspace = true }
+
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+url = "2"
+mdns-sd = "0.20" # LAN mode: `_wavvon._tcp.local` mDNS/DNS-SD advertisement
+rcgen = "0.14" # LAN mode: self-signed TLS cert generation for the fingerprint-pinning trust tier
+rustls-pemfile = "2" # LAN mode: re-derive a persisted self-signed cert's fingerprint on reload
+dialoguer = "0.11" # `wavvon-hub setup` interactive prompts; small, well-maintained, TTY-only (bypassed entirely in non-interactive/scripted use)
+
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
+[dev-dependencies]
+axum-test = "19"
+tokio = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

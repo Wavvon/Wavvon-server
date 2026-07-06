@@ -1,0 +1,18 @@
+[package]
+name = "discord-import"
+version = "0.1.0"
+edition = "2021"
+description = "Migrates a Discord guild's structure (categories, channels, roles, permission overwrites) onto a fresh Wavvon hub via a reviewable manifest file. See docs/docs/discord-import.md."
+
+[[bin]]
+name = "discord-import"
+path = "src/main.rs"
+
+[dependencies]
+wavvon-identity = { path = "../identity" }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+hex = "0.4"

@@ -1,0 +1,285 @@
+use std::sync::Arc;
+
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::Json;
+use serde::{Deserialize, Serialize};
+
+use crate::auth::middleware::AuthUser;
+use crate::state::AppState;
+
+#[derive(Deserialize)]
+pub struct UserSearchParams {
+    pub q: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct UserInfo {
+    pub public_key: String,
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub avatar: Option<String>,
+    pub online: bool,
+    /// Presence status for online users: None = plain online, "away", "dnd".
+    /// Always None while offline (the stored value is not surfaced).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Optional short custom status text; only surfaced while online.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_custom: Option<String>,
+    /// Name of the highest-priority role with display_separately=true assigned
+    /// to this user. Used by the client to group members in the sidebar.
+    #[serde(default)]
+    pub group_role: Option<String>,
+    #[serde(default)]
+    pub is_bot: bool,
+}
+
+pub async fn list_users(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Query(params): Query<UserSearchParams>,
+) -> Result<Json<Vec<UserInfo>>, (StatusCode, String)> {
+    let online = state.online_users.read().await;
+
+    // Cap search queries to prevent unbounded LIKE pattern scans.
+    let q = params
+        .q
+        .as_deref()
+        .map(|s| if s.len() > 64 { &s[..64] } else { s });
+
+    // Single query with a LEFT JOIN to pick up the highest-priority
+    // display_separately role in one round-trip instead of N+1 queries.
+    let rows: Vec<UserRowWithRole> = if let Some(q) = q {
+        let search = format!("%{q}%");
+        sqlx::query_as::<_, UserRowWithRole>(
+            "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                    u.presence_status, u.presence_custom,
+                    (SELECT r.name FROM roles r
+                     INNER JOIN user_roles ur ON r.id = ur.role_id
+                     WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
+                     ORDER BY r.priority DESC LIMIT 1) AS group_role
+             FROM users u
+             WHERE (u.display_name LIKE $1 OR u.public_key LIKE $2)
+               AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
+               AND (u.is_bot = TRUE OR EXISTS
+                    (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key))
+             ORDER BY u.display_name, u.public_key LIMIT 50",
+        )
+        .bind(&search)
+        .bind(&search)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        sqlx::query_as::<_, UserRowWithRole>(
+            "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                    u.presence_status, u.presence_custom,
+                    (SELECT r.name FROM roles r
+                     INNER JOIN user_roles ur ON r.id = ur.role_id
+                     WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
+                     ORDER BY r.priority DESC LIMIT 1) AS group_role
+             FROM users u
+             WHERE NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
+               AND (u.is_bot = TRUE OR EXISTS
+                    (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key))
+             ORDER BY u.display_name, u.public_key LIMIT 50",
+        )
+        .fetch_all(&state.db)
+        .await
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let result: Vec<UserInfo> = rows
+        .into_iter()
+        .map(|r| {
+            let is_online = online.contains_key(&r.public_key);
+            UserInfo {
+                online: is_online,
+                status: r.presence_status.filter(|_| is_online),
+                status_custom: r.presence_custom.filter(|_| is_online),
+                public_key: r.public_key,
+                display_name: r.display_name,
+                avatar: r.avatar,
+                group_role: r.group_role,
+                is_bot: r.is_bot,
+            }
+        })
+        .collect();
+
+    Ok(Json(result))
+}
+
+pub async fn channel_members(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Path(channel_id): Path<String>,
+) -> Result<Json<Vec<UserInfo>>, (StatusCode, String)> {
+    // For now, all hub users can see all channels (no per-channel access control yet).
+    // Return all users, marking who's online.
+    // When channel bans exist, we filter out banned users.
+    let online = state.online_users.read().await;
+
+    let rows = sqlx::query_as::<_, UserRow>(
+        "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+                u.presence_status, u.presence_custom
+         FROM users u
+         WHERE u.public_key NOT IN (
+             SELECT target_public_key FROM channel_bans WHERE channel_id = $1
+         )
+           AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
+           AND (u.is_bot = TRUE OR EXISTS
+                (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key))
+         ORDER BY u.display_name, u.public_key",
+    )
+    .bind(&channel_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| {
+                let is_online = online.contains_key(&r.public_key);
+                UserInfo {
+                    online: is_online,
+                    status: r.presence_status.filter(|_| is_online),
+                    status_custom: r.presence_custom.filter(|_| is_online),
+                    public_key: r.public_key,
+                    display_name: r.display_name,
+                    avatar: r.avatar,
+                    group_role: None,
+                    is_bot: r.is_bot,
+                }
+            })
+            .collect(),
+    ))
+}
+
+#[derive(sqlx::FromRow)]
+struct UserRow {
+    public_key: String,
+    display_name: Option<String>,
+    avatar: Option<String>,
+    is_bot: bool,
+    presence_status: Option<String>,
+    presence_custom: Option<String>,
+}
+
+/// Like UserRow but includes the pre-joined group_role column.
+#[derive(sqlx::FromRow)]
+struct UserRowWithRole {
+    public_key: String,
+    display_name: Option<String>,
+    avatar: Option<String>,
+    is_bot: bool,
+    presence_status: Option<String>,
+    presence_custom: Option<String>,
+    group_role: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// User profile endpoint
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct RoleSummary {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct BadgeSummary {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Serialize)]
+pub struct UserProfileResponse {
+    pub public_key: String,
+    pub display_name: Option<String>,
+    pub avatar: Option<String>,
+    pub joined_at: i64,
+    pub roles: Vec<RoleSummary>,
+    pub badges: Vec<BadgeSummary>,
+}
+
+/// GET /users/:pubkey/profile
+pub async fn get_user_profile(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Path(pubkey): Path<String>,
+) -> Result<Json<UserProfileResponse>, (StatusCode, String)> {
+    let row: Option<(Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT display_name, avatar, first_seen_at FROM users WHERE public_key = $1",
+    )
+    .bind(&pubkey)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let (display_name, avatar, joined_at) =
+        row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    // Fetch roles assigned to this user (reuse the RoleResponse pattern from me.rs).
+    #[derive(sqlx::FromRow)]
+    struct RoleRow {
+        id: String,
+        name: String,
+        color: Option<String>,
+    }
+
+    let roles: Vec<RoleRow> = sqlx::query_as(
+        "SELECT r.id, r.name, NULL as color
+         FROM roles r
+         INNER JOIN user_roles ur ON r.id = ur.role_id
+         WHERE ur.user_public_key = $1
+         ORDER BY r.priority DESC",
+    )
+    .bind(&pubkey)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let role_summaries: Vec<RoleSummary> = roles
+        .into_iter()
+        .map(|r| RoleSummary {
+            id: r.id,
+            name: r.name,
+            color: r.color,
+        })
+        .collect();
+
+    // Fetch badges held by this user (from hub_badges table, linked via subject_pubkey
+    // stored inside the JSON payload).
+    #[derive(sqlx::FromRow)]
+    struct BadgeRow {
+        id: String,
+        label: String,
+    }
+
+    let badges: Vec<BadgeRow> = sqlx::query_as(
+        "SELECT id, label FROM issued_badges WHERE recipient_hub_pubkey = $1 AND revoked_at IS NULL",
+    )
+    .bind(&pubkey)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let badge_summaries: Vec<BadgeSummary> = badges
+        .into_iter()
+        .map(|b| BadgeSummary {
+            id: b.id,
+            label: b.label,
+        })
+        .collect();
+
+    Ok(Json(UserProfileResponse {
+        public_key: pubkey,
+        display_name,
+        avatar,
+        joined_at,
+        roles: role_summaries,
+        badges: badge_summaries,
+    }))
+}

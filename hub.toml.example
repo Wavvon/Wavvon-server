@@ -1,5 +1,5 @@
-# Voxply Hub — example configuration file
-# Copy to hub.toml and edit. Environment variables (VOXPLY_*) override any value here.
+# Wavvon Hub — example configuration file
+# Copy to hub.toml and edit. Environment variables (WAVVON_*) override any value here.
 
 # ── Network ──────────────────────────────────────────────────────────────────
 
@@ -11,8 +11,8 @@ voice_udp_port = 3001
 
 # ── TLS (leave commented out for plain HTTP) ──────────────────────────────────
 
-# tls_cert = "/etc/voxply/hub.crt"
-# tls_key  = "/etc/voxply/hub.key"
+# tls_cert = "/etc/wavvon/hub.crt"
+# tls_key  = "/etc/wavvon/hub.key"
 
 # ── Ownership & admin access ─────────────────────────────────────────────────
 
@@ -24,13 +24,13 @@ voice_udp_port = 3001
 # ── Farm integration ─────────────────────────────────────────────────────────
 
 # External URL of the farm that manages this hub.
-# Only set when this hub is spawned by voxply-farm.
+# Only set when this hub is spawned by wavvon-farm.
 # farm_url = "https://farm.example.com"
 
 # ── Discovery ────────────────────────────────────────────────────────────────
 
 # Discovery service base URL (hub directory).
-discovery_url = "https://discovery.voxply.io"
+discovery_url = "https://discovery.wavvon.io"
 
 # ── First-boot bootstrap ─────────────────────────────────────────────────────
 
@@ -39,10 +39,10 @@ discovery_url = "https://discovery.voxply.io"
 # bootstrap_token = ""
 
 # ── Database ─────────────────────────────────────────────────────────────────
-# Leave unset to use SQLite at hub.db (default).
-# database_url = "sqlite://hub.db"
-# database_url = "postgresql://voxply:secret@localhost/hub_prod"
-# database_read_url = "postgresql://voxply:secret@replica/hub_prod"
+# PostgreSQL connection. Leave unset to use the local default:
+# postgres://postgres:postgres@localhost:5432/wavvon
+# database_url = "postgresql://wavvon:secret@localhost/hub_prod"
+# database_read_url = "postgresql://wavvon:secret@replica/hub_prod"
 
 # ── Search ───────────────────────────────────────────────────────────────────
 

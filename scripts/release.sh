@@ -11,7 +11,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 ROOT="$(git rev-parse --show-toplevel)"
-HUB_CARGO="$ROOT/hub/Cargo.toml"
+HUB_CARGO="$ROOT/crates/hub/Cargo.toml"
 
 if ! command -v git-cliff >/dev/null 2>&1; then
   echo "git-cliff not found. Install with: cargo install git-cliff" >&2
@@ -25,7 +25,7 @@ echo "==> Updating CHANGELOG.md"
 (cd "$ROOT" && git-cliff --unreleased --tag "v$VERSION" -o CHANGELOG.md)
 
 echo "==> Committing on develop"
-git -C "$ROOT" add hub/Cargo.toml CHANGELOG.md
+git -C "$ROOT" add crates/hub/Cargo.toml Cargo.lock CHANGELOG.md
 git -C "$ROOT" commit -m "chore: release v$VERSION"
 
 echo
