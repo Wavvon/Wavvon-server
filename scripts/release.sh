@@ -25,7 +25,7 @@ echo "==> Updating CHANGELOG.md"
 (cd "$ROOT" && git-cliff --unreleased --tag "v$VERSION" -o CHANGELOG.md)
 
 echo "==> Committing on develop"
-git -C "$ROOT" add hub/Cargo.toml CHANGELOG.md
+git -C "$ROOT" add crates/hub/Cargo.toml Cargo.lock CHANGELOG.md
 git -C "$ROOT" commit -m "chore: release v$VERSION"
 
 echo
