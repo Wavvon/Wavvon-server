@@ -56,7 +56,13 @@ RUN mkdir -p /web-client && \
 # will not start on an older runtime base (bit us on v0.2.1: GLIBC_2.38).
 FROM rust:1-slim-trixie AS builder
 
-# No system deps needed — all TLS is handled by rustls (pure Rust)
+# perl + make: webauthn-rs links OpenSSL, which we build vendored
+# (openssl-src runs OpenSSL's perl Configure). Client-facing TLS is
+# still rustls.
+RUN apt-get update && apt-get install -y \
+    perl \
+    make \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 COPY . .

@@ -2,8 +2,9 @@
 
 All notable changes to Wavvon Server (hub + farm) are documented here.
 
-## [0.3.0] — 2026-07-06
+## [0.3.1] — 2026-07-06
 ### Bug Fixes
+- Skip auto-owner grant when owner_pubkey is configured
 - Fix aarch64 musl cross-build: replace gnu-gcc with cargo-zigbuild
 
 aarch64-linux-gnu-gcc targets GNU/glibc ABI; building for
@@ -51,6 +52,7 @@ The x86_64-musl and Docker builds are unchanged.
 - Close channel-permission read/write gating gaps from the 2026-07-04 audit
 - Tear down ephemeral test databases automatically
 - Spawn-on-join temp voice channels on the web voice relay
+- Vendor OpenSSL on all targets so release builds link
 
 ### Documentation
 - Fix renamed GitHub URLs, PostgreSQL reality, Postgres sidecar in compose
@@ -89,6 +91,62 @@ The x86_64-musl and Docker builds are unchanged.
 ### Tests
 - Skip member_online/member_offline frames in ws_voice_join_and_recv
 - Skip member_online/offline frames in screen_share_flow tests
+- De-flake cross-hub DM delivery tests
+
+
+## [0.2.3] — 2026-06-12
+### Bug Fixes
+- Harden auth, invites, SSRF, uploads, and session checks
+- Enforce federated_bans on outbound messages and DMs
+- Address security and correctness issues from audit
+- Guard /federation/dm with PeerHub extractor
+- Clippy double_ended_iterator_last in XFF parsing
+- Resolve remaining clippy lints (rfind in XFF parsing, print_literal in help)
+- Pin Docker builder and runtime stages to the same Debian release
+- Deterministic pow_flow below-minimum test
+
+### Documentation
+- Add CONTRIBUTING.md
+- Add wire-format spec and deterministic test vectors
+- Rewrite README as a self-hoster landing page
+- Restore the AI-assistance transparency note
+
+### Features
+- Allow multiple concurrent screen sharers per channel
+- Cross-channel stream subscription (decouple streaming from voice)
+- Voxply-hub update subcommand
+- Rate-limit GET /preview per user (10 req/60 s)
+- POST /admin/search/reindex — operator-driven index rebuild
+- Networked voice Phase 1 — token-gated UDP source-address learning
+- Optionally self-serve the web client
+
+### Performance
+- Lazy search reload, message rate-limit eviction, users N+1 fix
+- Single public-info fetch per farm per revalidation sweep
+
+### Refactoring
+- Split routes/ws.rs into directory module
+- Split routes/games.rs into directory module
+
+### Tests
+- Pin DhKeyRecord and DM-envelope wire vectors
+
+
+## [0.2.0] — 2026-05-30
+### Bug Fixes
+- Re-encode test files as UTF-8 (em-dash was written as Windows-1252)
+- Switch reqwest to rustls-tls, remove OpenSSL dependency
+
+### Features
+- Add max_channel_depth hub setting with server-side depth enforcement
+- Enforce minimum PoW level on hub authentication
+- Add forum channel type with posts, replies, and FTS
+- Channel ban, voice mute, and talk power enforcement
+- Hub self-tags and federated badge issue/accept/decline
+- Tier 2 party multiplayer session backend
+- Hub certification issuance, auth gate, and admin routes
+- Recovery contacts, DM block enforcement, and screen share v2 signaling
+- Farm-level game install and per-hub enable/disable
 
 
 

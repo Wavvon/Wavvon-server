@@ -44,4 +44,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh workflow run release.yml --ref "${{ steps.ver.outputs.version }}"
+          # release.yml declares a REQUIRED workflow_dispatch input "tag" —
+          # dispatching without it 422s and the release silently never runs
+          # (bit every tag from v0.2.1 to v0.3.0).
+          gh workflow run release.yml --ref "${{ steps.ver.outputs.version }}" \
+            -f tag="${{ steps.ver.outputs.version }}"

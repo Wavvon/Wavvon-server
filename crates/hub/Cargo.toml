@@ -1,6 +1,6 @@
 [package]
 name = "wavvon-hub"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 
 [[bin]]
@@ -47,14 +47,15 @@ flate2 = "1"
 tar = "0.4"
 tempfile = "3"
 webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+# webauthn-rs links OpenSSL; vendor it on every target so builds never need
+# system OpenSSL headers — required for the static-musl release binaries and
+# the Docker image (was cfg(windows)-only, which left Linux CI unvendored).
+openssl = { version = "0.10", features = ["vendored"] }
 url = "2"
 mdns-sd = "0.20" # LAN mode: `_wavvon._tcp.local` mDNS/DNS-SD advertisement
 rcgen = "0.14" # LAN mode: self-signed TLS cert generation for the fingerprint-pinning trust tier
 rustls-pemfile = "2" # LAN mode: re-derive a persisted self-signed cert's fingerprint on reload
 dialoguer = "0.11" # `wavvon-hub setup` interactive prompts; small, well-maintained, TTY-only (bypassed entirely in non-interactive/scripted use)
-
-[target.'cfg(windows)'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 axum-test = "19"
