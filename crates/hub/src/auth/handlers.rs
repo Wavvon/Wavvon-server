@@ -273,7 +273,10 @@ pub async fn verify(
     .fetch_one(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let owner_exempt = existing_users == 0 || already_owner;
+    // A federating peer hub (is_hub=true) is a machine, not a human doing
+    // PoW — it must never be lobby-confined, or /federation/* calls would
+    // fail opaquely against a gated hub. Exempt it like owner/first-user.
+    let owner_exempt = existing_users == 0 || already_owner || req.is_hub == Some(true);
 
     // Check security level requirement (lobby-bot-survey.md Feature 1).
     let min_level: u32 = sqlx::query_scalar::<_, String>(
