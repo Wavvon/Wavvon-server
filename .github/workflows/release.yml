@@ -36,7 +36,7 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           body_path: CHANGES.md
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -161,7 +161,7 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/wavvon-hub wavvon-hub-linux-aarch64
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
         with:
           files: |
             wavvon-hub-linux-x86_64
