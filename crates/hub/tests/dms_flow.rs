@@ -381,6 +381,44 @@ fn make_plaintext_sig(
     hex::encode(sender.sign(&bytes).to_bytes())
 }
 
+/// Poll the recipient hub until the federated DM lands. Cross-hub delivery
+/// is asynchronous (outbox worker / spawned federation request), and a fixed
+/// sleep flakes on slow CI runners — before delivery the recipient hub may
+/// even 403 because it doesn't know the conversation yet. Panics with the
+/// last status/body if nothing arrives within 15s.
+async fn wait_for_federated_dms(
+    client: &reqwest::Client,
+    hub_url: &str,
+    token: &str,
+    conversation_id: &str,
+    expected_len: usize,
+) -> serde_json::Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let resp = client
+            .get(format!(
+                "{hub_url}/conversations/{conversation_id}/messages"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            if let Ok(messages) = serde_json::from_str::<serde_json::Value>(&body) {
+                if messages.as_array().is_some_and(|a| a.len() >= expected_len) {
+                    return messages;
+                }
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("federated DM never arrived on {hub_url}: last response: {status} {body}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// Return the AppState together with the URL so tests can drive the worker manually.
 async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
@@ -510,22 +548,8 @@ async fn dm_delivered_across_hubs() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
-    // Give the async federation request time to land.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
     // Bob reads the thread from Hub B — message should have been federated there.
-    let resp = client
-        .get(format!("{hub_b}/conversations/{}/messages", conv.id))
-        .bearer_auth(&bob_token)
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        resp.status().is_success(),
-        "Hub B list endpoint failed: {}",
-        resp.status()
-    );
-    let messages: serde_json::Value = resp.json().await.unwrap();
+    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().expect("expected an array");
     assert_eq!(arr.len(), 1, "Bob should see the federated DM");
     assert_eq!(arr[0]["content"], content);
@@ -877,18 +901,9 @@ async fn send_dm_uses_home_hub_designation_when_present() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
     // Bob reads from Hub B — message should have arrived via the designation.
     let bob_token = authenticate_http(&hub_b, &bob).await;
-    let resp = client
-        .get(format!("{hub_b}/conversations/{}/messages", conv.id))
-        .bearer_auth(&bob_token)
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-    let messages: serde_json::Value = resp.json().await.unwrap();
+    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().unwrap();
     assert_eq!(
         arr.len(),
@@ -936,17 +951,8 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
     let bob_token = authenticate_http(&hub_b, &bob).await;
-    let resp = client
-        .get(format!("{hub_b}/conversations/{}/messages", conv.id))
-        .bearer_auth(&bob_token)
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-    let messages: serde_json::Value = resp.json().await.unwrap();
+    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().unwrap();
     assert_eq!(
         arr.len(),
@@ -1607,18 +1613,9 @@ async fn federated_dm_accepts_registered_peer_hub() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
     // Bob reads from Hub B — message must be there.
     let bob_token = authenticate_http(&hub_b, &bob).await;
-    let resp = client
-        .get(format!("{hub_b}/conversations/{}/messages", conv.id))
-        .bearer_auth(&bob_token)
-        .send()
-        .await
-        .unwrap();
-    assert!(resp.status().is_success());
-    let messages: serde_json::Value = resp.json().await.unwrap();
+    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().unwrap();
     assert_eq!(
         arr.len(),
