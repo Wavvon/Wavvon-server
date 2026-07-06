@@ -502,13 +502,19 @@ pub async fn update_channel(
             sep.push("retention_days = ");
             sep.push_bind_unseparated(*rd_opt);
         }
+        // Setting one banner source atomically clears the other — the two are
+        // mutually exclusive (validated above) and the PATCH surface has no
+        // way to send an explicit NULL, so without this a url->upload switch
+        // would leave the stale banner_url shadowing the new image.
         if req.banner_url.is_some() {
             sep.push("banner_url = ");
             sep.push_bind_unseparated(req.banner_url.as_deref());
+            sep.push("banner_file_id = NULL");
         }
         if req.banner_file_id.is_some() {
             sep.push("banner_file_id = ");
             sep.push_bind_unseparated(req.banner_file_id.as_deref());
+            sep.push("banner_url = NULL");
         }
         qb.push(" WHERE id = ");
         qb.push_bind(&channel_id);

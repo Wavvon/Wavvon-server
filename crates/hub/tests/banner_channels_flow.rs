@@ -255,3 +255,91 @@ async fn patch_banner_file_id_invalid_reference_rejected() {
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
     assert!(resp.text().contains("image uploaded to this channel"));
 }
+
+// Switching a banner's source must atomically clear the other column — the
+// PATCH surface has no explicit-NULL form, so without this a url->upload
+// switch leaves the stale banner_url shadowing the new image in every client
+// (found porting the banner editor to web, 2026-07-06).
+#[tokio::test]
+async fn patch_banner_source_switch_clears_other() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    let resp = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "name": "switch-banner",
+            "channel_type": "banner",
+            "banner_url": "https://example.com/original.png",
+        }))
+        .await;
+    let id = resp.json::<serde_json::Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Synthetic uploaded image row — the PATCH validation only checks
+    // id + channel + image mime, so this stands in for the upload step.
+    sqlx::query(
+        "INSERT INTO upload_files (id, filename, original_name, mime_type, size_bytes, uploader_pubkey, channel_id, created_at)
+         VALUES ('banner-file-1', 'f.png', 'f.png', 'image/png', 10, $1, $2, 0)",
+    )
+    .bind(owner.public_key_hex())
+    .bind(&id)
+    .execute(&server.state().db)
+    .await
+    .unwrap();
+
+    let channel_of = |list: serde_json::Value, id: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["id"] == id)
+            .cloned()
+            .unwrap()
+    };
+
+    // url -> upload: banner_file_id set, stale banner_url cleared.
+    server
+        .patch(&format!("/channels/{id}"))
+        .authorization_bearer(&token)
+        .json(&json!({ "banner_file_id": "banner-file-1" }))
+        .await
+        .assert_status_ok();
+    let ch = channel_of(
+        server
+            .get("/channels")
+            .authorization_bearer(&token)
+            .await
+            .json::<serde_json::Value>(),
+        &id,
+    );
+    assert_eq!(ch["banner_file_id"], "banner-file-1");
+    assert!(
+        ch["banner_url"].is_null(),
+        "stale banner_url must be cleared: {ch}"
+    );
+
+    // upload -> url: banner_url set, stale banner_file_id cleared.
+    server
+        .patch(&format!("/channels/{id}"))
+        .authorization_bearer(&token)
+        .json(&json!({ "banner_url": "https://example.com/replacement.png" }))
+        .await
+        .assert_status_ok();
+    let ch = channel_of(
+        server
+            .get("/channels")
+            .authorization_bearer(&token)
+            .await
+            .json::<serde_json::Value>(),
+        &id,
+    );
+    assert_eq!(ch["banner_url"], "https://example.com/replacement.png");
+    assert!(
+        ch["banner_file_id"].is_null(),
+        "stale banner_file_id must be cleared: {ch}"
+    );
+}
