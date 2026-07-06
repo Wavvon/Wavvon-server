@@ -6,6 +6,8 @@
 # To build locally instead of pulling from ghcr.io, uncomment the build: block.
 # To enable HTTPS, set WAVVON_TLS_CERT and WAVVON_TLS_KEY (see below).
 # For a farm + hub setup, use docker-compose.farm.yml instead.
+# For a guided install that generates a tailored compose + .env, run:
+#   wavvon-hub setup
 
 services:
   hub:
@@ -13,6 +15,9 @@ services:
     # build:
     #   context: .
     #   dockerfile: crates/hub/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
     ports:
       - "${WAVVON_HTTP_PORT:-3000}:3000"
       - "${WAVVON_VOICE_UDP_PORT:-3001}:3001/udp"
@@ -23,6 +28,9 @@ services:
     environment:
       WAVVON_HTTP_PORT: "3000"
       WAVVON_VOICE_UDP_PORT: "3001"
+      # Override WAVVON_DB_PASSWORD (shell env or .env file) before exposing
+      # anything beyond localhost.
+      WAVVON_DATABASE_URL: "postgres://wavvon:${WAVVON_DB_PASSWORD:-wavvon}@db:5432/wavvon"
       # Make yourself hub owner (64-char Ed25519 public key, shown in the
       # client under Settings -> Identity). Set before opening the hub to users:
       # WAVVON_OWNER_PUBKEY: "<your-public-key>"
@@ -35,5 +43,23 @@ services:
       # WAVVON_OTLP_ENDPOINT: http://otel-collector:4318
     restart: unless-stopped
 
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: wavvon
+      POSTGRES_PASSWORD: "${WAVVON_DB_PASSWORD:-wavvon}"
+      POSTGRES_DB: wavvon
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wavvon -d wavvon"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # No host port published on purpose — reachable only on the compose
+    # network, never the internet.
+    restart: unless-stopped
+
 volumes:
   hub-data:
+  db-data:

@@ -39,8 +39,8 @@ discovery_url = "https://discovery.wavvon.io"
 # bootstrap_token = ""
 
 # ── Database ─────────────────────────────────────────────────────────────────
-# Leave unset to use SQLite at hub.db (default).
-# database_url = "sqlite://hub.db"
+# PostgreSQL connection. Leave unset to use the local default:
+# postgres://postgres:postgres@localhost:5432/wavvon
 # database_url = "postgresql://wavvon:secret@localhost/hub_prod"
 # database_read_url = "postgresql://wavvon:secret@replica/hub_prod"
 
