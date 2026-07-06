@@ -22,7 +22,13 @@ echo "==> Bumping version to $VERSION in hub/Cargo.toml"
 sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$VERSION\"/}" "$HUB_CARGO"
 
 echo "==> Updating CHANGELOG.md"
-(cd "$ROOT" && git-cliff --unreleased --tag "v$VERSION" -o CHANGELOG.md)
+# Full regeneration. NOT `--unreleased -o`: that overwrites the file with
+# ONLY the unreleased section, silently dropping every previous release's
+# notes (bit v0.3.0/v0.3.1). Caveat: release tags land on main's merge
+# commits, which develop doesn't contain, so a release whose tag isn't in
+# develop's ancestry gets folded into the next section — acceptable, since
+# an invisible tag here means that release was cut from a different line.
+(cd "$ROOT" && git-cliff --tag "v$VERSION" -o CHANGELOG.md)
 
 echo "==> Committing on develop"
 git -C "$ROOT" add crates/hub/Cargo.toml Cargo.lock CHANGELOG.md
