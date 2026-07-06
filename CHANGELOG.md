@@ -2,7 +2,7 @@
 
 All notable changes to Wavvon Server (hub + farm) are documented here.
 
-## [0.3.1] — 2026-07-06
+## [0.3.2] — 2026-07-06
 ### Bug Fixes
 - Skip auto-owner grant when owner_pubkey is configured
 - Fix aarch64 musl cross-build: replace gnu-gcc with cargo-zigbuild
@@ -53,6 +53,7 @@ The x86_64-musl and Docker builds are unchanged.
 - Tear down ephemeral test databases automatically
 - Spawn-on-join temp voice channels on the web voice relay
 - Vendor OpenSSL on all targets so release builds link
+- Switching a banner's image source clears the other column
 
 ### Documentation
 - Fix renamed GitHub URLs, PostgreSQL reality, Postgres sidecar in compose
