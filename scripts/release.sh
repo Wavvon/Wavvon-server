@@ -21,6 +21,11 @@ fi
 echo "==> Bumping version to $VERSION in hub/Cargo.toml"
 sed -i "0,/^version = \".*\"/{s/^version = \".*\"/version = \"$VERSION\"/}" "$HUB_CARGO"
 
+echo "==> Syncing Cargo.lock"
+# sed only edits Cargo.toml; without this the lockfile still records the
+# old version and dirties the working tree on the next cargo run.
+(cd "$ROOT" && cargo update --workspace --quiet)
+
 echo "==> Updating CHANGELOG.md"
 # Full regeneration. NOT `--unreleased -o`: that overwrites the file with
 # ONLY the unreleased section, silently dropping every previous release's
