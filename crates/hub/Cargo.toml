@@ -51,6 +51,7 @@ url = "2"
 mdns-sd = "0.20" # LAN mode: `_wavvon._tcp.local` mDNS/DNS-SD advertisement
 rcgen = "0.14" # LAN mode: self-signed TLS cert generation for the fingerprint-pinning trust tier
 rustls-pemfile = "2" # LAN mode: re-derive a persisted self-signed cert's fingerprint on reload
+dialoguer = "0.11" # `wavvon-hub setup` interactive prompts; small, well-maintained, TTY-only (bypassed entirely in non-interactive/scripted use)
 
 [target.'cfg(windows)'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }

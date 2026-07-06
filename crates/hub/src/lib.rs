@@ -17,6 +17,7 @@ pub mod routes;
 pub mod search;
 pub mod server;
 pub mod settings;
+pub mod setup;
 pub mod state;
 pub mod subkey_revocation_worker;
 pub mod temp_channel_worker;

@@ -25,6 +25,7 @@ fn print_help() {
     println!("USAGE:");
     println!("  wavvon-hub [SUBCOMMAND | OPTION]\n");
     println!("SUBCOMMANDS:");
+    println!("  setup            Interactive install wizard: generates docker-compose.yml + .env");
     println!("  migrate          Apply DB migrations and exit");
     println!("  backup [FILE]    Write a backup archive (default: hub-backup-<ts>.tar.gz)");
     println!("  restore FILE     Restore from a backup archive");
@@ -326,6 +327,21 @@ async fn main() -> Result<()> {
     if first_arg == Some("--doctor") {
         let ok = run_doctor().await;
         std::process::exit(if ok { 0 } else { 1 });
+    }
+
+    // `setup` is a pure file-generation wizard: it needs none of the DB/TLS/
+    // port config `settings::load()` would otherwise require, and is in fact
+    // meant to be usable *before* any of that exists yet. Dispatched here,
+    // fast-path, same as --help/--version/--doctor above.
+    if first_arg == Some("setup") {
+        let setup_args: Vec<String> = std::env::args().skip(2).collect();
+        match wavvon_hub::setup::run(&setup_args) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
     }
 
     let settings = match wavvon_hub::settings::load() {
