@@ -155,6 +155,18 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         .await
         .expect("Failed to run migrations on test database");
 
+    // Fresh hubs now seed `invite_only = true` by default (task #31), but
+    // the vast majority of this suite predates that and assumes open
+    // registration — dozens of test files build their own harness directly
+    // on top of this function (not just common::setup()). Force it back off
+    // here, at the shared root, so every one of them keeps working. Tests
+    // that specifically want the real invite-first default re-enable it
+    // explicitly (see setup_raw() below).
+    sqlx::query("UPDATE hub_settings SET value = 'false' WHERE key = 'invite_only'")
+        .execute(&pool)
+        .await
+        .expect("reset invite_only for test database");
+
     (pool, guard)
 }
 
@@ -250,8 +262,12 @@ fn make_test_webauthn() -> Arc<webauthn_rs::Webauthn> {
     )
 }
 
-pub async fn setup() -> TestHarness {
-    let (db, guard) = create_test_db().await;
+/// Builds a `TestHarness` on top of an already-created (and migrated) test
+/// database, without touching any hub_settings. Shared by [`setup`] (which
+/// forces `invite_only` back off — see its doc comment) and [`setup_raw`]
+/// (which doesn't, for tests that specifically exercise the invite-first
+/// default from task #31).
+async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -316,6 +332,28 @@ pub async fn setup() -> TestHarness {
         _guard: guard,
         state: Some(state),
     }
+}
+
+/// The harness used by the vast majority of the suite. See
+/// [`create_test_db`]'s doc comment: `invite_only` is already forced back
+/// off there. Tests for the invite-only default itself, and for
+/// invite/role-grant behavior, use [`setup_raw`] instead.
+pub async fn setup() -> TestHarness {
+    let (db, guard) = create_test_db().await;
+    build_harness(db, guard).await
+}
+
+/// Like [`setup`], but re-enables `invite_only` so the hub is in the same
+/// state a real fresh hub boots into (task #31). Use this for tests that
+/// exercise the invite-first default or role-granting invites directly.
+#[allow(dead_code)]
+pub async fn setup_raw() -> TestHarness {
+    let (db, guard) = create_test_db().await;
+    sqlx::query("UPDATE hub_settings SET value = 'true' WHERE key = 'invite_only'")
+        .execute(&db)
+        .await
+        .expect("re-enable invite_only for setup_raw");
+    build_harness(db, guard).await
 }
 
 #[allow(dead_code)]

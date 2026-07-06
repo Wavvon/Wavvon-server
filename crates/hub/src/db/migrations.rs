@@ -105,7 +105,18 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     for (key, val) in [
-        ("invite_only", "false"),
+        // Invite-first default (task #31): fresh hubs start invite_only so an
+        // operator has to deliberately open the door. Templates that intend a
+        // public/discovery-listed community opt OUT by setting
+        // `"invite_only": "false"` explicitly in their `settings` block (see
+        // bootstrap::apply_template) — this row only seeds the value when it
+        // isn't already present (ON CONFLICT DO NOTHING below), so existing
+        // hubs are never flipped retroactively.
+        ("invite_only", "true"),
+        // Code of the one-time, owner-granting invite minted on first boot
+        // when the hub has no users yet (see routes::invites::
+        // maybe_mint_first_boot_owner_invite). Empty until minted.
+        ("first_boot_owner_invite_code", ""),
         ("min_security_level", "0"),
         ("require_approval", "false"),
         ("max_channel_depth", "0"),
@@ -1618,6 +1629,14 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // (see routes/lobby.rs submit_pow). Backfilled to 'member' for every
     // pre-existing session row so nothing already issued becomes confined.
     let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT 'member'")
+        .execute(pool)
+        .await;
+
+    // Role-granting invites (task #34). NULL = a plain invite (today's
+    // behavior). When set, the role is assigned to the joining user in
+    // addition to builtin-everyone — see routes::invites::create_invite for
+    // the priority/admin guards and auth::handlers::verify for the grant.
+    let _ = sqlx::query("ALTER TABLE invites ADD COLUMN grant_role_id TEXT REFERENCES roles(id)")
         .execute(pool)
         .await;
 

@@ -244,6 +244,61 @@ async fn run_doctor() -> bool {
         }
     }
 
+    // Owner / first-boot invite status. Best-effort only: this needs a live
+    // database connection that the rest of doctor doesn't otherwise require,
+    // so an unreachable DB (or a hub that has never run migrate/start yet)
+    // is reported as INFO, not FAIL — it doesn't block a normal doctor run.
+    // Reuses the same idempotent mint used at real startup, so running
+    // `--doctor` before the hub's first real launch is enough to get the
+    // link — it's safe to call repeatedly and a no-op once a user exists.
+    println!();
+    let db_url = settings
+        .database_url
+        .clone()
+        .unwrap_or_else(|| "postgres://postgres:postgres@localhost:5432/wavvon".to_string());
+    match PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url)
+        .await
+    {
+        Ok(pool) => {
+            match wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(&pool).await {
+                Ok(Some(code)) => {
+                    let raw_host = settings
+                        .public_url
+                        .clone()
+                        .unwrap_or_else(|| format!("localhost:{}", settings.http_port));
+                    let host = raw_host
+                        .trim_start_matches("https://")
+                        .trim_start_matches("http://")
+                        .trim_end_matches('/');
+                    match Identity::load(Path::new("hub_identity.json")) {
+                        Ok(identity) => {
+                            println!(
+                            "INFO  hub owner: none yet — first-boot invite wavvon://{host}/i/{}/{code}",
+                            identity.public_key_hex()
+                        );
+                        }
+                        Err(_) => {
+                            println!(
+                            "INFO  hub owner: none yet — first-boot invite https://{host}/join/{code}"
+                        );
+                        }
+                    }
+                }
+                Ok(None) => {
+                    println!("PASS  hub owner: already assigned");
+                }
+                Err((_, e)) => {
+                    println!("INFO  hub owner check skipped: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            println!("INFO  database ({db_url}) unreachable, skipping owner check: {e}");
+        }
+    }
+
     if all_pass {
         println!("\nAll checks passed.");
     } else {
@@ -818,6 +873,33 @@ async fn main() -> Result<()> {
              The hub has no owner; set WAVVON_OWNER_PUBKEY and restart, \
              or assign the builtin-owner role manually via the API."
         );
+
+        // Fresh hubs default to invite_only=true (task #31), which would
+        // otherwise leave no invite-free path for anyone to become owner.
+        // Mint (or reuse) the one-time owner-granting invite and print both
+        // link forms so the operator has a concrete way in. No-op once the
+        // hub already has a real user — see maybe_mint_first_boot_owner_invite.
+        match wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(&db).await {
+            Ok(Some(code)) => {
+                let raw_host = settings
+                    .public_url
+                    .clone()
+                    .unwrap_or_else(|| format!("localhost:{}", settings.http_port));
+                let host = raw_host
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/');
+                let serial = hub_identity.public_key_hex();
+                tracing::warn!(
+                    "First-boot owner invite: wavvon://{host}/i/{serial}/{code}  \
+                     (or https://{host}/join/{code})"
+                );
+            }
+            Ok(None) => {}
+            Err((_, e)) => {
+                tracing::warn!("Could not mint first-boot owner invite: {e}");
+            }
+        }
     }
 
     let search_path = std::path::Path::new("hub.search");
