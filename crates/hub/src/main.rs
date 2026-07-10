@@ -897,6 +897,14 @@ async fn main() -> Result<()> {
         // hub already has a real user — see maybe_mint_first_boot_owner_invite.
         match wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(&db).await {
             Ok(Some(code)) => {
+                // The /join link must be copy-pasteable: an explicit scheme in
+                // public_url wins; a bare public host is assumed TLS-fronted;
+                // the localhost fallback matches this process's own TLS state.
+                let join_scheme = match settings.public_url.as_deref() {
+                    Some(u) if u.starts_with("http://") => "http",
+                    Some(_) => "https",
+                    None => scheme,
+                };
                 let raw_host = settings
                     .public_url
                     .clone()
@@ -908,7 +916,7 @@ async fn main() -> Result<()> {
                 let serial = hub_identity.public_key_hex();
                 tracing::warn!(
                     "First-boot owner invite: wavvon://{host}/i/{serial}/{code}  \
-                     (or https://{host}/join/{code})"
+                     (or {join_scheme}://{host}/join/{code})"
                 );
             }
             Ok(None) => {}
