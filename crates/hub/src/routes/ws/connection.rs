@@ -11,7 +11,12 @@ use super::conn_state::{ConnState, DispatchResult};
 use super::handlers::{bot, chat, mini_app, screen, voice};
 use super::voice::get_voice_roster;
 
-pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: String) {
+pub(super) async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    public_key: String,
+    mini_app_channel_id: Option<String>,
+) {
     // ── Connection setup ─────────────────────────────────────────────────────
 
     let is_bot: bool =
@@ -83,16 +88,28 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     let mut voice_rx = state.voice_event_tx.subscribe();
     let mut screen_share_rx = state.screen_share_tx.subscribe();
 
-    // Load DM conversation memberships (once at connect time).
-    let my_conversations: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
-        "SELECT conversation_id FROM conversation_members WHERE public_key = $1",
-    )
-    .bind(&public_key)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .collect();
+    // A mini-app session (bot-mini-apps.md "Scoped session token") is bound
+    // to exactly one channel and never sees DMs — it's a game/interactive
+    // relay for one channel, not a general-purpose login. Skip the normal
+    // "every readable channel" auto-subscribe and DM-membership load
+    // entirely in that case.
+    let is_mini_app = mini_app_channel_id.is_some();
+
+    // Load DM conversation memberships (once at connect time). Never for a
+    // mini-app session — see above.
+    let my_conversations: std::collections::HashSet<String> = if is_mini_app {
+        std::collections::HashSet::new()
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT conversation_id FROM conversation_members WHERE public_key = $1",
+        )
+        .bind(&public_key)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+    };
 
     // Read-gating (§3.5): a channel the caller can't effectively read is
     // never auto-subscribed, so no chat/typing/etc. events for it are ever
@@ -106,7 +123,10 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
         .await
         .unwrap_or_default();
 
-    // Auto-subscribe to non-banned, readable channels.
+    // Auto-subscribe to non-banned, readable channels — or, for a mini-app
+    // session, to its single bound channel only (still gated by the same
+    // ban + read-permission checks; a mini-app session grants no extra
+    // visibility beyond what the underlying user already has).
     let subscribed: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT id FROM channels
          WHERE is_category = false
@@ -120,6 +140,11 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     .unwrap_or_default()
     .into_iter()
     .filter(|id| readable_channels.contains(id))
+    .filter(|id| {
+        mini_app_channel_id
+            .as_deref()
+            .is_none_or(|bound| bound == id)
+    })
     .collect();
 
     // Send `hello` with live_seq.

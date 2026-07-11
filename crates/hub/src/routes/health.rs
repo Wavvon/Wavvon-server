@@ -145,6 +145,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         lan_fingerprint: state.lan_fingerprint.clone(),
         welcome_label,
         welcome_invite_url,
+        voice_udp_addr: state.voice_udp_addr.clone(),
     })
 }
 
@@ -226,4 +227,10 @@ pub struct InfoResponse {
     /// Always `https://` or `wavvon://` when present. Absent when unset.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub welcome_invite_url: Option<String>,
+    /// Publicly-reachable `host:port` for this hub's voice UDP relay.
+    /// Absent when the hub has no known public host (no `WAVVON_PUBLIC_URL`
+    /// and not in LAN mode). Clients dial UDP voice directly at this
+    /// address after fetching `/info` — see "UDP voice" in farm-impl.md.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice_udp_addr: Option<String>,
 }

@@ -737,6 +737,21 @@ pub async fn verify(
     }))
 }
 
+/// Result of a successful [`validate_ws_token`] call.
+pub struct WsAuth {
+    pub public_key: String,
+    /// Session scope: `"member"`, `"mini_app"`, or (bot tokens / legacy rows)
+    /// effectively `"member"`. Never `"lobby"` — that scope is rejected
+    /// before this is constructed.
+    pub scope: String,
+    /// Set only when `scope == "mini_app"`: the single channel this
+    /// mini-app session (bot-mini-apps.md "Scoped session token") is bound
+    /// to. Callers use this to confine auto-subscription/roster loading to
+    /// just this channel instead of every channel the underlying user can
+    /// read.
+    pub mini_app_channel_id: Option<String>,
+}
+
 /// Validate a hub session token for WebSocket connections.
 ///
 /// Mirrors the checks in the HTTP `AuthUser` extractor so the two paths
@@ -752,16 +767,21 @@ pub async fn verify(
 ///      deferred (v1 polls `/lobby/status`), so there is nothing a lobby
 ///      session legitimately needs a WS for yet.
 ///
-/// Returns the canonical public key on success.
+/// A `mini_app`-scoped session (bot-mini-apps.md) is allowed through — the
+/// mini-app webview's whole purpose is to talk over `/ws` — but callers
+/// must consult `WsAuth::mini_app_channel_id` to confine what it can see.
 pub async fn validate_ws_token(
     db: &PgPool,
     token: &str,
-) -> Result<String, (axum::http::StatusCode, String)> {
+) -> Result<WsAuth, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
 
+    // (public_key, approval_status, expires_at, scope, mini_app_channel_id)
+    type WsSessionRow = (String, String, Option<i64>, String, Option<String>);
+
     // Try session table first.
-    let row: Option<(String, String, Option<i64>, String)> = sqlx::query_as(
-        "SELECT s.public_key, u.approval_status, s.expires_at, s.scope
+    let row: Option<WsSessionRow> = sqlx::query_as(
+        "SELECT s.public_key, u.approval_status, s.expires_at, s.scope, s.mini_app_channel_id
          FROM sessions s
          INNER JOIN users u ON s.public_key = u.public_key
          WHERE s.token = $1",
@@ -771,42 +791,43 @@ pub async fn validate_ws_token(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (pk, approval_status) = if let Some((pk, status, expires_at, scope)) = row {
-        if let Some(exp) = expires_at {
-            let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            if exp < now_ts {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    r#"{"error":"token_expired"}"#.to_string(),
-                ));
+    let (pk, approval_status, scope, mini_app_channel_id) =
+        if let Some((pk, status, expires_at, scope, mini_app_channel_id)) = row {
+            if let Some(exp) = expires_at {
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if exp < now_ts {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        r#"{"error":"token_expired"}"#.to_string(),
+                    ));
+                }
             }
-        }
-        if scope == "lobby" {
-            return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
-        }
-        (pk, status)
-    } else {
-        // Try bot tokens.
-        let bot_key: Option<String> =
-            sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = $1")
-                .bind(token)
-                .fetch_optional(db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if scope == "lobby" {
+                return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
+            }
+            (pk, status, scope, mini_app_channel_id)
+        } else {
+            // Try bot tokens.
+            let bot_key: Option<String> =
+                sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = $1")
+                    .bind(token)
+                    .fetch_optional(db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-        match bot_key {
-            Some(k) => (k, "approved".to_string()),
-            None => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid or expired token".to_string(),
-                ))
+            match bot_key {
+                Some(k) => (k, "approved".to_string(), "member".to_string(), None),
+                None => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Invalid or expired token".to_string(),
+                    ))
+                }
             }
-        }
-    };
+        };
 
     // Subkey revocation check.
     let revoked_count: i64 =
@@ -832,7 +853,11 @@ pub async fn validate_ws_token(
         return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
     }
 
-    Ok(pk)
+    Ok(WsAuth {
+        public_key: pk,
+        scope,
+        mini_app_channel_id,
+    })
 }
 
 /// Assign builtin roles to a brand-new user who has none yet.

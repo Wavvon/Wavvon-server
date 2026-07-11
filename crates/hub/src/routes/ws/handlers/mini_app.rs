@@ -80,6 +80,16 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
     let grant_camera = requires_camera && state.bots_allow_camera;
 
     // Mint a 4-hour scoped session token for the joining user.
+    //
+    // `scope = 'mini_app'` (not 'member' — see auth::middleware) is the fix
+    // for the security finding this closes: this token used to be a plain
+    // full-access session row indistinguishable from the user's own login,
+    // which meant a mini-app webview holding it could call every REST route
+    // the user's roles allowed, including admin and federation endpoints.
+    // `mini_app_channel_id` / `mini_app_bot_id` record the binding
+    // bot-mini-apps.md's "Scoped session token" section documents ("Bound to
+    // one channel and one bot ID"); the WS layer uses the channel id to
+    // confine auto-subscription to just this channel.
     let mut bytes = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     let token = hex::encode(&bytes);
@@ -91,12 +101,15 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
     let expires_at = now + 4 * 3600;
 
     let insert_ok = sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope, mini_app_channel_id, mini_app_bot_id)
+         VALUES ($1, $2, $3, $4, 'mini_app', $5, $6)",
     )
     .bind(&token)
     .bind(&cs.public_key)
     .bind(now)
     .bind(expires_at)
+    .bind(&channel_id)
+    .bind(&bot_id)
     .execute(&state.db)
     .await
     .is_ok();

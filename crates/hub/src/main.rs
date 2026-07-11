@@ -987,6 +987,19 @@ async fn main() -> Result<()> {
 
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
 
+    // Publicly-reachable host for the voice UDP relay: WAVVON_PUBLIC_URL's
+    // host wins (explicit operator override), falling back to the LAN-mode
+    // advertise address when set. No public host is known otherwise — the
+    // hub doesn't guess at its own internet-facing IP.
+    let voice_udp_host: Option<String> = settings
+        .public_url
+        .as_deref()
+        .and_then(|u| Url::parse(u).ok())
+        .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
+        .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
+    let voice_udp_addr: Option<String> =
+        voice_udp_host.map(|host| format!("{host}:{voice_udp_port}"));
+
     // ---- WebAuthn / passkey setup ----
     let rp_id: String = settings
         .webauthn_rp_id
@@ -1043,6 +1056,7 @@ async fn main() -> Result<()> {
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_udp_port,
+        voice_udp_addr,
         voice_event_tx,
         dm_tx,
         online_users: RwLock::new(HashMap::new()),

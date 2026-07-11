@@ -1632,6 +1632,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Mini-app session binding (bot-mini-apps.md "Scoped session token"):
+    // a `scope = 'mini_app'` session (minted by `bot_app_join`, see
+    // routes/ws/handlers/mini_app.rs) is bound to exactly one channel and
+    // one bot ID. NULL for every other scope. Recorded so the WS layer can
+    // confine auto-subscription to the bound channel only, and so a future
+    // `DELETE /bots/{id}/sessions/{token}` revocation endpoint can look up
+    // which bot a given mini-app session belongs to.
+    let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN mini_app_channel_id TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE sessions ADD COLUMN mini_app_bot_id TEXT")
+        .execute(pool)
+        .await;
+
     // Role-granting invites (task #34). NULL = a plain invite (today's
     // behavior). When set, the role is assigned to the joining user in
     // addition to builtin-everyone — see routes::invites::create_invite for

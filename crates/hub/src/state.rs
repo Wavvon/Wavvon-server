@@ -269,6 +269,14 @@ pub struct AppState {
     /// Next available sender_id counter per channel
     pub voice_next_sender_id: RwLock<HashMap<String, u16>>,
     pub voice_udp_port: u16,
+    /// Publicly-reachable `host:port` for this hub's voice UDP relay, or
+    /// `None` when no public host is known (no `WAVVON_PUBLIC_URL` and not
+    /// in LAN mode). Derived once at startup from (in priority order)
+    /// `WAVVON_PUBLIC_URL`'s host, then the LAN-mode advertise address, both
+    /// paired with `voice_udp_port`. Surfaced on `/info` so a farm-routed
+    /// client (or any client) can dial voice directly without guessing the
+    /// hub's public address — see "UDP voice" in farm-impl.md.
+    pub voice_udp_addr: Option<String>,
     pub voice_event_tx: broadcast::Sender<(String, WsServerMessage)>,
     // DM relay: broadcast DMs to all WS clients (they filter by conversation membership)
     pub dm_tx: broadcast::Sender<DmEvent>,

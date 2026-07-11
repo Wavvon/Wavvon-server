@@ -518,3 +518,89 @@ async fn first_boot_owner_invite_grants_owner_and_is_one_time() {
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
 }
+
+/// The end-to-end bootstrap flow demo-seed relies on (task: fix demo-seed vs
+/// invite-first defaults): a brand-new, ownerless, `invite_only=true` hub
+/// mints its first-boot owner invite; the admin identity redeems it (single
+/// use, so it can't be reused for anyone else); the now-owner admin mints a
+/// fresh multi-use invite via `POST /invites`; further identities redeem
+/// *that* invite to join as regular (non-owner) members.
+#[tokio::test]
+async fn first_boot_owner_invite_then_admin_minted_invite_onboards_members() {
+    let server = common::setup_raw().await;
+    let db = &server.state().db;
+
+    // Step 1: the hub mints the owner-granting invite for the ownerless hub,
+    // exactly as `maybe_mint_first_boot_owner_invite` is called from
+    // `main.rs` at real startup / `--doctor`.
+    let owner_code = wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(db)
+        .await
+        .unwrap()
+        .expect("a fresh, ownerless hub should mint a first-boot invite");
+
+    // Step 2: the admin identity (demo-seed's "Nova") redeems it and becomes
+    // builtin-owner.
+    let admin = Identity::generate();
+    let admin_token = authenticate_with_invite(&server, &admin, Some(owner_code.as_str())).await;
+    assert!(!admin_token.is_empty());
+
+    let resp = server
+        .get(&format!("/users/{}/roles", admin.public_key_hex()))
+        .authorization_bearer(&admin_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(roles.iter().any(|r| r.id == "builtin-owner"));
+
+    // Step 3: the admin mints a fresh invite for the rest of the roster —
+    // the owner invite is already exhausted (max_uses = 1) so it cannot be
+    // reused, matching demo-seed's fixed member-onboarding flow.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&admin_token)
+        .json(&json!({ "max_uses": 7 }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let members_invite: InviteResponse = resp.json();
+
+    // Step 4: a plain member identity redeems the admin-minted invite and
+    // joins successfully, without becoming owner.
+    let member = Identity::generate();
+    let member_token =
+        authenticate_with_invite(&server, &member, Some(members_invite.code.as_str())).await;
+    assert!(!member_token.is_empty());
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&admin_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(!roles.iter().any(|r| r.id == "builtin-owner"));
+
+    // Step 5: the same admin-minted invite still has uses left, so a second
+    // member can redeem it too (max_uses = 7, only 1 consumed so far).
+    let member2 = Identity::generate();
+    let member2_token =
+        authenticate_with_invite(&server, &member2, Some(members_invite.code.as_str())).await;
+    assert!(!member2_token.is_empty());
+
+    // Step 6: the original owner invite is still exhausted — a third party
+    // cannot reuse it even after the admin invite exists.
+    let intruder = Identity::generate();
+    let pub_key = intruder.public_key_hex();
+    let resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await;
+    let challenge: ChallengeResponse = resp.json();
+    let signature = intruder.sign(&hex::decode(&challenge.challenge).unwrap());
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+            "invite_code": owner_code,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}

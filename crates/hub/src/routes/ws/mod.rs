@@ -26,12 +26,15 @@ pub async fn ws_handler(
     // Delegate to the shared session-validity helper so the WS admission
     // checks never drift from what the HTTP AuthUser middleware enforces
     // (session expiry, revocation, approval_status, bans).
-    let public_key = crate::auth::handlers::validate_ws_token(&state.db, &params.token).await?;
+    let auth = crate::auth::handlers::validate_ws_token(&state.db, &params.token).await?;
+    let public_key = auth.public_key;
 
     tracing::info!(
         "WebSocket connected: {}",
         &public_key[..16.min(public_key.len())]
     );
 
-    Ok(ws.on_upgrade(move |socket| connection::handle_socket(socket, state, public_key)))
+    Ok(ws.on_upgrade(move |socket| {
+        connection::handle_socket(socket, state, public_key, auth.mini_app_channel_id)
+    }))
 }

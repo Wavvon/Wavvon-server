@@ -57,6 +57,7 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx: broadcast::channel(16).0,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(HashMap::new()),

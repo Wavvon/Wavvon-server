@@ -28,10 +28,17 @@ pub async fn handle_voice_ws(
 
 async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppState>) {
     // Authenticate token — same validator the main WS endpoint uses.
-    let pubkey = match crate::auth::handlers::validate_ws_token(&state.db, &params.token).await {
-        Ok(pk) => pk,
+    let auth = match crate::auth::handlers::validate_ws_token(&state.db, &params.token).await {
+        Ok(a) => a,
         Err(_) => return,
     };
+    // Mini-app sessions (bot-mini-apps.md "Scoped session token") are bound
+    // to one channel for chat relay purposes — voice was never part of that
+    // scope, so reject rather than let a mini-app token join a voice call.
+    if auth.scope == "mini_app" {
+        return;
+    }
+    let pubkey = auth.public_key;
 
     // `channel_id` may be reassigned below by the spawn-on-join path
     // (temp-voice-channels.md §2) once we know the target is a spawner.

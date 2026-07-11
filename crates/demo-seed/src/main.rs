@@ -8,10 +8,19 @@
 //!   HUB_URL          base URL of the hub  (default: http://localhost:3000)
 //!   CREDS_OUT        path for the JSON credentials file
 //!                    (default: demo-credentials.json in the current directory)
+//!   INVITE_CODE      owner-granting invite code to redeem for the admin
+//!                    identity (also settable via `--invite <code>`).
+//!                    Fresh hubs boot with `invite_only=true` (task #31) and
+//!                    mint a single-use owner invite, printed by the hub at
+//!                    startup / `wavvon-hub --doctor` — there is no API to
+//!                    fetch it, so it must be pasted in here. Not needed
+//!                    against a hub that already has `invite_only=false`.
 //!
 //! Usage:
 //!   cargo run -p demo-seed
 //!   HUB_URL=http://myhub.example:3000 cargo run -p demo-seed
+//!   cargo run -p demo-seed -- --invite a1b2c3d4e5f6
+//!   INVITE_CODE=a1b2c3d4e5f6 cargo run -p demo-seed
 
 use anyhow::{bail, Context, Result};
 use reqwest::Client;
@@ -144,7 +153,17 @@ async fn send(builder: reqwest::RequestBuilder) -> Result<reqwest::Response> {
 // ---------------------------------------------------------------------------
 
 /// POST /auth/challenge + POST /auth/verify → session token.
-async fn authenticate(client: &Client, hub: &str, identity: &Identity) -> Result<String> {
+///
+/// `invite_code` is forwarded on the verify call when present. It is only
+/// consulted by the hub when the hub is invite-only *and* this is a
+/// brand-new identity with no roles yet — passing one against a hub that
+/// doesn't require it is harmless (the hub ignores the field in that case).
+async fn authenticate(
+    client: &Client,
+    hub: &str,
+    identity: &Identity,
+    invite_code: Option<&str>,
+) -> Result<String> {
     let pub_key = identity.public_key_hex();
 
     // Step 1: request challenge
@@ -167,18 +186,36 @@ async fn authenticate(client: &Client, hub: &str, identity: &Identity) -> Result
     let sig_hex = hex::encode(signature.to_bytes());
 
     // Step 3: verify
-    let verify: VerifyResponse = send(client.post(format!("{hub}/auth/verify")).json(&json!({
+    let mut body = json!({
         "public_key": pub_key,
         "challenge": resp.challenge,
         "signature": sig_hex,
-    })))
-    .await
-    .context("POST /auth/verify failed")?
-    .error_for_status()
-    .context("verify returned error status")?
-    .json()
-    .await
-    .context("verify response parse failed")?;
+    });
+    if let Some(code) = invite_code {
+        body["invite_code"] = json!(code);
+    }
+
+    let verify_resp = send(client.post(format!("{hub}/auth/verify")).json(&body))
+        .await
+        .context("POST /auth/verify failed")?;
+
+    if verify_resp.status().as_u16() == 403 {
+        let detail = verify_resp.text().await.unwrap_or_default();
+        bail!(
+            "POST /auth/verify returned 403 for key {}: {detail}. \
+             This hub is likely invite_only (fresh hubs default to invite_only=true — \
+             task #31). Pass the owner invite code printed in the hub's startup logs \
+             (or `wavvon-hub --doctor` output) via --invite <code> or INVITE_CODE=<code>.",
+            &pub_key[..16]
+        );
+    }
+
+    let verify: VerifyResponse = verify_resp
+        .error_for_status()
+        .context("verify returned error status")?
+        .json()
+        .await
+        .context("verify response parse failed")?;
 
     // If the hub returned a lobby scope the identity's PoW level is below
     // min_security_level. On a fresh hub with defaults this should not happen;
@@ -194,6 +231,32 @@ async fn authenticate(client: &Client, hub: &str, identity: &Identity) -> Result
     }
 
     Ok(verify.token)
+}
+
+/// POST /invites — mints a fresh invite the admin uses to onboard the
+/// remaining demo members. Needed because the owner invite redeemed by the
+/// admin (`INVITE_CODE`) is single-use (task #34's admin-grant guard) and
+/// can't be reused for the rest of the roster.
+async fn create_invite(client: &Client, hub: &str, token: &str, max_uses: i64) -> Result<String> {
+    #[derive(Deserialize)]
+    struct CreateInviteResponse {
+        code: String,
+    }
+
+    let resp: CreateInviteResponse = send(
+        client
+            .post(format!("{hub}/invites"))
+            .bearer_auth(token)
+            .json(&json!({ "max_uses": max_uses })),
+    )
+    .await
+    .context("POST /invites failed")?
+    .error_for_status()
+    .context("create_invite returned error status")?
+    .json()
+    .await
+    .context("invite response parse failed")?;
+    Ok(resp.code)
 }
 
 /// PATCH /me  to set the display name.
@@ -397,26 +460,15 @@ async fn existing_channel_count(client: &Client, hub: &str, token: &str) -> Resu
         .context("channels response is not an array")
 }
 
-// ---------------------------------------------------------------------------
-// Extraction of secret key bytes from Identity (internal field access via
-// sign round-trip approach is not needed — Identity exposes recovery_phrase
-// which we store; for the secret_key_hex we reconstruct from the signing key
-// bytes by re-encoding the sign output of a known message and verifying, but
-// the cleaner path is to just keep the entropy from generate()).
-//
-// wavvon_identity::Identity does not expose the raw secret bytes directly in
-// the public API, so we persist the recovery phrase (24 BIP39 words) which
-// is sufficient to reconstruct the keypair, plus the session token for
-// immediate use. We also derive the public key for reference.
-// ---------------------------------------------------------------------------
-
 fn persisted(identity: &Identity, display_name: &str, token: &str) -> PersistedIdentity {
     PersistedIdentity {
         display_name: display_name.to_string(),
         public_key: identity.public_key_hex(),
-        // Recovery phrase (24 BIP39 words) is the durable backup; session
-        // token is ephemeral and only useful for the current hub run.
-        secret_key_hex: String::new(), // not exposed by Identity public API
+        // Recovery phrase (24 BIP39 words) is the durable backup; secret_key_hex
+        // is the raw key for tooling that wants to reconstruct the Identity
+        // directly; session token is ephemeral and only useful for the
+        // current hub run.
+        secret_key_hex: identity.secret_key_hex(),
         session_token: token.to_string(),
         recovery_phrase: identity.recovery_phrase(),
     }
@@ -433,13 +485,43 @@ fn persisted(identity: &Identity, display_name: &str, token: &str) -> PersistedI
 /// the sustained rate even if other traffic shares the IP.
 const REGISTRATION_PACE: Duration = Duration::from_secs(2);
 
+/// Reads `--invite <code>` from argv, falling back to the `INVITE_CODE`
+/// env var. Returns `None` when neither is set — fine for a hub that isn't
+/// invite_only, an error otherwise (surfaced from `authenticate`'s 403 path).
+fn owner_invite_code() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    owner_invite_code_from(&args, std::env::var("INVITE_CODE").ok())
+}
+
+/// Pure logic behind [`owner_invite_code`], parameterised on argv and the
+/// env var value so it's testable without touching real process state.
+/// `--invite` takes priority over `INVITE_CODE` when both are present.
+fn owner_invite_code_from(args: &[String], invite_code_env: Option<String>) -> Option<String> {
+    args.iter()
+        .position(|a| a == "--invite")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .or(invite_code_env)
+        .filter(|s| !s.is_empty())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let hub_url = std::env::var("HUB_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let creds_out =
         std::env::var("CREDS_OUT").unwrap_or_else(|_| "demo-credentials.json".to_string());
+    let invite_code = owner_invite_code();
 
     println!("demo-seed: target hub = {hub_url}");
+    match &invite_code {
+        Some(_) => {
+            println!("demo-seed: owner invite code provided, will redeem it for the admin identity")
+        }
+        None => println!(
+            "demo-seed: no owner invite code provided (--invite / INVITE_CODE) — \
+             assuming the hub is not invite_only"
+        ),
+    }
 
     // TLS verification is only skipped for a loopback target (the intended
     // use of this tool is seeding a local demo hub). A HUB_URL pointed at a
@@ -482,7 +564,7 @@ async fn main() -> Result<()> {
     // ------------------------------------------------------------------
     let admin = Identity::generate();
     println!("Authenticating admin identity ...");
-    let admin_token = authenticate(&client, &hub_url, &admin)
+    let admin_token = authenticate(&client, &hub_url, &admin, invite_code.as_deref())
         .await
         .context("Admin authentication failed. If the hub already has users it is not fresh.")?;
     set_display_name(&client, &hub_url, &admin_token, "Nova")
@@ -523,6 +605,12 @@ async fn main() -> Result<()> {
     // (burst=10, refill=1/s) refills between the challenge+verify pair
     // for each member.  The send() helper will also back off automatically
     // on any 429 that slips through.
+    //
+    // The owner invite the admin redeemed above (if any) is single-use
+    // (task #34's admin-grant guard forces max_uses=1 on any invite that
+    // grants an admin-holding role) so it cannot be reused for the rest of
+    // the roster. The now-admin identity mints its own invite for them —
+    // harmless to pass on a non-invite_only hub, where it's simply ignored.
     // ------------------------------------------------------------------
     let member_names = [
         "patches",
@@ -534,6 +622,15 @@ async fn main() -> Result<()> {
         "Vex",
     ];
 
+    let members_invite_code =
+        create_invite(&client, &hub_url, &admin_token, member_names.len() as i64)
+            .await
+            .context("Failed to mint an invite for the demo members")?;
+    println!(
+        "Minted a {}-use invite for the demo members.",
+        member_names.len()
+    );
+
     let mut member_tokens: Vec<(Identity, String)> = Vec::new();
     for name in &member_names {
         // Pace before each registration (including the first) to let the
@@ -541,7 +638,7 @@ async fn main() -> Result<()> {
         sleep(REGISTRATION_PACE).await;
 
         let id = Identity::generate();
-        let token = authenticate(&client, &hub_url, &id)
+        let token = authenticate(&client, &hub_url, &id, Some(&members_invite_code))
             .await
             .context(format!("Auth failed for member {name}"))?;
         set_display_name(&client, &hub_url, &token, name)
@@ -977,4 +1074,68 @@ async fn main() -> Result<()> {
     println!("=============================================================");
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_invite_source_returns_none() {
+        assert_eq!(owner_invite_code_from(&args(&["demo-seed"]), None), None);
+    }
+
+    #[test]
+    fn env_var_used_when_no_cli_flag() {
+        assert_eq!(
+            owner_invite_code_from(&args(&["demo-seed"]), Some("abc123".to_string())),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_flag_used_when_present() {
+        assert_eq!(
+            owner_invite_code_from(&args(&["demo-seed", "--invite", "deadbeef"]), None),
+            Some("deadbeef".to_string())
+        );
+    }
+
+    #[test]
+    fn cli_flag_takes_priority_over_env_var() {
+        assert_eq!(
+            owner_invite_code_from(
+                &args(&["demo-seed", "--invite", "from-cli"]),
+                Some("from-env".to_string())
+            ),
+            Some("from-cli".to_string())
+        );
+    }
+
+    #[test]
+    fn dangling_invite_flag_with_no_value_falls_back_to_env() {
+        assert_eq!(
+            owner_invite_code_from(
+                &args(&["demo-seed", "--invite"]),
+                Some("from-env".to_string())
+            ),
+            Some("from-env".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_values_are_treated_as_absent() {
+        assert_eq!(
+            owner_invite_code_from(&args(&["demo-seed", "--invite", ""]), None),
+            None
+        );
+        assert_eq!(
+            owner_invite_code_from(&args(&["demo-seed"]), Some(String::new())),
+            None
+        );
+    }
 }
