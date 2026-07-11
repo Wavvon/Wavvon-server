@@ -19,7 +19,14 @@ const ADMIN_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
 /// True if holding `role_id` alone grants the `admin` permission.
 /// `builtin-owner` is seeded with an explicit `admin` row (see
 /// `db::migrations::run`), so no separate special-case is needed here.
-async fn role_grants_admin(db: &sqlx::PgPool, role_id: &str) -> Result<bool, (StatusCode, String)> {
+///
+/// `pub(crate)` so `routes::hub::update_hub` can reuse it to reject an
+/// admin-holding role as `default_invite_role_id` (hub-level invite role
+/// policy).
+pub(crate) async fn role_grants_admin(
+    db: &sqlx::PgPool,
+    role_id: &str,
+) -> Result<bool, (StatusCode, String)> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission = 'admin')",
     )
@@ -204,49 +211,100 @@ pub async fn validate_and_use_invite(
     Ok((invite.created_by, invite.grant_role_id))
 }
 
-/// Applies an invite's `grant_role_id` (if any) to a newly admitted user.
-/// Shared by both invite-redemption paths — new-registration via
-/// `/auth/verify` and existing-session via `/join/:code` — so the grant
-/// logic (and its guards) lives in exactly one place (task #34 follow-on).
+/// Applies an invite's `grant_role_id` (if any) — or, absent an explicit
+/// grant, the hub-level `default_invite_role_id` setting (invite role
+/// policies, hub-level default) — to a newly admitted user. Shared by both
+/// invite-redemption paths — new-registration via `/auth/verify` and
+/// existing-session via `/join/:code` — so the grant logic (and its guards)
+/// lives in exactly one place (task #34 follow-on).
 ///
-/// Re-validates the priority guard at redemption time: `create_invite`
-/// already rejects minting an invite that grants a role at or above the
-/// creator's priority, but the creator's own priority (or the role's
-/// priority) can change between mint and redemption, and a stale invite
-/// otherwise stays live at a would-be-blocked-if-minted-today grant. On a
-/// guard failure this withholds the bonus role rather than failing the
+/// `grant_role_id: None` means the invite itself didn't request a role; this
+/// function then looks up `default_invite_role_id` in `hub_settings` and
+/// falls back to that instead. An explicit invite grant always wins over the
+/// default — the default is never consulted when `grant_role_id` is `Some`.
+///
+/// Explicit-grant guard: re-validates the priority guard at redemption time.
+/// `create_invite` already rejects minting an invite that grants a role at or
+/// above the creator's priority, but the creator's own priority (or the
+/// role's priority) can change between mint and redemption, and a stale
+/// invite otherwise stays live at a would-be-blocked-if-minted-today grant.
+/// On a guard failure this withholds the bonus role rather than failing the
 /// caller's request — the join/registration has already succeeded by this
 /// point. The first-boot owner invite's `created_by = 'system'` sentinel is
 /// exempt, matching `maybe_mint_first_boot_owner_invite`'s documented
 /// exception (no real user holds a priority to compare against yet).
+///
+/// Default-role guard: no inviter priority is meaningful here (a hub-level
+/// setting has no "creator"), so instead this defends against the role
+/// having been deleted, or having gained the `admin` permission, since the
+/// setting was configured — either silently skips the default rather than
+/// failing the redemption.
 pub async fn apply_invite_role_grant(
     db: &sqlx::PgPool,
     invite_created_by: &str,
-    grant_role_id: &str,
+    grant_role_id: Option<&str>,
     user_public_key: &str,
     now: i64,
 ) -> Result<(), (StatusCode, String)> {
-    if invite_created_by != "system" {
-        let role_priority: Option<i64> =
-            sqlx::query_scalar("SELECT priority FROM roles WHERE id = $1")
-                .bind(grant_role_id)
-                .fetch_optional(db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let role_id: String = match grant_role_id {
+        Some(role_id) => {
+            if invite_created_by != "system" {
+                let role_priority: Option<i64> =
+                    sqlx::query_scalar("SELECT priority FROM roles WHERE id = $1")
+                        .bind(role_id)
+                        .fetch_optional(db)
+                        .await
+                        .map_err(|e| {
+                            (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
+                        })?;
 
-        let role_priority = match role_priority {
-            Some(p) => p,
-            None => return Ok(()), // the role was deleted since the invite was minted
-        };
+                let role_priority = match role_priority {
+                    Some(p) => p,
+                    None => return Ok(()), // the role was deleted since the invite was minted
+                };
 
-        let creator_perms = permissions::user_permissions(db, invite_created_by).await?;
-        if role_priority >= creator_perms.max_priority {
-            // The creator no longer outranks this role (demoted, or the
-            // role's own priority changed since the invite was minted) —
-            // withhold the grant instead of failing the redemption.
-            return Ok(());
+                let creator_perms = permissions::user_permissions(db, invite_created_by).await?;
+                if role_priority >= creator_perms.max_priority {
+                    // The creator no longer outranks this role (demoted, or
+                    // the role's own priority changed since the invite was
+                    // minted) — withhold the grant instead of failing the
+                    // redemption.
+                    return Ok(());
+                }
+            }
+            role_id.to_string()
         }
-    }
+        None => {
+            let default_role_id: Option<String> = sqlx::query_scalar(
+                "SELECT value FROM hub_settings WHERE key = 'default_invite_role_id'",
+            )
+            .fetch_optional(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .filter(|v: &String| !v.is_empty());
+
+            let Some(default_role_id) = default_role_id else {
+                return Ok(()); // no default configured — nothing to grant
+            };
+
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM roles WHERE id = $1)")
+                    .bind(&default_role_id)
+                    .fetch_one(db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if !exists {
+                return Ok(()); // the default role was deleted since it was configured
+            }
+            if role_grants_admin(db, &default_role_id).await? {
+                // Defense in depth: the role gained `admin` since it was set
+                // as the default — refuse to silently hand out admin.
+                return Ok(());
+            }
+
+            default_role_id
+        }
+    };
 
     sqlx::query(
         "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
@@ -254,7 +312,7 @@ pub async fn apply_invite_role_grant(
          ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(user_public_key)
-    .bind(grant_role_id)
+    .bind(&role_id)
     .bind(now)
     .execute(db)
     .await
@@ -384,10 +442,11 @@ pub async fn get_join_info(
 /// POST /join/:code — requires a valid session token.
 /// Validates the invite, increments use_count, and auto-approves the user
 /// (bypasses the require_approval gate even when the hub has it enabled).
-/// If the invite carries `grant_role_id` (task #34), the same role grant
-/// applied on the `/auth/verify` registration path is applied here too, via
-/// the shared `apply_invite_role_grant` helper (same priority-guard
-/// re-check).
+/// The same role grant applied on the `/auth/verify` registration path is
+/// applied here too, via the shared `apply_invite_role_grant` helper (same
+/// priority-guard re-check) — whether the invite carries an explicit
+/// `grant_role_id` (task #34) or falls back to the hub-level
+/// `default_invite_role_id` (invite role policies).
 pub async fn join_with_invite(
     State(state): State<Arc<AppState>>,
     user: crate::auth::middleware::AuthUser,
@@ -431,16 +490,18 @@ pub async fn join_with_invite(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    if let Some(role_id) = &invite.grant_role_id {
-        apply_invite_role_grant(
-            &state.db,
-            &invite.created_by,
-            role_id,
-            &user.public_key,
-            now,
-        )
-        .await?;
-    }
+    // Always call the shared helper, even when the invite carries no
+    // explicit `grant_role_id` — it falls back to `default_invite_role_id`
+    // (hub-level invite role policy) in that case, and is itself a no-op
+    // when neither an explicit grant nor a default is in play.
+    apply_invite_role_grant(
+        &state.db,
+        &invite.created_by,
+        invite.grant_role_id.as_deref(),
+        &user.public_key,
+        now,
+    )
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

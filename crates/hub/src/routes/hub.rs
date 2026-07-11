@@ -64,6 +64,35 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "welcome_invite_url", invite_url).await?;
     }
+    if let Some(role_id) = req.default_invite_role_id.as_deref() {
+        if role_id.is_empty() {
+            // Empty string clears the setting, matching the convention used
+            // by `icon` and `welcome_invite_url` above.
+            upsert_setting(&state.db, "default_invite_role_id", "").await?;
+        } else {
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM roles WHERE id = $1)")
+                    .bind(role_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if !exists {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "default_invite_role_id does not reference an existing role".to_string(),
+                ));
+            }
+            if crate::routes::invites::role_grants_admin(&state.db, role_id).await? {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "default_invite_role_id cannot carry the admin permission — a default that \
+                     silently hands out admin is not allowed"
+                        .to_string(),
+                ));
+            }
+            upsert_setting(&state.db, "default_invite_role_id", role_id).await?;
+        }
+    }
 
     Ok(StatusCode::OK)
 }
@@ -247,20 +276,30 @@ pub async fn get_hub_settings(
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    let default_invite_role_id: Option<String> = read_setting(&state.db, "default_invite_role_id")
+        .await
+        .filter(|v| !v.is_empty());
+
     Ok(Json(HubSettings {
         require_approval,
         invite_only,
         min_security_level,
         max_channel_depth,
+        default_invite_role_id,
     }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct HubSettings {
     pub require_approval: bool,
     pub invite_only: bool,
     pub min_security_level: u32,
     pub max_channel_depth: u32,
+    /// Role automatically granted to a new user who joins via an invite that
+    /// doesn't itself carry an explicit `grant_role_id` (invite role
+    /// policies, hub-level default). `null` when unset.
+    #[serde(default)]
+    pub default_invite_role_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -317,6 +356,12 @@ pub struct UpdateHubRequest {
     /// `wavvon://`. Empty string clears the setting.
     #[serde(default)]
     pub welcome_invite_url: Option<String>,
+    /// Hub-level invite role policy default (invite role policies). Role to
+    /// grant a new user who joins via an invite that doesn't itself carry an
+    /// explicit `grant_role_id`. Must reference an existing role that does
+    /// not carry the `admin` permission. Empty string clears the setting.
+    #[serde(default)]
+    pub default_invite_role_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]

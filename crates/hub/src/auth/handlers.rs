@@ -610,17 +610,21 @@ pub async fn verify(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         }
-        // Role-granting invite (task #34), applied through the shared helper
-        // also used by the `/join/:code` redemption path (its ON CONFLICT DO
-        // NOTHING covers the rare, harmless case where this is also the same
-        // role granted above — e.g. the first-boot owner invite grants
-        // builtin-owner to the very first user, who already received it via
-        // existing_users == 0).
-        if let (Some(role_id), Some(created_by)) = (&invite_grant_role_id, &invite_created_by) {
+        // Role-granting invite (task #34) — or, absent an explicit grant, the
+        // hub-level `default_invite_role_id` (invite role policies) — applied
+        // through the shared helper also used by the `/join/:code` redemption
+        // path (its ON CONFLICT DO NOTHING covers the rare, harmless case
+        // where this is also the same role granted above — e.g. the
+        // first-boot owner invite grants builtin-owner to the very first
+        // user, who already received it via existing_users == 0). Only
+        // consulted when an invite was actually redeemed this call
+        // (`invite_created_by` is `Some`) — registrations that didn't use an
+        // invite at all don't pick up the default.
+        if let Some(created_by) = &invite_created_by {
             crate::routes::invites::apply_invite_role_grant(
                 &state.db,
                 created_by,
-                role_id,
+                invite_grant_role_id.as_deref(),
                 &canonical_pubkey,
                 now,
             )
