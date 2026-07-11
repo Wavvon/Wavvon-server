@@ -127,7 +127,7 @@ pub async fn peer_channels(
     let mut result = Vec::new();
 
     for ch in channels {
-        let fed_id = format!("{}:{}", &peer_key[..16], &ch.id);
+        let fed_id = format!("{}:{}", &peer_key[..16], ch.id);
 
         // Cache in DB (upsert)
         sqlx::query(
