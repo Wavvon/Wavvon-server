@@ -1,6 +1,7 @@
 use crate::routes::chat_models::Attachment;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use wavvon_identity::SubkeyCert;
 
 #[derive(Deserialize)]
 pub struct CreateConversationRequest {
@@ -64,6 +65,17 @@ pub struct EncryptedDmEnvelope {
     /// DR only: number of messages in the previous sending chain (for out-of-order).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_count: Option<u32>,
+    /// Present when this envelope was signed by a paired device's subkey
+    /// rather than the canonical (subkey-0/entropy) key — see
+    /// docs/docs/decisions.md "Paired-device DMs attribute to canonical via
+    /// cert-chained envelopes". `sender_pubkey` above stays the canonical
+    /// pubkey either way; verifiers check the envelope signature against
+    /// `signer_cert.subkey_pubkey` (not `sender_pubkey`) when present, plus
+    /// that `sender_pubkey` is owned by `signer_cert.master_pubkey`.
+    /// `None` (and omitted from the wire) keeps a primary/legacy-device
+    /// envelope byte-identical to today — no wire-vector break.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_cert: Option<SubkeyCert>,
 }
 
 /// Wire envelope for a group E2E encrypted DM.
@@ -156,4 +168,12 @@ pub struct FederatedDmRequest {
     /// empty string until the peer is properly added via /federation/peers.
     #[serde(default)]
     pub sender_hub_url: Option<String>,
+    /// Forwarded from `encrypted_envelope.signer_cert` (if any) so a
+    /// receiving hub can resolve the master→canonical binding for a
+    /// paired-device sender without a session — see
+    /// docs/docs/decisions.md "Paired-device DMs attribute to canonical via
+    /// cert-chained envelopes". `None` for plaintext DMs and for
+    /// primary/legacy-device encrypted DMs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_cert: Option<SubkeyCert>,
 }

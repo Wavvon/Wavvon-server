@@ -10,6 +10,14 @@ use crate::state::AppState;
 
 pub struct AuthUser {
     pub public_key: String,
+    /// The master pubkey bound to this canonical identity, when known —
+    /// mirrors `users.master_pubkey` for `public_key`. `None` for a legacy
+    /// single-key user that has never paired a second device. Used by
+    /// cert-chained DM attribution (docs/docs/decisions.md "Paired-device
+    /// DMs attribute to canonical via cert-chained envelopes") to bind a
+    /// `signer_cert.master_pubkey` to the authenticated session without a
+    /// re-query.
+    pub master_pubkey: Option<String>,
     /// Session scope:
     /// - `"member"` — full access, subject to normal role/permission checks.
     ///   Default for token paths that predate scoping (bot tokens, farm
@@ -472,7 +480,23 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             }
         }
 
-        Ok(AuthUser { public_key, scope })
+        // Single indexed (primary-key) lookup for the master binding used by
+        // cert-chained DM attribution. Cheap enough to do unconditionally
+        // rather than threading an extra flag through every token path
+        // above (farm token, session, bot token).
+        let master_pubkey: Option<String> =
+            sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
+                .bind(&public_key)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
+
+        Ok(AuthUser {
+            public_key,
+            master_pubkey,
+            scope,
+        })
     }
 }
 

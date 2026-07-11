@@ -1654,6 +1654,16 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Wrapped canonical DH scalar relayed through pairing complete
+    // (decisions.md "Paired-device DMs attribute to canonical via
+    // cert-chained envelopes" — Mechanism A). ECIES-wrapped for the
+    // claiming subkey, same shape as the existing `wrapped_key_hex`
+    // (prefs-blob key). NULL for pairings completed before this field
+    // existed and for any peer that hasn't relayed one.
+    let _ = sqlx::query("ALTER TABLE pairing_offers ADD COLUMN wrapped_dh_seed_hex TEXT")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

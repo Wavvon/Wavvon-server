@@ -10,7 +10,7 @@ use crate::routes::chat_models::MAX_ATTACHMENTS_BYTES;
 use crate::routes::dm_models::*;
 use crate::state::{AppState, DmEvent};
 
-use super::keys::{envelope_signing_bytes, group_envelope_signing_bytes};
+use super::keys::{group_envelope_signing_bytes, verify_envelope_sender};
 use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
 
 pub async fn send_dm(
@@ -145,16 +145,35 @@ pub async fn send_dm(
             StatusCode::BAD_REQUEST,
             "encrypted_envelope missing".to_string(),
         ))?;
-        // Verify the Ed25519 signature over the envelope fields.
-        let msg = envelope_signing_bytes(env);
-        let sig_bytes = hex::decode(&env.signature_hex)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-        wavvon_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
-            (
+
+        // Tiered signature verification (docs/docs/decisions.md
+        // "Paired-device DMs attribute to canonical via cert-chained
+        // envelopes"): no signer_cert verifies the signature against the
+        // authenticated canonical identity directly (today's behavior,
+        // unchanged); a signer_cert verifies against the cert's subkey and
+        // returns the cert's master for the binding check below.
+        let cert_master = verify_envelope_sender(env, &user.public_key)?;
+        if let Some(master) = &cert_master {
+            if Some(master.as_str()) != user.master_pubkey.as_deref() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "signer_cert master does not match the authenticated session".to_string(),
+                ));
+            }
+        }
+        // The envelope always claims the canonical pubkey as sender —
+        // whether signed directly (no cert) or via a paired device's
+        // subkey (cert present) — never the authenticated session's own
+        // auth pubkey when that differs (a paired device's session is
+        // already resolved to canonical by `resolve_canonical_identity`,
+        // so `user.public_key` below IS canonical).
+        if env.sender_pubkey != user.public_key {
+            return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Invalid envelope signature: {e}"),
-            )
-        })?;
+                "encrypted_envelope.sender_pubkey must match the authenticated identity"
+                    .to_string(),
+            ));
+        }
     }
 
     if is_group_encrypted {
@@ -376,6 +395,13 @@ pub async fn send_dm(
             encrypted_envelope: req.encrypted_envelope.clone(),
             group_encrypted_envelope: req.group_encrypted_envelope.clone(),
             sender_hub_url: None,
+            // Forward the cert-chained attribution proof (if any) so a
+            // federated hub can verify a paired-device sender without a
+            // session — see dm_models.rs::FederatedDmRequest::signer_cert.
+            signer_cert: req
+                .encrypted_envelope
+                .as_ref()
+                .and_then(|e| e.signer_cert.clone()),
         };
 
         for hub_url in &delivery_urls {
@@ -625,16 +651,27 @@ pub async fn receive_federated_dm(
             StatusCode::BAD_REQUEST,
             "encrypted_envelope missing".to_string(),
         ))?;
-        // Verify the signature before storing.
-        let msg = envelope_signing_bytes(env);
-        let sig_bytes = hex::decode(&env.signature_hex)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-        wavvon_identity::verify_signature(&req.sender, &msg, &sig_bytes).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid envelope signature: {e}"),
-            )
-        })?;
+
+        // Tiered verification, mirroring send_dm (docs/docs/decisions.md
+        // "Paired-device DMs attribute to canonical via cert-chained
+        // envelopes"). No signer_cert verifies against `req.sender`
+        // directly — today's behavior, unchanged.
+        let cert_master = verify_envelope_sender(env, &req.sender)?;
+        // Prefer the per-envelope cert; fall back to the top-level
+        // forwarded cert for a peer that only set that one.
+        let master_opt =
+            cert_master.or_else(|| req.signer_cert.as_ref().map(|c| c.master_pubkey.clone()));
+        if let Some(master) = master_opt {
+            let bound =
+                resolve_master_binding(&state, &req.sender, &master, req.sender_hub_url.as_deref())
+                    .await?;
+            if !bound {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "signer_cert master is not bound to sender".to_string(),
+                ));
+            }
+        }
 
         let ciphertext_json = serde_json::to_string(env)
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
@@ -764,6 +801,74 @@ pub async fn receive_federated_dm(
     });
 
     Ok(StatusCode::OK)
+}
+
+/// Resolve whether `master` (a `signer_cert.master_pubkey` carried on an
+/// incoming federated DM) is bound to `canonical` (`req.sender`) — i.e.
+/// that the master genuinely certified `canonical` as one of its own
+/// subkeys, not just the subkey that signed this particular envelope
+/// (docs/docs/decisions.md "Paired-device DMs attribute to canonical via
+/// cert-chained envelopes", binding tier (c)).
+///
+/// Tries the local `users` row first (covers senders this hub already
+/// knows about — including the origin hub, where `resolve_canonical_identity`
+/// populated it at auth time). Falls back to fetching the sender's device
+/// registry from `sender_hub_url` and checking for a self-cert
+/// (`subkey_pubkey == canonical`, signed by `master`), caching the result
+/// on success so future messages from the same sender skip the network
+/// round-trip.
+async fn resolve_master_binding(
+    state: &AppState,
+    canonical: &str,
+    master: &str,
+    sender_hub_url: Option<&str>,
+) -> Result<bool, (StatusCode, String)> {
+    let local_master: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
+            .bind(canonical)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .flatten();
+
+    if let Some(m) = local_master {
+        return Ok(m == master);
+    }
+
+    let Some(hub_url) = sender_hub_url else {
+        return Ok(false);
+    };
+
+    let Ok(resp) = state
+        .http_client
+        .get(format!("{hub_url}/identity/{master}/devices"))
+        .send()
+        .await
+    else {
+        return Ok(false);
+    };
+
+    let Ok(certs) = resp.json::<Vec<wavvon_identity::SubkeyCert>>().await else {
+        return Ok(false);
+    };
+
+    let proven = certs
+        .iter()
+        .any(|c| c.subkey_pubkey == canonical && c.master_pubkey == master && c.verify().is_ok());
+
+    if proven {
+        // Best-effort cache; COALESCE preserves whatever a concurrent auth
+        // may have already recorded rather than racing it.
+        let _ = sqlx::query(
+            "UPDATE users SET master_pubkey = COALESCE(master_pubkey, $1) WHERE public_key = $2",
+        )
+        .bind(master)
+        .bind(canonical)
+        .execute(&state.db)
+        .await;
+    }
+
+    Ok(proven)
 }
 
 /// Public wrapper around `deliver_federated_dm` for the retry worker.

@@ -15,8 +15,8 @@ use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha512};
 use wavvon_identity::{
     dm_envelope_signing_bytes, group_dm_envelope_signing_bytes, sender_key_dist_signing_bytes,
-    DhKeyRecord, HomeHubList, PairingClaim, PairingOffer, RevocationEntry, SignedPrefsBlob,
-    SubkeyCert,
+    unwrap_blob_key, wrap_blob_key, DhKeyRecord, HomeHubList, PairingClaim, PairingComplete,
+    PairingOffer, PairingStatus, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 const TS: u64 = 1_700_000_000;
@@ -325,6 +325,128 @@ fn pairing_claim_verify_vector() {
         proof: PAIRING_CLAIM_PROOF.to_string(),
     };
     assert!(claim.verify().is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// PairingComplete.wrapped_dh_seed_hex — DM-attribution fix (see
+// docs/docs/decisions.md "Paired-device DMs attribute to canonical via
+// cert-chained envelopes"). `PairingComplete` itself carries no signing
+// bytes (only the nested `cert` is signed), so the new field is a plain
+// JSON addition — these are serde-compatibility checks, not signature
+// vectors. `wrap_blob_key`/`unwrap_blob_key` are the same ECIES primitive
+// `wrapped_blob_key_hex` already uses; the design reuses them verbatim to
+// wrap the canonical X25519 DH **scalar** instead of the prefs-blob key,
+// so no new primitive needs its own vector.
+// ---------------------------------------------------------------------------
+
+fn sample_cert() -> SubkeyCert {
+    SubkeyCert {
+        master_pubkey: MASTER_PUB.to_string(),
+        subkey_pubkey: SUBKEY_PUB.to_string(),
+        device_label: "laptop".to_string(),
+        issued_at: TS,
+        not_after: None,
+        fallback_hubs: vec![],
+        signature: SUBKEY_CERT_SIG.to_string(),
+    }
+}
+
+#[test]
+fn pairing_complete_without_wrapped_dh_seed_parses_as_none() {
+    // Old JSON shape (predates this field) must still deserialize —
+    // no wire-vector break for the existing pairing-complete path.
+    let json = serde_json::json!({
+        "pairing_token": "tok123",
+        "cert": sample_cert(),
+        "wrapped_blob_key_hex": "deadbeef",
+    });
+    let complete: PairingComplete = serde_json::from_value(json).unwrap();
+    assert_eq!(complete.wrapped_dh_seed_hex, None);
+}
+
+#[test]
+fn pairing_complete_round_trips_wrapped_dh_seed_hex() {
+    let complete = PairingComplete {
+        pairing_token: "tok123".to_string(),
+        cert: sample_cert(),
+        wrapped_blob_key_hex: "deadbeef".to_string(),
+        wrapped_dh_seed_hex: Some("cafef00d".to_string()),
+    };
+    let json = serde_json::to_value(&complete).unwrap();
+    let round_tripped: PairingComplete = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        round_tripped.wrapped_dh_seed_hex,
+        Some("cafef00d".to_string())
+    );
+}
+
+#[test]
+fn pairing_status_complete_round_trips_wrapped_dh_seed_hex() {
+    let status = PairingStatus::Complete {
+        cert: sample_cert(),
+        wrapped_blob_key_hex: "deadbeef".to_string(),
+        wrapped_dh_seed_hex: Some("cafef00d".to_string()),
+    };
+    let json = serde_json::to_value(&status).unwrap();
+    let round_tripped: PairingStatus = serde_json::from_value(json).unwrap();
+    match round_tripped {
+        PairingStatus::Complete {
+            wrapped_dh_seed_hex,
+            ..
+        } => assert_eq!(wrapped_dh_seed_hex, Some("cafef00d".to_string())),
+        other => panic!("expected Complete, got {other:?}"),
+    }
+}
+
+#[test]
+fn pairing_status_complete_without_wrapped_dh_seed_parses_as_none() {
+    let json = serde_json::json!({
+        "state": "complete",
+        "cert": sample_cert(),
+        "wrapped_blob_key_hex": "deadbeef",
+    });
+    let status: PairingStatus = serde_json::from_value(json).unwrap();
+    match status {
+        PairingStatus::Complete {
+            wrapped_dh_seed_hex,
+            ..
+        } => assert_eq!(wrapped_dh_seed_hex, None),
+        other => panic!("expected Complete, got {other:?}"),
+    }
+}
+
+/// The wrapped-DH-scalar mechanism (decisions.md Mechanism A): the
+/// enrolling device wraps the canonical X25519 **scalar** (not the
+/// Ed25519 seed) with `wrap_blob_key` for the claiming subkey; the
+/// claiming device unwraps with its own subkey seed via `unwrap_blob_key`.
+/// This is the same primitive `wrapped_blob_key_hex` uses — this test
+/// pins that it round-trips a DH scalar just as well as a symmetric key.
+#[test]
+fn wrapped_dh_scalar_round_trips_through_existing_ecies_primitive() {
+    let master = master_key();
+    let (master_dh_secret, _master_dh_pub) = {
+        use sha2::{Digest, Sha512};
+        let hash = Sha512::digest(master.to_bytes());
+        let mut scalar = [0u8; 32];
+        scalar.copy_from_slice(&hash[..32]);
+        scalar[0] &= 248;
+        scalar[31] &= 127;
+        scalar[31] |= 64;
+        let secret = x25519_dalek::StaticSecret::from(scalar);
+        let public = x25519_dalek::PublicKey::from(&secret);
+        (scalar, public)
+    };
+
+    let subkey = subkey_signing_key();
+    let subkey_pubkey_hex = hex_pubkey(&subkey);
+
+    let wrapped_hex = wrap_blob_key(&master_dh_secret, &subkey_pubkey_hex)
+        .expect("wrapping the DH scalar should succeed");
+
+    let unwrapped = unwrap_blob_key(&wrapped_hex, &subkey.to_bytes())
+        .expect("the claiming subkey should unwrap its own wrapped scalar");
+
+    assert_eq!(unwrapped, master_dh_secret);
 }
 
 #[test]

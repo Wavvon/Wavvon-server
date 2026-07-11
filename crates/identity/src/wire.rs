@@ -293,6 +293,15 @@ pub struct PairingComplete {
     pub pairing_token: String,
     pub cert: SubkeyCert,
     pub wrapped_blob_key_hex: String,
+    /// The canonical (subkey-0/entropy) DM DH X25519 **scalar** (not the
+    /// Ed25519 seed), ECIES-wrapped for the claiming subkey with the same
+    /// `wrap_blob_key` primitive as `wrapped_blob_key_hex`. Lets the paired
+    /// device agree on E2E DM keys as the canonical identity without ever
+    /// holding a signing seed. `None` for hubs/clients that predate this
+    /// field — plain JSON addition, no signing-bytes impact (`PairingComplete`
+    /// itself is not signed; only the nested `cert` is).
+    #[serde(default)]
+    pub wrapped_dh_seed_hex: Option<String>,
 }
 
 /// Status returned by the pairing status endpoint. Both sides poll
@@ -309,6 +318,8 @@ pub enum PairingStatus {
     Complete {
         cert: SubkeyCert,
         wrapped_blob_key_hex: String,
+        #[serde(default)]
+        wrapped_dh_seed_hex: Option<String>,
     },
     Expired,
 }
