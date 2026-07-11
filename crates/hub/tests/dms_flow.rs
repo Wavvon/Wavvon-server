@@ -190,6 +190,57 @@ async fn list_my_conversations() {
 }
 
 #[tokio::test]
+async fn get_single_conversation_as_member() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let alice_token = common::authenticate(&server, &alice).await;
+    let bob = Identity::generate();
+    common::authenticate(&server, &bob).await;
+
+    let created: ConversationResponse = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex()] }))
+        .await
+        .json();
+
+    let resp = server
+        .get(&format!("/conversations/{}", created.id))
+        .authorization_bearer(&alice_token)
+        .await;
+    resp.assert_status_ok();
+    let conv: ConversationResponse = resp.json();
+    assert_eq!(conv.id, created.id);
+    assert_eq!(conv.members.len(), 2);
+    assert!(conv.members.contains(&alice.public_key_hex()));
+}
+
+#[tokio::test]
+async fn get_single_conversation_hidden_from_non_member() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let alice_token = common::authenticate(&server, &alice).await;
+    let bob = Identity::generate();
+    common::authenticate(&server, &bob).await;
+    let mallory = Identity::generate();
+    let mallory_token = common::authenticate(&server, &mallory).await;
+
+    let created: ConversationResponse = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex()] }))
+        .await
+        .json();
+
+    // Non-member gets the same 404 as a nonexistent id (no existence leak).
+    let resp = server
+        .get(&format!("/conversations/{}", created.id))
+        .authorization_bearer(&mallory_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn cannot_send_to_conversation_youre_not_in() {
     let server = common::setup().await;
     let alice = Identity::generate();

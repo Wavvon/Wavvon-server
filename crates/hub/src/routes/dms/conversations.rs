@@ -138,6 +138,54 @@ pub async fn list_conversations(
     Ok(Json(result))
 }
 
+// GET /conversations/:id — a single conversation the requester is a member
+// of. Membership is enforced by the JOIN, so a non-member gets the same 404
+// as a nonexistent id (no existence leak). The web client depends on this
+// route in its DM send path (member lookup for E2E) and its
+// dm_members_changed WS handler.
+pub async fn get_conversation(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<ConversationResponse>, (StatusCode, String)> {
+    let row = sqlx::query_as::<_, ConvRow>(
+        "SELECT c.id, c.conv_type, c.created_at
+         FROM conversations c
+         INNER JOIN conversation_members cm ON c.id = cm.conversation_id
+         WHERE c.id = $1 AND cm.public_key = $2",
+    )
+    .bind(&conversation_id)
+    .bind(&user.public_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    .ok_or((StatusCode::NOT_FOUND, "Conversation not found".to_string()))?;
+
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT public_key FROM conversation_members WHERE conversation_id = $1",
+    )
+    .bind(&row.id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let last_msg: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(created_at) FROM dm_messages WHERE conversation_id = $1")
+            .bind(&row.id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
+    Ok(Json(ConversationResponse {
+        id: row.id,
+        conv_type: row.conv_type,
+        members,
+        created_at: row.created_at,
+        last_activity_at: last_msg.unwrap_or(row.created_at),
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // POST /conversations/:id/members  { "public_key": "..." }
 // Adds a member to a group conversation. Caller must already be a member.

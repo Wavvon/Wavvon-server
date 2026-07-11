@@ -406,6 +406,10 @@ pub fn create_router_full(
         .route("/ws", get(routes::ws::ws_handler))
         .route("/conversations", get(routes::dms::list_conversations))
         .route(
+            "/conversations/{conversation_id}",
+            get(routes::dms::get_conversation),
+        )
+        .route(
             "/conversations/{conversation_id}/messages",
             get(routes::dms::list_dm_messages),
         )
@@ -897,7 +901,7 @@ pub fn create_router_full(
         // ---- Native polls (Task #31) ----
         .route(
             "/channels/{channel_id}/polls",
-            post(routes::polls::create_poll),
+            get(routes::polls::list_polls).post(routes::polls::create_poll),
         )
         .route(
             "/polls/{poll_id}",
