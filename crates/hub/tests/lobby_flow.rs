@@ -334,6 +334,67 @@ async fn existing_owner_rejoin_is_never_lobby_confined_even_below_level() {
 }
 
 #[tokio::test]
+async fn hub_peer_join_is_never_lobby_confined_even_below_level() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "min_security_level": 8 }))
+        .await
+        .assert_status_ok();
+
+    // A regular (non-hub) newcomer presenting no PoW proof (level 0 < 8)
+    // lands in scope="lobby", as covered by
+    // sub_level_join_is_admitted_as_lobby_not_403 above.
+    let regular_newcomer = Identity::generate();
+    let regular_body = auth_verify_raw(&server, &regular_newcomer).await;
+    assert_eq!(regular_body["scope"], "lobby");
+
+    // A federating peer hub authenticating with is_hub=true, same level 0
+    // (< 8), must be exempt from the lobby gate and land at scope="member" —
+    // it's a machine proxying federation traffic, not a human doing PoW, and
+    // a lobby-confined peer session would opaquely fail every
+    // /federation/* call (not on the lobby allowlist). See
+    // auth::handlers::verify's `owner_exempt` computation.
+    let peer_hub = Identity::generate();
+    let peer_pub_key = peer_hub.public_key_hex();
+    let resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": peer_pub_key }))
+        .await;
+    let challenge: ChallengeResponse = resp.json();
+    let signature = peer_hub.sign(&hex::decode(&challenge.challenge).unwrap());
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": peer_pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+            "is_hub": true,
+        }))
+        .await;
+    resp.assert_status_ok();
+    let peer_body: Value = resp.json();
+    assert_eq!(
+        peer_body["scope"], "member",
+        "a federating hub peer must never be lobby-confined regardless of PoW level"
+    );
+
+    // Confirm the exemption is real (not just a scope-string coincidence):
+    // the resulting session is unconfined on a member-only surface, unlike
+    // the regular sub-level newcomer's lobby-scoped token.
+    let peer_token = peer_body["token"].as_str().unwrap().to_string();
+    server
+        .get("/channels")
+        .authorization_bearer(&peer_token)
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
 async fn min_security_level_still_hard_rejects_when_lobby_disabled() {
     let server = common::setup().await;
     let owner = Identity::generate();

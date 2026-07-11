@@ -151,16 +151,18 @@ pub async fn revoke_invite(
 }
 
 /// Called during auth to validate and consume an invite code.
-/// Returns `Ok(grant_role_id)` if the code is valid — `grant_role_id` is the
-/// role (if any) the caller should additionally assign to the joining user
-/// (task #34) — or `Err` if the code is invalid, expired, or exhausted.
+/// Returns `Ok((created_by, grant_role_id))` if the code is valid —
+/// `created_by` is the invite's minter (needed by `apply_invite_role_grant`'s
+/// redemption-time priority re-check) and `grant_role_id` is the role (if
+/// any) the caller should additionally assign to the joining user (task
+/// #34) — or `Err` if the code is invalid, expired, or exhausted.
 ///
 /// Uses a single atomic UPDATE with the guard conditions so that
 /// concurrent registrations cannot over-consume a limited invite.
 pub async fn validate_and_use_invite(
     db: &sqlx::PgPool,
     code: &str,
-) -> Result<Option<String>, (StatusCode, String)> {
+) -> Result<(String, Option<String>), (StatusCode, String)> {
     let now = crate::auth::handlers::unix_timestamp();
 
     // First verify the code exists and hasn't expired (expiry is checked here
@@ -199,7 +201,66 @@ pub async fn validate_and_use_invite(
         ));
     }
 
-    Ok(invite.grant_role_id)
+    Ok((invite.created_by, invite.grant_role_id))
+}
+
+/// Applies an invite's `grant_role_id` (if any) to a newly admitted user.
+/// Shared by both invite-redemption paths — new-registration via
+/// `/auth/verify` and existing-session via `/join/:code` — so the grant
+/// logic (and its guards) lives in exactly one place (task #34 follow-on).
+///
+/// Re-validates the priority guard at redemption time: `create_invite`
+/// already rejects minting an invite that grants a role at or above the
+/// creator's priority, but the creator's own priority (or the role's
+/// priority) can change between mint and redemption, and a stale invite
+/// otherwise stays live at a would-be-blocked-if-minted-today grant. On a
+/// guard failure this withholds the bonus role rather than failing the
+/// caller's request — the join/registration has already succeeded by this
+/// point. The first-boot owner invite's `created_by = 'system'` sentinel is
+/// exempt, matching `maybe_mint_first_boot_owner_invite`'s documented
+/// exception (no real user holds a priority to compare against yet).
+pub async fn apply_invite_role_grant(
+    db: &sqlx::PgPool,
+    invite_created_by: &str,
+    grant_role_id: &str,
+    user_public_key: &str,
+    now: i64,
+) -> Result<(), (StatusCode, String)> {
+    if invite_created_by != "system" {
+        let role_priority: Option<i64> =
+            sqlx::query_scalar("SELECT priority FROM roles WHERE id = $1")
+                .bind(grant_role_id)
+                .fetch_optional(db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        let role_priority = match role_priority {
+            Some(p) => p,
+            None => return Ok(()), // the role was deleted since the invite was minted
+        };
+
+        let creator_perms = permissions::user_permissions(db, invite_created_by).await?;
+        if role_priority >= creator_perms.max_priority {
+            // The creator no longer outranks this role (demoted, or the
+            // role's own priority changed since the invite was minted) —
+            // withhold the grant instead of failing the redemption.
+            return Ok(());
+        }
+    }
+
+    sqlx::query(
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_public_key, role_id) DO NOTHING",
+    )
+    .bind(user_public_key)
+    .bind(grant_role_id)
+    .bind(now)
+    .execute(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(())
 }
 
 /// Mints (or reuses) the single owner-granting invite for a brand-new hub
@@ -323,6 +384,10 @@ pub async fn get_join_info(
 /// POST /join/:code — requires a valid session token.
 /// Validates the invite, increments use_count, and auto-approves the user
 /// (bypasses the require_approval gate even when the hub has it enabled).
+/// If the invite carries `grant_role_id` (task #34), the same role grant
+/// applied on the `/auth/verify` registration path is applied here too, via
+/// the shared `apply_invite_role_grant` helper (same priority-guard
+/// re-check).
 pub async fn join_with_invite(
     State(state): State<Arc<AppState>>,
     user: crate::auth::middleware::AuthUser,
@@ -341,8 +406,6 @@ pub async fn join_with_invite(
 
     // Note: this endpoint is the "existing session, auto-approve" join path,
     // distinct from new-registration invites handled in auth::handlers::verify.
-    // It doesn't apply invite.grant_role_id — role-granting invites (task #34)
-    // are scoped to the registration path for now.
     if let Some(expires_at) = invite.expires_at {
         if now > expires_at {
             return Err((StatusCode::GONE, "Invite has expired".to_string()));
@@ -367,6 +430,17 @@ pub async fn join_with_invite(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if let Some(role_id) = &invite.grant_role_id {
+        apply_invite_role_grant(
+            &state.db,
+            &invite.created_by,
+            role_id,
+            &user.public_key,
+            now,
+        )
+        .await?;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

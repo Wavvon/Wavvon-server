@@ -566,14 +566,17 @@ pub async fn verify(
     // Role granted by a role-granting invite (task #34), if the joining
     // user presented one. Assigned alongside builtin-everyone below.
     let mut invite_grant_role_id: Option<String> = None;
+    let mut invite_created_by: Option<String> = None;
 
     if has_roles == 0 {
         // New user — check if hub requires an invite
         if crate::routes::invites::is_invite_only(&state.db).await? {
             match &req.invite_code {
                 Some(code) => {
-                    invite_grant_role_id =
+                    let (created_by, grant_role_id) =
                         crate::routes::invites::validate_and_use_invite(&state.db, code).await?;
+                    invite_created_by = Some(created_by);
+                    invite_grant_role_id = grant_role_id;
                 }
                 None => {
                     return Err((
@@ -607,22 +610,21 @@ pub async fn verify(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         }
-        // Role-granting invite (task #34). ON CONFLICT DO NOTHING covers the
-        // (rare, harmless) case where this is also the same role granted
-        // above — e.g. the first-boot owner invite grants builtin-owner to
-        // the very first user, who already received it via existing_users == 0.
-        if let Some(role_id) = &invite_grant_role_id {
-            sqlx::query(
-                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
+        // Role-granting invite (task #34), applied through the shared helper
+        // also used by the `/join/:code` redemption path (its ON CONFLICT DO
+        // NOTHING covers the rare, harmless case where this is also the same
+        // role granted above — e.g. the first-boot owner invite grants
+        // builtin-owner to the very first user, who already received it via
+        // existing_users == 0).
+        if let (Some(role_id), Some(created_by)) = (&invite_grant_role_id, &invite_created_by) {
+            crate::routes::invites::apply_invite_role_grant(
+                &state.db,
+                created_by,
+                role_id,
+                &canonical_pubkey,
+                now,
             )
-            .bind(&canonical_pubkey)
-            .bind(role_id)
-            .bind(now)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            .await?;
         }
     }
 
