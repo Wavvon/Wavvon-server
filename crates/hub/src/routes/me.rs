@@ -15,10 +15,82 @@ const PRONOUNS_MAX: usize = 40;
 const STATUS_MESSAGE_MAX: usize = 140;
 const ACTIVITIES_MAX: usize = 1000;
 const COVER_MAX: usize = 400_000;
+const FAVORITE_HUBS_MAX: usize = 30;
+const FAVORITE_HUB_NAME_MAX: usize = 100;
+const FAVORITE_HUB_URL_MAX: usize = 512;
+const FAVORITE_HUB_ICON_MAX: usize = 400_000;
+
+/// A single entry in a member's opt-in favorite-hubs list, shown on their
+/// profile when `show_hubs` is true. Stored as a JSON array in the nullable
+/// `favorite_hubs` TEXT column.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FavoriteHub {
+    pub url: String,
+    pub name: String,
+    #[serde(default)]
+    pub icon: Option<String>,
+}
+
+/// Parse the stored `favorite_hubs` JSON column into a list, defaulting to
+/// empty on NULL or malformed JSON (mirrors the old dormant `interests`
+/// column's parsing convention).
+pub fn parse_favorite_hubs(raw: &Option<String>) -> Vec<FavoriteHub> {
+    raw.as_deref()
+        .and_then(|s| serde_json::from_str::<Vec<FavoriteHub>>(s).ok())
+        .unwrap_or_default()
+}
+
+/// Validate a favorite-hubs list against the PATCH /me limits.
+fn validate_favorite_hubs(hubs: &[FavoriteHub]) -> Result<(), (StatusCode, String)> {
+    if hubs.len() > FAVORITE_HUBS_MAX {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("favorite_hubs must have {FAVORITE_HUBS_MAX} entries or fewer"),
+        ));
+    }
+    for hub in hubs {
+        if hub.url.trim().is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "favorite_hubs entries must have a non-empty url".to_string(),
+            ));
+        }
+        if hub.name.trim().is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "favorite_hubs entries must have a non-empty name".to_string(),
+            ));
+        }
+        if hub.name.chars().count() > FAVORITE_HUB_NAME_MAX {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("favorite_hubs name must be {FAVORITE_HUB_NAME_MAX} characters or fewer"),
+            ));
+        }
+        if hub.url.chars().count() > FAVORITE_HUB_URL_MAX {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("favorite_hubs url must be {FAVORITE_HUB_URL_MAX} characters or fewer"),
+            ));
+        }
+        if let Some(ref icon) = hub.icon {
+            if icon.chars().count() > FAVORITE_HUB_ICON_MAX {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "favorite_hubs icon must be {FAVORITE_HUB_ICON_MAX} characters or fewer"
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Row shape shared by the GET and PATCH `/me` handlers: display_name,
 /// approval_status, avatar, bio, pronouns, status_message, activities,
-/// accent_color, cover.
+/// accent_color, cover, favorite_hubs, show_hubs.
+#[allow(clippy::type_complexity)]
 type MeProfileRow = (
     Option<String>,
     String,
@@ -29,14 +101,18 @@ type MeProfileRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
+    Option<bool>,
 );
 
-const ME_SELECT: &str = "SELECT display_name, approval_status, avatar, bio, pronouns, status_message, activities, accent_color, cover FROM users WHERE public_key = $1";
+const ME_SELECT: &str = "SELECT display_name, approval_status, avatar, bio, pronouns, status_message, activities, accent_color, cover, favorite_hubs, show_hubs FROM users WHERE public_key = $1";
 
 fn empty_row() -> MeProfileRow {
     (
         None,
         "approved".to_string(),
+        None,
+        None,
         None,
         None,
         None,
@@ -67,6 +143,8 @@ pub async fn me(
         activities,
         accent_color,
         cover,
+        favorite_hubs,
+        show_hubs,
     ) = row.unwrap_or_else(empty_row);
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
@@ -81,6 +159,8 @@ pub async fn me(
         activities,
         accent_color,
         cover,
+        favorite_hubs: parse_favorite_hubs(&favorite_hubs),
+        show_hubs: show_hubs.unwrap_or(false),
         approval_status,
         roles,
     }))
@@ -190,6 +270,33 @@ pub async fn update_me(
     if let Some(ref cover) = req.cover {
         update_text_field(&state.db, pk, "cover", cover, COVER_MAX, "cover").await?;
     }
+    if let Some(ref hubs) = req.favorite_hubs {
+        validate_favorite_hubs(hubs)?;
+        let stored = if hubs.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(hubs).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("serialize error: {e}"),
+                )
+            })?)
+        };
+        sqlx::query("UPDATE users SET favorite_hubs = $1 WHERE public_key = $2")
+            .bind(stored)
+            .bind(pk)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    if let Some(show_hubs) = req.show_hubs {
+        sqlx::query("UPDATE users SET show_hubs = $1 WHERE public_key = $2")
+            .bind(show_hubs)
+            .bind(pk)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
 
     // Return fresh me
     let row: Option<MeProfileRow> = sqlx::query_as(ME_SELECT)
@@ -208,6 +315,8 @@ pub async fn update_me(
         activities,
         accent_color,
         cover,
+        favorite_hubs,
+        show_hubs,
     ) = row.unwrap_or_else(empty_row);
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
@@ -244,6 +353,8 @@ pub async fn update_me(
         activities,
         accent_color,
         cover,
+        favorite_hubs: parse_favorite_hubs(&favorite_hubs),
+        show_hubs: show_hubs.unwrap_or(false),
         approval_status,
         roles,
     }))
@@ -314,6 +425,10 @@ pub struct MeResponse {
     pub accent_color: Option<String>,
     #[serde(default)]
     pub cover: Option<String>,
+    #[serde(default)]
+    pub favorite_hubs: Vec<FavoriteHub>,
+    #[serde(default)]
+    pub show_hubs: bool,
     #[serde(default = "default_approval_status")]
     pub approval_status: String,
     #[serde(default)]
@@ -342,6 +457,10 @@ pub struct UpdateMeRequest {
     pub accent_color: Option<String>,
     #[serde(default)]
     pub cover: Option<String>,
+    #[serde(default)]
+    pub favorite_hubs: Option<Vec<FavoriteHub>>,
+    #[serde(default)]
+    pub show_hubs: Option<bool>,
 }
 
 #[derive(sqlx::FromRow)]

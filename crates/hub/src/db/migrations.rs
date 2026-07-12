@@ -1697,6 +1697,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Opt-in favorite-hubs list (member profile field, mirrors bio/pronouns/
+    // status_message/activities above). `favorite_hubs` is a JSON array of
+    // `{ url, name, icon }` set via PATCH /me (routes/me.rs) and surfaced on
+    // GET /me (always) and the public GET /users/:pubkey/profile endpoint
+    // (gated by `show_hubs`, except for the profile owner viewing their own
+    // profile). NULL/empty = no favorites. `show_hubs` controls visibility
+    // of that list to other members; NULL is treated as false.
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN favorite_hubs TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN show_hubs BOOLEAN")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================
