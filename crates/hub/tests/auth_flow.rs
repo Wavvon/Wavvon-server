@@ -273,8 +273,8 @@ async fn me_rejects_oversized_status_activities_accent_color_and_cover() {
         .await;
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
 
-    // 1001-char activities: over the 1000-char cap.
-    let long_activities = "a".repeat(1001);
+    // 501-char activities: over the 500-char cap.
+    let long_activities = "a".repeat(501);
     let resp = server
         .patch("/me")
         .authorization_bearer(&token)

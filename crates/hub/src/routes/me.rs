@@ -13,7 +13,7 @@ use crate::state::AppState;
 const BIO_MAX: usize = 500;
 const PRONOUNS_MAX: usize = 40;
 const STATUS_MESSAGE_MAX: usize = 140;
-const ACTIVITIES_MAX: usize = 1000;
+const ACTIVITIES_MAX: usize = 500;
 const COVER_MAX: usize = 400_000;
 const FAVORITE_HUBS_MAX: usize = 30;
 const FAVORITE_HUB_NAME_MAX: usize = 100;
