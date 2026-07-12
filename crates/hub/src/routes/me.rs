@@ -9,21 +9,43 @@ use crate::auth::middleware::AuthUser;
 use crate::routes::role_models::RoleResponse;
 use crate::state::AppState;
 
+/// Row shape shared by the GET and PATCH `/me` handlers: display_name,
+/// approval_status, avatar, bio, pronouns, interests (raw JSON text),
+/// accent_color, cover.
+type MeProfileRow = (
+    Option<String>,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 pub async fn me(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<MeResponse>, (StatusCode, String)> {
-    let row: Option<(Option<String>, String, Option<String>, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT display_name, approval_status, avatar, bio, pronouns FROM users WHERE public_key = $1",
-        )
-        .bind(&user.public_key)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<MeProfileRow> = sqlx::query_as(
+        "SELECT display_name, approval_status, avatar, bio, pronouns, interests, accent_color, cover FROM users WHERE public_key = $1",
+    )
+    .bind(&user.public_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (display_name, approval_status, avatar, bio, pronouns) =
-        row.unwrap_or((None, "approved".to_string(), None, None, None));
+    let (display_name, approval_status, avatar, bio, pronouns, interests, accent_color, cover) =
+        row.unwrap_or((
+            None,
+            "approved".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
@@ -33,6 +55,9 @@ pub async fn me(
         avatar,
         bio,
         pronouns,
+        interests: parse_interests(interests.as_deref()),
+        accent_color,
+        cover,
         approval_status,
         roles,
     }))
@@ -105,19 +130,113 @@ pub async fn update_me(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
+    if let Some(ref entries) = req.interests {
+        if entries.len() > 6 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "interests must have 6 entries or fewer".to_string(),
+            ));
+        }
+        const ALLOWED_KINDS: [&str; 4] = ["playing", "want", "lfg", "into"];
+        let mut trimmed = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if !ALLOWED_KINDS.contains(&entry.kind.as_str()) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("invalid interest kind: {}", entry.kind),
+                ));
+            }
+            let text = entry.text.trim();
+            if text.is_empty() || text.chars().count() > 80 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "interest text must be 1-80 characters after trimming".to_string(),
+                ));
+            }
+            trimmed.push(InterestEntry {
+                kind: entry.kind.clone(),
+                text: text.to_string(),
+            });
+        }
+        // Empty array clears the interests list.
+        let stored = if trimmed.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&trimmed).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to serialize interests: {e}"),
+                )
+            })?)
+        };
+        sqlx::query("UPDATE users SET interests = $1 WHERE public_key = $2")
+            .bind(stored)
+            .bind(&user.public_key)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    if let Some(ref accent_color) = req.accent_color {
+        // Empty string clears the accent color.
+        let stored = if accent_color.is_empty() {
+            None
+        } else {
+            if !is_valid_hex_color(accent_color) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "accent_color must match #rrggbb".to_string(),
+                ));
+            }
+            Some(accent_color.as_str())
+        };
+        sqlx::query("UPDATE users SET accent_color = $1 WHERE public_key = $2")
+            .bind(stored)
+            .bind(&user.public_key)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    if let Some(ref cover) = req.cover {
+        if cover.chars().count() > 400_000 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cover must be 400000 characters or fewer".to_string(),
+            ));
+        }
+        // Empty string clears the cover.
+        let stored = if cover.is_empty() {
+            None
+        } else {
+            Some(cover.as_str())
+        };
+        sqlx::query("UPDATE users SET cover = $1 WHERE public_key = $2")
+            .bind(stored)
+            .bind(&user.public_key)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
 
     // Return fresh me
-    let row: Option<(Option<String>, String, Option<String>, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT display_name, approval_status, avatar, bio, pronouns FROM users WHERE public_key = $1",
-        )
-        .bind(&user.public_key)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<MeProfileRow> = sqlx::query_as(
+        "SELECT display_name, approval_status, avatar, bio, pronouns, interests, accent_color, cover FROM users WHERE public_key = $1",
+    )
+    .bind(&user.public_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (display_name, approval_status, avatar, bio, pronouns) =
-        row.unwrap_or((None, "approved".to_string(), None, None, None));
+    let (display_name, approval_status, avatar, bio, pronouns, interests, accent_color, cover) =
+        row.unwrap_or((
+            None,
+            "approved".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ));
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
@@ -147,9 +266,26 @@ pub async fn update_me(
         avatar,
         bio,
         pronouns,
+        interests: parse_interests(interests.as_deref()),
+        accent_color,
+        cover,
         approval_status,
         roles,
     }))
+}
+
+/// Parse the stored `interests` JSON column into the wire representation,
+/// defaulting to an empty list when NULL or on any (should-never-happen)
+/// deserialization failure.
+pub(crate) fn parse_interests(raw: Option<&str>) -> Vec<InterestEntry> {
+    raw.and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+/// Matches `#` followed by exactly 6 hex digits (e.g. `#7c5cff`).
+fn is_valid_hex_color(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|b| b.is_ascii_hexdigit())
 }
 
 async fn fetch_user_roles(
@@ -203,6 +339,12 @@ pub struct MeResponse {
     pub bio: Option<String>,
     #[serde(default)]
     pub pronouns: Option<String>,
+    #[serde(default)]
+    pub interests: Vec<InterestEntry>,
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    #[serde(default)]
+    pub cover: Option<String>,
     #[serde(default = "default_approval_status")]
     pub approval_status: String,
     #[serde(default)]
@@ -223,6 +365,21 @@ pub struct UpdateMeRequest {
     pub bio: Option<String>,
     #[serde(default)]
     pub pronouns: Option<String>,
+    #[serde(default)]
+    pub interests: Option<Vec<InterestEntry>>,
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    #[serde(default)]
+    pub cover: Option<String>,
+}
+
+/// A single self-authored interest entry on a member profile.
+/// `kind` is validated against a fixed allowed set at the handler level
+/// (see `update_me`); `text` is trimmed and length-capped there too.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct InterestEntry {
+    pub kind: String,
+    pub text: String,
 }
 
 #[derive(sqlx::FromRow)]

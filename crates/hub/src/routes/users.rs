@@ -8,6 +8,20 @@ use serde::{Deserialize, Serialize};
 use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
 
+/// Row shape for the profile fields SELECT in `get_user_profile`:
+/// display_name, avatar, first_seen_at, bio, pronouns, interests (raw JSON
+/// text), accent_color, cover.
+type UserProfileRow = (
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 #[derive(Deserialize)]
 pub struct UserSearchParams {
     pub q: Option<String>,
@@ -203,6 +217,12 @@ pub struct UserProfileResponse {
     pub bio: Option<String>,
     #[serde(default)]
     pub pronouns: Option<String>,
+    #[serde(default)]
+    pub interests: Vec<crate::routes::me::InterestEntry>,
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    #[serde(default)]
+    pub cover: Option<String>,
     pub joined_at: i64,
     pub roles: Vec<RoleSummary>,
     pub badges: Vec<BadgeSummary>,
@@ -214,16 +234,15 @@ pub async fn get_user_profile(
     _user: AuthUser,
     Path(pubkey): Path<String>,
 ) -> Result<Json<UserProfileResponse>, (StatusCode, String)> {
-    let row: Option<(Option<String>, Option<String>, i64, Option<String>, Option<String>)> =
-        sqlx::query_as(
-            "SELECT display_name, avatar, first_seen_at, bio, pronouns FROM users WHERE public_key = $1",
-        )
-        .bind(&pubkey)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<UserProfileRow> = sqlx::query_as(
+        "SELECT display_name, avatar, first_seen_at, bio, pronouns, interests, accent_color, cover FROM users WHERE public_key = $1",
+    )
+    .bind(&pubkey)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (display_name, avatar, joined_at, bio, pronouns) =
+    let (display_name, avatar, joined_at, bio, pronouns, interests, accent_color, cover) =
         row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
 
     // Fetch roles assigned to this user (reuse the RoleResponse pattern from me.rs).
@@ -285,6 +304,9 @@ pub async fn get_user_profile(
         avatar,
         bio,
         pronouns,
+        interests: crate::routes::me::parse_interests(interests.as_deref()),
+        accent_color,
+        cover,
         joined_at,
         roles: role_summaries,
         badges: badge_summaries,

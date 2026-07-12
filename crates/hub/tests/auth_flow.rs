@@ -207,6 +207,141 @@ async fn me_clears_bio_and_pronouns_with_empty_string() {
 }
 
 #[tokio::test]
+async fn me_interests_accent_color_and_cover_round_trip_through_patch_and_profile() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let pub_key = owner.public_key_hex();
+    let token = common::authenticate(&server, &owner).await;
+
+    // Happy path: PATCH interests + accent_color + cover.
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "interests": [
+                { "kind": "playing", "text": "Stardew Valley" },
+                { "kind": "lfg", "text": "co-op puzzle games" },
+            ],
+            "accent_color": "#7c5cff",
+            "cover": "data:image/png;base64,aGVsbG8=",
+        }))
+        .await;
+    resp.assert_status_ok();
+    let me: MeResponse = resp.json();
+    assert_eq!(me.interests.len(), 2);
+    assert_eq!(me.interests[0].kind, "playing");
+    assert_eq!(me.interests[0].text, "Stardew Valley");
+    assert_eq!(me.interests[1].kind, "lfg");
+    assert_eq!(me.interests[1].text, "co-op puzzle games");
+    assert_eq!(me.accent_color.as_deref(), Some("#7c5cff"));
+    assert_eq!(me.cover.as_deref(), Some("data:image/png;base64,aGVsbG8="));
+
+    // Read back via GET /me.
+    let resp = server.get("/me").authorization_bearer(&token).await;
+    resp.assert_status_ok();
+    let me: MeResponse = resp.json();
+    assert_eq!(me.interests.len(), 2);
+    assert_eq!(me.accent_color.as_deref(), Some("#7c5cff"));
+    assert_eq!(me.cover.as_deref(), Some("data:image/png;base64,aGVsbG8="));
+
+    // Read back via the public profile endpoint.
+    let resp = server
+        .get(&format!("/users/{pub_key}/profile"))
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status_ok();
+    let profile: serde_json::Value = resp.json();
+    assert_eq!(profile["interests"][0]["kind"], "playing");
+    assert_eq!(profile["interests"][0]["text"], "Stardew Valley");
+    assert_eq!(profile["interests"][1]["kind"], "lfg");
+    assert_eq!(profile["accent_color"], "#7c5cff");
+    assert_eq!(profile["cover"], "data:image/png;base64,aGVsbG8=");
+}
+
+#[tokio::test]
+async fn me_rejects_invalid_interests_accent_color_and_cover() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    // Bad interest kind.
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "interests": [{ "kind": "obsessed", "text": "raiding" }] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // 7 entries: over the 6-entry cap.
+    let too_many: Vec<serde_json::Value> = (0..7)
+        .map(|i| json!({ "kind": "into", "text": format!("thing {i}") }))
+        .collect();
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "interests": too_many }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // 81-char interest text: over the 80-char cap.
+    let long_text = "a".repeat(81);
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "interests": [{ "kind": "want", "text": long_text }] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // Malformed accent_color.
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "accent_color": "not-a-color" }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // Over-long cover.
+    let long_cover = "a".repeat(400_001);
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "cover": long_cover }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn me_clears_interests_accent_color_and_cover_with_empty_values() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    // Set them first.
+    server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "interests": [{ "kind": "into", "text": "synths" }],
+            "accent_color": "#123abc",
+            "cover": "data:image/png;base64,aGVsbG8=",
+        }))
+        .await
+        .assert_status_ok();
+
+    // Empty array / empty strings clear all three to null.
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "interests": [], "accent_color": "", "cover": "" }))
+        .await;
+    resp.assert_status_ok();
+    let me: MeResponse = resp.json();
+    assert!(me.interests.is_empty());
+    assert_eq!(me.accent_color, None);
+    assert_eq!(me.cover, None);
+}
+
+#[tokio::test]
 async fn pending_members_are_blocked_until_approved() {
     let server = common::setup().await;
 

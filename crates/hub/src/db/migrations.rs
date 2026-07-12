@@ -1675,6 +1675,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Additional member profile fields: self-authored interests list (JSON
+    // array of {kind, text}), an accent color (#rrggbb), and a cover image
+    // data URL. Same PATCH /me / GET /users/:pubkey/profile surfaces as
+    // bio/pronouns above, same "empty clears it" semantics as `avatar`.
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN interests TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN accent_color TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN cover TEXT")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================
