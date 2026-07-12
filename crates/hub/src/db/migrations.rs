@@ -374,7 +374,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // Seed built-in roles
     sqlx::query(
-        "INSERT INTO roles (id, name, priority, created_at) VALUES ('builtin-everyone', '@everyone', 0, 0)
+        "INSERT INTO roles (id, name, priority, created_at) VALUES ('builtin-everyone', 'everyone', 0, 0)
          ON CONFLICT (id) DO NOTHING",
     )
     .execute(pool)

@@ -383,7 +383,7 @@ pub async fn remove_role(
     if role_id == "builtin-everyone" {
         return Err((
             StatusCode::FORBIDDEN,
-            "Cannot remove @everyone role".to_string(),
+            "Cannot remove the everyone role".to_string(),
         ));
     }
 

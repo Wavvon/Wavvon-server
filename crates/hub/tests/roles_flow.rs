@@ -18,7 +18,7 @@ async fn first_user_gets_owner_and_everyone() {
     assert_eq!(me.roles.len(), 2);
     let role_names: Vec<&str> = me.roles.iter().map(|r| r.name.as_str()).collect();
     assert!(role_names.contains(&"Owner"));
-    assert!(role_names.contains(&"@everyone"));
+    assert!(role_names.contains(&"everyone"));
 }
 
 #[tokio::test]
@@ -35,7 +35,7 @@ async fn second_user_gets_only_everyone() {
     let me: MeResponse = resp.json();
 
     assert_eq!(me.roles.len(), 1);
-    assert_eq!(me.roles[0].name, "@everyone");
+    assert_eq!(me.roles[0].name, "everyone");
 }
 
 #[tokio::test]
