@@ -68,10 +68,17 @@ pub(super) async fn handle_socket(
     let mut dm_rx = state.dm_tx.subscribe();
 
     // Notify all clients (including this one, since chat_rx is now subscribed)
-    // that this user is online. Only fires on the first session (refcount == 1).
+    // that this user is online. Only fires on the first session (refcount == 1),
+    // and never while the user's stored presence is "invisible" — an
+    // invisible user must never be broadcast as online to other clients,
+    // even though they are (and stay) genuinely connected for delivery.
     {
+        let is_invisible = crate::routes::users::fetch_presence_status(&state.db, &public_key)
+            .await
+            .as_deref()
+            == Some("invisible");
         let online = state.online_users.read().await;
-        if online.get(&public_key).copied().unwrap_or(0) == 1 {
+        if online.get(&public_key).copied().unwrap_or(0) == 1 && !is_invisible {
             let ws_msg = WsServerMessage::MemberOnline {
                 public_key: public_key.clone(),
             };
@@ -628,17 +635,28 @@ pub(super) async fn handle_socket(
     };
 
     if went_offline {
-        let ws_msg = WsServerMessage::MemberOffline {
-            public_key: public_key.clone(),
-        };
-        let json: std::sync::Arc<str> =
-            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state.chat_tx.send((
-            crate::routes::chat_models::ChatEvent::MemberOffline {
+        // If the user's current presence is "invisible", other clients were
+        // never told they came online in the first place (see connect,
+        // above) — or were already told they went offline the moment
+        // invisible was set (see handle_set_status) — so skip the redundant
+        // member_offline broadcast here.
+        let is_invisible = crate::routes::users::fetch_presence_status(&state.db, &public_key)
+            .await
+            .as_deref()
+            == Some("invisible");
+        if !is_invisible {
+            let ws_msg = WsServerMessage::MemberOffline {
                 public_key: public_key.clone(),
-            },
-            json,
-        ));
+            };
+            let json: std::sync::Arc<str> =
+                std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+            let _ = state.chat_tx.send((
+                crate::routes::chat_models::ChatEvent::MemberOffline {
+                    public_key: public_key.clone(),
+                },
+                json,
+            ));
+        }
     }
 
     tracing::info!(

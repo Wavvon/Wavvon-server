@@ -279,7 +279,9 @@ pub enum ChatEvent {
     /// without a reconnect.
     MemberUpdated { public_key: String },
     /// A user changed their presence status (away/DND/custom text);
-    /// delivered hub-wide like MemberOnline/MemberOffline.
+    /// delivered hub-wide like MemberOnline/MemberOffline. Never emitted for
+    /// a transition into "invisible" — that broadcasts as MemberOffline
+    /// instead (see `handle_set_status`).
     MemberStatus { public_key: String },
     /// An outgoing webhook auto-disabled itself after too many consecutive
     /// delivery failures. Hub-wide (admin UI filters/display client-side —
@@ -366,8 +368,11 @@ pub enum WsClientMessage {
     VoiceSpeaking { channel_id: String, speaking: bool },
     #[serde(rename = "typing")]
     Typing { channel_id: String, typing: bool },
-    /// Set the sender's presence status. `status` is "online", "away", or
-    /// "dnd" ("online" clears); `custom` is an optional short status text.
+    /// Set the sender's presence status. `status` is "online", "away",
+    /// "dnd", or "invisible" ("online" clears); `custom` is an optional
+    /// short status text. "invisible" keeps the connection fully live
+    /// (DMs/messages/voice unaffected) but is reported as offline to other
+    /// members everywhere presence is surfaced (roster, broadcasts).
     #[serde(rename = "set_status")]
     SetStatus {
         status: String,

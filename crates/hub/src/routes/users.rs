@@ -32,6 +32,31 @@ pub struct UserSearchParams {
     pub q: Option<String>,
 }
 
+/// Whether a user's presence should be *reported* to other members as
+/// online, given whether they have a live connection and their stored
+/// `presence_status`. A user with `presence_status == "invisible"` always
+/// reports as offline here, regardless of `is_connected` — they remain
+/// fully connected for delivery purposes (DMs, messages, voice); only what
+/// other members are told about their presence changes.
+pub(crate) fn reported_online(is_connected: bool, presence_status: Option<&str>) -> bool {
+    is_connected && presence_status != Some("invisible")
+}
+
+/// Fetch a user's stored `presence_status` column. Used by the WS presence
+/// paths (connect/disconnect/set_status) to decide whether the invisible
+/// gate applies, independent of the roster read path above.
+pub(crate) async fn fetch_presence_status(db: &sqlx::PgPool, public_key: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT presence_status FROM users WHERE public_key = $1",
+    )
+    .bind(public_key)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+}
+
 #[derive(Serialize)]
 pub struct UserInfo {
     pub public_key: String,
@@ -41,6 +66,8 @@ pub struct UserInfo {
     pub online: bool,
     /// Presence status for online users: None = plain online, "away", "dnd".
     /// Always None while offline (the stored value is not surfaced).
+    /// Also always None for a connected user whose stored status is
+    /// "invisible" — see `reported_online`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// Optional short custom status text; only surfaced while online.
@@ -111,7 +138,8 @@ pub async fn list_users(
     let result: Vec<UserInfo> = rows
         .into_iter()
         .map(|r| {
-            let is_online = online.contains_key(&r.public_key);
+            let is_connected = online.contains_key(&r.public_key);
+            let is_online = reported_online(is_connected, r.presence_status.as_deref());
             UserInfo {
                 online: is_online,
                 status: r.presence_status.filter(|_| is_online),
@@ -158,7 +186,8 @@ pub async fn channel_members(
     Ok(Json(
         rows.into_iter()
             .map(|r| {
-                let is_online = online.contains_key(&r.public_key);
+                let is_connected = online.contains_key(&r.public_key);
+                let is_online = reported_online(is_connected, r.presence_status.as_deref());
                 UserInfo {
                     online: is_online,
                     status: r.presence_status.filter(|_| is_online),
@@ -347,4 +376,32 @@ pub async fn get_user_profile(
         roles: role_summaries,
         badges: badge_summaries,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reported_online;
+
+    #[test]
+    fn connected_plain_online_reports_online() {
+        assert!(reported_online(true, None));
+    }
+
+    #[test]
+    fn connected_away_or_dnd_reports_online_with_status_intact() {
+        assert!(reported_online(true, Some("away")));
+        assert!(reported_online(true, Some("dnd")));
+    }
+
+    #[test]
+    fn connected_invisible_reports_offline() {
+        assert!(!reported_online(true, Some("invisible")));
+    }
+
+    #[test]
+    fn disconnected_never_reports_online_regardless_of_status() {
+        assert!(!reported_online(false, None));
+        assert!(!reported_online(false, Some("away")));
+        assert!(!reported_online(false, Some("invisible")));
+    }
 }
