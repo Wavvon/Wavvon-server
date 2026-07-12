@@ -1675,11 +1675,19 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
-    // Additional member profile fields: self-authored interests list (JSON
-    // array of {kind, text}), an accent color (#rrggbb), and a cover image
-    // data URL. Same PATCH /me / GET /users/:pubkey/profile surfaces as
-    // bio/pronouns above, same "empty clears it" semantics as `avatar`.
+    // Additional member profile fields, all on the same PATCH /me /
+    // GET /users/:pubkey/profile surfaces as bio/pronouns, same "empty clears
+    // it" semantics as `avatar`. `interests` is dormant — it was the earlier
+    // structured-interests JSON column, superseded by the free-text
+    // `status_message` + `activities` fields (additive-only: kept, unused).
+    // `accent_color` (#rrggbb) and `cover` (image data URL) drive the banner.
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN interests TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN status_message TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN activities TEXT")
         .execute(pool)
         .await;
     let _ = sqlx::query("ALTER TABLE users ADD COLUMN accent_color TEXT")
