@@ -234,6 +234,8 @@ pub struct RoleSummary {
     pub id: String,
     pub name: String,
     pub color: Option<String>,
+    pub icon: Option<String>,
+    pub category_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -313,10 +315,12 @@ pub async fn get_user_profile(
         id: String,
         name: String,
         color: Option<String>,
+        icon: Option<String>,
+        category_id: Option<String>,
     }
 
     let roles: Vec<RoleRow> = sqlx::query_as(
-        "SELECT r.id, r.name, NULL as color
+        "SELECT r.id, r.name, r.color, r.icon, r.category_id
          FROM roles r
          INNER JOIN user_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
@@ -333,6 +337,8 @@ pub async fn get_user_profile(
             id: r.id,
             name: r.name,
             color: r.color,
+            icon: r.icon,
+            category_id: r.category_id,
         })
         .collect();
 

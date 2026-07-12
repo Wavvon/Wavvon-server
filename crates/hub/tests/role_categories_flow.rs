@@ -113,6 +113,62 @@ async fn role_created_with_color_icon_category_reads_back() {
 }
 
 #[tokio::test]
+async fn user_profile_endpoint_carries_role_category_color_and_icon() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let pub_key = owner.public_key_hex();
+    let token = common::authenticate(&server, &owner).await;
+
+    let resp = server
+        .post("/role-categories")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Staff" }))
+        .await;
+    let category: RoleCategoryResponse = resp.json();
+
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "name": "Moderator",
+            "permissions": ["manage_messages"],
+            "priority": 50,
+            "color": "#FF00AA",
+            "icon": "🛡️",
+            "category_id": category.id,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let role: RoleResponse = resp.json();
+
+    // Assign the categorized role to the owner.
+    let resp = server
+        .put(&format!("/users/{pub_key}/roles/{}", role.id))
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status_ok();
+
+    // The public profile endpoint must carry category_id/color/icon so the
+    // member card can group the role under its category. Regression: it used
+    // to select `NULL as color` and omit icon/category_id entirely, so every
+    // role landed under "Uncategorized" with no tint.
+    let resp = server
+        .get(&format!("/users/{pub_key}/profile"))
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status_ok();
+    let profile: serde_json::Value = resp.json();
+    let roles = profile["roles"].as_array().unwrap();
+    let mod_role = roles
+        .iter()
+        .find(|r| r["id"] == role.id)
+        .expect("Moderator role present in profile");
+    assert_eq!(mod_role["category_id"], category.id);
+    assert_eq!(mod_role["color"], "#FF00AA");
+    assert_eq!(mod_role["icon"], "🛡️");
+}
+
+#[tokio::test]
 async fn deleting_category_sets_role_category_id_null() {
     let server = common::setup().await;
     let owner = Identity::generate();
