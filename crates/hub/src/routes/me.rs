@@ -13,16 +13,17 @@ pub async fn me(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<MeResponse>, (StatusCode, String)> {
-    let row: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT display_name, approval_status, avatar FROM users WHERE public_key = $1",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(Option<String>, String, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT display_name, approval_status, avatar, bio, pronouns FROM users WHERE public_key = $1",
+        )
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (display_name, approval_status, avatar) =
-        row.unwrap_or((None, "approved".to_string(), None));
+    let (display_name, approval_status, avatar, bio, pronouns) =
+        row.unwrap_or((None, "approved".to_string(), None, None, None));
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
@@ -30,6 +31,8 @@ pub async fn me(
         public_key: user.public_key,
         display_name,
         avatar,
+        bio,
+        pronouns,
         approval_status,
         roles,
     }))
@@ -62,18 +65,59 @@ pub async fn update_me(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
+    if let Some(ref bio) = req.bio {
+        if bio.chars().count() > 500 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "bio must be 500 characters or fewer".to_string(),
+            ));
+        }
+        // Empty string clears the bio.
+        let stored = if bio.is_empty() {
+            None
+        } else {
+            Some(bio.as_str())
+        };
+        sqlx::query("UPDATE users SET bio = $1 WHERE public_key = $2")
+            .bind(stored)
+            .bind(&user.public_key)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    if let Some(ref pronouns) = req.pronouns {
+        if pronouns.chars().count() > 40 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "pronouns must be 40 characters or fewer".to_string(),
+            ));
+        }
+        // Empty string clears the pronouns.
+        let stored = if pronouns.is_empty() {
+            None
+        } else {
+            Some(pronouns.as_str())
+        };
+        sqlx::query("UPDATE users SET pronouns = $1 WHERE public_key = $2")
+            .bind(stored)
+            .bind(&user.public_key)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
 
     // Return fresh me
-    let row: Option<(Option<String>, String, Option<String>)> = sqlx::query_as(
-        "SELECT display_name, approval_status, avatar FROM users WHERE public_key = $1",
-    )
-    .bind(&user.public_key)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(Option<String>, String, Option<String>, Option<String>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT display_name, approval_status, avatar, bio, pronouns FROM users WHERE public_key = $1",
+        )
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (display_name, approval_status, avatar) =
-        row.unwrap_or((None, "approved".to_string(), None));
+    let (display_name, approval_status, avatar, bio, pronouns) =
+        row.unwrap_or((None, "approved".to_string(), None, None, None));
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
@@ -101,6 +145,8 @@ pub async fn update_me(
         public_key: user.public_key,
         display_name,
         avatar,
+        bio,
+        pronouns,
         approval_status,
         roles,
     }))
@@ -153,6 +199,10 @@ pub struct MeResponse {
     pub display_name: Option<String>,
     #[serde(default)]
     pub avatar: Option<String>,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub pronouns: Option<String>,
     #[serde(default = "default_approval_status")]
     pub approval_status: String,
     #[serde(default)]
@@ -169,6 +219,10 @@ pub struct UpdateMeRequest {
     pub display_name: Option<String>,
     #[serde(default)]
     pub avatar: Option<String>,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub pronouns: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

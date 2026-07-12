@@ -1664,6 +1664,17 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Per-hub member profile fields: free-text bio and pronouns, set via
+    // PATCH /me (routes/me.rs) and surfaced on GET /me and the public
+    // GET /users/:pubkey/profile endpoint. NULL = unset, same "empty string
+    // clears it" semantics as `avatar`.
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN bio TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN pronouns TEXT")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

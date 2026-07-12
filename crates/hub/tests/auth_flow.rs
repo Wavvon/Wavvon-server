@@ -120,6 +120,93 @@ async fn me_rejects_no_token() {
 }
 
 #[tokio::test]
+async fn me_bio_and_pronouns_round_trip_through_patch_and_profile() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let pub_key = owner.public_key_hex();
+    let token = common::authenticate(&server, &owner).await;
+
+    // Happy path: PATCH bio + pronouns.
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "bio": "Loves synths and long walks.", "pronouns": "she/her" }))
+        .await;
+    resp.assert_status_ok();
+    let me: MeResponse = resp.json();
+    assert_eq!(me.bio.as_deref(), Some("Loves synths and long walks."));
+    assert_eq!(me.pronouns.as_deref(), Some("she/her"));
+
+    // Read back via GET /me.
+    let resp = server.get("/me").authorization_bearer(&token).await;
+    resp.assert_status_ok();
+    let me: MeResponse = resp.json();
+    assert_eq!(me.bio.as_deref(), Some("Loves synths and long walks."));
+    assert_eq!(me.pronouns.as_deref(), Some("she/her"));
+
+    // Read back via the public profile endpoint.
+    let resp = server
+        .get(&format!("/users/{pub_key}/profile"))
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status_ok();
+    let profile: serde_json::Value = resp.json();
+    assert_eq!(profile["bio"], "Loves synths and long walks.");
+    assert_eq!(profile["pronouns"], "she/her");
+}
+
+#[tokio::test]
+async fn me_rejects_oversized_bio_and_pronouns() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    // 501 chars: over the 500-char bio limit.
+    let long_bio = "a".repeat(501);
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "bio": long_bio }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // 41 chars: over the 40-char pronouns limit.
+    let long_pronouns = "a".repeat(41);
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "pronouns": long_pronouns }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn me_clears_bio_and_pronouns_with_empty_string() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    // Set them first.
+    server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "bio": "temporary bio", "pronouns": "they/them" }))
+        .await
+        .assert_status_ok();
+
+    // Empty string clears both to null.
+    let resp = server
+        .patch("/me")
+        .authorization_bearer(&token)
+        .json(&json!({ "bio": "", "pronouns": "" }))
+        .await;
+    resp.assert_status_ok();
+    let me: MeResponse = resp.json();
+    assert_eq!(me.bio, None);
+    assert_eq!(me.pronouns, None);
+}
+
+#[tokio::test]
 async fn pending_members_are_blocked_until_approved() {
     let server = common::setup().await;
 
