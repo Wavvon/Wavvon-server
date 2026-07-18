@@ -227,7 +227,17 @@ pub(super) async fn handle_socket(
                                 | crate::routes::chat_models::ChatEvent::MemberUpdated { .. }
                                 | crate::routes::chat_models::ChatEvent::MemberStatus { .. }
                                 | crate::routes::chat_models::ChatEvent::WebhookDisabled { .. }
+                                | crate::routes::chat_models::ChatEvent::VoiceMove { .. }
                         ) {
+                            // VoiceMove is hub-wide-bypass in the sense that it
+                            // never depends on channel subscription, but it is
+                            // still targeted to exactly one recipient (events.md
+                            // §7.1) — filter on pubkey before delivering.
+                            if let crate::routes::chat_models::ChatEvent::VoiceMove {
+                                to_pubkey,
+                            } = &event {
+                                if to_pubkey != &cs.public_key { continue; }
+                            }
                             let json = pre_json.to_string();
                             if ws_tx.send(Message::Text(json.into())).await.is_err() {
                                 break;
@@ -703,6 +713,7 @@ async fn dispatch_client_msg(
             voice::handle_voice_whisper_start(cs, state, msg).await
         }
         WsClientMessage::VoiceWhisperStop => voice::handle_voice_whisper_stop(cs, state).await,
+        WsClientMessage::VoiceMove { .. } => voice::handle_voice_move(cs, state, ws_tx, msg).await,
 
         // ── Proximity voice ────────────────────────────────────────────────
         WsClientMessage::VoiceZoneCreate { .. } => {

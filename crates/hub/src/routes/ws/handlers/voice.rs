@@ -617,6 +617,146 @@ pub(in crate::routes::ws) async fn handle_voice_whisper_stop(
     DispatchResult::Continue
 }
 
+/// Sends a `voice_move`-context `Error` back to the mover on `ws_tx`.
+async fn send_voice_move_error(ws_tx: &mut WsTx, message: impl Into<String>) -> DispatchResult {
+    let err = WsServerMessage::Error {
+        context: "voice_move".to_string(),
+        message: message.into(),
+    };
+    let _ = ws_tx
+        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+        .await;
+    DispatchResult::Continue
+}
+
+/// Phase 1 move primitive (events.md §7.1): the mover asks the hub to move
+/// `target_pubkey` into `target_channel_id`. The hub never yanks the target
+/// server-side — it pushes a `voice_move` control message and the target's
+/// own client runs its normal leave-and-join.
+///
+/// Phase 1 scope only: the target must already be in voice (no queued
+/// assignments) and must already hold effective `READ_MESSAGES` on the
+/// destination (no voice-only presence grant) — both are Phase 2.
+pub(in crate::routes::ws) async fn handle_voice_move(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    ws_tx: &mut WsTx,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let (target_pubkey, target_channel_id, event_id) = match msg {
+        WsClientMessage::VoiceMove {
+            target_pubkey,
+            target_channel_id,
+            event_id,
+        } => (target_pubkey, target_channel_id, event_id),
+        _ => return DispatchResult::Continue,
+    };
+
+    // Authorize the mover: MOVE_MEMBERS resolved channel-scoped against the
+    // destination channel.
+    match crate::permissions::channel_permissions(&state.db, &cs.public_key, &target_channel_id)
+        .await
+    {
+        Ok(perms) if perms.has(crate::permissions::MOVE_MEMBERS) => {}
+        Ok(_) => {
+            return send_voice_move_error(
+                ws_tx,
+                "You do not have permission to move members into this channel.",
+            )
+            .await;
+        }
+        Err(_) => {
+            return send_voice_move_error(ws_tx, "Unable to verify move permission.").await;
+        }
+    }
+
+    // Destination must be a real, non-category channel.
+    let target_channel_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND is_category = false")
+            .bind(&target_channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let target_channel_name = match target_channel_name {
+        Some(name) => name,
+        None => {
+            return send_voice_move_error(ws_tx, "Target channel does not exist.").await;
+        }
+    };
+
+    // Target must currently be in voice somewhere — queued assignments for
+    // an absent target are Phase 2.
+    let source_channel_id = {
+        let vc = state.voice_channels.read().await;
+        vc.iter()
+            .find(|(_, participants)| participants.contains_key(&target_pubkey))
+            .map(|(channel_id, _)| channel_id.clone())
+    };
+    let source_channel_id = match source_channel_id {
+        Some(ch) => ch,
+        None => {
+            return send_voice_move_error(ws_tx, "Target is not currently in voice.").await;
+        }
+    };
+
+    // Target must already hold effective READ_MESSAGES on the destination —
+    // voice-only presence grants for an unreadable destination are Phase 2.
+    match crate::permissions::channel_permissions(&state.db, &target_pubkey, &target_channel_id)
+        .await
+    {
+        Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+        Ok(_) => {
+            return send_voice_move_error(ws_tx, "Target cannot read the destination channel.")
+                .await;
+        }
+        Err(_) => {
+            return send_voice_move_error(ws_tx, "Unable to verify target's channel access.").await;
+        }
+    }
+
+    // §7.2 consent model: auto-accept when the target has claimed a slot or
+    // RSVP'd "going" on the driving event. A slot claim is stored as
+    // status='going' + slot_id, so a plain status check covers both cases.
+    // No event_id => auto: false.
+    let auto = match &event_id {
+        Some(eid) => sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM event_rsvps
+                 WHERE event_id = $1 AND user_pubkey = $2 AND status = 'going'
+             )",
+        )
+        .bind(eid)
+        .bind(&target_pubkey)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false),
+        None => false,
+    };
+
+    let push = WsServerMessage::VoiceMove {
+        target_channel_id: target_channel_id.clone(),
+        target_channel_name,
+        source_channel_id: Some(source_channel_id),
+        event_id: event_id.clone(),
+        auto,
+    };
+    let ev = crate::routes::chat_models::ChatEvent::VoiceMove {
+        to_pubkey: target_pubkey.clone(),
+    };
+    let json: std::sync::Arc<str> =
+        std::sync::Arc::from(serde_json::to_string(&push).unwrap().as_str());
+    let _ = state.chat_tx.send((ev, json));
+
+    tracing::info!(
+        "Voice move: {} requested by {} -> channel {}",
+        &target_pubkey[..16.min(target_pubkey.len())],
+        &cs.public_key[..16.min(cs.public_key.len())],
+        &target_channel_id[..8.min(target_channel_id.len())]
+    );
+    DispatchResult::Continue
+}
+
 pub(in crate::routes::ws) async fn handle_voice_zone_create(
     cs: &ConnState,
     state: &Arc<AppState>,

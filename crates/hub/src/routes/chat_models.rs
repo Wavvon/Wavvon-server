@@ -260,6 +260,12 @@ pub enum ChatEvent {
         channel_id: String,
         to_pubkeys: Vec<String>,
     },
+    /// A voice-move push (events.md §7.1) targeted at exactly one recipient.
+    /// Unlike `WhisperSignal`, `channel_id()` truly returns "" for this
+    /// variant (see the dedicated hub-wide-bypass-plus-pubkey-filter branch
+    /// in the WS dispatch loop) so delivery never depends on the target
+    /// still being subscribed to any particular channel.
+    VoiceMove { to_pubkey: String },
     /// Bot mini-app announce/dismiss event. Routed to channel subscribers.
     BotApp { channel_id: String },
     /// Soundboard clip-played attribution event (soundboard.md §1). Routed
@@ -327,7 +333,8 @@ impl ChatEvent {
             | ChatEvent::MemberOffline { .. }
             | ChatEvent::MemberUpdated { .. }
             | ChatEvent::MemberStatus { .. }
-            | ChatEvent::WebhookDisabled { .. } => "",
+            | ChatEvent::WebhookDisabled { .. }
+            | ChatEvent::VoiceMove { .. } => "",
         }
     }
 }
@@ -505,6 +512,20 @@ pub enum WsClientMessage {
     /// Sender closes their active whisper session.
     #[serde(rename = "voice_whisper_stop")]
     VoiceWhisperStop,
+
+    /// Request that the hub ask `target_pubkey` to leave-and-join
+    /// `target_channel_id` (events.md §7.1). `event_id` is present when the
+    /// move is driven by a staging panel (Phase 2); absent for the generic
+    /// Phase 1 right-click primitive. The hub never forces the move — it
+    /// pushes a `voice_move` control message and the target's own client
+    /// runs its normal join.
+    #[serde(rename = "voice_move")]
+    VoiceMove {
+        target_pubkey: String,
+        target_channel_id: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
 
     /// Bot sends this after connecting to request replay of missed events.
     #[serde(rename = "resume")]
@@ -859,6 +880,23 @@ pub enum WsServerMessage {
     /// Delivered only to the resolved whisper target set when a sender stops whispering.
     #[serde(rename = "voice_whisper_stopped")]
     VoiceWhisperStopped { sender_pubkey: String },
+
+    /// Delivered only to the moved target (events.md §7.1). `target_channel_name`
+    /// is included so a voice-only-presence target (Phase 2) can still label
+    /// the voice UI even though the channel is absent from its read-gated
+    /// channel list. `auto: true` means the target has claimed a slot or
+    /// RSVP'd "going" on `event_id` (§7.2) and the client should immediately
+    /// leave-and-join; `auto: false` means the client should prompt with an
+    /// accept/decline modal. Decline is a client-side no-op — the hub is
+    /// never told about it.
+    #[serde(rename = "voice_move")]
+    VoiceMove {
+        target_channel_id: String,
+        target_channel_name: String,
+        source_channel_id: Option<String>,
+        event_id: Option<String>,
+        auto: bool,
+    },
 
     /// Hub-wide signal that the channel list changed; clients should re-fetch /channels.
     #[serde(rename = "channels_updated")]
