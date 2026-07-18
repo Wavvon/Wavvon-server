@@ -873,6 +873,10 @@ pub fn create_router_full(
             "/events/{event_id}/assignments",
             get(routes::events::list_event_assignments),
         )
+        .route(
+            "/events/{event_id}/squad-rooms",
+            post(routes::events::create_squad_rooms),
+        )
         // ---- File uploads ----
         .route(
             "/channels/{channel_id}/upload",

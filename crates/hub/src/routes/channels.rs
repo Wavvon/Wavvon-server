@@ -284,6 +284,7 @@ pub async fn create_channel(
         is_temporary: false,
         owner_pubkey: None,
         spawner_name_template: req.spawner_name_template.clone(),
+        event_id: None,
     };
 
     // Publish channel.created audit event.
@@ -567,7 +568,7 @@ pub async fn list_channels(
     user: AuthUser,
 ) -> Result<Json<Vec<ChannelResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id, is_temporary, owner_pubkey, spawner_name_template
+        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id, is_temporary, owner_pubkey, spawner_name_template, event_id
          FROM channels
          ORDER BY display_order, created_at",
     )
@@ -607,6 +608,7 @@ pub async fn list_channels(
             is_temporary: r.is_temporary,
             owner_pubkey: r.owner_pubkey,
             spawner_name_template: r.spawner_name_template,
+            event_id: r.event_id,
         })
         .collect();
 
@@ -754,11 +756,12 @@ struct ChannelRow {
     is_temporary: bool,
     owner_pubkey: Option<String>,
     spawner_name_template: Option<String>,
+    event_id: Option<String>,
 }
 
 /// Returns the code-depth a new item would sit at if placed under `parent_id`
 /// (0 = root-level, 1 = one level down, etc.).
-async fn node_depth(
+pub(crate) async fn node_depth(
     db: &sqlx::PgPool,
     parent_id: Option<&str>,
 ) -> Result<u32, (StatusCode, String)> {
@@ -925,7 +928,7 @@ pub async fn spawn_temp_channel(
     }
 }
 
-async fn read_max_depth(db: &sqlx::PgPool) -> u32 {
+pub(crate) async fn read_max_depth(db: &sqlx::PgPool) -> u32 {
     sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'max_channel_depth'",
     )

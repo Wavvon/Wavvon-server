@@ -52,6 +52,11 @@ pub struct ChannelResponse {
     /// Set only on spawner channels: the name template used for rooms it spawns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawner_name_template: Option<String>,
+    /// Set only on auto-spawned squad rooms (events.md §7.5): the event this
+    /// room was created for. Lets clients identify "this event's rooms" and
+    /// group them in the sidebar/staging panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]

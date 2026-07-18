@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -8,7 +9,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
-use crate::routes::chat_models::{ChatEvent, MessageResponse, WsServerMessage};
+use crate::routes::chat_models::{ChannelResponse, ChatEvent, MessageResponse, WsServerMessage};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,17 @@ pub struct CreateEventRequest {
     /// `position` is assigned sequentially starting at 0.
     #[serde(default)]
     pub slots: Vec<CreateSlotRequest>,
+    /// Hub-level event (events.md §5): visible to every member regardless of
+    /// whether they can read the anchor `channel_id`. Create-time only --
+    /// requires hub-level `CREATE_EVENTS` in addition to the channel-scoped
+    /// gate on the anchor (see `create_event`).
+    #[serde(default)]
+    pub hub_wide: bool,
+    /// Fan the announcement/reminder cards out to every descendant of the
+    /// anchor channel (events.md §6). Same permission as the base event --
+    /// no extra grant needed.
+    #[serde(default)]
+    pub propagate_to_children: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -55,6 +67,12 @@ pub struct UpdateEventRequest {
     /// `update_event` below.
     #[serde(default, deserialize_with = "deserialize_some")]
     pub reminder_minutes: Option<Option<i64>>,
+    /// `hub_wide` is create-time only (events.md §5): present here purely so
+    /// `update_event` can detect and reject an attempted flip with a clear
+    /// 400 rather than silently ignoring it or erroring on an unknown field.
+    /// Absent = don't touch (the common case: no attempted flip at all).
+    #[serde(default)]
+    pub hub_wide: Option<bool>,
 }
 
 /// Lets us distinguish "field missing" from "field explicitly null" in JSON
@@ -106,6 +124,12 @@ pub struct EventResponse {
     pub created_at: i64,
     pub reminder_minutes: Option<i64>,
     pub reminder_sent_at: Option<i64>,
+    /// Hub-level event (events.md §5): visible hub-wide regardless of
+    /// anchor-channel read access. Create-time only.
+    pub hub_wide: bool,
+    /// Fan the announcement/reminder cards out to every descendant of the
+    /// anchor channel (events.md §6).
+    pub propagate_to_children: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -148,6 +172,15 @@ pub struct EventMoveAssignmentResponse {
     pub target_channel_id: String,
     pub assigned_by: String,
     pub created_at: i64,
+}
+
+/// Auto-spawned squad channels (events.md §7.5). `count` is bounded to
+/// `1..=20`; `name_prefix` defaults to `"Squad"` when absent.
+#[derive(Deserialize)]
+pub struct CreateSquadRoomsRequest {
+    pub count: i64,
+    #[serde(default)]
+    pub name_prefix: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -268,25 +301,63 @@ async fn post_card_message(
     Ok(())
 }
 
-/// "Event created" card: title + formatted start time.
+/// Returns `channel_id` plus every descendant of it in the `channels` tree
+/// (any depth) when `propagate` is true; otherwise just `[channel_id]`
+/// (events.md §6). Mirrors the same BFS-over-`parent_id` shape
+/// `routes::channels::delete_channel` uses to collect a subtree, reused here
+/// for card fan-out rather than deletion.
+async fn propagation_targets(
+    db: &sqlx::PgPool,
+    channel_id: &str,
+    propagate: bool,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    if !propagate {
+        return Ok(vec![channel_id.to_string()]);
+    }
+
+    let mut seen: HashSet<String> = HashSet::new();
+    seen.insert(channel_id.to_string());
+    let mut frontier: Vec<String> = vec![channel_id.to_string()];
+    while !frontier.is_empty() {
+        let children: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM channels WHERE parent_id = ANY($1)")
+                .bind(&frontier)
+                .fetch_all(db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        frontier = children
+            .into_iter()
+            .filter(|c| seen.insert(c.clone()))
+            .collect();
+    }
+    Ok(seen.into_iter().collect())
+}
+
+/// "Event created" card: title + formatted start time. Fans out to every
+/// descendant of the anchor when `event.propagate_to_children` is set
+/// (events.md §6) — one event row, N cards.
 async fn post_event_card(
     state: &AppState,
-    channel_id: &str,
     event: &EventResponse,
 ) -> Result<(), (StatusCode, String)> {
     // Format starts_at as a simple UTC string for the card content.
     // We avoid pulling in chrono — a direct conversion is fine for display.
     let dt = format_unix_utc(event.starts_at);
     let content = format!("**{}** — {}", event.title, dt);
-    post_card_message(state, channel_id, &event.creator_pubkey, content).await
+    let targets =
+        propagation_targets(&state.db, &event.channel_id, event.propagate_to_children).await?;
+    for channel_id in targets {
+        post_card_message(state, &channel_id, &event.creator_pubkey, content.clone()).await?;
+    }
+    Ok(())
 }
 
 /// Reminder card (events.md §3): posted by the reminder worker when
 /// `starts_at - reminder_minutes * 60 <= now`. `pub(crate)` so
-/// `reminder_worker` can call it.
+/// `reminder_worker` can call it. Fans out the same way `post_event_card`
+/// does (events.md §6).
 pub(crate) async fn post_event_reminder_card(
     state: &AppState,
-    channel_id: &str,
     event: &EventResponse,
     reminder_minutes: i64,
 ) -> Result<(), (StatusCode, String)> {
@@ -294,7 +365,12 @@ pub(crate) async fn post_event_reminder_card(
         "**{}** — starts in {} minutes",
         event.title, reminder_minutes
     );
-    post_card_message(state, channel_id, &event.creator_pubkey, content).await
+    let targets =
+        propagation_targets(&state.db, &event.channel_id, event.propagate_to_children).await?;
+    for channel_id in targets {
+        post_card_message(state, &channel_id, &event.creator_pubkey, content.clone()).await?;
+    }
+    Ok(())
 }
 
 /// Slots for an event, ordered by `position`, each carrying its current
@@ -448,6 +524,15 @@ pub async fn create_event(
         permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id).await?;
     perms.require(permissions::CREATE_EVENTS)?;
 
+    // events.md §5: a hub-wide event additionally requires hub-level
+    // CREATE_EVENTS (the plain, non-channel-scoped baseline) -- a member who
+    // only holds CREATE_EVENTS via a channel overwrite in one sub-tree must
+    // not be able to post an announcement visible to the whole hub.
+    if req.hub_wide {
+        let hub_perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+        hub_perms.require(permissions::CREATE_EVENTS)?;
+    }
+
     if req.title.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title is required".to_string()));
     }
@@ -463,8 +548,8 @@ pub async fn create_event(
     let description = req.description.unwrap_or_default();
 
     sqlx::query(
-        "INSERT INTO hub_events (id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        "INSERT INTO hub_events (id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, hub_wide, propagate_to_children)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&id)
     .bind(&req.channel_id)
@@ -476,6 +561,8 @@ pub async fn create_event(
     .bind(&req.location)
     .bind(now)
     .bind(req.reminder_minutes)
+    .bind(req.hub_wide)
+    .bind(req.propagate_to_children)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -508,9 +595,11 @@ pub async fn create_event(
         created_at: now,
         reminder_minutes: req.reminder_minutes,
         reminder_sent_at: None,
+        hub_wide: req.hub_wide,
+        propagate_to_children: req.propagate_to_children,
     };
 
-    post_event_card(&state, &event.channel_id, &event).await?;
+    post_event_card(&state, &event).await?;
 
     Ok((StatusCode::CREATED, Json(event)))
 }
@@ -527,7 +616,7 @@ pub async fn list_events(
 
     let rows: Vec<EventResponse> = if upcoming {
         sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
+            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
              FROM hub_events WHERE starts_at >= $1 ORDER BY starts_at ASC LIMIT $2",
         )
         .bind(now)
@@ -536,7 +625,7 @@ pub async fn list_events(
         .await
     } else {
         sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
+            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
              FROM hub_events ORDER BY starts_at ASC LIMIT $1",
         )
         .bind(limit)
@@ -548,7 +637,9 @@ pub async fn list_events(
     // Read-gating (§3.5): drop any event whose channel the caller lacks
     // effective READ_MESSAGES on, so title/description/location/channel_id
     // for hidden channels never reach the client (matches `channels.rs`
-    // list_channels' batch-filter approach).
+    // list_channels' batch-filter approach). events.md §5: a `hub_wide`
+    // event skips this filter entirely -- every member sees it regardless
+    // of anchor-channel access.
     let readable = permissions::channels_with_permission(
         &state.db,
         &user.public_key,
@@ -558,7 +649,7 @@ pub async fn list_events(
 
     let mut result = Vec::with_capacity(rows.len());
     for event in rows {
-        if !readable.contains(&event.channel_id) {
+        if !event.hub_wide && !readable.contains(&event.channel_id) {
             continue;
         }
         let rsvp_counts = load_rsvp_counts(&state.db, &event.id).await?;
@@ -579,7 +670,7 @@ pub async fn get_event(
     Path(event_id): Path<String>,
 ) -> Result<Json<EventWithRsvps>, (StatusCode, String)> {
     let event: Option<EventResponse> = sqlx::query_as(
-        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
          FROM hub_events WHERE id = $1",
     )
     .bind(&event_id)
@@ -592,10 +683,16 @@ pub async fn get_event(
     // Read-gating (§3.5): the event id itself doesn't reveal the channel, so
     // a hidden-channel event 404s here rather than 403ing -- 403 would
     // confirm the event's existence to a caller who can't see its channel.
-    let perms =
-        permissions::channel_permissions(&state.db, &user.public_key, &event.channel_id).await?;
-    if !perms.has(permissions::READ_MESSAGES) {
-        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
+    // events.md §5: a `hub_wide` event bypasses this gate entirely -- it's
+    // public to the hub by construction, so an unreadable anchor never 404s
+    // it.
+    if !event.hub_wide {
+        let perms =
+            permissions::channel_permissions(&state.db, &user.public_key, &event.channel_id)
+                .await?;
+        if !perms.has(permissions::READ_MESSAGES) {
+            return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
+        }
     }
 
     let rsvp_counts = load_rsvp_counts(&state.db, &event_id).await?;
@@ -614,18 +711,29 @@ pub async fn update_event(
     Path(event_id): Path<String>,
     Json(req): Json<UpdateEventRequest>,
 ) -> Result<Json<EventResponse>, (StatusCode, String)> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT creator_pubkey FROM hub_events WHERE id = $1")
+    let row: Option<(String, bool)> =
+        sqlx::query_as("SELECT creator_pubkey, hub_wide FROM hub_events WHERE id = $1")
             .bind(&event_id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (creator,) = row.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
+    let (creator, hub_wide) = row.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
 
     if creator != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
         perms.require(permissions::ADMIN)?;
+    }
+
+    // events.md §5: `hub_wide` is create-time only -- reject an attempted
+    // flip with a clear 400 rather than silently ignoring it.
+    if let Some(requested_hub_wide) = req.hub_wide {
+        if requested_hub_wide != hub_wide {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "hub_wide cannot be changed after creation".to_string(),
+            ));
+        }
     }
 
     if let Some(title) = &req.title {
@@ -685,7 +793,7 @@ pub async fn update_event(
     }
 
     let updated: EventResponse = sqlx::query_as(
-        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
          FROM hub_events WHERE id = $1",
     )
     .bind(&event_id)
@@ -716,6 +824,14 @@ pub async fn delete_event(
         perms.require(permissions::ADMIN)?;
     }
 
+    // events.md §7.5: squad rooms are linked to this event by a plain
+    // `channels.event_id` column with no FK (see migrations.rs), so they
+    // must be cleaned up explicitly here rather than relying on
+    // ON-DELETE-CASCADE -- an occupied room mid-conversation is deleted too
+    // (event deletion, unlike the event-end sweep, isn't expected to
+    // preserve occupied rooms; the organizer explicitly removed the event).
+    delete_event_squad_rooms(&state, &event_id).await?;
+
     sqlx::query("DELETE FROM hub_events WHERE id = $1")
         .bind(&event_id)
         .execute(&state.db)
@@ -723,6 +839,55 @@ pub async fn delete_event(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deletes every squad room linked to `event_id` (`channels.event_id`),
+/// mirroring `routes::channels::delete_channel`'s manual multi-table cascade
+/// (squad rooms are always leaves -- nothing can be created under a
+/// non-category channel -- so there's no descendant walk to do). Broadcasts
+/// `channels_updated` if anything was removed. No-op if the event has no
+/// rooms.
+async fn delete_event_squad_rooms(
+    state: &AppState,
+    event_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let room_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM channels WHERE event_id = $1")
+        .bind(event_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if room_ids.is_empty() {
+        return Ok(());
+    }
+
+    for table in [
+        "messages",
+        "channel_bans",
+        "channel_settings",
+        "alliance_shared_channels",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE channel_id = ANY($1)"))
+            .bind(&room_ids)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    sqlx::query("DELETE FROM channels WHERE id = ANY($1)")
+        .bind(&room_ids)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+            .unwrap()
+            .as_str(),
+    );
+    let _ = state.chat_tx.send((ChatEvent::ChannelsUpdated, json));
+
+    Ok(())
 }
 
 /// POST /events/:id/rsvp
@@ -912,6 +1077,141 @@ pub async fn list_event_assignments(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(Json(rows))
+}
+
+/// POST /events/:id/squad-rooms
+///
+/// Auto-spawned squad channels (events.md §7.5). Creates `count` temp
+/// voice-capable channels named "`<name_prefix>` 1".."`<name_prefix>`
+/// `count`" (prefix defaults to "Squad"), parented under the event's anchor
+/// channel, each with `channels.event_id` set to this event -- lets clients
+/// identify "this event's rooms" and the reminder-worker sweep clean them up
+/// at event end (§7.5's updated lifetime rule).
+///
+/// Gated identically to `GET /events/:id/assignments`: (event creator OR
+/// channel-scoped `CREATE_EVENTS` on the anchor -- `require_slot_management_access`)
+/// AND channel-scoped `MOVE_MEMBERS` on the anchor.
+pub async fn create_squad_rooms(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(event_id): Path<String>,
+    Json(req): Json<CreateSquadRoomsRequest>,
+) -> Result<(StatusCode, Json<Vec<ChannelResponse>>), (StatusCode, String)> {
+    let channel_id = require_slot_management_access(&state, &user, &event_id).await?;
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    perms.require(permissions::MOVE_MEMBERS)?;
+
+    if !(1..=20).contains(&req.count) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "count must be between 1 and 20".to_string(),
+        ));
+    }
+
+    let prefix = req
+        .name_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Squad");
+    if prefix.chars().count() > 40 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name_prefix must be at most 40 characters".to_string(),
+        ));
+    }
+
+    // Depth safety: the rooms sit one level below the anchor (events.md §7.5
+    // -- "the spawned rooms live under the event's anchor channel"), unlike
+    // the join-to-create spawner's sibling placement (temp-voice-channels.md
+    // §2), so a depth check is needed here where it wasn't there.
+    let max_depth = crate::routes::channels::read_max_depth(&state.db).await;
+    if max_depth > 0 {
+        let new_depth = crate::routes::channels::node_depth(&state.db, Some(&channel_id)).await?;
+        if new_depth > max_depth - 1 {
+            return Err((StatusCode::BAD_REQUEST, "depth_exceeded".to_string()));
+        }
+    }
+
+    let now = crate::auth::handlers::unix_timestamp();
+    let mut created = Vec::with_capacity(req.count as usize);
+
+    for i in 1..=req.count {
+        let base_name = format!("{prefix} {i}");
+        let mut name = base_name.clone();
+        let mut attempt = 0u32;
+        loop {
+            let id = Uuid::new_v4().to_string();
+            let next_order: i64 =
+                sqlx::query_scalar("SELECT COALESCE(MAX(display_order), -1) + 1 FROM channels")
+                    .fetch_one(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+            let result = sqlx::query(
+                "INSERT INTO channels
+                    (id, name, created_by, parent_id, is_category, display_order, channel_type, created_at, is_temporary, event_id)
+                 VALUES ($1, $2, $3, $4, FALSE, $5, 'text', $6, TRUE, $7)",
+            )
+            .bind(&id)
+            .bind(&name)
+            .bind(&user.public_key)
+            .bind(&channel_id)
+            .bind(next_order)
+            .bind(now)
+            .bind(&event_id)
+            .execute(&state.db)
+            .await;
+
+            match result {
+                Ok(_) => {
+                    created.push(ChannelResponse {
+                        id,
+                        name: name.clone(),
+                        created_by: user.public_key.clone(),
+                        parent_id: Some(channel_id.clone()),
+                        is_category: false,
+                        display_order: next_order,
+                        description: None,
+                        icon: None,
+                        color: None,
+                        custom_icon_svg: None,
+                        created_at: now,
+                        channel_type: "text".to_string(),
+                        banner_url: None,
+                        banner_file_id: None,
+                        is_temporary: true,
+                        owner_pubkey: None,
+                        spawner_name_template: None,
+                        event_id: Some(event_id.clone()),
+                    });
+                    break;
+                }
+                Err(sqlx::Error::Database(dbe)) if dbe.code().is_some_and(|c| c == "23505") => {
+                    attempt += 1;
+                    if attempt > 50 {
+                        return Err((
+                            StatusCode::CONFLICT,
+                            "Could not allocate a unique room name".to_string(),
+                        ));
+                    }
+                    name = format!("{base_name} ({attempt})");
+                }
+                Err(e) => {
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+                }
+            }
+        }
+    }
+
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(&WsServerMessage::ChannelsUpdated)
+            .unwrap()
+            .as_str(),
+    );
+    let _ = state.chat_tx.send((ChatEvent::ChannelsUpdated, json));
+
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 // ---------------------------------------------------------------------------

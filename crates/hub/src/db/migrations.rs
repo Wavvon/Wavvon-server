@@ -1731,6 +1731,39 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Hub-level events + propagation (events.md §5, §6). `hub_wide` marks an
+    // event as belonging to the whole community rather than just its anchor
+    // channel -- `channel_id` stays NOT NULL (see events.md's "Decisions"),
+    // the card/reminder still anchor there, but `list_events`/`get_event`
+    // bypass the anchor's read-gate for these rows. `propagate_to_children`
+    // fans the announcement/reminder cards out to every descendant of the
+    // anchor in the channels tree; the event itself stays one row.
+    let _ =
+        sqlx::query("ALTER TABLE hub_events ADD COLUMN hub_wide BOOLEAN NOT NULL DEFAULT FALSE")
+            .execute(pool)
+            .await;
+    let _ = sqlx::query(
+        "ALTER TABLE hub_events ADD COLUMN propagate_to_children BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+
+    // Auto-spawned squad channels (events.md §7.5, updated lifetime). Links a
+    // temp voice channel back to the event that spawned it -- nullable, no
+    // FK. A FK with `ON DELETE SET NULL` would silently sever this link the
+    // moment the event is deleted, orphaning the room from both the
+    // event-end sweep and `delete_event`'s explicit cleanup; `ON DELETE
+    // CASCADE` would instead destroy an occupied room out from under its
+    // participants, which the doc's lifetime rule forbids ("never yank an
+    // occupied room"). Both are handled by hand instead: `delete_event`
+    // deletes its squad rooms before removing the event row, and
+    // `reminder_worker`'s sweep deletes only the *empty* rooms of an ended
+    // event, leaving occupied ones to drain via the ordinary temp-channel
+    // empty-GC path.
+    let _ = sqlx::query("ALTER TABLE channels ADD COLUMN event_id TEXT")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

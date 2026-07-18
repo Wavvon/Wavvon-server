@@ -105,6 +105,37 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         Ok(_) => {}
     }
 
+    // events.md §7.5 (updated lifetime): a squad room linked to an event
+    // whose `ends_at` has passed blocks *new* joins -- it never yanks anyone
+    // already inside. Existing occupants keep talking; the room dies via
+    // the ordinary temp-channel empty-GC once it drains, or is deleted
+    // immediately if already empty by the reminder worker's sweep.
+    let squad_room_event_ended: bool = sqlx::query_scalar::<_, bool>(
+        "SELECT e.ends_at IS NOT NULL AND e.ends_at <= $2
+         FROM channels c
+         JOIN hub_events e ON e.id = c.event_id
+         WHERE c.id = $1",
+    )
+    .bind(&channel_id)
+    .bind(crate::auth::handlers::unix_timestamp())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+
+    if squad_room_event_ended {
+        let err = WsServerMessage::Error {
+            context: "voice_join".to_string(),
+            message: "This event has ended; its squad room no longer accepts new joins."
+                .to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
     // Spawn-on-join (join-to-create temp voice channels,
     // temp-voice-channels.md §2): if the target is a spawner, create a
     // personal sibling room and join that instead. The read gate above
