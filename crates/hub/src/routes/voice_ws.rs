@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::routes::chat_models::{VoiceParticipantInfo, WsServerMessage};
-use crate::routes::ws::{get_voice_participants, leave_voice};
+use crate::routes::ws::{apply_pending_voice_move_assignment, get_voice_participants, leave_voice};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -108,11 +108,25 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         // read_messages against the spawner when applicable; human callers
         // are gated here, same rule (§3.4/§3.5: no effective READ_MESSAGES
         // means the channel — and therefore its spawn action — isn't
-        // visible to them at all).
+        // visible to them at all) -- UNLESS a voice-only presence grant
+        // (events.md §7.4) covers this (pubkey, channel) pair, mirroring
+        // the same bypass in the main hub WS join gate
+        // (routes/ws/handlers/voice.rs::handle_voice_join). The is_bot
+        // branch above is untouched by this bypass.
         if !is_bot {
-            match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await {
-                Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
-                _ => return,
+            let has_grant = state
+                .staging_voice_grants
+                .read()
+                .await
+                .get(&pubkey)
+                .map(|grants| grants.contains(&channel_id))
+                .unwrap_or(false);
+            if !has_grant {
+                match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await
+                {
+                    Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+                    _ => return,
+                }
             }
         }
 
@@ -193,6 +207,11 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         .entry(channel_id.clone())
         .or_default()
         .insert(pubkey.clone(), sentinel);
+
+    // events.md §7.3: apply any queued voice-move assignment now that the
+    // join has fully succeeded (mirrors the same call in the main hub WS
+    // voice-join handler, routes/ws/handlers/voice.rs).
+    apply_pending_voice_move_assignment(&state, &pubkey, &channel_id).await;
 
     // Create the mpsc channel used to push outbound binary frames to this client.
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<Vec<u8>>();

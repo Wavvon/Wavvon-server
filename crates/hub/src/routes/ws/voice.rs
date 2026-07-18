@@ -139,6 +139,118 @@ pub(super) async fn re_resolve_whisper_sessions(state: &AppState) {
     }
 }
 
+/// Applies a queued voice-move assignment (events.md §7.3) after a
+/// successful voice join, if one exists for `pubkey` whose
+/// `target_channel_id` differs from `joined_channel_id` and belongs to an
+/// event that hasn't ended yet (`ends_at IS NULL OR ends_at > now`).
+///
+/// Called from both voice-join paths (`routes/ws/handlers/voice.rs` and
+/// `routes/voice_ws.rs`) right after a join succeeds. Pushes a `voice_move`
+/// exactly like a live move — creating a voice-only presence grant (§7.4)
+/// first if the target lacks `READ_MESSAGES` on the assigned channel. The
+/// assignment row is intentionally left in place (not consumed): a
+/// drop-and-rejoin during the event re-applies it (doc ruling).
+///
+/// An assignment does not itself imply consent (§7.2) — an organizer may
+/// assign a member who never claimed a slot or RSVP'd "going"; `auto` is
+/// computed the same way a live move computes it, not assumed `true`.
+pub async fn apply_pending_voice_move_assignment(
+    state: &AppState,
+    pubkey: &str,
+    joined_channel_id: &str,
+) {
+    let now = crate::auth::handlers::unix_timestamp();
+
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT ema.event_id, ema.target_channel_id
+         FROM event_move_assignments ema
+         INNER JOIN hub_events he ON he.id = ema.event_id
+         WHERE ema.user_pubkey = $1
+           AND ema.target_channel_id != $2
+           AND (he.ends_at IS NULL OR he.ends_at > $3)
+         ORDER BY ema.created_at DESC
+         LIMIT 1",
+    )
+    .bind(pubkey)
+    .bind(joined_channel_id)
+    .bind(now)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let Some((event_id, target_channel_id)) = row else {
+        return;
+    };
+
+    let target_channel_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND is_category = false")
+            .bind(&target_channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    // The assigned channel may have been deleted since the assignment was
+    // made; nothing to apply in that case (the row is cleaned up by the
+    // hub_events ON DELETE CASCADE if the event itself is gone, or lingers
+    // harmlessly otherwise until pruned at event end).
+    let Some(target_channel_name) = target_channel_name else {
+        return;
+    };
+
+    // §7.4: create a voice-only presence grant before the push if the
+    // target lacks effective READ_MESSAGES on the assigned channel.
+    if let Ok(perms) =
+        crate::permissions::channel_permissions(&state.db, pubkey, &target_channel_id).await
+    {
+        if !perms.has(crate::permissions::READ_MESSAGES) {
+            state
+                .staging_voice_grants
+                .write()
+                .await
+                .entry(pubkey.to_string())
+                .or_default()
+                .insert(target_channel_id.clone());
+        }
+    }
+
+    // §7.2: an assignment does not itself imply consent -- compute `auto`
+    // the same way a live move does (a "going" RSVP, or slot claim stored
+    // the same way, on the driving event).
+    let auto: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+             SELECT 1 FROM event_rsvps
+             WHERE event_id = $1 AND user_pubkey = $2 AND status = 'going'
+         )",
+    )
+    .bind(&event_id)
+    .bind(pubkey)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false);
+
+    let push = crate::routes::chat_models::WsServerMessage::VoiceMove {
+        target_channel_id: target_channel_id.clone(),
+        target_channel_name,
+        source_channel_id: Some(joined_channel_id.to_string()),
+        event_id: Some(event_id.clone()),
+        auto,
+    };
+    let ev = crate::routes::chat_models::ChatEvent::VoiceMove {
+        to_pubkey: pubkey.to_string(),
+    };
+    let json: std::sync::Arc<str> =
+        std::sync::Arc::from(serde_json::to_string(&push).unwrap().as_str());
+    let _ = state.chat_tx.send((ev, json));
+
+    tracing::info!(
+        "Voice move applied from queued assignment: {} -> channel {} (event {})",
+        &pubkey[..16.min(pubkey.len())],
+        &target_channel_id[..8.min(target_channel_id.len())],
+        event_id
+    );
+}
+
 pub(super) async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<VoiceRosterEntry> {
     let sender_ids = state.voice_sender_ids.read().await;
     let ch_map = match sender_ids.get(channel_id) {

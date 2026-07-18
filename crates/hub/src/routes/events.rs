@@ -139,6 +139,17 @@ pub struct RsvpEntry {
     pub status: String,
 }
 
+/// Staging-panel data surface (events.md §7.5) — one queued voice-move
+/// assignment. Field names are load-bearing: the web staging panel is built
+/// against this exact shape.
+#[derive(Serialize, sqlx::FromRow)]
+pub struct EventMoveAssignmentResponse {
+    pub user_pubkey: String,
+    pub target_channel_id: String,
+    pub assigned_by: String,
+    pub created_at: i64,
+}
+
 #[derive(Deserialize)]
 pub struct ListEventsParams {
     pub upcoming: Option<bool>,
@@ -843,6 +854,64 @@ pub async fn list_rsvps(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(Json(entries))
+}
+
+/// GET /events/:id/assignments
+///
+/// Staging-panel data surface (events.md §7.5). Gated on: (event creator OR
+/// channel-scoped `CREATE_EVENTS` -- `require_slot_management_access`, the
+/// same rule slot management uses) AND channel-scoped `MOVE_MEMBERS`.
+///
+/// Both permission checks are resolved against the event's own **anchor**
+/// channel, not a move's destination: unlike a single `voice_move` (which
+/// resolves `MOVE_MEMBERS` against that one move's destination, §7.1),
+/// this endpoint has no single destination to scope against -- it surfaces
+/// every assignment for the whole event, potentially targeting many
+/// different channels. The anchor channel is the natural analogue, matching
+/// how `CREATE_EVENTS` is already resolved here for slot management.
+///
+/// 404s (not 403s) when the event doesn't exist or the caller can't read
+/// its anchor channel, matching `get_event`'s "an id alone can't confirm a
+/// hidden channel's existence" posture; a caller who *can* read the channel
+/// but isn't an organizer/mover gets 403.
+pub async fn list_event_assignments(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(event_id): Path<String>,
+) -> Result<Json<Vec<EventMoveAssignmentResponse>>, (StatusCode, String)> {
+    let channel_id: Option<String> =
+        sqlx::query_scalar("SELECT channel_id FROM hub_events WHERE id = $1")
+            .bind(&event_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let channel_id = channel_id.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
+
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    if !perms.has(permissions::READ_MESSAGES) {
+        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
+    }
+
+    // Organizer gate (creator or channel-scoped CREATE_EVENTS) -- reuses the
+    // same helper slot management uses. Re-derives the channel id, which we
+    // already have, but keeps this endpoint's authorization identical to
+    // slot management's rather than hand-rolling a second copy.
+    require_slot_management_access(&state, &user, &event_id).await?;
+    // Mover gate: channel-scoped MOVE_MEMBERS against the anchor channel.
+    perms.require(permissions::MOVE_MEMBERS)?;
+
+    let rows: Vec<EventMoveAssignmentResponse> = sqlx::query_as(
+        "SELECT user_pubkey, target_channel_id, assigned_by, created_at
+         FROM event_move_assignments
+         WHERE event_id = $1
+         ORDER BY created_at ASC",
+    )
+    .bind(&event_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(rows))
 }
 
 // ---------------------------------------------------------------------------

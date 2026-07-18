@@ -66,6 +66,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: RwLock::new(HashMap::new()),
         voice_consumed_tokens: RwLock::new(HashMap::new()),
         voice_ws_senders: RwLock::new(HashMap::new()),
@@ -223,6 +224,49 @@ async fn rsvp_going(base: &str, token: &str, event_id: &str) {
         .await
         .unwrap();
     assert!(resp.status().is_success(), "rsvp failed: {resp:?}");
+}
+
+/// Like `create_event` but lets the caller set `ends_at` (events.md §7.3
+/// prune: assignments die at event end).
+async fn create_event_with_ends_at(
+    base: &str,
+    token: &str,
+    channel_id: &str,
+    title: &str,
+    ends_at: i64,
+) -> EventResponse {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/events"))
+        .bearer_auth(token)
+        .json(&json!({
+            "channel_id": channel_id,
+            "title": title,
+            "starts_at": 0,
+            "ends_at": ends_at,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "create_event failed: {resp:?}");
+    resp.json().await.unwrap()
+}
+
+async fn get_assignments(base: &str, token: &str, event_id: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .get(format!("{base}/events/{event_id}/assignments"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn get_assignments_ok(base: &str, token: &str, event_id: &str) -> Vec<Value> {
+    let resp = get_assignments(base, token, event_id).await;
+    assert!(
+        resp.status().is_success(),
+        "get assignments failed: {resp:?}"
+    );
+    resp.json().await.unwrap()
 }
 
 type WsSink = futures_util::stream::SplitSink<
@@ -486,7 +530,10 @@ async fn rejects_target_not_in_voice() {
 }
 
 /// A target that lacks effective `READ_MESSAGES` on the destination is
-/// rejected (voice-only presence grants are Phase 2 — out of scope here).
+/// rejected when the move carries no `event_id` — a generic mod-tool move
+/// must not reveal a hidden channel (events.md §7.4). The voice-only
+/// presence grant only kicks in with an event context; see
+/// `voice_only_grant_allows_join_but_not_message_history` below.
 #[tokio::test]
 async fn rejects_target_without_read_access_to_destination() {
     let mut fx = build_fixture(true).await;
@@ -516,4 +563,390 @@ async fn rejects_target_without_read_access_to_destination() {
     assert_eq!(err["context"], "voice_move");
 
     assert_not_received(&mut fx.target_ws.1, "voice_move").await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: queued assignments (events.md §7.3)
+// ---------------------------------------------------------------------------
+
+/// A move to a target that isn't in voice, with an `event_id`, queues an
+/// `event_move_assignments` row instead of erroring (no push either, since
+/// the target isn't there to receive it). Re-issuing the move overwrites
+/// the assignment's `target_channel_id` (latest wins) rather than creating
+/// a second row.
+#[tokio::test]
+async fn queued_assignment_upserted_and_overwritten_on_reissue() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    let mover = Identity::generate();
+    let mover_token = authenticate_http(&base, &mover).await;
+    let mover_key = mover.public_key_hex();
+
+    let target = Identity::generate();
+    let target_token = authenticate_http(&base, &target).await;
+    let target_pubkey = target.public_key_hex();
+
+    let squad_a = create_channel(&base, &owner_token, "squad-a").await;
+    let squad_b = create_channel(&base, &owner_token, "squad-b").await;
+
+    let mover_role = create_role(&base, &owner_token, "MarshalQueue", &["move_members"]).await;
+    assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
+
+    let event = create_event(&base, &owner_token, &squad_a.id, "Raid Night").await;
+
+    // Target authenticates (so it can observe non-delivery) but never joins
+    // voice anywhere.
+    let mut target_ws = connect_ws(&base, &target_token).await;
+    let mut mover_ws = connect_ws(&base, &mover_token).await;
+
+    send_ws(
+        &mut mover_ws.0,
+        json!({
+            "type": "voice_move",
+            "target_pubkey": target_pubkey,
+            "target_channel_id": squad_a.id,
+            "event_id": event.id,
+        }),
+    )
+    .await;
+
+    // No error to the mover, no push to the absent target.
+    assert_not_received(&mut mover_ws.1, "error").await;
+    assert_not_received(&mut target_ws.1, "voice_move").await;
+
+    let assignments = get_assignments_ok(&base, &owner_token, &event.id).await;
+    assert_eq!(assignments.len(), 1, "expected one queued assignment");
+    assert_eq!(assignments[0]["user_pubkey"], target_pubkey);
+    assert_eq!(assignments[0]["target_channel_id"], squad_a.id);
+    assert_eq!(assignments[0]["assigned_by"], mover_key);
+
+    // Re-issue to a different channel -- overwrites, doesn't duplicate.
+    send_ws(
+        &mut mover_ws.0,
+        json!({
+            "type": "voice_move",
+            "target_pubkey": target_pubkey,
+            "target_channel_id": squad_b.id,
+            "event_id": event.id,
+        }),
+    )
+    .await;
+    assert_not_received(&mut mover_ws.1, "error").await;
+
+    let assignments = get_assignments_ok(&base, &owner_token, &event.id).await;
+    assert_eq!(
+        assignments.len(),
+        1,
+        "re-issuing must overwrite, not duplicate"
+    );
+    assert_eq!(assignments[0]["target_channel_id"], squad_b.id);
+}
+
+/// A queued assignment auto-applies the moment the target joins any voice
+/// channel: the hub pushes a `voice_move` for the assigned channel. Because
+/// the target never claimed a slot or RSVP'd "going" on the driving event,
+/// an assignment alone does not imply consent (§7.2) -- the push carries
+/// `auto: false`. The row is not consumed on application: leaving and
+/// rejoining voice re-applies it.
+#[tokio::test]
+async fn queued_assignment_applies_on_join_auto_false_and_persists_across_rejoin() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    let mover = Identity::generate();
+    let mover_token = authenticate_http(&base, &mover).await;
+    let mover_key = mover.public_key_hex();
+
+    let target = Identity::generate();
+    let target_token = authenticate_http(&base, &target).await;
+    let target_pubkey = target.public_key_hex();
+
+    let lobby = create_channel(&base, &owner_token, "lobby-voice").await;
+    let squad = create_channel(&base, &owner_token, "squad-voice").await;
+
+    let mover_role = create_role(&base, &owner_token, "MarshalApply", &["move_members"]).await;
+    assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
+
+    let event = create_event(&base, &owner_token, &squad.id, "Raid Night").await;
+    // Target intentionally never RSVPs.
+
+    let mut target_ws = connect_ws(&base, &target_token).await;
+    let mut mover_ws = connect_ws(&base, &mover_token).await;
+
+    // Queue the assignment while the target is not in voice.
+    send_ws(
+        &mut mover_ws.0,
+        json!({
+            "type": "voice_move",
+            "target_pubkey": target_pubkey,
+            "target_channel_id": squad.id,
+            "event_id": event.id,
+        }),
+    )
+    .await;
+    assert_not_received(&mut target_ws.1, "voice_move").await;
+
+    // Target joins some unrelated voice channel -> assignment auto-applies.
+    send_ws(
+        &mut target_ws.0,
+        json!({ "type": "voice_join", "channel_id": lobby.id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for(&mut target_ws.1, "voice_joined").await;
+
+    let push = wait_for(&mut target_ws.1, "voice_move").await;
+    assert_eq!(push["target_channel_id"], squad.id);
+    assert_eq!(push["source_channel_id"], lobby.id);
+    assert_eq!(push["event_id"], event.id);
+    assert_eq!(
+        push["auto"], false,
+        "an assignment alone must not imply consent for a non-RSVP'd target"
+    );
+
+    // Client runs its normal leave-and-join per the push, then later drops
+    // and rejoins the lobby again -- the row was not consumed, so it
+    // re-applies.
+    send_ws(
+        &mut target_ws.0,
+        json!({ "type": "voice_leave", "channel_id": lobby.id }),
+    )
+    .await;
+    send_ws(
+        &mut target_ws.0,
+        json!({ "type": "voice_join", "channel_id": lobby.id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for(&mut target_ws.1, "voice_joined").await;
+    let push2 = wait_for(&mut target_ws.1, "voice_move").await;
+    assert_eq!(push2["target_channel_id"], squad.id);
+
+    let assignments = get_assignments_ok(&base, &owner_token, &event.id).await;
+    assert_eq!(
+        assignments.len(),
+        1,
+        "assignment row must persist, not be consumed, across application"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: voice-only presence (events.md §7.4)
+// ---------------------------------------------------------------------------
+
+/// A move with an `event_id` to a destination the target can't read
+/// succeeds (voice-only presence, §7.4): the target's join to that channel
+/// is admitted despite lacking `READ_MESSAGES`, but message history on that
+/// channel still 403s them -- the grant bypasses exactly one gate. Leaving
+/// voice drops the grant, so a fresh direct join attempt afterward fails
+/// again.
+#[tokio::test]
+async fn voice_only_grant_allows_join_but_not_message_history_and_evaporates_on_leave() {
+    let mut fx = build_fixture(true).await;
+
+    // Deny read_messages for @everyone on the destination -- the target
+    // holds only builtin-everyone, so this removes their read access there.
+    deny_overwrite(
+        &fx.base,
+        &fx.owner_token,
+        &fx.dest.id,
+        "builtin-everyone",
+        &["read_messages"],
+    )
+    .await;
+
+    let event = create_event(&fx.base, &fx.owner_token, &fx.dest.id, "Raid Night").await;
+
+    send_ws(
+        &mut fx.mover_ws.0,
+        json!({
+            "type": "voice_move",
+            "target_pubkey": fx.target_pubkey,
+            "target_channel_id": fx.dest.id,
+            "event_id": event.id,
+        }),
+    )
+    .await;
+
+    let push = wait_for(&mut fx.target_ws.1, "voice_move").await;
+    assert_eq!(push["target_channel_id"], fx.dest.id);
+
+    // Target's client runs its normal leave-and-join per the push -- this
+    // must succeed despite lacking READ_MESSAGES on the destination.
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_leave", "channel_id": fx.source.id }),
+    )
+    .await;
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_join", "channel_id": fx.dest.id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for(&mut fx.target_ws.1, "voice_joined").await;
+
+    // Message history on the destination is still 403 for the voice-only
+    // participant -- the grant bypasses only the voice-join gate.
+    let resp = reqwest::Client::new()
+        .get(format!("{}/channels/{}/messages", fx.base, fx.dest.id))
+        .bearer_auth(&fx.target_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Leaving voice drops the grant.
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_leave", "channel_id": fx.dest.id }),
+    )
+    .await;
+
+    // A fresh, un-consented direct join attempt now fails again.
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_join", "channel_id": fx.dest.id, "udp_port": 0 }),
+    )
+    .await;
+    let err = wait_for(&mut fx.target_ws.1, "error").await;
+    assert_eq!(err["context"], "voice_join");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: staging panel data surface (events.md §7.5)
+// ---------------------------------------------------------------------------
+
+/// `GET /events/:id/assignments` happy path (organizer sees queued rows) and
+/// its gating: a member who can read the anchor channel but holds neither
+/// organizer nor mover rights gets 403; once the anchor channel is hidden
+/// from them entirely, the same request 404s instead (an id alone must not
+/// confirm a hidden channel's existence, matching `get_event`'s posture).
+#[tokio::test]
+async fn get_assignments_happy_path_and_gated_for_non_organizer() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    let mover = Identity::generate();
+    let mover_token = authenticate_http(&base, &mover).await;
+    let mover_key = mover.public_key_hex();
+
+    let target = Identity::generate();
+    let target_token = authenticate_http(&base, &target).await;
+    let target_pubkey = target.public_key_hex();
+
+    let outsider = Identity::generate();
+    let outsider_token = authenticate_http(&base, &outsider).await;
+
+    let dest = create_channel(&base, &owner_token, "assignments-dest").await;
+    let mover_role = create_role(&base, &owner_token, "MarshalGet", &["move_members"]).await;
+    assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
+
+    let event = create_event(&base, &owner_token, &dest.id, "Raid Night").await;
+
+    let mut target_ws = connect_ws(&base, &target_token).await;
+    let mut mover_ws = connect_ws(&base, &mover_token).await;
+
+    send_ws(
+        &mut mover_ws.0,
+        json!({
+            "type": "voice_move",
+            "target_pubkey": target_pubkey,
+            "target_channel_id": dest.id,
+            "event_id": event.id,
+        }),
+    )
+    .await;
+    assert_not_received(&mut target_ws.1, "voice_move").await;
+
+    // Happy path: the event creator (also hub admin here) sees the queued row.
+    let assignments = get_assignments_ok(&base, &owner_token, &event.id).await;
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments[0]["user_pubkey"], target_pubkey);
+
+    // A member who can read the channel but has neither organizer nor mover
+    // rights is forbidden.
+    let resp = get_assignments(&base, &outsider_token, &event.id).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Once the anchor channel is hidden from them entirely, the same
+    // request 404s instead of 403ing.
+    deny_overwrite(
+        &base,
+        &owner_token,
+        &dest.id,
+        "builtin-everyone",
+        &["read_messages"],
+    )
+    .await;
+    let resp = get_assignments(&base, &outsider_token, &event.id).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: assignment prune at event end (events.md §7.3)
+// ---------------------------------------------------------------------------
+
+/// The reminder worker's 60s sweep also prunes `event_move_assignments` for
+/// events whose `ends_at` is in the past; an event still in the future
+/// keeps its assignments.
+#[tokio::test]
+async fn reminder_worker_sweep_prunes_assignments_for_ended_events() {
+    let (base, state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let target = Identity::generate();
+    let target_pubkey = target.public_key_hex();
+    let mover = Identity::generate();
+    let mover_key = mover.public_key_hex();
+
+    let dest = create_channel(&base, &owner_token, "prune-dest").await;
+
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+
+    let ended_event =
+        create_event_with_ends_at(&base, &owner_token, &dest.id, "Ended Raid", now - 3600).await;
+    let live_event =
+        create_event_with_ends_at(&base, &owner_token, &dest.id, "Live Raid", now + 3600).await;
+
+    for (event_id, ch) in [(&ended_event.id, &dest.id), (&live_event.id, &dest.id)] {
+        sqlx::query(
+            "INSERT INTO event_move_assignments
+                 (event_id, user_pubkey, target_channel_id, assigned_by, created_at)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(event_id)
+        .bind(&target_pubkey)
+        .bind(ch)
+        .bind(&mover_key)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    wavvon_hub::reminder_worker::tick(&state)
+        .await
+        .expect("tick should succeed");
+
+    let ended_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event_move_assignments WHERE event_id = $1")
+            .bind(&ended_event.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(ended_count, 0, "ended event's assignments should be pruned");
+
+    let live_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM event_move_assignments WHERE event_id = $1")
+            .bind(&live_event.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(live_count, 1, "still-live event's assignment must survive");
 }

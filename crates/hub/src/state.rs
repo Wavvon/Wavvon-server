@@ -351,6 +351,19 @@ pub struct AppState {
     /// `RwLock<HashSet>` to avoid adding a new crate dependency.
     pub voice_relay_active: RwLock<HashSet<String>>,
 
+    /// Voice-only presence grants (events.md §7.4): pubkey → set of
+    /// channel_ids the pubkey may join voice on despite lacking effective
+    /// `READ_MESSAGES` there.
+    ///
+    /// Ephemeral, in-memory only — never persisted, never survives a
+    /// restart. Created just before the hub pushes a `voice_move` whose
+    /// target lacks read access on the destination; consumed (checked, not
+    /// removed) by the voice-join read gate; removed by `leave_voice` on
+    /// leave/disconnect. Exactly one enforcement point (the voice-join gate)
+    /// consults this map — message history, WS subscribe, channel list, and
+    /// event read-gating all stay strict per the decisions.md entry.
+    pub staging_voice_grants: RwLock<HashMap<String, HashSet<String>>>,
+
     /// Pending UDP address-binds waiting for the client's VXRG register packet.
     ///
     /// Key is the hex register token (64 chars, 32 random bytes).

@@ -16,6 +16,7 @@ use crate::state::AppState;
 
 pub use connection::leave_voice;
 pub use connection::leave_voice_for_test;
+pub use voice::apply_pending_voice_move_assignment;
 pub use voice::get_voice_participants;
 
 pub async fn ws_handler(

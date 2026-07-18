@@ -930,6 +930,21 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     // Revoke the UDP relay slot.
     state.voice_relay_active.write().await.remove(public_key);
 
+    // events.md §7.4: a voice-only presence grant for this exact
+    // (pubkey, channel) pair evaporates on leave -- never persisted, never
+    // outlives the voice session. Both transports (main hub WS VoiceLeave
+    // and the /voice/ws relay's disconnect cleanup) funnel through this
+    // shared teardown.
+    {
+        let mut grants = state.staging_voice_grants.write().await;
+        if let Some(set) = grants.get_mut(public_key) {
+            set.remove(channel_id);
+            if set.is_empty() {
+                grants.remove(public_key);
+            }
+        }
+    }
+
     // Broadcast updated roster.
     let roster = get_voice_roster(state, channel_id).await;
     let _ = state.voice_event_tx.send((

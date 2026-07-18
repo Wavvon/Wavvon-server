@@ -11,6 +11,13 @@
 //! needed; a crash between posting the card and marking it sent would send
 //! at most one duplicate card, no different from the risk any single-writer
 //! worker in this codebase already carries).
+//!
+//! Same tick also prunes expired queued voice-move assignments (events.md
+//! §7.3): extending this worker's existing 60s sweep rather than adding a
+//! dedicated `staging_worker` keeps a single-purpose-but-small worker count
+//! (the doc offers a dedicated worker as the alternative if this one
+//! shouldn't grow -- it's one extra DELETE per tick, judged small enough to
+//! fold in here).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,6 +78,19 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
             .execute(&state.db)
             .await?;
     }
+
+    // events.md §7.3: assignments die with the event and are pruned at event
+    // end. An event with no `ends_at` keeps its assignments until the event
+    // row itself is deleted (ON DELETE CASCADE handles that case).
+    sqlx::query(
+        "DELETE FROM event_move_assignments
+         WHERE event_id IN (
+             SELECT id FROM hub_events WHERE ends_at IS NOT NULL AND ends_at < $1
+         )",
+    )
+    .bind(now)
+    .execute(&state.db)
+    .await?;
 
     Ok(())
 }

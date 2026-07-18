@@ -1523,6 +1523,26 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Queued voice-move assignments (events.md §7.3): a `voice_move` issued
+    // to a member not currently in voice is persisted here and auto-applied
+    // when they next join any voice channel while the event is active. The
+    // (event_id, user_pubkey) PK makes re-issuing an UPSERT -- latest
+    // assignment wins. Rows are pruned at event end by the reminder worker's
+    // sweep (reminder_worker.rs); an event with no `ends_at` keeps its
+    // assignments until the event row itself is deleted (ON DELETE CASCADE).
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS event_move_assignments (
+            event_id           TEXT   NOT NULL REFERENCES hub_events(id) ON DELETE CASCADE,
+            user_pubkey        TEXT   NOT NULL,
+            target_channel_id  TEXT   NOT NULL REFERENCES channels(id)   ON DELETE CASCADE,
+            assigned_by        TEXT   NOT NULL,
+            created_at         BIGINT NOT NULL,
+            PRIMARY KEY (event_id, user_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     // ---- Polls ----
 
     sqlx::query(

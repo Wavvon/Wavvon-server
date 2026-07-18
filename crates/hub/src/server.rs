@@ -869,6 +869,10 @@ pub fn create_router_full(
             "/events/{event_id}/slots/{slot_id}",
             patch(routes::events::update_slot).delete(routes::events::delete_slot),
         )
+        .route(
+            "/events/{event_id}/assignments",
+            get(routes::events::list_event_assignments),
+        )
         // ---- File uploads ----
         .route(
             "/channels/{channel_id}/upload",

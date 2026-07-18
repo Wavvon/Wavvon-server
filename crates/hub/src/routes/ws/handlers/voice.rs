@@ -10,8 +10,8 @@ use crate::state::{AppState, PendingVoiceBind};
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 use crate::routes::ws::voice::{
-    get_voice_participants, get_voice_roster, re_resolve_whisper_sessions, resolve_role_addrs,
-    resolve_whisper_targets,
+    apply_pending_voice_move_assignment, get_voice_participants, get_voice_roster,
+    re_resolve_whisper_sessions, resolve_role_addrs, resolve_whisper_targets,
 };
 
 type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
@@ -66,17 +66,31 @@ pub(in crate::routes::ws) async fn handle_voice_join(
 
     // Channel visibility gate (§3.4/§3.5): a channel the caller can't
     // effectively READ_MESSAGES isn't visible to them at all, so voice join
-    // is rejected the same way message history and the channel list are.
+    // is rejected the same way message history and the channel list are --
+    // UNLESS a voice-only presence grant (events.md §7.4) covers this exact
+    // (pubkey, channel) pair, in which case the organizer's consented move
+    // is the authorization and the join proceeds without READ_MESSAGES.
+    // This is the single enforcement point that bypasses read-gating; the
+    // grant is never consulted anywhere else.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
         Ok(perms) if !perms.has(crate::permissions::READ_MESSAGES) => {
-            let err = WsServerMessage::Error {
-                context: "voice_join".to_string(),
-                message: "You do not have access to this channel.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            let has_grant = state
+                .staging_voice_grants
+                .read()
+                .await
+                .get(&cs.public_key)
+                .map(|grants| grants.contains(&channel_id))
+                .unwrap_or(false);
+            if !has_grant {
+                let err = WsServerMessage::Error {
+                    context: "voice_join".to_string(),
+                    message: "You do not have access to this channel.".to_string(),
+                };
+                let _ = ws_tx
+                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .await;
+                return DispatchResult::Continue;
+            }
         }
         Err(_) => {
             let err = WsServerMessage::Error {
@@ -431,6 +445,10 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         });
     }
 
+    // events.md §7.3: apply any queued voice-move assignment now that the
+    // join has fully succeeded.
+    apply_pending_voice_move_assignment(state, &cs.public_key, &channel_id).await;
+
     tracing::info!(
         "Voice join: {} in channel",
         &cs.public_key[..16.min(cs.public_key.len())]
@@ -629,14 +647,21 @@ async fn send_voice_move_error(ws_tx: &mut WsTx, message: impl Into<String>) -> 
     DispatchResult::Continue
 }
 
-/// Phase 1 move primitive (events.md §7.1): the mover asks the hub to move
-/// `target_pubkey` into `target_channel_id`. The hub never yanks the target
-/// server-side — it pushes a `voice_move` control message and the target's
-/// own client runs its normal leave-and-join.
+/// Move primitive (events.md §7.1, §7.3, §7.4): the mover asks the hub to
+/// move `target_pubkey` into `target_channel_id`. The hub never yanks the
+/// target server-side — it pushes a `voice_move` control message and the
+/// target's own client runs its normal leave-and-join.
 ///
-/// Phase 1 scope only: the target must already be in voice (no queued
-/// assignments) and must already hold effective `READ_MESSAGES` on the
-/// destination (no voice-only presence grant) — both are Phase 2.
+/// Phase 2 additions over the Phase 1 primitive:
+/// - Target **not in voice** + `event_id` present → the move is queued as an
+///   `event_move_assignments` row instead of rejected (§7.3); with no
+///   `event_id` the Phase 1 rejection still applies (no event context to
+///   apply it against later).
+/// - Target **lacks `READ_MESSAGES`** on the destination + `event_id`
+///   present → a voice-only presence grant is created (§7.4) and the move
+///   proceeds instead of being rejected; with no `event_id` the Phase 1
+///   rejection still applies (a generic mod-tool move must not reveal a
+///   hidden channel).
 pub(in crate::routes::ws) async fn handle_voice_move(
     cs: &ConnState,
     state: &Arc<AppState>,
@@ -685,34 +710,96 @@ pub(in crate::routes::ws) async fn handle_voice_move(
         }
     };
 
-    // Target must currently be in voice somewhere — queued assignments for
-    // an absent target are Phase 2.
+    // Resolve the target's current voice channel, if any.
     let source_channel_id = {
         let vc = state.voice_channels.read().await;
         vc.iter()
             .find(|(_, participants)| participants.contains_key(&target_pubkey))
             .map(|(channel_id, _)| channel_id.clone())
     };
+
     let source_channel_id = match source_channel_id {
         Some(ch) => ch,
         None => {
-            return send_voice_move_error(ws_tx, "Target is not currently in voice.").await;
+            // Target not in voice: with an event context, queue the
+            // assignment (§7.3) for auto-application on their next voice
+            // join instead of rejecting. No event context => Phase 1's
+            // rejection still applies (there's no later trigger to apply
+            // a bare, event-less move against).
+            let Some(eid) = &event_id else {
+                return send_voice_move_error(ws_tx, "Target is not currently in voice.").await;
+            };
+
+            let now = crate::auth::handlers::unix_timestamp();
+            let res = sqlx::query(
+                "INSERT INTO event_move_assignments
+                     (event_id, user_pubkey, target_channel_id, assigned_by, created_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (event_id, user_pubkey) DO UPDATE
+                 SET target_channel_id = EXCLUDED.target_channel_id,
+                     assigned_by = EXCLUDED.assigned_by,
+                     created_at = EXCLUDED.created_at",
+            )
+            .bind(eid)
+            .bind(&target_pubkey)
+            .bind(&target_channel_id)
+            .bind(&cs.public_key)
+            .bind(now)
+            .execute(&state.db)
+            .await;
+
+            if let Err(e) = res {
+                return send_voice_move_error(ws_tx, format!("Unable to queue assignment: {e}"))
+                    .await;
+            }
+
+            // No ack to the mover on success (mirrors the live-push path
+            // below, which also replies only on error) — the staging panel
+            // confirms via GET /events/:id/assignments.
+            tracing::info!(
+                "Voice move queued: {} assigned by {} -> channel {} (event {})",
+                &target_pubkey[..16.min(target_pubkey.len())],
+                &cs.public_key[..16.min(cs.public_key.len())],
+                &target_channel_id[..8.min(target_channel_id.len())],
+                eid
+            );
+            return DispatchResult::Continue;
         }
     };
 
-    // Target must already hold effective READ_MESSAGES on the destination —
-    // voice-only presence grants for an unreadable destination are Phase 2.
-    match crate::permissions::channel_permissions(&state.db, &target_pubkey, &target_channel_id)
-        .await
+    // Does the target already hold effective READ_MESSAGES on the
+    // destination?
+    let target_can_read = match crate::permissions::channel_permissions(
+        &state.db,
+        &target_pubkey,
+        &target_channel_id,
+    )
+    .await
     {
-        Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
-        Ok(_) => {
-            return send_voice_move_error(ws_tx, "Target cannot read the destination channel.")
-                .await;
-        }
+        Ok(perms) => perms.has(crate::permissions::READ_MESSAGES),
         Err(_) => {
             return send_voice_move_error(ws_tx, "Unable to verify target's channel access.").await;
         }
+    };
+
+    if !target_can_read {
+        if event_id.is_none() {
+            // No event context => Phase 1's rejection still applies: a
+            // generic mod-tool move must not reveal a hidden channel.
+            return send_voice_move_error(ws_tx, "Target cannot read the destination channel.")
+                .await;
+        }
+        // §7.4: the organizer's consented, event-scoped move is the
+        // authorization for voice-only presence. Insert the grant BEFORE
+        // the push below so the target's imminent join passes the
+        // voice-join read gate.
+        state
+            .staging_voice_grants
+            .write()
+            .await
+            .entry(target_pubkey.clone())
+            .or_default()
+            .insert(target_channel_id.clone());
     }
 
     // §7.2 consent model: auto-accept when the target has claimed a slot or
