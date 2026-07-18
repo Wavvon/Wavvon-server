@@ -98,38 +98,40 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         }
     }
 
+    // Channel visibility gate (§3.4/§3.5), all human joins: a channel the
+    // caller can't effectively READ_MESSAGES isn't visible to them at all,
+    // so voice join is rejected the same way message history and the
+    // channel list are -- UNLESS a voice-only presence grant (events.md
+    // §7.4) covers this exact (pubkey, channel) pair, mirroring the same
+    // bypass in the main hub WS join gate
+    // (routes/ws/handlers/voice.rs::handle_voice_join). This runs against
+    // whatever channel was actually requested, before the spawn-on-join
+    // branch below possibly reassigns `channel_id` to a freshly spawned
+    // sibling room -- the sibling inherits the parent's visibility, so no
+    // further check is needed there. The is_bot branch above already ran
+    // its own read_messages check and is untouched by this gate.
+    if !is_bot {
+        let has_grant = state
+            .staging_voice_grants
+            .read()
+            .await
+            .get(&pubkey)
+            .map(|grants| grants.contains(&channel_id))
+            .unwrap_or(false);
+        if !has_grant {
+            match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await {
+                Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+                _ => return,
+            }
+        }
+    }
+
     // Spawn-on-join (join-to-create temp voice channels,
     // temp-voice-channels.md §2): mirrors the main hub WS path in
     // routes/ws/handlers/voice.rs::handle_voice_join. The web client's audio
     // transport is this separate /voice/ws relay, so it needs the same
     // detection independently.
     if channel_type == "spawner" {
-        // The bot branch above already gated on channel-scoped
-        // read_messages against the spawner when applicable; human callers
-        // are gated here, same rule (§3.4/§3.5: no effective READ_MESSAGES
-        // means the channel — and therefore its spawn action — isn't
-        // visible to them at all) -- UNLESS a voice-only presence grant
-        // (events.md §7.4) covers this (pubkey, channel) pair, mirroring
-        // the same bypass in the main hub WS join gate
-        // (routes/ws/handlers/voice.rs::handle_voice_join). The is_bot
-        // branch above is untouched by this bypass.
-        if !is_bot {
-            let has_grant = state
-                .staging_voice_grants
-                .read()
-                .await
-                .get(&pubkey)
-                .map(|grants| grants.contains(&channel_id))
-                .unwrap_or(false);
-            if !has_grant {
-                match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await
-                {
-                    Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
-                    _ => return,
-                }
-            }
-        }
-
         match crate::routes::channels::spawn_temp_channel(
             &state.db,
             &channel_id,

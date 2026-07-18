@@ -1259,3 +1259,186 @@ async fn bot_without_can_speak_voice_capability_is_rejected() {
         "uncapable bot must not appear in the voice roster"
     );
 }
+
+// ---------------------------------------------------------------------------
+// H: human joins to /voice/ws had no read gate at all (see ROADMAP.md Known
+// issues, docs/docs/events.md §7.4 implementation note). A plain human join
+// to a normal channel must now be rejected the same way the main hub WS
+// `voice_join` handler rejects it -- UNLESS a voice-only presence grant
+// (events.md §7.4) covers the (pubkey, channel) pair.
+// ---------------------------------------------------------------------------
+
+/// Denies `permission` for `@everyone` on `channel_id` via the
+/// channel-permission-overwrites admin route (§3.6). Mirrors
+/// `ws_read_gating_flow.rs`'s `deny_everyone`.
+async fn deny_everyone(base: &str, owner_token: &str, channel_id: &str, permission: &str) {
+    let resp = reqwest::Client::new()
+        .put(format!(
+            "{base}/channels/{channel_id}/permissions/builtin-everyone"
+        ))
+        .bearer_auth(owner_token)
+        .json(&json!({ "allow": [], "deny": [permission] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+}
+
+/// Regression test for the read-gate hole: a plain human member, denied
+/// `read_messages` on a channel, must be rejected by `/voice/ws` rather than
+/// silently admitted -- no `voice_ws_ready` frame, and no entry in the voice
+/// roster.
+#[tokio::test]
+async fn human_without_read_access_is_rejected_over_voice_ws() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "human-voice-denied").await;
+    deny_everyone(&base, &owner_token, &ch.id, "read_messages").await;
+
+    let member = Identity::generate();
+    let member_token = authenticate_http(&base, &member).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &member_token, &ch.id).await;
+
+    // The gate makes the server task return without ever sending a frame,
+    // so the connection closes (or the stream ends) instead of yielding a
+    // voice_ws_ready message. Close frame, stream end, or a transport error
+    // are all acceptable "rejected" outcomes.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rx.next()).await;
+    if let Ok(Some(Ok(TsMessage::Text(t)))) = outcome {
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_ne!(
+            v["type"], "voice_ws_ready",
+            "a member without read_messages must not be admitted to /voice/ws"
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == member.public_key_hex()))
+            .unwrap_or(false),
+        "rejected member must not appear in the voice roster"
+    );
+}
+
+/// Sanity check: an ordinary member on a normal, readable channel still
+/// joins `/voice/ws` fine -- guards against over-tightening the new gate.
+#[tokio::test]
+async fn human_with_read_access_joins_voice_ws_normally() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "human-voice-ok").await;
+
+    let member = Identity::generate();
+    let member_token = authenticate_http(&base, &member).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &member_token, &ch.id).await;
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["type"], "voice_ws_ready");
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let members = roster
+        .get(&ch.id)
+        .expect("readable channel should have a voice roster entry");
+    assert!(
+        members
+            .iter()
+            .any(|m| m["public_key"] == member.public_key_hex()),
+        "member with read access should appear in the voice roster"
+    );
+}
+
+/// events.md §7.4 Phase 2 bypass, /voice/ws-transport-specific: a voice-only
+/// presence grant for (pubkey, channel) admits a human join over `/voice/ws`
+/// despite the channel being unreadable to them. `voice_move_flow.rs`
+/// exercises the grant's creation and its bypass of the *main* hub WS
+/// `voice_join` gate end-to-end; this test drives the /voice/ws transport
+/// directly against the same `state.staging_voice_grants` map to confirm the
+/// bypass this fix introduces here composes correctly with it.
+#[tokio::test]
+async fn staging_grant_admits_voice_ws_join_to_unreadable_channel() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "grant-voice-ws").await;
+    deny_everyone(&base, &owner_token, &ch.id, "read_messages").await;
+
+    let target = Identity::generate();
+    let target_token = authenticate_http(&base, &target).await;
+    let target_pubkey = target.public_key_hex();
+
+    // Grant voice-only presence for this exact (pubkey, channel) pair, same
+    // as `handle_voice_move` does for an event-scoped move (events.md §7.4).
+    state
+        .staging_voice_grants
+        .write()
+        .await
+        .entry(target_pubkey.clone())
+        .or_default()
+        .insert(ch.id.clone());
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &target_token, &ch.id).await;
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(
+        v["type"], "voice_ws_ready",
+        "a staging voice grant should admit the join despite no read_messages"
+    );
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let members = roster
+        .get(&ch.id)
+        .expect("granted target should have a voice roster entry");
+    assert!(
+        members.iter().any(|m| m["public_key"] == target_pubkey),
+        "grant-admitted target should appear in the voice roster"
+    );
+}
