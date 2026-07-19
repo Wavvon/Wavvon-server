@@ -737,7 +737,7 @@ async fn dispatch_client_msg(
 
         // ── Screen share ───────────────────────────────────────────────────
         WsClientMessage::ScreenShareStart { .. } => {
-            screen::handle_screen_share_start(cs, state, msg).await
+            screen::handle_screen_share_start(cs, state, ws_tx, msg).await
         }
         WsClientMessage::ScreenShareChunk { .. } => {
             screen::handle_screen_share_chunk_header(cs, msg)

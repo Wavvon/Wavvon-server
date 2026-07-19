@@ -1085,6 +1085,8 @@ async fn main() -> Result<()> {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
         bots_allow_camera: settings.bots_allow_camera,
+        bots_allow_video: settings.bots_allow_video,
+        bot_video_stream_budget: settings.bot_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),

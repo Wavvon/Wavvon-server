@@ -127,6 +127,21 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          operators who trust all registered bots on this hub can enable it hub-wide.",
     ),
     (
+        "WAVVON_BOTS_ALLOW_VIDEO",
+        "false",
+        "Set to `true` to allow bots granted `can_inject_video` to push frames into the \
+         screen-share relay via `screen_share_start` (bot-capability-layer.md §6 Phase 2). \
+         Defaults to false; a per-bot capability grant is necessary but not sufficient -- \
+         this operator-level flag must also be on.",
+    ),
+    (
+        "WAVVON_BOT_VIDEO_STREAM_BUDGET",
+        "2",
+        "Max number of concurrent bot-initiated video streams across the whole hub \
+         (bot-capability-layer.md §4 media budget). `screen_share_start` is rejected once \
+         this many bot streams are already active; human screen shares are never counted.",
+    ),
+    (
         "WAVVON_PUBLIC_URL",
         "(unset)",
         "Public HTTPS URL of this hub (e.g. https://wavvon.example.com). \
@@ -255,6 +270,12 @@ pub struct Settings {
     ///
     /// Env: WAVVON_BOTS_ALLOW_CAMERA
     pub bots_allow_camera: bool,
+    /// Operator kill-switch for `can_inject_video` bot video streams.
+    /// Env: WAVVON_BOTS_ALLOW_VIDEO
+    pub bots_allow_video: bool,
+    /// Max concurrent bot-initiated video streams hub-wide.
+    /// Env: WAVVON_BOT_VIDEO_STREAM_BUDGET
+    pub bot_video_stream_budget: u32,
     /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
     /// Env: WAVVON_PUBLIC_URL
     pub public_url: Option<String>,
@@ -291,6 +312,8 @@ pub fn load() -> Result<Settings> {
         .set_default("discovery_url", "https://discovery.wavvon.io")?
         .set_default("trusted_proxy", false)?
         .set_default("bots_allow_camera", false)?
+        .set_default("bots_allow_video", false)?
+        .set_default("bot_video_stream_budget", 2u32)?
         .set_default("device_token_ttl_days", 30u64)?
         .set_default("lan_mode", false)?
         .set_default("lan_tls_mode", "self")?

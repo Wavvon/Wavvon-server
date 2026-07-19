@@ -171,6 +171,16 @@ async fn grant_capabilities_404s_for_unknown_bot() {
 // ---------------------------------------------------------------------------
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
+    start_hub_with(false, 2).await
+}
+
+/// Same harness, with the `bots_allow_video` operator flag and
+/// `bot_video_stream_budget` cap set explicitly (bot-capability-layer.md §6
+/// Phase 2), for the `can_inject_video` gate tests below.
+async fn start_hub_with(
+    bots_allow_video: bool,
+    bot_video_stream_budget: usize,
+) -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
@@ -221,6 +231,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video,
+        bot_video_stream_budget,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -293,6 +305,19 @@ async fn authenticate_http(base: &str, identity: &Identity) -> String {
 /// a raw `reqwest::Client` since this file's harness is a real TCP listener,
 /// not `axum_test`.
 async fn invite_and_auth_bot_http(base: &str, admin_token: &str, bot: &Identity) -> String {
+    invite_and_auth_bot_http_with_caps(base, admin_token, bot, &[]).await
+}
+
+/// Same as `invite_and_auth_bot_http`, but declares `capabilities` in
+/// `bot_meta` at auth time -- the "requested" side of the requested ∩
+/// granted resolver (bot-capability-layer.md §1) -- so the caller can then
+/// grant a matching capability and see it become effective.
+async fn invite_and_auth_bot_http_with_caps(
+    base: &str,
+    admin_token: &str,
+    bot: &Identity,
+    capabilities: &[&str],
+) -> String {
     let client = reqwest::Client::new();
     let pub_key = bot.public_key_hex();
 
@@ -324,7 +349,7 @@ async fn invite_and_auth_bot_http(base: &str, admin_token: &str, bot: &Identity)
             "challenge": challenge["challenge"],
             "signature": hex::encode(signature.to_bytes()),
             "is_bot": true,
-            "bot_meta": { "name": "GameBot" },
+            "bot_meta": { "name": "GameBot", "capabilities": capabilities },
         }))
         .send()
         .await
@@ -586,4 +611,228 @@ async fn migration_backfills_grant_for_pre_existing_self_declared_bot() {
         wavvon_hub::bots::capabilities::has_capability(&db, bot_pubkey, "can_speak_voice").await,
         "backfill should grant the pre-existing self-declared capability"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `can_inject_video` gate at `screen_share_start` (bot-capability-layer.md
+// §3/§6 Phase 2). Mirrors the `can_use_interactive_ui` gate tests above:
+// granted + operator flag on succeeds; either one missing is rejected; the
+// media budget rejects once the hub-wide cap is hit.
+// ---------------------------------------------------------------------------
+
+/// Bot has the grant and the hub has `bots_allow_video` on: `screen_share_start`
+/// succeeds and fans out `screen_share_started` to channel subscribers.
+#[tokio::test]
+async fn bot_screen_share_start_succeeds_with_grant_and_operator_flag_on() {
+    let (base, _state, _guard) = start_hub_with(true, 2).await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "video-ok").await;
+    let channel_id = ch["id"].as_str().unwrap().to_string();
+
+    let bot = Identity::generate();
+    let bot_token =
+        invite_and_auth_bot_http_with_caps(&base, &owner_token, &bot, &["can_inject_video"]).await;
+    grant_capabilities(
+        &base,
+        &owner_token,
+        &bot.public_key_hex(),
+        &["can_inject_video"],
+    )
+    .await;
+
+    let (mut bot_tx, mut bot_rx) = connect_ws(&base, &bot_token).await;
+    send_text(
+        &mut bot_tx,
+        json!({ "type": "subscribe", "channel_id": channel_id }),
+    )
+    .await;
+    send_text(
+        &mut bot_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": channel_id,
+            "stream_id": "video-stream-1",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+
+    let frame = next_meaningful_frame(&mut bot_rx, std::time::Duration::from_secs(3))
+        .await
+        .expect("granted bot with operator flag on should start the stream");
+    assert_eq!(frame["type"], "screen_share_started");
+    assert_eq!(frame["stream_id"], "video-stream-1");
+}
+
+/// Bot without the `can_inject_video` grant is rejected even with the
+/// operator flag on.
+#[tokio::test]
+async fn bot_screen_share_start_rejected_without_grant() {
+    let (base, _state, _guard) = start_hub_with(true, 2).await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "video-ungranted").await;
+    let channel_id = ch["id"].as_str().unwrap().to_string();
+
+    let bot = Identity::generate();
+    let bot_token =
+        invite_and_auth_bot_http_with_caps(&base, &owner_token, &bot, &["can_inject_video"]).await;
+    // Deliberately no grant.
+
+    let (mut bot_tx, mut bot_rx) = connect_ws(&base, &bot_token).await;
+    send_text(
+        &mut bot_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": channel_id,
+            "stream_id": "video-stream-2",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+
+    let frame = next_meaningful_frame(&mut bot_rx, std::time::Duration::from_secs(2))
+        .await
+        .expect("expected an error reply");
+    assert_eq!(frame["type"], "error");
+    assert_eq!(frame["context"], "screen_share_start");
+}
+
+/// Bot has the grant, but the hub-wide `bots_allow_video` flag is off: the
+/// grant alone is not sufficient, so the start is still rejected.
+#[tokio::test]
+async fn bot_screen_share_start_rejected_when_operator_flag_off() {
+    let (base, _state, _guard) = start_hub_with(false, 2).await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "video-flag-off").await;
+    let channel_id = ch["id"].as_str().unwrap().to_string();
+
+    let bot = Identity::generate();
+    let bot_token =
+        invite_and_auth_bot_http_with_caps(&base, &owner_token, &bot, &["can_inject_video"]).await;
+    grant_capabilities(
+        &base,
+        &owner_token,
+        &bot.public_key_hex(),
+        &["can_inject_video"],
+    )
+    .await;
+
+    let (mut bot_tx, mut bot_rx) = connect_ws(&base, &bot_token).await;
+    send_text(
+        &mut bot_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": channel_id,
+            "stream_id": "video-stream-3",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+
+    let frame = next_meaningful_frame(&mut bot_rx, std::time::Duration::from_secs(2))
+        .await
+        .expect("expected an error reply");
+    assert_eq!(frame["type"], "error");
+    assert_eq!(frame["context"], "screen_share_start");
+}
+
+/// The per-hub media budget (bot-capability-layer.md §4): with the budget
+/// set to 1, a second bot video stream is rejected once the first is active,
+/// even though both bots are fully granted and the operator flag is on.
+#[tokio::test]
+async fn bot_screen_share_start_rejected_once_media_budget_exceeded() {
+    let (base, _state, _guard) = start_hub_with(true, 1).await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "video-budget").await;
+    let channel_id = ch["id"].as_str().unwrap().to_string();
+
+    let bot_a = Identity::generate();
+    let bot_a_token =
+        invite_and_auth_bot_http_with_caps(&base, &owner_token, &bot_a, &["can_inject_video"])
+            .await;
+    grant_capabilities(
+        &base,
+        &owner_token,
+        &bot_a.public_key_hex(),
+        &["can_inject_video"],
+    )
+    .await;
+
+    let bot_b = Identity::generate();
+    let bot_b_token =
+        invite_and_auth_bot_http_with_caps(&base, &owner_token, &bot_b, &["can_inject_video"])
+            .await;
+    grant_capabilities(
+        &base,
+        &owner_token,
+        &bot_b.public_key_hex(),
+        &["can_inject_video"],
+    )
+    .await;
+
+    let (mut a_tx, mut a_rx) = connect_ws(&base, &bot_a_token).await;
+    send_text(
+        &mut a_tx,
+        json!({ "type": "subscribe", "channel_id": channel_id }),
+    )
+    .await;
+    send_text(
+        &mut a_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": channel_id,
+            "stream_id": "budget-stream-a",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    let a_frame = next_meaningful_frame(&mut a_rx, std::time::Duration::from_secs(3))
+        .await
+        .expect("first bot stream should start under budget");
+    assert_eq!(a_frame["type"], "screen_share_started");
+
+    let (mut b_tx, mut b_rx) = connect_ws(&base, &bot_b_token).await;
+
+    // On connect, the hub replays already-active shares (readable channels
+    // are auto-subscribed) -- that's bot_a's stream, not a reply to bot_b's
+    // own request yet. Drain it before sending bot_b's own attempt.
+    let replay = next_meaningful_frame(&mut b_rx, std::time::Duration::from_secs(3))
+        .await
+        .expect("expected the replay of bot_a's already-active stream");
+    assert_eq!(replay["type"], "screen_share_started");
+    assert_eq!(replay["stream_id"], "budget-stream-a");
+
+    send_text(
+        &mut b_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": channel_id,
+            "stream_id": "budget-stream-b",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    let b_frame = next_meaningful_frame(&mut b_rx, std::time::Duration::from_secs(2))
+        .await
+        .expect("expected a budget-exceeded error reply");
+    assert_eq!(b_frame["type"], "error");
+    assert_eq!(b_frame["context"], "screen_share_start");
 }

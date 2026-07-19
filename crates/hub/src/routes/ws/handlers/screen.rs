@@ -152,6 +152,7 @@ pub(in crate::routes::ws) async fn handle_binary_chunk(
 pub(in crate::routes::ws) async fn handle_screen_share_start(
     cs: &ConnState,
     state: &Arc<AppState>,
+    ws_tx: &mut WsTx,
     msg: WsClientMessage,
 ) -> DispatchResult {
     let (channel_id, stream_id, kind, mime, has_audio) = match msg {
@@ -165,6 +166,79 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
         } => (channel_id, stream_id, kind, mime, has_audio),
         _ => return DispatchResult::Continue,
     };
+
+    // Bot video injection (bot-capability-layer.md §3/§6 Phase 2): a bot
+    // pushes frames into this same screen-share relay, gated exactly like the
+    // shipped `can_speak_voice` voice gate (voice_ws.rs). Human sharers are
+    // unaffected by this branch entirely.
+    if cs.is_bot {
+        // Gate 1: admin grant. Reads the *effective* capability set
+        // (requested ∩ granted, bot-capability-layer.md §1) so a revoked
+        // bot is rejected immediately, same as voice/mini-app.
+        if !crate::bots::capabilities::has_capability(&state.db, &cs.public_key, "can_inject_video")
+            .await
+        {
+            let err = WsServerMessage::Error {
+                context: "screen_share_start".to_string(),
+                message: "Bot lacks the can_inject_video capability grant.".to_string(),
+            };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return DispatchResult::Continue;
+        }
+
+        // Gate 2: operator kill-switch. A grant alone is never sufficient --
+        // the hub-wide flag must also be on (bot-capability-layer.md §4).
+        if !state.bots_allow_video {
+            let err = WsServerMessage::Error {
+                context: "screen_share_start".to_string(),
+                message: "Bot video is disabled on this hub (bots_allow_video).".to_string(),
+            };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return DispatchResult::Continue;
+        }
+
+        // Gate 3: channel-scoped READ_MESSAGES, same rule as voice_ws.rs.
+        match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await
+        {
+            Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+            _ => {
+                let err = WsServerMessage::Error {
+                    context: "screen_share_start".to_string(),
+                    message: "Bot cannot read this channel.".to_string(),
+                };
+                let _ = ws_tx
+                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .await;
+                return DispatchResult::Continue;
+            }
+        }
+
+        // Gate 4: media budget (bot-capability-layer.md §4). Coarse per-hub
+        // cap on concurrent bot video streams; frames beyond it are refused
+        // outright rather than queued.
+        let active_bot_streams = state
+            .screen_shares
+            .read()
+            .await
+            .values()
+            .flat_map(|active| active.streams.values())
+            .filter(|meta| meta.is_bot)
+            .count();
+        if active_bot_streams >= state.bot_video_stream_budget {
+            let err = WsServerMessage::Error {
+                context: "screen_share_start".to_string(),
+                message: "Hub-wide bot video stream budget exceeded.".to_string(),
+            };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return DispatchResult::Continue;
+        }
+    }
 
     {
         let mut shares = state.screen_shares.write().await;
@@ -182,6 +256,7 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
                 mime: mime.clone(),
                 has_audio,
                 sharer_pubkey: cs.public_key.clone(),
+                is_bot: cs.is_bot,
                 session_id: cs.session_id.clone(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),

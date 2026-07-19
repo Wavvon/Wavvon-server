@@ -93,6 +93,7 @@ pub async fn bot_screenshare_start(
                 mime: req.mime.clone(),
                 has_audio: req.has_audio,
                 sharer_pubkey: bot_id.clone(),
+                is_bot: true,
                 session_id: "bot-rest".to_string(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),
