@@ -1790,6 +1790,25 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // External-bot mini-app registration (bot-mini-apps.md "A bot can
+    // declare a mini_app_url in its registration payload"; bots.md §17
+    // "Bot registration"). This was previously wired only to the
+    // self-service `bots` table (see the `bot_app_join` lookup in
+    // routes/ws/handlers/mini_app.rs and the migration backfill above), which
+    // left external bots -- the only bot kind with slash commands and a live
+    // WS session, i.e. the only kind that can actually own game state -- with
+    // no way to register a mini-app at all. Additive columns, self-declared
+    // via `BotMeta` at auth/accept-invite time or `PUT /bots/me/profile`,
+    // same pattern as `webhook_url`.
+    let _ = sqlx::query("ALTER TABLE bot_profiles ADD COLUMN mini_app_url TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query(
+        "ALTER TABLE bot_profiles ADD COLUMN requires_camera BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

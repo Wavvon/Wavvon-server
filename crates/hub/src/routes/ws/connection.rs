@@ -778,6 +778,9 @@ async fn dispatch_client_msg(
         WsClientMessage::BotAppDismiss { .. } => {
             mini_app::handle_bot_app_dismiss(cs, state, msg).await
         }
+        WsClientMessage::MiniAppMessage { .. } => {
+            mini_app::handle_mini_app_message(cs, state, msg).await
+        }
 
         // ── V4 voice encryption ────────────────────────────────────────────
         WsClientMessage::VoiceKeyOffer { .. } => {

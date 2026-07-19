@@ -131,12 +131,13 @@ pub async fn ext_accept_invite(
     // Upsert bot_profiles.
     let meta = &req.bot_meta;
     sqlx::query(
-        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT(pubkey) DO UPDATE SET
            name=excluded.name, avatar_url=excluded.avatar_url,
            description=excluded.description, webhook_url=excluded.webhook_url,
            homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
+           mini_app_url=excluded.mini_app_url, requires_camera=excluded.requires_camera,
            updated_at=excluded.updated_at",
     )
     .bind(&req.pubkey)
@@ -146,6 +147,8 @@ pub async fn ext_accept_invite(
     .bind(&meta.webhook_url)
     .bind(&meta.homepage_url)
     .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
+    .bind(&meta.mini_app_url)
+    .bind(meta.requires_camera.unwrap_or(false))
     .bind(now)
     .execute(&state.db)
     .await
@@ -335,12 +338,13 @@ pub async fn ext_update_bot_profile(
 
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
          ON CONFLICT(pubkey) DO UPDATE SET
            name=excluded.name, avatar_url=excluded.avatar_url,
            description=excluded.description, webhook_url=excluded.webhook_url,
            homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
+           mini_app_url=excluded.mini_app_url, requires_camera=excluded.requires_camera,
            updated_at=excluded.updated_at",
     )
     .bind(&user.public_key)
@@ -350,6 +354,8 @@ pub async fn ext_update_bot_profile(
     .bind(&meta.webhook_url)
     .bind(&meta.homepage_url)
     .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
+    .bind(&meta.mini_app_url)
+    .bind(meta.requires_camera.unwrap_or(false))
     .bind(now)
     .execute(&state.db)
     .await

@@ -195,6 +195,13 @@ pub struct ReactionRequest {
 #[derive(Serialize, Deserialize)]
 pub struct EditMessageRequest {
     pub content: String,
+    /// Result embed on a game-modal launch card (bot-capability-layer.md §7
+    /// step 5: "PATCHes the message with a result embed"). Bot authors
+    /// only -- `routes/messages.rs::edit_message` rejects it for any other
+    /// sender, same rule as `SendMessageRequest.game`. Absent = leave
+    /// embeds untouched.
+    #[serde(default)]
+    pub embeds: Option<Vec<crate::routes::bot_models::Embed>>,
 }
 
 #[derive(Clone, Debug)]
@@ -609,6 +616,26 @@ pub enum WsClientMessage {
     /// Only valid from bot connections.
     #[serde(rename = "bot_app_dismiss")]
     BotAppDismiss { channel_id: String },
+
+    /// Generic mini-app <-> bot relay (bot-mini-apps.md "the mini-app
+    /// connects to the hub's existing /ws endpoint ... and exchanges
+    /// messages with the bot ... through the normal WS relay"). `payload` is
+    /// an opaque JSON-encoded string -- the hub never inspects it, same
+    /// convention as `screen_share_ice`'s `candidate` field.
+    ///
+    /// From a mini-app session (non-bot connection): hub forwards to every
+    /// active WS session for `bot_id`, tagged with the sender's pubkey.
+    /// From the bot itself: `to_pubkey` selects which joined player's
+    /// mini-app session receives it; absent `to_pubkey` is a no-op (there is
+    /// no channel-wide mini-app broadcast surface).
+    #[serde(rename = "mini_app_message")]
+    MiniAppMessage {
+        bot_id: String,
+        channel_id: String,
+        payload: String,
+        #[serde(default)]
+        to_pubkey: Option<String>,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -1014,6 +1041,19 @@ pub enum WsServerMessage {
     /// Hub fans a bot's dismiss to all subscribers — clients close open webviews.
     #[serde(rename = "bot_app_close")]
     BotAppClose { bot_id: String, channel_id: String },
+
+    /// Generic mini-app <-> bot relay, hub -> client leg. See
+    /// `WsClientMessage::MiniAppMessage`. `from_pubkey` is set when relaying
+    /// a player's move to the bot; absent when the bot is pushing state to a
+    /// specific player (the recipient already knows who the bot is).
+    #[serde(rename = "mini_app_message")]
+    MiniAppMessage {
+        bot_id: String,
+        channel_id: String,
+        payload: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_pubkey: Option<String>,
+    },
 
     /// An outgoing webhook was auto-disabled after too many consecutive
     /// delivery failures. Hub-wide; the admin settings UI is the intended

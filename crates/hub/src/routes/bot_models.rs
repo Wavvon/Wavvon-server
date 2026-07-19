@@ -19,6 +19,14 @@ pub struct BotMeta {
     pub commands: Option<Vec<BotCommandDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
+    /// Mini-app / game-modal registration (bot-mini-apps.md, bots.md §17).
+    /// Absent = this bot has no interactive-UI surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mini_app_url: Option<String>,
+    /// Requests camera access for the mini-app webview. Still gated on the
+    /// hub operator's `bots_allow_camera` setting at `bot_app_join` time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_camera: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -54,19 +54,35 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
         _ => return DispatchResult::Continue,
     };
 
-    // Look up the bot's mini_app_url and requires_camera flag.
+    // Look up the bot's mini_app_url and requires_camera flag. Two bot
+    // systems can register a mini-app (bots/capabilities.rs doc comment):
+    // external bots self-declare it in `bot_profiles` (bot-mini-apps.md,
+    // bots.md §17 -- added alongside `webhook_url`/`capabilities`, since an
+    // external bot is the only kind with slash commands and a live WS
+    // session to actually own game state); self-service bots set it at
+    // `POST /admin/bots` time in the `bots` table. Try external first.
     #[derive(sqlx::FromRow)]
     struct BotAppRow {
         mini_app_url: Option<String>,
         requires_camera: bool,
     }
     let bot_row: Option<BotAppRow> =
-        sqlx::query_as("SELECT mini_app_url, requires_camera FROM bots WHERE public_key = $1")
+        sqlx::query_as("SELECT mini_app_url, requires_camera FROM bot_profiles WHERE pubkey = $1")
             .bind(&bot_id)
             .fetch_optional(&state.db)
             .await
             .ok()
             .flatten();
+
+    let bot_row = match bot_row {
+        Some(r) if r.mini_app_url.is_some() => Some(r),
+        _ => sqlx::query_as("SELECT mini_app_url, requires_camera FROM bots WHERE public_key = $1")
+            .bind(&bot_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten(),
+    };
 
     let (mini_app_url, requires_camera) = match bot_row {
         Some(r) => match r.mini_app_url {
@@ -164,6 +180,67 @@ pub(in crate::routes::ws) async fn handle_bot_app_dismiss(
     };
     let json: Arc<str> = Arc::from(serde_json::to_string(&server_msg).unwrap().as_str());
     let _ = state.chat_tx.send((ChatEvent::BotApp { channel_id }, json));
+
+    DispatchResult::Continue
+}
+
+/// Generic mini-app <-> bot relay (bot-mini-apps.md "exchanges messages ...
+/// through the normal WS relay"). No wire type shipped this before this
+/// pairing — a mini-app session is confined to `/ws` (`auth::middleware`
+/// `MINI_APP_ALLOWED_PATHS` is deliberately empty), so without this the
+/// modal webview had no way to reach the bot that owns its game state.
+///
+/// - Player (mini-app, non-bot) -> bot: forward to every active WS session
+///   for `bot_id`, tagged with the sender's pubkey.
+/// - Bot -> player: `to_pubkey` selects the target; delivered via the
+///   per-pubkey targeted sender (`ws_key_senders`, the same mechanism V4
+///   voice key distribution uses). Last-registered session for that pubkey
+///   wins if the user has more than one connection open — acceptable for a
+///   single modal per player.
+pub(in crate::routes::ws) async fn handle_mini_app_message(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let (bot_id, channel_id, payload, to_pubkey) = match msg {
+        WsClientMessage::MiniAppMessage {
+            bot_id,
+            channel_id,
+            payload,
+            to_pubkey,
+        } => (bot_id, channel_id, payload, to_pubkey),
+        _ => return DispatchResult::Continue,
+    };
+
+    if cs.is_bot {
+        let Some(target) = to_pubkey else {
+            return DispatchResult::Continue;
+        };
+        let server_msg = WsServerMessage::MiniAppMessage {
+            bot_id: cs.public_key.clone(),
+            channel_id,
+            payload,
+            from_pubkey: None,
+        };
+        let senders = state.ws_key_senders.read().await;
+        if let Some(tx) = senders.get(&target) {
+            let _ = tx.send(server_msg);
+        }
+    } else {
+        let server_msg = WsServerMessage::MiniAppMessage {
+            bot_id: bot_id.clone(),
+            channel_id,
+            payload,
+            from_pubkey: Some(cs.public_key.clone()),
+        };
+        let json = serde_json::to_string(&server_msg).unwrap();
+        let sessions = state.bot_sessions.read().await;
+        if let Some(per_bot) = sessions.get(&bot_id) {
+            for tx in per_bot.values() {
+                let _ = tx.try_send(json.clone());
+            }
+        }
+    }
 
     DispatchResult::Continue
 }

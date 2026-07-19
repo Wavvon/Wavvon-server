@@ -9,6 +9,7 @@ members = [
     "crates/store",
     "crates/demo-seed",
     "crates/discord-import",
+    "crates/ttt-bot",
 ]
 
 [workspace.dependencies]

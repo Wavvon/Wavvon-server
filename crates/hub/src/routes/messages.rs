@@ -489,14 +489,49 @@ pub async fn edit_message(
         ));
     }
 
+    // Result embed on edit (bot-capability-layer.md §7 step 5): bot authors
+    // only, same rule as `SendMessageRequest.game` in `send_message` above.
+    let embeds_json = if req.embeds.is_some() {
+        let is_bot: Option<bool> =
+            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+                .bind(&user.public_key)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
+        if is_bot != Some(true) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "embeds are bot-authored only".to_string(),
+            ));
+        }
+        Some(
+            serde_json::to_string(&req.embeds)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?,
+        )
+    } else {
+        None
+    };
+
     let now = crate::auth::handlers::unix_timestamp();
-    sqlx::query("UPDATE messages SET content = $1, edited_at = $2 WHERE id = $3")
-        .bind(&req.content)
-        .bind(now)
-        .bind(&message_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some(embeds_json) = embeds_json {
+        sqlx::query("UPDATE messages SET content = $1, edited_at = $2, embeds = $3 WHERE id = $4")
+            .bind(&req.content)
+            .bind(now)
+            .bind(&embeds_json)
+            .bind(&message_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    } else {
+        sqlx::query("UPDATE messages SET content = $1, edited_at = $2 WHERE id = $3")
+            .bind(&req.content)
+            .bind(now)
+            .bind(&message_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
 
     let updated = load_message(&state, &message_id).await?;
     {

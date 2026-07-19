@@ -765,6 +765,82 @@ async fn external_bot_can_post_message_with_game_launch_card() {
     assert_eq!(game_msg["game"]["description"], "1v1");
 }
 
+// ---------------------------------------------------------------------------
+// PATCH /channels/:id/messages/:id with a result embed (bot-capability-
+// layer.md §7 step 5: "the bot updates the launch-card message via
+// PATCH /messages/:id with a result embed"). Previously `EditMessageRequest`
+// only carried `content` -- a bot had no way to attach the result embed on
+// game end at all.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bot_can_patch_message_with_result_embed() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "game-room-patch" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    let bot = Identity::generate();
+    let bot_token = invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    let posted: serde_json::Value = server
+        .post(&format!("/channels/{channel_id}/messages"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({ "content": "Tic-Tac-Toe: click Play to join!" }))
+        .await
+        .json();
+    let message_id = posted["id"].as_str().unwrap().to_string();
+
+    let resp = server
+        .patch(&format!("/channels/{channel_id}/messages/{message_id}"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({
+            "content": "Tic-Tac-Toe — game over.",
+            "embeds": [{ "title": "Tic-Tac-Toe", "description": "X wins!", "color": "#22c55e" }]
+        }))
+        .await;
+    resp.assert_status_success();
+    let updated: serde_json::Value = resp.json();
+    assert_eq!(updated["embeds"][0]["title"], "Tic-Tac-Toe");
+    assert_eq!(updated["embeds"][0]["description"], "X wins!");
+}
+
+#[tokio::test]
+async fn non_bot_cannot_patch_message_with_embeds() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "game-room-patch-2" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    let posted: serde_json::Value = server
+        .post(&format!("/channels/{channel_id}/messages"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "content": "hello" }))
+        .await
+        .json();
+    let message_id = posted["id"].as_str().unwrap().to_string();
+
+    let resp = server
+        .patch(&format!("/channels/{channel_id}/messages/{message_id}"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "content": "hello",
+            "embeds": [{ "title": "not allowed" }]
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn non_bot_cannot_post_message_with_game_launch_card() {
     let (server, owner_token) = common::setup_with_owner().await;
