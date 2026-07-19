@@ -27,6 +27,13 @@ pub struct BotMeta {
     /// hub operator's `bots_allow_camera` setting at `bot_app_join` time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_camera: Option<bool>,
+    /// Profile-declared game descriptor (bot-capability-layer.md §11): lets
+    /// the per-hub bot directory show a Play affordance for this bot without
+    /// a live launch-card message in view. Absent = this bot has no game to
+    /// advertise. Independent of the per-message `game` launch card
+    /// (`BotResponse.game`) -- this one lives on the profile, not a message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameLaunchCard>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

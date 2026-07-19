@@ -176,14 +176,19 @@ pub async fn verify(
         // Upsert bot_profiles from bot_meta and register commands.
         if let Some(meta) = &req.bot_meta {
             let now = unix_timestamp();
+            let game_json = meta
+                .game
+                .as_ref()
+                .map(|g| serde_json::to_string(g).unwrap_or_default());
             sqlx::query(
-                "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, updated_at)
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, game, updated_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                  ON CONFLICT(pubkey) DO UPDATE SET
                    name=excluded.name, avatar_url=excluded.avatar_url,
                    description=excluded.description, webhook_url=excluded.webhook_url,
                    homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
                    mini_app_url=excluded.mini_app_url, requires_camera=excluded.requires_camera,
+                   game=excluded.game,
                    updated_at=excluded.updated_at",
             )
             .bind(&canonical_pubkey)
@@ -195,6 +200,7 @@ pub async fn verify(
             .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
             .bind(&meta.mini_app_url)
             .bind(meta.requires_camera.unwrap_or(false))
+            .bind(&game_json)
             .bind(now)
             .execute(&state.db)
             .await

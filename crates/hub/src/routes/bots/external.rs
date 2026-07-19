@@ -6,7 +6,7 @@ use axum::Json;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
-use crate::routes::bot_models::BotCommandDef;
+use crate::routes::bot_models::{BotCommandDef, GameLaunchCard};
 use crate::state::AppState;
 
 use super::models::{
@@ -14,6 +14,15 @@ use super::models::{
     BotMeResponse, BotProfileRow, InviteBotRequest, InviteBotResponse, SetSubscriptionsResponse,
     UpdateCommandsRequest, UpdateSubscriptionsRequest,
 };
+
+/// Decode a `bot_profiles.game` JSON column into a `GameLaunchCard`.
+/// Absent/invalid JSON reads back as `None` -- same "best-effort optional
+/// column" behavior as `parse_game` in routes/messages.rs.
+fn parse_game(json: Option<String>) -> Option<GameLaunchCard> {
+    json.as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
+}
 
 // ---- Handler: POST /bots — admin invites external bot by pubkey ----
 
@@ -130,14 +139,19 @@ pub async fn ext_accept_invite(
 
     // Upsert bot_profiles.
     let meta = &req.bot_meta;
+    let game_json = meta
+        .game
+        .as_ref()
+        .map(|g| serde_json::to_string(g).unwrap_or_default());
     sqlx::query(
-        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, game, updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
          ON CONFLICT(pubkey) DO UPDATE SET
            name=excluded.name, avatar_url=excluded.avatar_url,
            description=excluded.description, webhook_url=excluded.webhook_url,
            homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
            mini_app_url=excluded.mini_app_url, requires_camera=excluded.requires_camera,
+           game=excluded.game,
            updated_at=excluded.updated_at",
     )
     .bind(&req.pubkey)
@@ -149,6 +163,7 @@ pub async fn ext_accept_invite(
     .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
     .bind(&meta.mini_app_url)
     .bind(meta.requires_camera.unwrap_or(false))
+    .bind(&game_json)
     .bind(now)
     .execute(&state.db)
     .await
@@ -217,11 +232,12 @@ pub async fn ext_list_bots(
         description: Option<String>,
         last_seen_at: Option<i64>,
         webhook_url: Option<String>,
+        game: Option<String>,
     }
 
     let rows = sqlx::query_as::<_, BotListRow>(
         "SELECT u.public_key as pubkey, bp.name, bp.avatar_url, bp.description,
-                u.last_seen_at, bp.webhook_url
+                u.last_seen_at, bp.webhook_url, bp.game
          FROM users u
          JOIN bot_profiles bp ON bp.pubkey = u.public_key
          WHERE u.is_bot = TRUE AND u.is_bot_removed = FALSE",
@@ -247,6 +263,7 @@ pub async fn ext_list_bots(
             description: row.description,
             last_seen_at: row.last_seen_at,
             webhook_url: row.webhook_url,
+            game: parse_game(row.game),
             commands: cmds
                 .into_iter()
                 .map(|(name, description)| BotCommandSummary { name, description })
@@ -337,14 +354,19 @@ pub async fn ext_update_bot_profile(
     }
 
     let now = crate::auth::handlers::unix_timestamp();
+    let game_json = meta
+        .game
+        .as_ref()
+        .map(|g| serde_json::to_string(g).unwrap_or_default());
     sqlx::query(
-        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, game, updated_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
          ON CONFLICT(pubkey) DO UPDATE SET
            name=excluded.name, avatar_url=excluded.avatar_url,
            description=excluded.description, webhook_url=excluded.webhook_url,
            homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
            mini_app_url=excluded.mini_app_url, requires_camera=excluded.requires_camera,
+           game=excluded.game,
            updated_at=excluded.updated_at",
     )
     .bind(&user.public_key)
@@ -356,6 +378,7 @@ pub async fn ext_update_bot_profile(
     .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
     .bind(&meta.mini_app_url)
     .bind(meta.requires_camera.unwrap_or(false))
+    .bind(&game_json)
     .bind(now)
     .execute(&state.db)
     .await

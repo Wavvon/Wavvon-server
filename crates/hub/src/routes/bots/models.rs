@@ -267,6 +267,10 @@ pub struct BotListEntry {
     pub last_seen_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
+    /// Profile-declared game descriptor (bot-capability-layer.md §11): the
+    /// per-hub bot directory's Play affordance. Absent = no game declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
     pub commands: Vec<BotCommandSummary>,
 }
 

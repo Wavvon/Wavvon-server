@@ -1809,6 +1809,19 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // Profile-declared game descriptor (bot-capability-layer.md §11 "the one
+    // thin slice worth building now"): lets the per-hub bot directory render
+    // a Play affordance without a live launch-card message in view. JSON of
+    // the same `GameLaunchCard` shape as the `messages.game` launch card
+    // (`{ entry_url, name, description?, thumbnail_url? }`). NULL = this bot
+    // has no game to advertise. Self-declared via `BotMeta` at auth /
+    // accept-invite time or `PUT /bots/me/profile`, same pattern as
+    // `mini_app_url` -- no backfill needed since this is a brand-new field
+    // with no prior data to migrate.
+    let _ = sqlx::query("ALTER TABLE bot_profiles ADD COLUMN game TEXT")
+        .execute(pool)
+        .await;
+
     // Forum federation phase 2 (forum.md §9 "Proxied writes"). `author_hub`
     // is the origin hub's public key hex when a post/reply was created via
     // the alliance forum write-proxy; NULL for locally-authored content.

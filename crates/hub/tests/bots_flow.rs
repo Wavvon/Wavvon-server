@@ -863,3 +863,73 @@ async fn non_bot_cannot_post_message_with_game_launch_card() {
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
 }
+
+// ---------------------------------------------------------------------------
+// Profile-declared game descriptor on the bot directory (bot-capability-
+// layer.md §11 "the one thin slice worth building now"): lets the per-hub
+// bot directory render a Play affordance without a live launch-card message
+// in view.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bot_profile_game_descriptor_surfaces_on_directory_listing() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let bot = Identity::generate();
+    let bot_token = invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    // Bot declares a game descriptor via PUT /bots/me/profile.
+    server
+        .put("/bots/me/profile")
+        .authorization_bearer(&bot_token)
+        .json(&json!({
+            "name": "GameBot",
+            "game": {
+                "entry_url": "https://ttt.example.com/play",
+                "name": "Tic-Tac-Toe",
+                "description": "1v1",
+                "thumbnail_url": "https://ttt.example.com/thumb.png"
+            }
+        }))
+        .await
+        .assert_status_success();
+
+    // The hub-local bot directory carries the descriptor for any member.
+    let list: serde_json::Value = server
+        .get("/bots")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    let entries = list.as_array().unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e["pubkey"] == bot.public_key_hex())
+        .expect("bot should appear in the directory listing");
+    assert_eq!(entry["game"]["entry_url"], "https://ttt.example.com/play");
+    assert_eq!(entry["game"]["name"], "Tic-Tac-Toe");
+    assert_eq!(entry["game"]["description"], "1v1");
+}
+
+#[tokio::test]
+async fn bot_directory_listing_omits_game_field_when_undeclared() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let bot = Identity::generate();
+    // invite_and_auth_bot's bot_meta has no "game" field at all.
+    invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    let list: serde_json::Value = server
+        .get("/bots")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    let entries = list.as_array().unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e["pubkey"] == bot.public_key_hex())
+        .expect("bot should appear in the directory listing");
+    assert!(
+        entry.get("game").is_none(),
+        "game field should be absent (skip_serializing_if), got: {entry:?}"
+    );
+}
