@@ -8,6 +8,7 @@ use serde::Deserialize;
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, ADMIN};
 use crate::routes::alliance_models::*;
+use crate::routes::post_models::{PostDetail, PostListParams, PostListResponse, ReplyListParams};
 use crate::state::AppState;
 
 use super::models::{EffectiveChannelRow, LocalMessageRow, MemberRow};
@@ -366,6 +367,201 @@ pub async fn post_alliance_channel_message(
                 (
                     StatusCode::BAD_GATEWAY,
                     format!("Failed to deliver message to peer: {e}"),
+                )
+            });
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        "Alliance channel not found on any member hub".to_string(),
+    ))
+}
+
+/// List posts in an alliance-shared forum channel: read-through proxy to
+/// the owning hub, same pattern as `get_alliance_channel_messages`. A
+/// locally-owned channel delegates straight to the local forum handler
+/// (which enforces the `channel_type == 'forum'` gate itself); a
+/// peer-owned channel is resolved by walking alliance members and proxied
+/// over federation. See forum.md section 9 -- read-only first slice, no
+/// replication, owning hub stays authoritative.
+pub async fn get_alliance_forum_posts(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((alliance_id, channel_id)): Path<(String, String)>,
+    Query(params): Query<PostListParams>,
+) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+    let hub_key = state.hub_identity.public_key_hex();
+
+    let effective = effective_shared_channels(&state.db, &alliance_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if effective.iter().any(|c| c.id == channel_id) {
+        return crate::routes::posts::list_posts(
+            State(state),
+            user,
+            Path(channel_id),
+            Query(params),
+        )
+        .await;
+    }
+
+    let members = sqlx::query_as::<_, MemberRow>(
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(&alliance_id)
+    .bind(&hub_key)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for member in members {
+        let token = {
+            let map = state.peer_tokens.read().await;
+            map.get(&member.hub_public_key).cloned()
+        };
+        let token = match token {
+            Some(t) => t,
+            None => match state
+                .federation_client
+                .authenticate(&member.hub_url, &state.hub_identity)
+                .await
+            {
+                Ok(t) => {
+                    state
+                        .peer_tokens
+                        .write()
+                        .await
+                        .insert(member.hub_public_key.clone(), t.clone());
+                    t
+                }
+                Err(_) => continue,
+            },
+        };
+
+        let shared = match state
+            .federation_client
+            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !shared.iter().any(|s| s.channel_id == channel_id) {
+            continue;
+        }
+
+        return state
+            .federation_client
+            .get_forum_posts(
+                &member.hub_url,
+                &token,
+                &channel_id,
+                params.cursor.as_deref(),
+                params.limit,
+            )
+            .await
+            .map(Json)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to fetch forum posts from peer: {e}"),
+                )
+            });
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        "Alliance channel not found on any member hub".to_string(),
+    ))
+}
+
+/// Get one post (with its reply page) from an alliance-shared forum
+/// channel. Same owner-resolution + proxy shape as
+/// [`get_alliance_forum_posts`].
+pub async fn get_alliance_forum_post(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
+    Query(params): Query<ReplyListParams>,
+) -> Result<Json<PostDetail>, (StatusCode, String)> {
+    let hub_key = state.hub_identity.public_key_hex();
+
+    let effective = effective_shared_channels(&state.db, &alliance_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if effective.iter().any(|c| c.id == channel_id) {
+        return crate::routes::posts::get_post(
+            State(state),
+            user,
+            Path((channel_id, post_id)),
+            Query(params),
+        )
+        .await;
+    }
+
+    let members = sqlx::query_as::<_, MemberRow>(
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(&alliance_id)
+    .bind(&hub_key)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for member in members {
+        let token = {
+            let map = state.peer_tokens.read().await;
+            map.get(&member.hub_public_key).cloned()
+        };
+        let token = match token {
+            Some(t) => t,
+            None => match state
+                .federation_client
+                .authenticate(&member.hub_url, &state.hub_identity)
+                .await
+            {
+                Ok(t) => {
+                    state
+                        .peer_tokens
+                        .write()
+                        .await
+                        .insert(member.hub_public_key.clone(), t.clone());
+                    t
+                }
+                Err(_) => continue,
+            },
+        };
+
+        let shared = match state
+            .federation_client
+            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !shared.iter().any(|s| s.channel_id == channel_id) {
+            continue;
+        }
+
+        return state
+            .federation_client
+            .get_forum_post(
+                &member.hub_url,
+                &token,
+                &channel_id,
+                &post_id,
+                params.after.as_deref(),
+                params.limit,
+            )
+            .await
+            .map(Json)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to fetch forum post from peer: {e}"),
                 )
             });
     }

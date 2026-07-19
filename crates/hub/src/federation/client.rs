@@ -5,6 +5,7 @@ use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelRespon
 use crate::routes::chat_models::{ChannelResponse, MessageResponse};
 use crate::routes::dm_models::FederatedDmRequest;
 use crate::routes::health::InfoResponse;
+use crate::routes::post_models::{PostDetail, PostListResponse};
 use wavvon_identity::Identity;
 
 pub struct FederationClient {
@@ -118,6 +119,67 @@ impl FederationClient {
             .json()
             .await
             .context("Invalid messages response")
+    }
+
+    /// Read-through fetch of a forum channel's post list from the peer that
+    /// owns it. Siblings of `get_messages`/`send_message` -- same
+    /// bearer-auth'd hop, just against the local (non-alliance-prefixed)
+    /// forum route, since the peer serves its own channel locally.
+    pub async fn get_forum_posts(
+        &self,
+        base_url: &str,
+        token: &str,
+        channel_id: &str,
+        cursor: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<PostListResponse> {
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(c) = cursor {
+            query.push(("cursor", c.to_string()));
+        }
+        if let Some(l) = limit {
+            query.push(("limit", l.to_string()));
+        }
+        self.http
+            .get(format!("{base_url}/channels/{channel_id}/posts"))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await
+            .context("Failed to fetch forum posts from peer")?
+            .json()
+            .await
+            .context("Invalid forum posts response")
+    }
+
+    /// Read-through fetch of a single forum post (with its reply page) from
+    /// the peer that owns it.
+    pub async fn get_forum_post(
+        &self,
+        base_url: &str,
+        token: &str,
+        channel_id: &str,
+        post_id: &str,
+        after: Option<&str>,
+        limit: Option<i64>,
+    ) -> Result<PostDetail> {
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(a) = after {
+            query.push(("after", a.to_string()));
+        }
+        if let Some(l) = limit {
+            query.push(("limit", l.to_string()));
+        }
+        self.http
+            .get(format!("{base_url}/channels/{channel_id}/posts/{post_id}"))
+            .bearer_auth(token)
+            .query(&query)
+            .send()
+            .await
+            .context("Failed to fetch forum post from peer")?
+            .json()
+            .await
+            .context("Invalid forum post response")
     }
 
     pub async fn post_alliance_join(

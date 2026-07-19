@@ -630,6 +630,14 @@ pub fn create_router_full(
                 .post(routes::alliances::post_alliance_channel_message),
         )
         .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts",
+            get(routes::alliances::get_alliance_forum_posts),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}",
+            get(routes::alliances::get_alliance_forum_post),
+        )
+        .route(
             "/federation/alliance-invite",
             post(routes::alliances::receive_federation_alliance_invite),
         )

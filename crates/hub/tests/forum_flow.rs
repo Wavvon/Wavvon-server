@@ -636,3 +636,332 @@ async fn forum_get_post_not_found_returns_404() {
         .await;
     assert_eq!(resp.status_code(), 404);
 }
+
+// ── Federation read-through (forum.md section 9, phase 1) ───────────────────
+//
+// These need two real HTTP hubs talking to each other over the federation
+// client, so `axum_test::TestServer` (in-process, no network) doesn't work
+// here -- mirrors the `start_hub` harness in `alliance_flow.rs`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tokio::sync::{broadcast, RwLock};
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::routes::alliance_models::AllianceResponse;
+use wavvon_hub::routes::chat_models::ChannelResponse;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+
+async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
+    let (chat_tx, _) = broadcast::channel(256);
+    let (voice_event_tx, _) = broadcast::channel(16);
+
+    let state = Arc::new(AppState {
+        hub_name: name.to_string(),
+        hub_identity: Identity::generate(),
+        db,
+        db_read: None,
+        store,
+        pending_challenges: RwLock::new(HashMap::new()),
+        chat_tx,
+        federation_client: FederationClient::new(),
+        peer_tokens: RwLock::new(HashMap::new()),
+        voice_channels: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
+        voice_sender_ids: RwLock::new(HashMap::new()),
+        voice_next_sender_id: RwLock::new(HashMap::new()),
+        voice_zones: RwLock::new(HashMap::new()),
+        voice_udp_port: 0,
+        voice_udp_addr: None,
+        voice_event_tx,
+        dm_tx: broadcast::channel(16).0,
+        online_users: RwLock::new(std::collections::HashMap::new()),
+        screen_shares: RwLock::new(HashMap::new()),
+        screen_share_tx: broadcast::channel(16).0,
+        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        http_client: reqwest::Client::new(),
+        farm_url: None,
+        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
+        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        started_at: std::time::Instant::now(),
+        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
+        bots_allow_camera: false,
+        webauthn: {
+            let origin = url::Url::parse("http://localhost:3000").unwrap();
+            std::sync::Arc::new(
+                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
+                    .unwrap()
+                    .rp_name("test-hub")
+                    .build()
+                    .unwrap(),
+            )
+        },
+        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        device_token_ttl_secs: 30 * 86400,
+        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
+            wavvon_hub::state::WebhookCircuit::default(),
+        )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
+    });
+
+    let app = server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    (url, state, guard)
+}
+
+async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
+    let client = reqwest::Client::new();
+    let pub_key = identity.public_key_hex();
+
+    let challenge: ChallengeResponse = client
+        .post(format!("{hub_url}/auth/challenge"))
+        .json(&json!({ "public_key": pub_key }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+    let signature = identity.sign(&challenge_bytes);
+
+    let verify: VerifyResponse = client
+        .post(format!("{hub_url}/auth/verify"))
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    verify.token
+}
+
+/// Hub B owns a forum channel shared into an alliance with Hub A. Hub A
+/// reads the post list and post detail (with replies) purely through the
+/// alliance read-through proxy -- Hub A never stores a copy, it federates
+/// the read to Hub B on every call.
+#[tokio::test]
+async fn alliance_forum_read_through_proxies_to_owning_hub() {
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+    let user_b = Identity::generate();
+    let token_b = authenticate_user(&hub_b_url, &user_b).await;
+
+    // Hub A creates the alliance.
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Forum Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let invite: wavvon_hub::routes::alliance_models::AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Hub B: create a forum channel with a post and a reply, then share it.
+    let channel: ChannelResponse = client
+        .post(format!("{hub_b_url}/channels"))
+        .bearer_auth(&token_b)
+        .json(&json!({ "name": "patch-notes", "channel_type": "forum" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(channel.channel_type, "forum");
+
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_b)
+        .json(&json!({ "channel_id": channel.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let post: PostDetail = client
+        .post(format!("{hub_b_url}/channels/{}/posts", channel.id))
+        .bearer_auth(&token_b)
+        .json(&json!({ "title": "v1.2 notes", "body": "Fixed the thing" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let _reply: Value = client
+        .post(format!(
+            "{hub_b_url}/channels/{}/posts/{}/replies",
+            channel.id, post.summary.id
+        ))
+        .bearer_auth(&token_b)
+        .json(&json!({ "body": "nice, thanks" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Hub A: list posts via the alliance proxy -- it owns no copy, this is
+    // a live federated read every time.
+    let resp = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts",
+            alliance.id, channel.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let list: PostListResponse = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts",
+            alliance.id, channel.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list.posts.len(), 1);
+    assert_eq!(list.posts[0].id, post.summary.id);
+    assert_eq!(list.posts[0].title.as_deref(), Some("v1.2 notes"));
+
+    // Hub A: get post detail (with the reply) via the proxy.
+    let detail: PostDetail = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts/{}",
+            alliance.id, channel.id, post.summary.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail.body.as_deref(), Some("Fixed the thing"));
+    assert_eq!(detail.replies.len(), 1);
+    assert_eq!(detail.replies[0].body.as_deref(), Some("nice, thanks"));
+}
+
+/// Reading posts for a channel that isn't shared with the alliance on any
+/// member hub is rejected with 404, mirroring the message-proxy rejection.
+#[tokio::test]
+async fn alliance_forum_read_through_rejects_unshared_channel() {
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Solo Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // A forum channel that was never shared into the alliance.
+    let channel: ChannelResponse = client
+        .post(format!("{hub_a_url}/channels"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "private-forum", "channel_type": "forum" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts",
+            alliance.id, channel.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
