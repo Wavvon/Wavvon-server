@@ -12,8 +12,8 @@ use crate::state::AppState;
 use super::models::{generate_token, hash_token};
 use super::models::{
     AuditLogEntry, AuditLogQuery, AuditLogResponse, BotAdminInfo, BotCreatedResponse,
-    BotDetailResponse, BotRow, CapabilitiesResponse, CreateBotRequest, SetCapabilitiesRequest,
-    SetWebhookRequest, SlashCommandInfo, SlashCommandRow,
+    BotDetailResponse, BotRow, CapabilitiesReadResponse, CapabilitiesResponse, CreateBotRequest,
+    SetCapabilitiesRequest, SetWebhookRequest, SlashCommandInfo, SlashCommandRow,
 };
 
 /// POST /admin/bots  — create a bot (any authenticated hub member)
@@ -325,6 +325,72 @@ pub async fn admin_set_bot_capabilities(
     Ok(Json(CapabilitiesResponse {
         bot_pubkey: pubkey,
         capabilities: req.capabilities,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /admin/bots/:pubkey/capabilities
+// ---------------------------------------------------------------------------
+
+/// Admin-only: stable read contract for the admin panel (bot-capability-
+/// layer.md §1, §6 Phase 1 item 2 follow-up). Not just the write endpoint's
+/// echo -- `requested` and `effective` aren't observable from
+/// `PUT .../capabilities`'s response at all.
+pub async fn admin_get_bot_capabilities(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(pubkey): Path<String>,
+) -> Result<Json<CapabilitiesReadResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(permissions::ADMIN)?;
+
+    let known_bot: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE
+            UNION
+            SELECT 1 FROM bots WHERE public_key = $1
+         )",
+    )
+    .bind(&pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if !known_bot {
+        return Err((StatusCode::NOT_FOUND, "Bot not found".to_string()));
+    }
+
+    let requested_json: Option<String> =
+        sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = $1")
+            .bind(&pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .flatten();
+    let requested: Vec<String> = requested_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+
+    let granted: Vec<String> = sqlx::query_scalar(
+        "SELECT capability FROM bot_capability_grants WHERE bot_pubkey = $1 ORDER BY capability",
+    )
+    .bind(&pubkey)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let mut effective: Vec<String> =
+        crate::bots::capabilities::effective_capabilities(&state.db, &pubkey)
+            .await
+            .into_iter()
+            .collect();
+    effective.sort();
+
+    Ok(Json(CapabilitiesReadResponse {
+        requested,
+        granted,
+        effective,
     }))
 }
 

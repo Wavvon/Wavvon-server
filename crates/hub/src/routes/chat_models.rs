@@ -174,6 +174,17 @@ pub struct MessageResponse {
     /// 0 for replies themselves; only root messages accumulate a non-zero count.
     #[serde(default)]
     pub reply_count: i64,
+    /// Bot-authored rich embeds (bots.md §11), persisted on `messages.embeds`.
+    /// None for any message that never had embeds (which is most of them) --
+    /// DM and federation reads use their own response types and never
+    /// populate this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embeds: Option<Vec<crate::routes::bot_models::Embed>>,
+    /// Game-modal launch card (bot-capability-layer.md §2, §6 Phase 1 item
+    /// 3), persisted on `messages.game`. None for any message that never
+    /// had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
 }
 
 #[derive(Deserialize)]

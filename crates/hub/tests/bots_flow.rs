@@ -741,19 +741,28 @@ async fn external_bot_can_post_message_with_game_launch_card() {
         .await;
     resp.assert_status_success();
 
-    // The `game` field isn't round-tripped over the WS/HTTP response yet
-    // (client work, out of scope here) -- verify it landed in the DB, which
-    // is what a future client-facing read path would source from.
-    let game_col: Option<String> =
-        sqlx::query_scalar("SELECT game FROM messages WHERE channel_id = $1")
-            .bind(&channel_id)
-            .fetch_one(&server.state().db)
-            .await
-            .unwrap();
-    let game_col = game_col.expect("game column should be populated");
-    let game: serde_json::Value = serde_json::from_str(&game_col).unwrap();
-    assert_eq!(game["entry_url"], "https://ttt.example.com/play");
-    assert_eq!(game["name"], "Tic-Tac-Toe");
+    // The POST response itself carries the launch card.
+    let posted: serde_json::Value = resp.json();
+    assert_eq!(posted["game"]["entry_url"], "https://ttt.example.com/play");
+    assert_eq!(posted["game"]["name"], "Tic-Tac-Toe");
+
+    // It also survives the DB round-trip and comes back on a plain GET.
+    let messages: serde_json::Value = server
+        .get(&format!("/channels/{channel_id}/messages"))
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    let msgs = messages.as_array().unwrap();
+    let game_msg = msgs
+        .iter()
+        .find(|m| m["content"] == "Play a round?")
+        .expect("posted message should be in the read-back list");
+    assert_eq!(
+        game_msg["game"]["entry_url"],
+        "https://ttt.example.com/play"
+    );
+    assert_eq!(game_msg["game"]["name"], "Tic-Tac-Toe");
+    assert_eq!(game_msg["game"]["description"], "1v1");
 }
 
 #[tokio::test]

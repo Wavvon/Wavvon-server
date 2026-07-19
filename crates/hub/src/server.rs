@@ -292,7 +292,8 @@ pub fn create_router_full(
         )
         .route(
             "/admin/bots/{pubkey}/capabilities",
-            put(routes::bots::admin_set_bot_capabilities),
+            get(routes::bots::admin_get_bot_capabilities)
+                .put(routes::bots::admin_set_bot_capabilities),
         )
         .route("/admin/audit-log", get(routes::bots::admin_audit_log))
         // ---- Bot API (token auth, internal service accounts) ----

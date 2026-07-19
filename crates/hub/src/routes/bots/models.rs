@@ -174,6 +174,20 @@ pub struct CapabilitiesResponse {
     pub capabilities: Vec<String>,
 }
 
+/// GET /admin/bots/:pubkey/capabilities response (bot-capability-layer.md
+/// §1, §6 Phase 1 item 2 follow-up): the three sets side by side so the
+/// admin panel can render requested vs. granted vs. what's actually live.
+#[derive(Serialize)]
+pub struct CapabilitiesReadResponse {
+    /// Self-declared capabilities (external bots' `bot_profiles.capabilities`).
+    /// Empty for a self-service bot -- it has no self-declaration mechanism.
+    pub requested: Vec<String>,
+    /// Admin-granted rows from `bot_capability_grants`.
+    pub granted: Vec<String>,
+    /// `effective_capabilities()` output -- the only set any runtime gate trusts.
+    pub effective: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Bot API request / response types
 // ---------------------------------------------------------------------------

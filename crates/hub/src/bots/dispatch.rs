@@ -265,6 +265,8 @@ pub async fn dispatch_slash(
             reply_to: None,
             visible_to_pubkey: visible_to.map(|s| s.to_string()),
             reply_count: 0,
+            embeds: reply.embeds,
+            game: bot_response.game,
         };
 
         {
@@ -327,6 +329,8 @@ pub async fn insert_ephemeral_error(
         reply_to: None,
         visible_to_pubkey: Some(invoker_pubkey.to_string()),
         reply_count: 0,
+        embeds: None,
+        game: None,
     };
 
     {
@@ -622,6 +626,10 @@ async fn apply_component_response(
             reply_to: None,
             visible_to_pubkey: Some(interacting_user.to_string()),
             reply_count: 0,
+            // EphemeralReply carries only a body -- no embeds/game field exists
+            // on that type to read from.
+            embeds: None,
+            game: None,
         };
 
         {
@@ -645,8 +653,18 @@ async fn load_updated_message(
     state: &Arc<AppState>,
     message_id: &str,
 ) -> Result<MessageResponse, sqlx::Error> {
-    let row: (String, String, Option<String>, String, i64, Option<i64>) = sqlx::query_as(
-        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at
+    #[allow(clippy::type_complexity)]
+    let row: (
+        String,
+        String,
+        Option<String>,
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at, m.embeds, m.game
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -667,5 +685,15 @@ async fn load_updated_message(
         reply_to: None,
         visible_to_pubkey: None,
         reply_count: 0,
+        embeds: row
+            .6
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str(s).ok()),
+        game: row
+            .7
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str(s).ok()),
     })
 }

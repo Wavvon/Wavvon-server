@@ -100,6 +100,60 @@ async fn non_admin_cannot_grant_bot_capabilities() {
 }
 
 #[tokio::test]
+async fn admin_can_read_capabilities_requested_granted_effective() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let bot: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "display_name": "ReadBackBot" }))
+        .await
+        .json();
+    let bot_key = bot["public_key"].as_str().unwrap().to_string();
+
+    // A self-service bot (created via POST /admin/bots) has no self-declared
+    // `bot_profiles` row, so `requested` starts empty and granted == effective.
+    server
+        .put(&format!("/admin/bots/{bot_key}/capabilities"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "capabilities": ["can_speak_voice"] }))
+        .await
+        .assert_status_success();
+
+    let resp = server
+        .get(&format!("/admin/bots/{bot_key}/capabilities"))
+        .authorization_bearer(&owner_token)
+        .await;
+    resp.assert_status_success();
+    let body: serde_json::Value = resp.json();
+    assert_eq!(body["requested"].as_array().unwrap().len(), 0);
+    assert_eq!(body["granted"].as_array().unwrap(), &["can_speak_voice"]);
+    assert_eq!(body["effective"].as_array().unwrap(), &["can_speak_voice"]);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_read_bot_capabilities() {
+    let server = common::setup().await;
+    let _owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let admin_token = common::authenticate(&server, &Identity::generate()).await;
+    let rando_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let bot: serde_json::Value = server
+        .post("/admin/bots")
+        .authorization_bearer(&admin_token)
+        .json(&json!({ "display_name": "NoReadBot" }))
+        .await
+        .json();
+    let bot_key = bot["public_key"].as_str().unwrap().to_string();
+
+    let resp = server
+        .get(&format!("/admin/bots/{bot_key}/capabilities"))
+        .authorization_bearer(&rando_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn grant_capabilities_404s_for_unknown_bot() {
     let (server, owner_token) = common::setup_with_owner().await;
 
@@ -232,6 +286,53 @@ async fn authenticate_http(base: &str, identity: &Identity) -> String {
         .unwrap();
 
     verify.token
+}
+
+/// Invites `bot` as an external bot (`/bots`) and authenticates it with
+/// `is_bot: true`, mirroring `bots_flow.rs`'s `invite_and_auth_bot` but over
+/// a raw `reqwest::Client` since this file's harness is a real TCP listener,
+/// not `axum_test`.
+async fn invite_and_auth_bot_http(base: &str, admin_token: &str, bot: &Identity) -> String {
+    let client = reqwest::Client::new();
+    let pub_key = bot.public_key_hex();
+
+    let resp = client
+        .post(format!("{base}/bots"))
+        .bearer_auth(admin_token)
+        .json(&json!({ "pubkey": pub_key }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let challenge: Value = client
+        .post(format!("{base}/auth/challenge"))
+        .json(&json!({ "public_key": pub_key }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let challenge_bytes = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
+    let signature = bot.sign(&challenge_bytes);
+
+    let verify: Value = client
+        .post(format!("{base}/auth/verify"))
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge["challenge"],
+            "signature": hex::encode(signature.to_bytes()),
+            "is_bot": true,
+            "bot_meta": { "name": "GameBot" },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    verify["token"].as_str().unwrap().to_string()
 }
 
 async fn create_channel(base: &str, token: &str, name: &str) -> Value {
@@ -374,6 +475,63 @@ async fn mini_app_join_succeeds_after_capability_grant() {
         .expect("granted bot should yield a bot_app_open reply");
     assert_eq!(frame["type"], "bot_app_open");
     assert!(!frame["session_token"].as_str().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// `game` launch-card readback (bot-capability-layer.md §2, §6 Phase 1 item
+// 3 follow-up): `MessageResponse` now carries `game`, so both the WS
+// broadcast and a plain GET must surface it.
+// ---------------------------------------------------------------------------
+
+/// A bot-authored message with a `game` launch card shows up on the WS
+/// broadcast with the card attached.
+#[tokio::test]
+async fn game_launch_card_appears_on_ws_broadcast() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let member = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let member_token = authenticate_http(&base, &member).await;
+
+    let channel = create_channel(&base, &owner_token, "game-broadcast-room").await;
+    let channel_id = channel["id"].as_str().unwrap().to_string();
+
+    let bot = Identity::generate();
+    let bot_token = invite_and_auth_bot_http(&base, &owner_token, &bot).await;
+
+    let (mut member_tx, mut member_rx) = connect_ws(&base, &member_token).await;
+    send_text(
+        &mut member_tx,
+        json!({ "type": "subscribe", "channel_id": channel_id }),
+    )
+    .await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/channels/{channel_id}/messages"))
+        .bearer_auth(&bot_token)
+        .json(&json!({
+            "content": "Play a round?",
+            "game": {
+                "entry_url": "https://ttt.example.com/play",
+                "name": "Tic-Tac-Toe",
+                "description": "1v1"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    let frame = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(3))
+        .await
+        .expect("expected the chat message broadcast");
+    assert_eq!(frame["type"], "message");
+    assert_eq!(
+        frame["message"]["game"]["entry_url"],
+        "https://ttt.example.com/play"
+    );
+    assert_eq!(frame["message"]["game"]["name"], "Tic-Tac-Toe");
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
+use crate::routes::bot_models::{Embed, GameLaunchCard};
 use crate::routes::chat_models::{
     Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
     ReactionSummary, ReplyContext, SendMessageRequest, MAX_ATTACHMENTS_BYTES,
@@ -198,6 +199,8 @@ pub async fn send_message(
                     reply_to: None,
                     visible_to_pubkey: Some(user.public_key),
                     reply_count: 0,
+                    embeds: None,
+                    game: None,
                 };
                 return Ok((StatusCode::OK, Json(placeholder)));
             }
@@ -408,6 +411,10 @@ pub async fn send_message(
         reply_to: reply_ctx,
         visible_to_pubkey: None,
         reply_count: 0,
+        // No embeds on user-authored messages -- bot-only, and this path
+        // already rejected req.game above unless the sender is a bot.
+        embeds: None,
+        game: req.game,
     };
 
     {
@@ -596,7 +603,7 @@ async fn load_message(
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
                 m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
-                COALESCE(m.reply_count, 0) as reply_count
+                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -624,6 +631,8 @@ async fn load_message(
         reply_to,
         visible_to_pubkey: None,
         reply_count: row.reply_count,
+        embeds: parse_embeds(row.embeds),
+        game: parse_game(row.game),
     })
 }
 
@@ -648,7 +657,7 @@ pub async fn get_messages(
     let rows = if let Some(ref root_id) = params.thread_root {
         // Thread mode: return all replies to this root, oldest first.
         sqlx::query_as::<_, MessageRow>(
-            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
              ORDER BY m.created_at ASC, m.id ASC LIMIT $3",
@@ -688,7 +697,7 @@ pub async fn get_messages(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
                      ORDER BY m.created_at DESC, m.id DESC"
@@ -701,7 +710,7 @@ pub async fn get_messages(
             }
             (None, Some(before_id)) => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
                        AND (m.created_at, m.id) < (
@@ -717,7 +726,7 @@ pub async fn get_messages(
             }
             (None, None) => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
                      ORDER BY m.created_at DESC, m.id DESC LIMIT $2",
@@ -760,6 +769,8 @@ pub async fn get_messages(
                 reply_to,
                 visible_to_pubkey: None,
                 reply_count: r.reply_count,
+                embeds: parse_embeds(r.embeds),
+                game: parse_game(r.game),
             }
         })
         .collect();
@@ -779,6 +790,20 @@ struct MessageRow {
     created_at: i64,
     edited_at: Option<i64>,
     reply_count: i64,
+    embeds: Option<String>,
+    game: Option<String>,
+}
+
+fn parse_embeds(json: Option<String>) -> Option<Vec<Embed>> {
+    json.as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
+}
+
+fn parse_game(json: Option<String>) -> Option<GameLaunchCard> {
+    json.as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
 }
 
 /// Bulk variant of load_reactions: one query for all messages in a page,

@@ -596,7 +596,7 @@ pub async fn get_alliance_channel_messages(
 
         let rows = sqlx::query_as::<_, LocalMessageRow>(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
-                    m.content, m.attachments, m.created_at, m.edited_at
+                    m.content, m.attachments, m.created_at, m.edited_at, m.embeds, m.game
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1
              ORDER BY m.created_at DESC, m.id DESC LIMIT 50",
@@ -631,6 +631,16 @@ pub async fn get_alliance_channel_messages(
                 reply_to: None,
                 visible_to_pubkey: None,
                 reply_count: 0,
+                embeds: r
+                    .embeds
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| serde_json::from_str(s).ok()),
+                game: r
+                    .game
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .and_then(|s| serde_json::from_str(s).ok()),
             });
         }
         return Ok(Json(out));
