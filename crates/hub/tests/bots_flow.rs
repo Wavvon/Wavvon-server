@@ -1071,6 +1071,58 @@ async fn admin_can_set_and_reset_bot_channel_scope() {
 }
 
 #[tokio::test]
+async fn admin_can_get_bot_channel_scope() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let bot = Identity::generate();
+    let bot_pubkey = bot.public_key_hex();
+    invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "scoped-channel-get" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    server
+        .put(&format!("/admin/bots/{bot_pubkey}/channels"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "channel_ids": [channel_id.clone()] }))
+        .await
+        .assert_status_success();
+
+    let resp = server
+        .get(&format!("/admin/bots/{bot_pubkey}/channels"))
+        .authorization_bearer(&owner_token)
+        .await;
+    resp.assert_status_success();
+    let body: serde_json::Value = resp.json();
+    assert_eq!(body["bot_pubkey"], bot_pubkey);
+    assert_eq!(
+        body["channel_ids"].as_array().unwrap(),
+        std::slice::from_ref(&channel_id)
+    );
+}
+
+#[tokio::test]
+async fn non_admin_cannot_get_bot_channel_scope() {
+    let (server, owner_token) = common::setup_with_owner().await;
+    let rando_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let bot = Identity::generate();
+    let bot_pubkey = bot.public_key_hex();
+    invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    let resp = server
+        .get(&format!("/admin/bots/{bot_pubkey}/channels"))
+        .authorization_bearer(&rando_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn set_channel_scope_404s_for_unknown_bot() {
     let (server, owner_token) = common::setup_with_owner().await;
 

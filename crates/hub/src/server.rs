@@ -305,7 +305,8 @@ pub fn create_router_full(
         )
         .route(
             "/admin/bots/{pubkey}/channels",
-            put(routes::bots::admin_set_bot_channel_scope),
+            get(routes::bots::admin_get_bot_channel_scope)
+                .put(routes::bots::admin_set_bot_channel_scope),
         )
         .route("/admin/audit-log", get(routes::bots::admin_audit_log))
         // ---- Bot API (token auth, internal service accounts) ----

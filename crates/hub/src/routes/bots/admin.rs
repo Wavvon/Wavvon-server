@@ -465,6 +465,51 @@ pub async fn admin_set_bot_channel_scope(
 }
 
 // ---------------------------------------------------------------------------
+// GET /admin/bots/:pubkey/channels
+// ---------------------------------------------------------------------------
+
+/// Admin-only: current channel scope for a bot (bots.md §14). Empty list
+/// means hub-wide access. Same pubkey resolution and response shape as
+/// `admin_set_bot_channel_scope`.
+pub async fn admin_get_bot_channel_scope(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(pubkey): Path<String>,
+) -> Result<Json<ChannelScopeResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(permissions::ADMIN)?;
+
+    let known_bot: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE
+            UNION
+            SELECT 1 FROM bots WHERE public_key = $1
+         )",
+    )
+    .bind(&pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if !known_bot {
+        return Err((StatusCode::NOT_FOUND, "Bot not found".to_string()));
+    }
+
+    let channel_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT channel_id FROM bot_channel_scope WHERE bot_pubkey = $1 ORDER BY channel_id",
+    )
+    .bind(&pubkey)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(ChannelScopeResponse {
+        bot_pubkey: pubkey,
+        channel_ids,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // GET /admin/audit-log
 // ---------------------------------------------------------------------------
 
