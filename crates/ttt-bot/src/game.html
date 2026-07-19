@@ -53,6 +53,13 @@
     ws.addEventListener("close", () => { statusEl.textContent = "Disconnected."; });
   }
 
+  // Liveness convention (bot-capability-layer.md §10): a ~10s heartbeat so
+  // the bot's roster notices a hung/crashed tab, plus a best-effort `bye`
+  // on unload so a clean close is noticed immediately instead of waiting
+  // out the heartbeat timeout.
+  setInterval(() => send({ kind: "ping" }), 10000);
+  window.addEventListener("beforeunload", () => send({ kind: "bye" }));
+
   function send(payloadObj) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.send(JSON.stringify({

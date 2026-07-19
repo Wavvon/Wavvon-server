@@ -21,7 +21,6 @@
 //!   IDENTITY_PATH   where to persist this bot's Ed25519 keypair (default:
 //!                   ~/.wavvon/ttt-bot-identity.json)
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,10 +30,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use bot_kit::Lobby;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use wavvon_identity::Identity;
 
@@ -143,7 +142,10 @@ struct Ctx {
     /// One active game per channel (ponytail: a new `/ttt` in a channel with
     /// an unfinished game silently replaces it -- fine for a demo bot; add a
     /// "game already in progress" reply if that ever surprises someone).
-    sessions: Mutex<HashMap<String, GameSession>>,
+    /// Roster maintenance (hello/bye/ping, ~30s timeout eviction) is
+    /// `bot-kit`'s job (bot-capability-layer.md §10); this bot only owns the
+    /// board via `GameSession`.
+    sessions: Lobby<GameSession>,
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +181,7 @@ async fn main() -> anyhow::Result<()> {
         hub_pubkey,
         bot_pubkey,
         bot_token,
-        sessions: Mutex::new(HashMap::new()),
+        sessions: Lobby::with_default_timeout(),
     });
 
     let app = Router::new()
@@ -379,10 +381,7 @@ async fn handle_ttt_command(
         turn: Symbol::X,
         finished: false,
     };
-    ctx.sessions
-        .lock()
-        .await
-        .insert(channel_id.to_string(), session);
+    ctx.sessions.start(channel_id.to_string(), session);
 
     None
 }
@@ -456,12 +455,20 @@ async fn run_ws_loop(ctx: &Arc<Ctx>) -> anyhow::Result<()> {
     Ok(())
 }
 
-type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-    WsMessage,
->;
+/// Outcome of applying one mini-app frame to a `GameSession`, computed
+/// inside `Lobby::with_state` and carried out past the lock for the
+/// (possibly async) fan-out below.
+struct FrameOutcome {
+    x_pubkey: String,
+    o_pubkey: String,
+    x_state: Value,
+    o_state: Value,
+    just_finished: bool,
+    message_id: String,
+    winner_pubkey: Option<String>,
+}
 
-async fn handle_mini_app_frame(ctx: &Arc<Ctx>, tx: &mut WsSink, frame: &Value) {
+async fn handle_mini_app_frame(ctx: &Arc<Ctx>, tx: &mut bot_kit::WsSink, frame: &Value) {
     let channel_id = match frame["channel_id"].as_str() {
         Some(c) => c.to_string(),
         None => return,
@@ -478,80 +485,112 @@ async fn handle_mini_app_frame(ctx: &Arc<Ctx>, tx: &mut WsSink, frame: &Value) {
         None => return,
     };
     let kind = payload["kind"].as_str().unwrap_or("");
+    let now = std::time::Instant::now();
 
-    let mut sessions = ctx.sessions.lock().await;
-    let Some(session) = sessions.get_mut(&channel_id) else {
-        return;
-    };
-    let Some(sender_symbol) = session.symbol_of(&from_pubkey) else {
-        return;
-    };
-
-    let just_finished = match kind {
-        "hello" => false,
-        "move" => {
-            if session.finished || sender_symbol != session.turn {
-                false
-            } else {
-                let Some(cell) = payload["cell"].as_u64() else {
-                    return;
-                };
-                match board::validate_and_apply(
-                    &mut session.board,
-                    session.turn,
-                    cell as usize,
-                    session.finished,
-                ) {
-                    Ok(()) => {
-                        if board::winner(&session.board).is_some() || board::is_full(&session.board)
-                        {
-                            session.finished = true;
-                        } else {
-                            session.turn = session.turn.other();
-                        }
-                        session.finished
-                    }
-                    Err(_) => false,
-                }
-            }
+    // Roster bookkeeping from the hello/bye/ping convention
+    // (bot-capability-layer.md §10) -- ttt-bot doesn't act on roster
+    // changes itself (it's a fixed 2-player game), but tracking them is
+    // what makes a disconnect eventually get noticed instead of silently
+    // leaving a dead session in memory.
+    match kind {
+        "hello" => {
+            ctx.sessions.hello(&channel_id, &from_pubkey, None, now);
         }
-        _ => false,
-    };
-
-    // Push the updated state to both players.
-    let x_key = session.x_pubkey.clone();
-    let o_key = session.o_pubkey.clone();
-    for target in [x_key, o_key] {
-        let state = session.state_json(&target);
-        let out = json!({
-            "type": "mini_app_message",
-            "bot_id": ctx.bot_pubkey,
-            "channel_id": channel_id,
-            "payload": state.to_string(),
-            "to_pubkey": target,
-        });
-        let _ = tx.send(WsMessage::Text(out.to_string())).await;
+        "bye" => {
+            ctx.sessions.bye(&channel_id, &from_pubkey, now);
+        }
+        "ping" => {
+            ctx.sessions.heartbeat(&channel_id, &from_pubkey, now);
+        }
+        _ => {}
     }
 
-    if just_finished {
-        let winner_sym = board::winner(&session.board);
-        let result_text = match winner_sym {
-            Some(sym) => format!("{} wins!", session.pubkey_of(sym)),
+    let outcome = ctx
+        .sessions
+        .with_state(&channel_id, |session| -> Option<FrameOutcome> {
+            let sender_symbol = session.symbol_of(&from_pubkey)?;
+
+            let just_finished = match kind {
+                "move" => {
+                    if session.finished || sender_symbol != session.turn {
+                        false
+                    } else {
+                        let cell = payload["cell"].as_u64()? as usize;
+                        match board::validate_and_apply(
+                            &mut session.board,
+                            session.turn,
+                            cell,
+                            session.finished,
+                        ) {
+                            Ok(()) => {
+                                if board::winner(&session.board).is_some()
+                                    || board::is_full(&session.board)
+                                {
+                                    session.finished = true;
+                                } else {
+                                    session.turn = session.turn.other();
+                                }
+                                session.finished
+                            }
+                            Err(_) => false,
+                        }
+                    }
+                }
+                _ => false,
+            };
+
+            let x_pubkey = session.x_pubkey.clone();
+            let o_pubkey = session.o_pubkey.clone();
+            let x_state = session.state_json(&x_pubkey);
+            let o_state = session.state_json(&o_pubkey);
+            let winner_pubkey =
+                board::winner(&session.board).map(|sym| session.pubkey_of(sym).to_string());
+
+            Some(FrameOutcome {
+                x_pubkey,
+                o_pubkey,
+                x_state,
+                o_state,
+                just_finished,
+                message_id: session.message_id.clone(),
+                winner_pubkey,
+            })
+        })
+        .flatten();
+
+    let Some(outcome) = outcome else {
+        return;
+    };
+
+    // Push the updated state to both players (bot_kit's per-viewer send
+    // loop, generalized from ttt-bot's original two-target `for` loop).
+    let x_key = outcome.x_pubkey.clone();
+    let o_key = outcome.o_pubkey.clone();
+    bot_kit::broadcast(tx, &ctx.bot_pubkey, &channel_id, [x_key, o_key], |target| {
+        if target == outcome.x_pubkey {
+            outcome.x_state.clone()
+        } else {
+            outcome.o_state.clone()
+        }
+    })
+    .await;
+
+    if outcome.just_finished {
+        let result_text = match &outcome.winner_pubkey {
+            Some(pk) => format!("{pk} wins!"),
             None => "It's a draw!".to_string(),
         };
-        let message_id = session.message_id.clone();
-        let color = if winner_sym.is_some() {
+        let color = if outcome.winner_pubkey.is_some() {
             "#22c55e"
         } else {
             "#94a3b8"
         };
-        drop(sessions); // release the lock before the network round-trips below
 
         let _ = ctx
             .http
             .patch(format!(
-                "{}/channels/{channel_id}/messages/{message_id}",
-                ctx.hub_url
+                "{}/channels/{channel_id}/messages/{}",
+                ctx.hub_url, outcome.message_id
             ))
             .bearer_auth(&ctx.bot_token)
             .json(&json!({
@@ -564,6 +603,6 @@ async fn handle_mini_app_frame(ctx: &Arc<Ctx>, tx: &mut WsSink, frame: &Value) {
         let dismiss = json!({ "type": "bot_app_dismiss", "channel_id": channel_id });
         let _ = tx.send(WsMessage::Text(dismiss.to_string())).await;
 
-        ctx.sessions.lock().await.remove(&channel_id);
+        ctx.sessions.end(&channel_id);
     }
 }

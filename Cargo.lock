@@ -494,6 +494,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bot-kit"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4527,6 +4537,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum 0.8.9",
+ "bot-kit",
  "dirs",
  "futures-util",
  "hex",

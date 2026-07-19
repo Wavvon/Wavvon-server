@@ -1,0 +1,11 @@
+[package]
+name = "bot-kit"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable roster/lobby + mini_app_message relay helpers for bot-owned multiplayer sessions (bot-capability-layer.md §10, gaming Phase 3)."
+
+[dependencies]
+tokio = { version = "1", features = ["net"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+serde_json = "1"
