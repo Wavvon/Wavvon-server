@@ -1809,6 +1809,29 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // Forum federation phase 2 (forum.md §9 "Proxied writes"). `author_hub`
+    // is the origin hub's public key hex when a post/reply was created via
+    // the alliance forum write-proxy; NULL for locally-authored content.
+    // Hub-asserted, not cryptographically proven -- render as "via HubName",
+    // never as a verified badge (see forum.md's threat-model deltas).
+    let _ = sqlx::query("ALTER TABLE posts ADD COLUMN author_hub TEXT")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE post_replies ADD COLUMN author_hub TEXT")
+        .execute(pool)
+        .await;
+
+    // Per-shared-channel policy for federated forum writes (forum.md §9
+    // "Threat-model deltas"): 'none' | 'replies_only' | 'posts_and_replies'.
+    // Lets an announcement forum accept allied replies without opening up
+    // allied post creation. Default 'replies_only' per the doc.
+    let _ = sqlx::query(
+        "ALTER TABLE alliance_shared_channels
+         ADD COLUMN forum_remote_write TEXT NOT NULL DEFAULT 'replies_only'",
+    )
+    .execute(pool)
+    .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

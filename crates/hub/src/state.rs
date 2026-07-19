@@ -211,6 +211,13 @@ pub struct RateLimiters {
     /// Per-hub-pubkey rate limiter for /federation/badge-offer (20 offers/3600 s).
     /// Keyed by the sender's hub public key hex.
     pub badge_offer: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-origin-hub rate limiter for federated forum writes
+    /// (`/federation/forum/...`, forum.md §9 "Threat-model deltas": "Add a
+    /// per-origin-hub rate limiter on federated forum writes"). Keyed by the
+    /// calling hub's public key hex. 30 writes/60 s -- mirrors `badge_offer`'s
+    /// shape (fixed window, same eviction policy) at a cadence sized for
+    /// chat-like content rather than the much rarer badge handshake.
+    pub forum_federated_write: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 impl Default for RateLimiters {
@@ -219,6 +226,7 @@ impl Default for RateLimiters {
             messages: Mutex::new(HashMap::new()),
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
+            forum_federated_write: Mutex::new(HashMap::new()),
         }
     }
 }

@@ -5,7 +5,7 @@ use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelRespon
 use crate::routes::chat_models::{ChannelResponse, MessageResponse};
 use crate::routes::dm_models::FederatedDmRequest;
 use crate::routes::health::InfoResponse;
-use crate::routes::post_models::{PostDetail, PostListResponse};
+use crate::routes::post_models::{PostDetail, PostListResponse, ReplyView};
 use wavvon_identity::Identity;
 
 pub struct FederationClient {
@@ -180,6 +180,106 @@ impl FederationClient {
             .json()
             .await
             .context("Invalid forum post response")
+    }
+
+    /// Proxied create-post over the alliance forum write path (forum.md §9
+    /// "Proxied writes"). Hits the owning hub's dedicated
+    /// `/federation/forum/...` endpoint (NOT the plain
+    /// `/channels/:cid/posts` route the read-through siblings above use for
+    /// reads) -- the owning hub gates this write by its `forum_remote_write`
+    /// policy rather than the caller's own (non-existent, on that hub)
+    /// channel permissions.
+    pub async fn create_forum_post(
+        &self,
+        base_url: &str,
+        token: &str,
+        channel_id: &str,
+        author_pubkey: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PostDetail> {
+        let resp = self
+            .http
+            .post(format!(
+                "{base_url}/federation/forum/channels/{channel_id}/posts"
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "author_pubkey": author_pubkey,
+                "title": title,
+                "body": body,
+            }))
+            .send()
+            .await
+            .context("Failed to create forum post on peer")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Peer returned HTTP {status}: {body}");
+        }
+        resp.json()
+            .await
+            .context("Invalid forum post create response")
+    }
+
+    /// Proxied create-reply, sibling of [`Self::create_forum_post`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_forum_reply(
+        &self,
+        base_url: &str,
+        token: &str,
+        channel_id: &str,
+        post_id: &str,
+        author_pubkey: &str,
+        body: &str,
+        reply_to_id: Option<&str>,
+    ) -> Result<ReplyView> {
+        let resp = self
+            .http
+            .post(format!(
+                "{base_url}/federation/forum/channels/{channel_id}/posts/{post_id}/replies"
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "author_pubkey": author_pubkey,
+                "body": body,
+                "reply_to_id": reply_to_id,
+            }))
+            .send()
+            .await
+            .context("Failed to create forum reply on peer")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Peer returned HTTP {status}: {body}");
+        }
+        resp.json()
+            .await
+            .context("Invalid forum reply create response")
+    }
+
+    /// Proxied post reaction, sibling of [`Self::create_forum_post`].
+    pub async fn add_forum_post_reaction(
+        &self,
+        base_url: &str,
+        token: &str,
+        channel_id: &str,
+        post_id: &str,
+        author_pubkey: &str,
+        emoji: &str,
+    ) -> Result<reqwest::Response> {
+        self.http
+            .post(format!(
+                "{base_url}/federation/forum/channels/{channel_id}/posts/{post_id}/reactions"
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "author_pubkey": author_pubkey,
+                "emoji": emoji,
+            }))
+            .send()
+            .await
+            .context("Failed to add forum reaction on peer")
     }
 
     pub async fn post_alliance_join(

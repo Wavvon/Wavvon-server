@@ -636,11 +636,32 @@ pub fn create_router_full(
         )
         .route(
             "/alliances/{alliance_id}/channels/{channel_id}/posts",
-            get(routes::alliances::get_alliance_forum_posts),
+            get(routes::alliances::get_alliance_forum_posts)
+                .post(routes::alliances::post_alliance_forum_post),
         )
         .route(
             "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}",
             get(routes::alliances::get_alliance_forum_post),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/replies",
+            post(routes::alliances::post_alliance_forum_reply),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/reactions",
+            post(routes::alliances::react_alliance_forum),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts",
+            post(routes::posts::federated_create_post),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}/replies",
+            post(routes::posts::federated_create_reply),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}/reactions",
+            post(routes::posts::federated_add_post_reaction),
         )
         .route(
             "/federation/alliance-invite",

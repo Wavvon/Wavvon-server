@@ -17,6 +17,9 @@ pub struct PostRow {
     pub last_activity_at: i64,
     pub deleted_at: Option<i64>,
     pub attachments: String,
+    /// Origin hub public key hex when authored via the alliance forum
+    /// write-proxy (forum.md §9); `None` for locally-authored posts.
+    pub author_hub: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -30,6 +33,9 @@ pub struct ReplyRow {
     pub reply_to_id: Option<String>,
     pub deleted_at: Option<i64>,
     pub attachments: String,
+    /// Origin hub public key hex when authored via the alliance forum
+    /// write-proxy (forum.md §9); `None` for locally-authored replies.
+    pub author_hub: Option<String>,
 }
 
 // ── Wire types (Serialize / Deserialize) ────────────────────────────────────
@@ -73,6 +79,14 @@ pub struct PostSummary {
     pub unread_reply_count: Option<i64>,
     pub reactions: Vec<ReactionCount>,
     pub attachments: Vec<Attachment>,
+    /// Origin hub public key hex when this post came in through the alliance
+    /// forum write-proxy (forum.md §9 "Proxied writes"); `None` for
+    /// locally-authored posts. Hub-asserted, not cryptographically proven --
+    /// clients must render it as mediated ("via HubName"), never as a
+    /// verified badge. Omitted from the wire when absent so un-upgraded
+    /// peers still parse the shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_hub: Option<String>,
 }
 
 /// Full post including body and first page of replies.
@@ -101,6 +115,10 @@ pub struct ReplyView {
     pub is_deleted: bool,
     pub reactions: Vec<ReactionCount>,
     pub attachments: Vec<Attachment>,
+    /// Origin hub public key hex when this reply came in through the
+    /// alliance forum write-proxy; see `PostSummary::author_hub`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author_hub: Option<String>,
 }
 
 /// Paged list of posts.
@@ -189,6 +207,40 @@ pub struct SearchParams {
     pub q: Option<String>,
 }
 
+// ── Federation: proxied writes (forum.md §9 phase 2) ────────────────────────
+//
+// Hit by an allied hub's `/federation/forum/...` call, not by an end user
+// directly. `author_pubkey` is the asserted (not cryptographically proven)
+// identity of the remote member who performed the action -- accepted within
+// alliance trust, same model as the existing federated-DM sender field.
+// `author_hub` is NOT part of the request body: the owning hub derives it
+// from the authenticated caller (`PeerHub::public_key`), so a peer cannot
+// assert a different hub's identity as the origin.
+
+/// Proxied post creation, carrying the asserted author.
+#[derive(Deserialize)]
+pub struct FederatedCreatePostRequest {
+    pub author_pubkey: String,
+    pub title: String,
+    pub body: String,
+}
+
+/// Proxied reply creation, carrying the asserted author.
+#[derive(Deserialize)]
+pub struct FederatedCreateReplyRequest {
+    pub author_pubkey: String,
+    pub body: String,
+    #[serde(default)]
+    pub reply_to_id: Option<String>,
+}
+
+/// Proxied reaction, carrying the asserted author.
+#[derive(Deserialize)]
+pub struct FederatedReactionRequest {
+    pub author_pubkey: String,
+    pub emoji: String,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn parse_attachments(json: &str) -> Vec<Attachment> {
@@ -230,6 +282,11 @@ pub fn post_to_summary(
         unread_reply_count: None,
         reactions,
         attachments: parse_attachments(&row.attachments),
+        author_hub: if is_deleted && !viewer_can_moderate {
+            None
+        } else {
+            row.author_hub.clone()
+        },
     }
 }
 
@@ -259,5 +316,10 @@ pub fn reply_to_view(
         is_deleted,
         reactions,
         attachments: parse_attachments(&row.attachments),
+        author_hub: if is_deleted && !viewer_can_moderate {
+            None
+        } else {
+            row.author_hub.clone()
+        },
     }
 }
