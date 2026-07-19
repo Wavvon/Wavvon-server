@@ -110,6 +110,31 @@ pub async fn send_message(
         )
     };
 
+    // Game-modal launch card (bot-capability-layer.md §2): bot authors only,
+    // same rule as embeds/components elsewhere in the bot wire surface
+    // (bots.md §11, §15 "rejected on messages authored by non-bots").
+    let game_json = if req.game.is_some() {
+        let is_bot: Option<bool> =
+            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+                .bind(&user.public_key)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
+        if is_bot != Some(true) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "game launch card is bot-authored only".to_string(),
+            ));
+        }
+        Some(
+            serde_json::to_string(&req.game)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?,
+        )
+    } else {
+        None
+    };
+
     // If a reply_to is provided, sanity-check the parent exists in this
     // same channel. Cross-channel replies would surprise everyone.
     if let Some(parent_id) = &req.reply_to {
@@ -319,7 +344,7 @@ pub async fn send_message(
     }
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at, game) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -328,6 +353,7 @@ pub async fn send_message(
     .bind(&attachments_json)
     .bind(&req.reply_to)
     .bind(now)
+    .bind(&game_json)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

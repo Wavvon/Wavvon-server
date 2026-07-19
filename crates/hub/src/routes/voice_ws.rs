@@ -76,19 +76,12 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
     // WS voice relay as a first-class participant, gated on the
     // `can_speak_voice` capability plus channel-scoped `read_messages` like
     // any other voice joiner. Human callers are unaffected by this branch.
+    // The gate reads the *effective* capability set (bot-capability-layer.md
+    // §1, requested ∩ granted) rather than the self-declared
+    // `bot_profiles.capabilities` directly, so an admin revocation actually
+    // takes the bot off the relay.
     if is_bot {
-        let caps_json: Option<String> =
-            sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = $1")
-                .bind(&pubkey)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-        let capabilities: Vec<String> = caps_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        if !capabilities.iter().any(|c| c == "can_speak_voice") {
+        if !crate::bots::capabilities::has_capability(&state.db, &pubkey, "can_speak_voice").await {
             return;
         }
 

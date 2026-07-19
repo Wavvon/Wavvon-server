@@ -666,3 +666,115 @@ async fn missing_auth_returns_unauthorized_on_bot_send() {
         .await;
     resp.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 }
+
+// ---------------------------------------------------------------------------
+// Game-modal launch card (bot-capability-layer.md §2) on POST /messages
+// ---------------------------------------------------------------------------
+
+/// Invites `bot` as an external bot (admin_token needs manage_roles/admin,
+/// which the hub's first authenticated user holds via builtin-owner) and
+/// completes the normal Ed25519 challenge/verify flow, returning the bot's
+/// session token -- same shape as `voice_relay_flow.rs`'s helper of the same
+/// name, adapted to the in-process `axum_test::TestServer` used here.
+async fn invite_and_auth_bot(
+    server: &axum_test::TestServer,
+    admin_token: &str,
+    bot: &wavvon_identity::Identity,
+) -> String {
+    let pub_key = bot.public_key_hex();
+
+    server
+        .post("/bots")
+        .authorization_bearer(admin_token)
+        .json(&json!({ "pubkey": pub_key }))
+        .await
+        .assert_status_success();
+
+    let challenge: serde_json::Value = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await
+        .json();
+    let challenge_bytes = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
+    let signature = bot.sign(&challenge_bytes);
+
+    let verify: serde_json::Value = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge["challenge"],
+            "signature": hex::encode(signature.to_bytes()),
+            "is_bot": true,
+            "bot_meta": { "name": "GameBot" },
+        }))
+        .await
+        .json();
+    verify["token"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn external_bot_can_post_message_with_game_launch_card() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "game-room" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    let bot = Identity::generate();
+    let bot_token = invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/messages"))
+        .authorization_bearer(&bot_token)
+        .json(&json!({
+            "content": "Play a round?",
+            "game": {
+                "entry_url": "https://ttt.example.com/play",
+                "name": "Tic-Tac-Toe",
+                "description": "1v1"
+            }
+        }))
+        .await;
+    resp.assert_status_success();
+
+    // The `game` field isn't round-tripped over the WS/HTTP response yet
+    // (client work, out of scope here) -- verify it landed in the DB, which
+    // is what a future client-facing read path would source from.
+    let game_col: Option<String> =
+        sqlx::query_scalar("SELECT game FROM messages WHERE channel_id = $1")
+            .bind(&channel_id)
+            .fetch_one(&server.state().db)
+            .await
+            .unwrap();
+    let game_col = game_col.expect("game column should be populated");
+    let game: serde_json::Value = serde_json::from_str(&game_col).unwrap();
+    assert_eq!(game["entry_url"], "https://ttt.example.com/play");
+    assert_eq!(game["name"], "Tic-Tac-Toe");
+}
+
+#[tokio::test]
+async fn non_bot_cannot_post_message_with_game_launch_card() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "game-room-2" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/messages"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "content": "Play a round?",
+            "game": { "entry_url": "https://ttt.example.com/play", "name": "Tic-Tac-Toe" }
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}

@@ -76,6 +76,16 @@ pub(in crate::routes::ws) async fn handle_bot_app_join(
         None => return DispatchResult::Continue,
     };
 
+    // Gate: opening the game modal / mini-app webview requires an admin
+    // grant (bot-capability-layer.md §1, §6 Phase 1 item 3). Uses the same
+    // effective-capability resolver as the voice gate so a revoked bot stops
+    // being able to open new sessions immediately.
+    if !crate::bots::capabilities::has_capability(&state.db, &bot_id, "can_use_interactive_ui")
+        .await
+    {
+        return DispatchResult::Continue;
+    }
+
     // Gate: camera is only granted when operator allows it hub-wide.
     let grant_camera = requires_camera && state.bots_allow_camera;
 

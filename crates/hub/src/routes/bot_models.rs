@@ -205,6 +205,25 @@ pub struct BotResponse {
     pub reactions: Option<Vec<BotReaction>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defer: Option<bool>,
+    /// Game-modal launch card (bot-capability-layer.md §2, §6 Phase 1 item
+    /// 3): a "Play" CTA attached to `reply`'s message. Baseline UI -- no
+    /// capability grant needed to render the card itself; opening the
+    /// webview it points at is what `can_use_interactive_ui` gates
+    /// (`bot_app_join`, routes/ws/handlers/mini_app.rs). Ignored if `reply`
+    /// is absent -- there is no message for the card to attach to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameLaunchCard>,
+}
+
+/// A bot-authored "Play" launch card (bot-capability-layer.md §2).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GameLaunchCard {
+    pub entry_url: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -169,7 +169,12 @@ async fn send_message(base: &str, token: &str, channel_id: &str, content: &str) 
     assert!(resp.status().is_success());
 }
 
-/// POST /admin/bots — registers a bot with a `mini_app_url`.
+/// POST /admin/bots — registers a bot with a `mini_app_url`, then grants it
+/// `can_use_interactive_ui` (bot-capability-layer.md §1, §6 Phase 1 item 3)
+/// via the new admin capabilities route so this file's tests -- which cover
+/// session-token scoping, not the capability gate itself -- keep exercising
+/// a bot that's actually allowed to open the mini-app modal. `token` is
+/// always the hub owner in this file's callers, so it already holds admin.
 async fn create_mini_app_bot(base: &str, token: &str) -> Value {
     let resp = reqwest::Client::new()
         .post(format!("{base}/admin/bots"))
@@ -182,7 +187,22 @@ async fn create_mini_app_bot(base: &str, token: &str) -> Value {
         .await
         .unwrap();
     assert!(resp.status().is_success(), "bot creation should succeed");
-    resp.json().await.unwrap()
+    let bot: Value = resp.json().await.unwrap();
+
+    let bot_id = bot["public_key"].as_str().unwrap();
+    let grant = reqwest::Client::new()
+        .put(format!("{base}/admin/bots/{bot_id}/capabilities"))
+        .bearer_auth(token)
+        .json(&json!({ "capabilities": ["can_use_interactive_ui"] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        grant.status().is_success(),
+        "capability grant should succeed"
+    );
+
+    bot
 }
 
 type WsSink = futures_util::stream::SplitSink<

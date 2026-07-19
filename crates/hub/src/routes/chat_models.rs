@@ -123,6 +123,10 @@ pub struct SendMessageRequest {
     /// Optional parent message id to thread under.
     #[serde(default)]
     pub reply_to: Option<String>,
+    /// Game-modal launch card (bot-capability-layer.md §2). Bot authors
+    /// only -- `routes/messages.rs` rejects it for any other sender.
+    #[serde(default)]
+    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
 }
 
 /// Minimal preview of a parent message. We embed it in replies so the

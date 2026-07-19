@@ -163,6 +163,17 @@ pub struct SetWebhookRequest {
     pub webhook_url: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct SetCapabilitiesRequest {
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct CapabilitiesResponse {
+    pub bot_pubkey: String,
+    pub capabilities: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Bot API request / response types
 // ---------------------------------------------------------------------------

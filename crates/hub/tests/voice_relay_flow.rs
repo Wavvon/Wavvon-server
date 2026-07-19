@@ -1136,6 +1136,31 @@ async fn invite_and_auth_bot(
     verify.token
 }
 
+/// Grants a set of capabilities to a bot via `PUT
+/// /admin/bots/:pubkey/capabilities` (bot-capability-layer.md §1, §6 Phase
+/// 1 item 2). `admin_token` must belong to a member with the `admin`
+/// permission (the hub's first authenticated user, per `setup`/`start_hub`
+/// conventions used throughout this file).
+async fn grant_capabilities(
+    base: &str,
+    admin_token: &str,
+    bot_pubkey: &str,
+    capabilities: &[&str],
+) {
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/admin/bots/{bot_pubkey}/capabilities"))
+        .bearer_auth(admin_token)
+        .json(&json!({ "capabilities": capabilities }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "capability grant should succeed: {}",
+        resp.status()
+    );
+}
+
 /// Connects to `/voice/ws?token=..&channel_id=..`, the same wire format
 /// `/voice/ws` uses for human web clients.
 async fn connect_voice_ws(
@@ -1165,9 +1190,10 @@ async fn connect_voice_ws(
     ws.split()
 }
 
-/// A bot session with the `can_speak_voice` capability can join `/voice/ws`
-/// as a first-class participant: it receives `voice_ws_ready` and shows up
-/// in the HTTP voice roster.
+/// A bot session with `can_speak_voice` both requested (bot_meta at auth)
+/// AND granted (admin, bot-capability-layer.md §1) can join `/voice/ws` as
+/// a first-class participant: it receives `voice_ws_ready` and shows up in
+/// the HTTP voice roster.
 #[tokio::test]
 async fn bot_with_can_speak_voice_registers_as_voice_sender() {
     let (base, _state, _guard) = start_hub().await;
@@ -1177,6 +1203,13 @@ async fn bot_with_can_speak_voice_registers_as_voice_sender() {
 
     let bot = Identity::generate();
     let bot_token = invite_and_auth_bot(&base, &owner_token, &bot, &["can_speak_voice"]).await;
+    grant_capabilities(
+        &base,
+        &owner_token,
+        &bot.public_key_hex(),
+        &["can_speak_voice"],
+    )
+    .await;
 
     let (_tx, mut rx) = connect_voice_ws(&base, &bot_token, &ch.id).await;
 
@@ -1257,6 +1290,51 @@ async fn bot_without_can_speak_voice_capability_is_rejected() {
             .map(|m| m.iter().any(|p| p["public_key"] == bot.public_key_hex()))
             .unwrap_or(false),
         "uncapable bot must not appear in the voice roster"
+    );
+}
+
+/// bot-capability-layer.md §1's core behavior change: a bot that *requests*
+/// `can_speak_voice` (self-declared in `bot_meta` at auth) but which no
+/// admin has *granted* it is still refused -- the effective gate is
+/// requested ∩ granted, never the self-declared set alone.
+#[tokio::test]
+async fn bot_with_requested_but_ungranted_capability_is_rejected() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "bot-voice-ungranted").await;
+
+    let bot = Identity::generate();
+    // Requests the capability at auth time, but no admin ever grants it.
+    let bot_token = invite_and_auth_bot(&base, &owner_token, &bot, &["can_speak_voice"]).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &bot_token, &ch.id).await;
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rx.next()).await;
+    if let Ok(Some(Ok(TsMessage::Text(t)))) = outcome {
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_ne!(
+            v["type"], "voice_ws_ready",
+            "requested-but-ungranted bot must not be registered as a voice sender"
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == bot.public_key_hex()))
+            .unwrap_or(false),
+        "requested-but-ungranted bot must not appear in the voice roster"
     );
 }
 

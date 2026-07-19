@@ -12,8 +12,8 @@ use crate::state::AppState;
 use super::models::{generate_token, hash_token};
 use super::models::{
     AuditLogEntry, AuditLogQuery, AuditLogResponse, BotAdminInfo, BotCreatedResponse,
-    BotDetailResponse, BotRow, CreateBotRequest, SetWebhookRequest, SlashCommandInfo,
-    SlashCommandRow,
+    BotDetailResponse, BotRow, CapabilitiesResponse, CreateBotRequest, SetCapabilitiesRequest,
+    SetWebhookRequest, SlashCommandInfo, SlashCommandRow,
 };
 
 /// POST /admin/bots  — create a bot (any authenticated hub member)
@@ -214,6 +214,118 @@ pub async fn admin_set_webhook(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::OK)
+}
+
+// ---------------------------------------------------------------------------
+// PUT /admin/bots/:pubkey/capabilities
+// ---------------------------------------------------------------------------
+
+/// Admin-only: atomically replaces the granted capability set for a bot
+/// (bot-capability-layer.md §1, §6 Phase 1 item 2). `pubkey` may name either
+/// an external bot (`users.is_bot=1`) or a self-service bot (`bots` table) --
+/// the grants table is keyed on the bare pubkey and doesn't care which.
+///
+/// The gate a runtime actually checks is requested ∩ granted
+/// (`bots::capabilities::effective_capabilities`), so granting a capability
+/// an external bot never requested is inert until the bot also declares it;
+/// this route only writes the "granted" side.
+pub async fn admin_set_bot_capabilities(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(pubkey): Path<String>,
+    Json(req): Json<SetCapabilitiesRequest>,
+) -> Result<Json<CapabilitiesResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(permissions::ADMIN)?;
+
+    let known_bot: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE
+            UNION
+            SELECT 1 FROM bots WHERE public_key = $1
+         )",
+    )
+    .bind(&pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if !known_bot {
+        return Err((StatusCode::NOT_FOUND, "Bot not found".to_string()));
+    }
+
+    let now = crate::auth::handlers::unix_timestamp();
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    sqlx::query("DELETE FROM bot_capability_grants WHERE bot_pubkey = $1")
+        .bind(&pubkey)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for cap in &req.capabilities {
+        sqlx::query(
+            "INSERT INTO bot_capability_grants (bot_pubkey, capability, granted_by, granted_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&pubkey)
+        .bind(cap)
+        .bind(&user.public_key)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Audit stream.
+    {
+        let state_c = state.clone();
+        let actor = user.public_key.clone();
+        let target = pubkey.clone();
+        let caps = req.capabilities.clone();
+        tokio::spawn(async move {
+            crate::bots::events::publish_hub_event(
+                &state_c,
+                "bot.capabilities_changed",
+                Some(&actor),
+                Some(&target),
+                None,
+                serde_json::json!({ "capabilities": caps }),
+            )
+            .await;
+        });
+    }
+
+    // Push directly to the bot's live WS session(s) (bot-capability-layer.md
+    // §1 consent flow step 4) so it can stop advertising something it can no
+    // longer run without waiting for a reconnect.
+    {
+        let sessions = state.bot_sessions.read().await;
+        if let Some(per_bot) = sessions.get(&pubkey) {
+            let msg = serde_json::json!({
+                "type": "capabilities_changed",
+                "capabilities": req.capabilities,
+            })
+            .to_string();
+            for tx in per_bot.values() {
+                let _ = tx.try_send(msg.clone());
+            }
+        }
+    }
+
+    Ok(Json(CapabilitiesResponse {
+        bot_pubkey: pubkey,
+        capabilities: req.capabilities,
+    }))
 }
 
 // ---------------------------------------------------------------------------

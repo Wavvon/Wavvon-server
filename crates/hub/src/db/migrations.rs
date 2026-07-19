@@ -735,6 +735,23 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Capability grants (bot-capability-layer.md §1): what the hub *permits*
+    // a bot to do, admin-only, separate from `bot_profiles.capabilities`
+    // (what the bot *requests*). The effective gate a runtime checks is
+    // always requested ∩ granted -- see `bots::capabilities::effective_capabilities`.
+    // Replaced atomically by `PUT /admin/bots/:pubkey/capabilities`.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS bot_capability_grants (
+            bot_pubkey TEXT NOT NULL,
+            capability TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at BIGINT NOT NULL,
+            PRIMARY KEY (bot_pubkey, capability)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     // Self-service bots (token-authenticated, webhook delivery)
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS bots (
@@ -1764,6 +1781,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Bot-launched game modal (bot-capability-layer.md §2): a launch-card
+    // field carrying { entry_url, name, description?, thumbnail_url? },
+    // additive on `messages` alongside `embeds`/`components`. NULL = no
+    // launch card. Bot-authored only, enforced at write time in
+    // routes/messages.rs and bots/dispatch.rs, not by this column.
+    let _ = sqlx::query("ALTER TABLE messages ADD COLUMN game TEXT")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================
@@ -1778,6 +1804,42 @@ pub async fn run(pool: &PgPool) -> Result<()> {
                SELECT 1 FROM messages
                WHERE sender = '00000000000000000000000000000000000000000000000000000000000000000000'
            )",
+    )
+    .execute(pool)
+    .await;
+
+    // Backfill bot_capability_grants (bot-capability-layer.md decision 1):
+    // "a migration backfills grants from existing capabilities so
+    // already-approved voice bots keep working". Best-effort, idempotent via
+    // ON CONFLICT DO NOTHING -- safe to run on every startup.
+    //
+    // 1. External bots (`users.is_bot=1` + `bot_profiles`): every
+    //    self-declared capability becomes granted, so `can_speak_voice`
+    //    bots that were already approved stay approved once voice_ws.rs
+    //    switches to the requested-∩-granted resolver.
+    let _ = sqlx::query(
+        "INSERT INTO bot_capability_grants (bot_pubkey, capability, granted_by, granted_at)
+         SELECT bp.pubkey, cap, 'system_backfill', bp.updated_at
+         FROM bot_profiles bp, jsonb_array_elements_text(bp.capabilities::jsonb) AS cap
+         ON CONFLICT (bot_pubkey, capability) DO NOTHING",
+    )
+    .execute(pool)
+    .await;
+
+    // 2. Self-service bots (`bots` table, token-auth, bot-mini-apps.md):
+    //    this system has no self-declaration mechanism -- the admin who ran
+    //    `POST /admin/bots` and set `mini_app_url` already is the consent
+    //    step, so `effective_capabilities` treats a granted capability as
+    //    effective outright for pubkeys with no `bot_profiles` row (see
+    //    bots::capabilities doc comment). Backfilling `can_use_interactive_ui`
+    //    for every bot that already has a mini-app configured preserves
+    //    today's fully-open mini-app-launch behavior once the gate in
+    //    routes/ws/handlers/mini_app.rs ships.
+    let _ = sqlx::query(
+        "INSERT INTO bot_capability_grants (bot_pubkey, capability, granted_by, granted_at)
+         SELECT public_key, 'can_use_interactive_ui', 'system_backfill', created_at
+         FROM bots WHERE mini_app_url IS NOT NULL
+         ON CONFLICT (bot_pubkey, capability) DO NOTHING",
     )
     .execute(pool)
     .await;

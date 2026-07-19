@@ -290,6 +290,10 @@ pub fn create_router_full(
             "/admin/bots/{pubkey}/webhook",
             put(routes::bots::admin_set_webhook),
         )
+        .route(
+            "/admin/bots/{pubkey}/capabilities",
+            put(routes::bots::admin_set_bot_capabilities),
+        )
         .route("/admin/audit-log", get(routes::bots::admin_audit_log))
         // ---- Bot API (token auth, internal service accounts) ----
         .route("/bot/commands", put(routes::bots::bot_set_commands))

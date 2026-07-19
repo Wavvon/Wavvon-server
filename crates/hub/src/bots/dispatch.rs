@@ -216,9 +216,20 @@ pub async fn dispatch_slash(
             }
         });
 
+        // Game-modal launch card (bot-capability-layer.md §2): the reply
+        // this bot posted may carry a "Play" CTA. No capability gate here --
+        // the sender is already a bot by construction (this is the
+        // slash-command dispatch path) and rendering the card is baseline
+        // UI; `can_use_interactive_ui` gates opening the webview instead
+        // (bot_app_join, routes/ws/handlers/mini_app.rs).
+        let game_json = bot_response
+            .game
+            .as_ref()
+            .and_then(|g| serde_json::to_string(g).ok());
+
         sqlx::query(
-            "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey, embeds)
-             VALUES($1,$2,$3,$4,$5,$6,$7)",
+            "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey, embeds, game)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(&msg_id)
         .bind(channel_id)
@@ -227,6 +238,7 @@ pub async fn dispatch_slash(
         .bind(now)
         .bind(visible_to)
         .bind(&embeds_json)
+        .bind(&game_json)
         .execute(&state.db)
         .await
         .ok();
