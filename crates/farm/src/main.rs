@@ -193,6 +193,8 @@ async fn main() -> Result<()> {
         cfg.hubs_dir,
     ));
 
+    wavvon_farm::monitor::spawn(state.clone());
+
     let app = server::create_router(state);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
     tracing::info!(

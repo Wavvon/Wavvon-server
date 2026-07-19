@@ -72,6 +72,17 @@ pub async fn receive_heartbeat(
     .execute(&state.db)
     .await;
 
+    // Hub is confirmed online — zero out any accrued auto-restart attempts
+    // (see monitor.rs) so a hub that recovers on its own, or after a manual
+    // force-restart, gets a clean backoff slate.
+    let _ = sqlx::query(
+        "UPDATE hubs SET restart_attempts = 0
+         WHERE hub_pubkey = $1 AND restart_attempts > 0",
+    )
+    .bind(&hub_pubkey)
+    .execute(&state.db)
+    .await;
+
     StatusCode::OK
 }
 
@@ -92,6 +103,10 @@ pub struct FleetEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen_at: Option<i64>,
     pub created_at: i64,
+    pub auto_restart_enabled: bool,
+    pub restart_attempts: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_restart_at: Option<i64>,
 }
 
 pub async fn get_fleet(
@@ -108,7 +123,7 @@ pub async fn get_fleet(
         "SELECT h.id, h.name, h.hub_pubkey,
                 hb.online_users, hb.storage_bytes, hb.last_seen_at,
                 (hb.last_seen_at IS NOT NULL AND hb.last_seen_at >= $1) AS online,
-                h.created_at
+                h.created_at, h.auto_restart_enabled, h.restart_attempts, h.last_restart_at
          FROM hubs h
          LEFT JOIN hub_heartbeats hb ON hb.hub_pubkey = h.hub_pubkey
          WHERE h.deleted_at IS NULL
@@ -141,6 +156,9 @@ pub async fn get_fleet(
                 storage_bytes: r.get::<Option<i64>, _>("storage_bytes").unwrap_or(0),
                 last_seen_at: r.get("last_seen_at"),
                 created_at: r.get("created_at"),
+                auto_restart_enabled: r.get("auto_restart_enabled"),
+                restart_attempts: r.get("restart_attempts"),
+                last_restart_at: r.get("last_restart_at"),
             }
         })
         .collect();

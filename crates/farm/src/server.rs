@@ -30,6 +30,10 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
             "/farm/hubs/{hub_id}/suspend",
             patch(routes::hubs::suspend_hub),
         )
+        .route(
+            "/farm/hubs/{hub_id}/restart",
+            post(routes::hubs::force_restart_hub),
+        )
         .route("/farm/hubs/{hub_id}", delete(routes::hubs::delete_hub))
         // Server agent management routes.
         .route(

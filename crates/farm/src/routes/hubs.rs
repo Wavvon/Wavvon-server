@@ -4,6 +4,7 @@
 /// POST /farm/hubs               — create a hub (authenticated)
 /// GET  /farm/hubs/:hub_id       — single hub info
 /// PATCH /farm/hubs/:hub_id/suspend — suspend/unsuspend (farm admin)
+/// POST  /farm/hubs/:hub_id/restart — force an immediate restart (farm admin)
 /// DELETE /farm/hubs/:hub_id     — delete (farm admin or owner)
 use std::sync::Arc;
 
@@ -518,6 +519,110 @@ pub async fn suspend_hub(
     Ok(Json(SuspendResponse {
         id: hub_id,
         suspended_at: Some(now),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// POST /farm/hubs/:hub_id/restart
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct RestartResponse {
+    pub id: String,
+    pub restarted_at: i64,
+}
+
+/// Admin-triggered immediate restart. Mirrors `suspend_hub`'s auth pattern.
+/// Resets `restart_attempts` and re-enables auto-restart supervision (see
+/// monitor.rs) — an operator restarting a hub by hand is a fresh start, not
+/// another automated attempt.
+pub async fn force_restart_hub(
+    Path(hub_id): Path<String>,
+    headers: HeaderMap,
+    State(state): State<Arc<FarmState>>,
+) -> Result<Json<RestartResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let farm_pubkey = state.public_key_hex();
+    let payload = require_auth(&headers, &farm_pubkey)?;
+
+    let admin_pubkey = get_admin_pubkey(&state.db).await;
+    if admin_pubkey.as_deref() != Some(&payload.sub) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "farm_admin_only"})),
+        ));
+    }
+
+    let row: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
+        "SELECT db_path, process_port, server_id FROM hubs WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(&hub_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("db_error: {e}")})),
+        )
+    })?;
+
+    let (db_path, process_port, server_id) = row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "hub_not_found"})),
+        )
+    })?;
+
+    // Agent-hosted hubs aren't restartable through this path yet — the agent
+    // WebSocket protocol only has `spawn_hub`, not `restart_hub` (see
+    // farm-impl.md follow-up in monitor.rs's module doc).
+    if server_id.is_some() {
+        tracing::warn!(
+            hub_id,
+            "Force-restart requested for agent-hosted hub — unsupported, no-op"
+        );
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "agent_hosted_restart_unsupported"})),
+        ));
+    }
+
+    let Some(port) = process_port else {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "hub_not_running"})),
+        ));
+    };
+
+    // Best-effort, same as `create_hub`'s spawn and `spawn_all_from_db`: a
+    // missing/unreachable hub binary shouldn't turn an admin action into a
+    // 500 — it's logged, and the fleet view already surfaces online status.
+    if let Err(e) = state
+        .hub_manager
+        .restart_hub(&hub_id, &db_path, port as u16)
+        .await
+    {
+        tracing::warn!(hub_id, error = %e, "Force-restart failed to spawn hub process");
+    }
+
+    let now = unix_now();
+    sqlx::query(
+        "UPDATE hubs SET restart_attempts = 0, last_restart_at = $1, auto_restart_enabled = TRUE
+         WHERE id = $2",
+    )
+    .bind(now)
+    .bind(&hub_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("db_error: {e}")})),
+        )
+    })?;
+
+    Ok(Json(RestartResponse {
+        id: hub_id,
+        restarted_at: now,
     }))
 }
 
