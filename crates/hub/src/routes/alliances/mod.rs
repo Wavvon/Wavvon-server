@@ -5,9 +5,10 @@ mod models;
 
 // Re-export all public items so server.rs paths remain unchanged.
 pub use channels::{
-    get_alliance_channel_messages, get_alliance_forum_post, get_alliance_forum_posts,
-    list_shared_channels, post_alliance_channel_message, post_alliance_forum_post,
-    post_alliance_forum_reply, react_alliance_forum, share_channel, unshare_channel,
+    delete_alliance_forum_post, delete_alliance_forum_reply, get_alliance_channel_messages,
+    get_alliance_forum_post, get_alliance_forum_posts, list_shared_channels,
+    post_alliance_channel_message, post_alliance_forum_post, post_alliance_forum_reply,
+    react_alliance_forum, share_channel, unshare_channel,
 };
 pub use crud::{create_alliance, get_alliance, leave_alliance, list_alliances};
 pub use membership::{

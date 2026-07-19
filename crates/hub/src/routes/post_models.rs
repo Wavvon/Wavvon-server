@@ -241,6 +241,21 @@ pub struct FederatedReactionRequest {
     pub emoji: String,
 }
 
+// ── Federation: origin-hub retraction (forum.md §9 phase 3) ────────────────
+//
+// A `DELETE /federation/forum/...` call, gated by `PeerHub` like the phase-2
+// write endpoints above. `author_pubkey` is the asserted local user doing
+// the retracting; the owning hub only honors the delete when BOTH the
+// target row's `author_hub` matches the calling peer AND its
+// `author_pubkey` matches this assertion -- a hub can retract only its own
+// users' content, never anyone else's.
+
+/// Proxied retraction (post or reply delete), carrying the asserted author.
+#[derive(Deserialize)]
+pub struct FederatedRetractRequest {
+    pub author_pubkey: String,
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn parse_attachments(json: &str) -> Vec<Attachment> {

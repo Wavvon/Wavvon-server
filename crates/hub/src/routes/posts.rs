@@ -11,8 +11,9 @@ use crate::routes::chat_models::ChatEvent;
 use crate::routes::post_models::{
     post_to_summary, reply_to_view, Attachment, CreatePostRequest, CreateReplyRequest,
     EditPostRequest, EditReplyRequest, FederatedCreatePostRequest, FederatedCreateReplyRequest,
-    FederatedReactionRequest, PostDetail, PostListParams, PostListResponse, PostRow, PostSearchHit,
-    PostSearchResponse, ReactionCount, ReplyListParams, ReplyRow, ReplyView, SearchParams,
+    FederatedReactionRequest, FederatedRetractRequest, PostDetail, PostListParams,
+    PostListResponse, PostRow, PostSearchHit, PostSearchResponse, ReactionCount, ReplyListParams,
+    ReplyRow, ReplyView, SearchParams,
 };
 use crate::state::AppState;
 
@@ -1462,4 +1463,109 @@ pub async fn federated_add_post_reaction(
     );
 
     Ok(StatusCode::CREATED)
+}
+
+// ── Federation: origin-hub retraction (forum.md §9 phase 3) ────────────────
+//
+// Hit only by an allied hub over `/federation/forum/...`, gated by `PeerHub`
+// like the phase-2 write endpoints above. Unlike creates, retraction is not
+// gated by `forum_remote_write` -- that policy controls whether NEW content
+// is accepted, not whether a hub may withdraw content it already placed. The
+// authorization that matters here is narrower and stricter: the target
+// row's `author_hub` must be this exact calling hub AND its `author_pubkey`
+// must match the asserted author, so a hub can only retract its own users'
+// content, never anyone else's (locally-authored rows have `author_hub =
+// NULL` and so can never match a federated caller). Owning-hub moderation
+// (pin/lock, moderator-initiated delete) is untouched by this path.
+
+// ── DELETE /federation/forum/channels/:cid/posts/:pid ───────────────────────
+
+pub async fn federated_delete_post(
+    State(state): State<Arc<AppState>>,
+    peer: PeerHub,
+    Path((channel_id, post_id)): Path<(String, String)>,
+    Json(req): Json<FederatedRetractRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    check_forum_federated_rate_limit(&state, &peer.public_key)?;
+
+    let row = require_post(&state.db, &channel_id, &post_id).await?;
+    if row.deleted_at.is_some() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if row.author_hub.as_deref() != Some(peer.public_key.as_str())
+        || row.author_pubkey != req.author_pubkey
+    {
+        return Err((StatusCode::FORBIDDEN, "not_your_content".to_string()));
+    }
+
+    let now = unix_now();
+    sqlx::query("UPDATE posts SET deleted_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(&post_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    broadcast_forum_event(
+        &state,
+        &channel_id,
+        serde_json::json!({
+            "type": "post_deleted",
+            "channel_id": channel_id,
+            "post_id": post_id,
+        }),
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ── DELETE /federation/forum/channels/:cid/posts/:pid/replies/:rid ─────────
+
+pub async fn federated_delete_reply(
+    State(state): State<Arc<AppState>>,
+    peer: PeerHub,
+    Path((channel_id, post_id, reply_id)): Path<(String, String, String)>,
+    Json(req): Json<FederatedRetractRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    check_forum_federated_rate_limit(&state, &peer.public_key)?;
+
+    let _post = require_post(&state.db, &channel_id, &post_id).await?;
+    let reply = require_reply(&state.db, &post_id, &reply_id).await?;
+    if reply.deleted_at.is_some() {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    if reply.author_hub.as_deref() != Some(peer.public_key.as_str())
+        || reply.author_pubkey != req.author_pubkey
+    {
+        return Err((StatusCode::FORBIDDEN, "not_your_content".to_string()));
+    }
+
+    let now = unix_now();
+    sqlx::query("UPDATE post_replies SET deleted_at = $1 WHERE id = $2")
+        .bind(now)
+        .bind(&reply_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    sqlx::query("UPDATE posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1")
+        .bind(&post_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    broadcast_forum_event(
+        &state,
+        &channel_id,
+        serde_json::json!({
+            "type": "reply_deleted",
+            "channel_id": channel_id,
+            "post_id": post_id,
+            "reply_id": reply_id,
+        }),
+    );
+
+    Ok(StatusCode::NO_CONTENT)
 }

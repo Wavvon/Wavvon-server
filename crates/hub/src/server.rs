@@ -641,11 +641,16 @@ pub fn create_router_full(
         )
         .route(
             "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}",
-            get(routes::alliances::get_alliance_forum_post),
+            get(routes::alliances::get_alliance_forum_post)
+                .delete(routes::alliances::delete_alliance_forum_post),
         )
         .route(
             "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/replies",
             post(routes::alliances::post_alliance_forum_reply),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/replies/{reply_id}",
+            delete(routes::alliances::delete_alliance_forum_reply),
         )
         .route(
             "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/reactions",
@@ -656,8 +661,16 @@ pub fn create_router_full(
             post(routes::posts::federated_create_post),
         )
         .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}",
+            delete(routes::posts::federated_delete_post),
+        )
+        .route(
             "/federation/forum/channels/{channel_id}/posts/{post_id}/replies",
             post(routes::posts::federated_create_reply),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}/replies/{reply_id}",
+            delete(routes::posts::federated_delete_reply),
         )
         .route(
             "/federation/forum/channels/{channel_id}/posts/{post_id}/reactions",

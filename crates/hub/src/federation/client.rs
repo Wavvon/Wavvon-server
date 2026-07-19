@@ -282,6 +282,64 @@ impl FederationClient {
             .context("Failed to add forum reaction on peer")
     }
 
+    /// Proxied post retraction (forum.md §9 "Origin-hub retraction"). Hits
+    /// the owning hub's `/federation/forum/...` endpoint with the asserted
+    /// author; the owning hub only honors this when the target post's
+    /// `author_hub` is this hub AND its `author_pubkey` matches.
+    pub async fn delete_forum_post(
+        &self,
+        base_url: &str,
+        token: &str,
+        channel_id: &str,
+        post_id: &str,
+        author_pubkey: &str,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!(
+                "{base_url}/federation/forum/channels/{channel_id}/posts/{post_id}"
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "author_pubkey": author_pubkey }))
+            .send()
+            .await
+            .context("Failed to delete forum post on peer")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Peer returned HTTP {status}: {body}");
+        }
+        Ok(())
+    }
+
+    /// Proxied reply retraction, sibling of [`Self::delete_forum_post`].
+    pub async fn delete_forum_reply(
+        &self,
+        base_url: &str,
+        token: &str,
+        channel_id: &str,
+        post_id: &str,
+        reply_id: &str,
+        author_pubkey: &str,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .delete(format!(
+                "{base_url}/federation/forum/channels/{channel_id}/posts/{post_id}/replies/{reply_id}"
+            ))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "author_pubkey": author_pubkey }))
+            .send()
+            .await
+            .context("Failed to delete forum reply on peer")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Peer returned HTTP {status}: {body}");
+        }
+        Ok(())
+    }
+
     pub async fn post_alliance_join(
         &self,
         base_url: &str,

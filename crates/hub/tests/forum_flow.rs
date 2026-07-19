@@ -1268,3 +1268,210 @@ async fn alliance_forum_proxied_write_rate_limited() {
     // proxy surfaces that as a gateway error same as any other rejection.
     assert_eq!(last_status, 502);
 }
+
+// ── Federation origin-hub retraction (forum.md section 9, phase 3) ─────────
+
+/// Hub A's user retracts their own reply on Hub B's post through the
+/// retraction proxy. The reply is tombstoned on the owning hub and shows
+/// as deleted both directly on Hub B and through Hub A's phase-1
+/// read-through.
+#[tokio::test]
+async fn alliance_forum_retraction_removes_own_reply() {
+    let s = setup_forum_alliance(Some("replies_only")).await;
+
+    let reply: Value = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "retract me" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+
+    let resp = s
+        .client
+        .delete(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies/{}",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id, reply_id
+        ))
+        .bearer_auth(&s.token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "{}", resp.text().await.unwrap());
+
+    // Directly on the owning hub: tombstoned.
+    let detail: PostDetail = s
+        .client
+        .get(format!(
+            "{}/channels/{}/posts/{}",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
+    assert!(r.is_deleted);
+    assert!(r.body.is_none());
+
+    // Through Hub A's own phase-1 read-through proxy.
+    let detail_via_proxy: PostDetail = s
+        .client
+        .get(format!(
+            "{}/alliances/{}/channels/{}/posts/{}",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail_via_proxy
+        .replies
+        .iter()
+        .find(|r| r.id == reply_id)
+        .unwrap();
+    assert!(r.is_deleted);
+    assert!(r.body.is_none());
+}
+
+/// A different user on the SAME origin hub cannot retract someone else's
+/// content -- the owning hub's `author_pubkey` check rejects it even though
+/// `author_hub` matches (both users are on Hub A).
+#[tokio::test]
+async fn alliance_forum_retraction_rejects_different_user_same_hub() {
+    let s = setup_forum_alliance(Some("replies_only")).await;
+
+    let reply: Value = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "mine, not yours" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+
+    // A second local user on Hub A tries to retract the first user's reply.
+    let other_user = Identity::generate();
+    let other_token = authenticate_user(&s.hub_a_url, &other_user).await;
+
+    let resp = s
+        .client
+        .delete(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies/{}",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id, reply_id
+        ))
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502, "{}", resp.text().await.unwrap());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("not_your_content") || body.contains("403"),
+        "expected a not-your-content rejection, got: {body}"
+    );
+
+    // Untouched on the owning hub.
+    let detail: PostDetail = s
+        .client
+        .get(format!(
+            "{}/channels/{}/posts/{}",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
+    assert!(!r.is_deleted);
+}
+
+/// A third hub -- one that never authored this content -- cannot retract it
+/// even when it asserts the correct `author_pubkey`. Hits the owning hub's
+/// federation endpoint directly (bypassing Hub A's proxy) with a distinct
+/// hub identity to exercise the `author_hub` mismatch directly.
+#[tokio::test]
+async fn alliance_forum_retraction_rejects_wrong_origin_hub() {
+    let s = setup_forum_alliance(Some("replies_only")).await;
+
+    let reply: Value = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "authored by hub a's user" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+    let author_pubkey = reply["author_pubkey"].as_str().unwrap().to_string();
+
+    // A hub identity that never wrote this content, self-registered as a
+    // peer of Hub B via the ordinary hub-authentication path.
+    let third_hub_identity = Identity::generate();
+    let third_hub_client = FederationClient::new();
+    let third_hub_token = third_hub_client
+        .authenticate(&s.hub_b_url, &third_hub_identity)
+        .await
+        .unwrap();
+
+    let resp = s
+        .client
+        .delete(format!(
+            "{}/federation/forum/channels/{}/posts/{}/replies/{}",
+            s.hub_b_url, s.channel_id, s.post_id, reply_id
+        ))
+        .bearer_auth(&third_hub_token)
+        .json(&json!({ "author_pubkey": author_pubkey }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "{}", resp.text().await.unwrap());
+    assert!(resp.text().await.unwrap().contains("not_your_content"));
+
+    // Untouched on the owning hub.
+    let detail: PostDetail = s
+        .client
+        .get(format!(
+            "{}/channels/{}/posts/{}",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
+    assert!(!r.is_deleted);
+}

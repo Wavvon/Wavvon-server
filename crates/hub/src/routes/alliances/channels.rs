@@ -900,6 +900,188 @@ pub async fn react_alliance_forum(
     ))
 }
 
+/// Retract (soft-delete) a post in an alliance-shared forum channel. Same
+/// local-vs-proxy split as [`post_alliance_forum_post`]: a locally-owned
+/// channel delegates straight to the local delete handler, which already
+/// enforces "author or `manage_posts`". A peer-owned channel is proxied to
+/// the owning hub's dedicated federation retraction endpoint (forum.md §9
+/// "Origin-hub retraction"), carrying the calling user's own pubkey as the
+/// asserted author -- the owning hub is the one that verifies the target
+/// row actually belongs to this hub's user; retraction of someone else's
+/// content is rejected there (403), never silently no-op'd here.
+pub async fn delete_alliance_forum_post(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let effective = effective_shared_channels(&state.db, &alliance_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if effective.iter().any(|c| c.id == channel_id) {
+        return crate::routes::posts::delete_post(State(state), user, Path((channel_id, post_id)))
+            .await;
+    }
+
+    let members = sqlx::query_as::<_, MemberRow>(
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(&alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for member in members {
+        let token = {
+            let map = state.peer_tokens.read().await;
+            map.get(&member.hub_public_key).cloned()
+        };
+        let token = match token {
+            Some(t) => t,
+            None => match state
+                .federation_client
+                .authenticate(&member.hub_url, &state.hub_identity)
+                .await
+            {
+                Ok(t) => {
+                    state
+                        .peer_tokens
+                        .write()
+                        .await
+                        .insert(member.hub_public_key.clone(), t.clone());
+                    t
+                }
+                Err(_) => continue,
+            },
+        };
+
+        let shared = match state
+            .federation_client
+            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !shared.iter().any(|s| s.channel_id == channel_id) {
+            continue;
+        }
+
+        return state
+            .federation_client
+            .delete_forum_post(
+                &member.hub_url,
+                &token,
+                &channel_id,
+                &post_id,
+                &user.public_key,
+            )
+            .await
+            .map(|_| StatusCode::NO_CONTENT)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to delete forum post on peer: {e}"),
+                )
+            });
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        "Alliance channel not found on any member hub".to_string(),
+    ))
+}
+
+/// Retract (soft-delete) a reply in an alliance-shared forum channel's post.
+/// Same local-vs-proxy split as [`delete_alliance_forum_post`].
+pub async fn delete_alliance_forum_reply(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((alliance_id, channel_id, post_id, reply_id)): Path<(String, String, String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let effective = effective_shared_channels(&state.db, &alliance_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if effective.iter().any(|c| c.id == channel_id) {
+        return crate::routes::posts::delete_reply(
+            State(state),
+            user,
+            Path((channel_id, post_id, reply_id)),
+        )
+        .await;
+    }
+
+    let members = sqlx::query_as::<_, MemberRow>(
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(&alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for member in members {
+        let token = {
+            let map = state.peer_tokens.read().await;
+            map.get(&member.hub_public_key).cloned()
+        };
+        let token = match token {
+            Some(t) => t,
+            None => match state
+                .federation_client
+                .authenticate(&member.hub_url, &state.hub_identity)
+                .await
+            {
+                Ok(t) => {
+                    state
+                        .peer_tokens
+                        .write()
+                        .await
+                        .insert(member.hub_public_key.clone(), t.clone());
+                    t
+                }
+                Err(_) => continue,
+            },
+        };
+
+        let shared = match state
+            .federation_client
+            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if !shared.iter().any(|s| s.channel_id == channel_id) {
+            continue;
+        }
+
+        return state
+            .federation_client
+            .delete_forum_reply(
+                &member.hub_url,
+                &token,
+                &channel_id,
+                &post_id,
+                &reply_id,
+                &user.public_key,
+            )
+            .await
+            .map(|_| StatusCode::NO_CONTENT)
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to delete forum reply on peer: {e}"),
+                )
+            });
+    }
+
+    Err((
+        StatusCode::NOT_FOUND,
+        "Alliance channel not found on any member hub".to_string(),
+    ))
+}
+
 pub async fn get_alliance_channel_messages(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
