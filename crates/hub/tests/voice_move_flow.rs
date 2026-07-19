@@ -863,18 +863,25 @@ async fn get_assignments_happy_path_and_gated_for_non_organizer() {
     .await;
     assert_not_received(&mut target_ws.1, "voice_move").await;
 
-    // Happy path: the event creator (also hub admin here) sees the queued row.
+    // Happy path: the event creator (also hub admin here) sees the queued
+    // row. The target can still read the destination at this point, so the
+    // computed `voice_only` hint is false.
     let assignments = get_assignments_ok(&base, &owner_token, &event.id).await;
     assert_eq!(assignments.len(), 1);
     assert_eq!(assignments[0]["user_pubkey"], target_pubkey);
+    assert_eq!(
+        assignments[0]["voice_only"], false,
+        "target can read the destination, so this is a normal move, not voice-only"
+    );
 
     // A member who can read the channel but has neither organizer nor mover
     // rights is forbidden.
     let resp = get_assignments(&base, &outsider_token, &event.id).await;
     assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
 
-    // Once the anchor channel is hidden from them entirely, the same
-    // request 404s instead of 403ing.
+    // Deny read_messages for @everyone on the destination -- the target
+    // holds only builtin-everyone, so this removes their read access there
+    // and the assignment now carries the voice-only hint.
     deny_overwrite(
         &base,
         &owner_token,
@@ -883,6 +890,16 @@ async fn get_assignments_happy_path_and_gated_for_non_organizer() {
         &["read_messages"],
     )
     .await;
+
+    let assignments = get_assignments_ok(&base, &owner_token, &event.id).await;
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(
+        assignments[0]["voice_only"], true,
+        "target lacks READ_MESSAGES on the destination, so the move would land them voice-only"
+    );
+
+    // Once the anchor channel is hidden from them entirely, the same
+    // request 404s instead of 403ing.
     let resp = get_assignments(&base, &outsider_token, &event.id).await;
     assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
 }

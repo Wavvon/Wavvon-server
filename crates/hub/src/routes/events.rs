@@ -172,6 +172,23 @@ pub struct EventMoveAssignmentResponse {
     pub target_channel_id: String,
     pub assigned_by: String,
     pub created_at: i64,
+    /// Computed, not stored: true when `user_pubkey` lacks effective
+    /// `READ_MESSAGES` on `target_channel_id`, meaning a move applied to
+    /// them would land them in voice-only presence rather than normal
+    /// channel access (events.md §7.4). The client can't see another
+    /// member's channel permissions, so the hub resolves this per row.
+    pub voice_only: bool,
+}
+
+/// Raw DB row for `event_move_assignments` -- `voice_only` on
+/// `EventMoveAssignmentResponse` is computed, not stored, so it's resolved
+/// separately per row and folded in after the fetch.
+#[derive(sqlx::FromRow)]
+struct EventMoveAssignmentRow {
+    user_pubkey: String,
+    target_channel_id: String,
+    assigned_by: String,
+    created_at: i64,
 }
 
 /// Auto-spawned squad channels (events.md §7.5). `count` is bounded to
@@ -1065,7 +1082,7 @@ pub async fn list_event_assignments(
     // Mover gate: channel-scoped MOVE_MEMBERS against the anchor channel.
     perms.require(permissions::MOVE_MEMBERS)?;
 
-    let rows: Vec<EventMoveAssignmentResponse> = sqlx::query_as(
+    let rows: Vec<EventMoveAssignmentRow> = sqlx::query_as(
         "SELECT user_pubkey, target_channel_id, assigned_by, created_at
          FROM event_move_assignments
          WHERE event_id = $1
@@ -1076,7 +1093,26 @@ pub async fn list_event_assignments(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok(Json(rows))
+    // Per-row permission resolve: each assignment can target a different
+    // channel, so there's no single (user, channel) pair to batch against.
+    // Assignment counts are event-scoped (raid-sized), so N `channel_permissions`
+    // calls (each its own ancestor-chain round trip) is acceptable for v1
+    // rather than building a batch resolver for a small, bounded list.
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let target_perms =
+            permissions::channel_permissions(&state.db, &row.user_pubkey, &row.target_channel_id)
+                .await?;
+        out.push(EventMoveAssignmentResponse {
+            voice_only: !target_perms.has(permissions::READ_MESSAGES),
+            user_pubkey: row.user_pubkey,
+            target_channel_id: row.target_channel_id,
+            assigned_by: row.assigned_by,
+            created_at: row.created_at,
+        });
+    }
+
+    Ok(Json(out))
 }
 
 /// POST /events/:id/squad-rooms
