@@ -765,6 +765,56 @@ async fn external_bot_can_post_message_with_game_launch_card() {
     assert_eq!(game_msg["game"]["description"], "1v1");
 }
 
+/// `external_bot_can_post_message_with_game_launch_card` above (and every
+/// other bot test in this file) runs on `setup()`, which forces
+/// `invite_only = false` -- the one setting every real hub defaults to `true`
+/// (task #31, `helpers/live.ts` in the web client). An invited external bot's
+/// `/auth/verify` used to still hit the human invite-code gate below the
+/// is_bot admission check and 403 with "This hub requires an invite code",
+/// even though `POST /bots` was already the admin's explicit consent --
+/// found running the ttt-bot demo against a real, default-config hub
+/// (bot-capability-layer.md §7).
+#[tokio::test]
+async fn external_bot_auth_bypasses_the_invite_only_gate() {
+    let server = common::setup_raw().await;
+
+    // Bootstrap a real owner the same way a fresh hub actually does under
+    // `invite_only = true` (invite_flow.rs's `first_boot_owner_invite_grants_
+    // owner_and_is_one_time`) -- a bare `common::authenticate` with no invite
+    // code 403s here too (`default_hub_rejects_join_without_invite`), so this
+    // is not the human invite-code gate being exercised.
+    let db = &server.state().db;
+    let first_boot_code = wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(db)
+        .await
+        .unwrap()
+        .expect("a fresh, ownerless hub should mint a first-boot invite");
+
+    let owner = Identity::generate();
+    let pub_key = owner.public_key_hex();
+    let challenge: serde_json::Value = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await
+        .json();
+    let challenge_bytes = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
+    let signature = owner.sign(&challenge_bytes);
+    let verify: serde_json::Value = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge["challenge"],
+            "signature": hex::encode(signature.to_bytes()),
+            "invite_code": first_boot_code,
+        }))
+        .await
+        .json();
+    let owner_token = verify["token"].as_str().unwrap().to_string();
+
+    let bot = Identity::generate();
+    let bot_token = invite_and_auth_bot(&server, &owner_token, &bot).await;
+    assert!(!bot_token.is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // PATCH /channels/:id/messages/:id with a result embed (bot-capability-
 // layer.md §7 step 5: "the bot updates the launch-card message via

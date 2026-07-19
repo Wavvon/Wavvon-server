@@ -577,7 +577,15 @@ pub async fn verify(
     let mut invite_grant_role_id: Option<String> = None;
     let mut invite_created_by: Option<String> = None;
 
-    if has_roles == 0 {
+    // A bot already passed the is_bot-specific admission gate above (a
+    // pre-existing 'bot_pending'/'approved' users row created by an admin's
+    // `POST /bots` invite-by-pubkey, bots.md §2) — that *is* this bot's
+    // invite. Applying the human invite-code gate on top made every
+    // external bot 403 on any invite_only hub (the default for a fresh hub,
+    // per WelcomeScreen's join-by-code requirement) even after an admin had
+    // already invited and capability-granted it — found live running the
+    // ttt-bot demo end to end (bot-capability-layer.md §7).
+    if has_roles == 0 && req.is_bot != Some(true) {
         // New user — check if hub requires an invite
         if crate::routes::invites::is_invite_only(&state.db).await? {
             match &req.invite_code {
