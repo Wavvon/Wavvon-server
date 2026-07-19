@@ -536,6 +536,11 @@ pub struct RestartResponse {
 /// Resets `restart_attempts` and re-enables auto-restart supervision (see
 /// monitor.rs) — an operator restarting a hub by hand is a fresh start, not
 /// another automated attempt.
+///
+/// Farm-local hubs restart via `HubManager` directly; agent-hosted hubs
+/// (`hubs.server_id` set) delegate to the owning agent over its WebSocket
+/// (`FarmState::send_restart_to_agent`), returning 503 `agent_offline` if
+/// that agent isn't currently connected.
 pub async fn force_restart_hub(
     Path(hub_id): Path<String>,
     headers: HeaderMap,
@@ -552,8 +557,9 @@ pub async fn force_restart_hub(
         ));
     }
 
-    let row: Option<(String, Option<i32>, Option<String>)> = sqlx::query_as(
-        "SELECT db_path, process_port, server_id FROM hubs WHERE id = $1 AND deleted_at IS NULL",
+    let row: Option<(String, Option<i32>, Option<String>, String)> = sqlx::query_as(
+        "SELECT db_path, process_port, server_id, owner_pubkey FROM hubs
+         WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(&hub_id)
     .fetch_optional(&state.db)
@@ -565,26 +571,12 @@ pub async fn force_restart_hub(
         )
     })?;
 
-    let (db_path, process_port, server_id) = row.ok_or_else(|| {
+    let (db_path, process_port, server_id, owner_pubkey) = row.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "hub_not_found"})),
         )
     })?;
-
-    // Agent-hosted hubs aren't restartable through this path yet — the agent
-    // WebSocket protocol only has `spawn_hub`, not `restart_hub` (see
-    // farm-impl.md follow-up in monitor.rs's module doc).
-    if server_id.is_some() {
-        tracing::warn!(
-            hub_id,
-            "Force-restart requested for agent-hosted hub — unsupported, no-op"
-        );
-        return Err((
-            StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "agent_hosted_restart_unsupported"})),
-        ));
-    }
 
     let Some(port) = process_port else {
         return Err((
@@ -593,15 +585,36 @@ pub async fn force_restart_hub(
         ));
     };
 
-    // Best-effort, same as `create_hub`'s spawn and `spawn_all_from_db`: a
-    // missing/unreachable hub binary shouldn't turn an admin action into a
-    // 500 — it's logged, and the fleet view already surfaces online status.
-    if let Err(e) = state
-        .hub_manager
-        .restart_hub(&hub_id, &db_path, port as u16)
-        .await
-    {
-        tracing::warn!(hub_id, error = %e, "Force-restart failed to spawn hub process");
+    if let Some(server_id) = server_id {
+        // Agent-hosted hub — delegate the restart over the agent's WebSocket.
+        if state
+            .send_restart_to_agent(
+                &server_id,
+                &hub_id,
+                &db_path,
+                port as u16,
+                Some(&owner_pubkey),
+            )
+            .await
+            .is_err()
+        {
+            tracing::warn!(hub_id, server_id, "Force-restart failed — agent offline");
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "agent_offline"})),
+            ));
+        }
+    } else {
+        // Best-effort, same as `create_hub`'s spawn and `spawn_all_from_db`: a
+        // missing/unreachable hub binary shouldn't turn an admin action into a
+        // 500 — it's logged, and the fleet view already surfaces online status.
+        if let Err(e) = state
+            .hub_manager
+            .restart_hub(&hub_id, &db_path, port as u16)
+            .await
+        {
+            tracing::warn!(hub_id, error = %e, "Force-restart failed to spawn hub process");
+        }
     }
 
     let now = unix_now();

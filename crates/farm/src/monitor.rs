@@ -3,19 +3,16 @@
 //! `routes/heartbeat.rs` already tracks online/offline (180s threshold); this
 //! module is what acts on offline status.
 //!
-//! Wakes every 30s, finds non-suspended, non-deleted, farm-local hubs
-//! (`server_id IS NULL` — agent-hosted hubs are out of scope, see below)
-//! with `auto_restart_enabled` whose last heartbeat is stale, and restarts
-//! them via `HubManager::restart_hub` with exponential backoff. After 5
+//! Wakes every 30s, finds non-suspended, non-deleted hubs with
+//! `auto_restart_enabled` whose last heartbeat is stale, and restarts them
+//! with exponential backoff: farm-local hubs (`server_id IS NULL`) via
+//! `HubManager::restart_hub`, agent-hosted hubs (`server_id` set) via a
+//! `restart_hub` command sent over the owning agent's WebSocket
+//! (`FarmState::send_restart_to_agent`). If that agent isn't connected the
+//! attempt is logged and skipped — the next tick tries again. After 5
 //! attempts auto-restart disables itself for that hub. The counter is reset
 //! to zero elsewhere — in `routes::heartbeat::receive_heartbeat`, the moment
 //! a hub is seen online again.
-//!
-//! Agent-hosted hubs (`hubs.server_id` set) are skipped with a WARN log:
-//! restarting a hub run by a remote agent needs a `restart_hub` command sent
-//! over the agent's WebSocket, which doesn't exist yet on the agent side
-//! (only `spawn_hub` does, see `routes/hubs.rs::create_hub`). That's the
-//! follow-up slice.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -87,26 +84,63 @@ pub async fn tick(state: &FarmState) -> Result<(), sqlx::Error> {
     let now = unix_now();
 
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(String, String, i32, i32, Option<i64>, i64)> = sqlx::query_as(
+    let rows: Vec<(
+        String,
+        String,
+        i32,
+        i32,
+        Option<i64>,
+        i64,
+        Option<String>,
+        String,
+    )> = sqlx::query_as(
         "SELECT h.id, h.db_path, h.process_port, h.restart_attempts, h.last_restart_at,
-                COALESCE(hb.last_seen_at, h.created_at) AS effective_last_seen
+                COALESCE(hb.last_seen_at, h.created_at) AS effective_last_seen,
+                h.server_id, h.owner_pubkey
          FROM hubs h
          LEFT JOIN hub_heartbeats hb ON hb.hub_pubkey = h.hub_pubkey
          WHERE h.suspended_at IS NULL
            AND h.deleted_at IS NULL
            AND h.auto_restart_enabled = TRUE
-           AND h.server_id IS NULL
            AND h.process_port IS NOT NULL",
     )
     .fetch_all(&state.db)
     .await?;
 
-    for (hub_id, db_path, port, attempts, last_restart_at, effective_last_seen) in rows {
+    for (
+        hub_id,
+        db_path,
+        port,
+        attempts,
+        last_restart_at,
+        effective_last_seen,
+        server_id,
+        owner_pubkey,
+    ) in rows
+    {
         match decide(effective_last_seen, attempts, last_restart_at, now) {
             Decision::Healthy | Decision::Backoff => {}
             Decision::Restart => {
                 tracing::warn!(hub_id, attempts, "Hub offline — attempting auto-restart");
-                if let Err(e) = state
+                if let Some(ref server_id) = server_id {
+                    if state
+                        .send_restart_to_agent(
+                            server_id,
+                            &hub_id,
+                            &db_path,
+                            port as u16,
+                            Some(&owner_pubkey),
+                        )
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            hub_id,
+                            server_id,
+                            "Auto-restart failed — owning agent offline"
+                        );
+                    }
+                } else if let Err(e) = state
                     .hub_manager
                     .restart_hub(&hub_id, &db_path, port as u16)
                     .await

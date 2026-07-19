@@ -63,6 +63,20 @@ impl HubManager {
         Ok(())
     }
 
+    /// Restart a hub process: stop it if running, then re-spawn it.
+    pub async fn restart_hub(
+        &self,
+        hub_id: &str,
+        db_path: &str,
+        port: u16,
+        owner_pubkey: Option<&str>,
+        farm_url: Option<&str>,
+    ) -> Result<()> {
+        self.stop_hub(hub_id).await?;
+        self.spawn_hub(hub_id, db_path, port, owner_pubkey, farm_url)
+            .await
+    }
+
     pub async fn list_hubs(&self) -> Vec<serde_json::Value> {
         self.hubs
             .read()

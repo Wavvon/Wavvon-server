@@ -244,6 +244,229 @@ async fn server_agent_connects_and_receives_hub_spawn() {
 }
 
 // ---------------------------------------------------------------------------
+// Shared helper: register a mock agent, connect it, and delegate one hub
+// creation to it. Returns the ws halves (so the caller can keep driving the
+// mock agent), the hub_id, and the server_id it was assigned to.
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::type_complexity)]
+async fn create_hub_via_agent(
+    client: &Client,
+    base: &str,
+    token: &str,
+) -> (
+    futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Message,
+    >,
+    futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    String,
+    String,
+) {
+    // Register + connect the mock agent.
+    let resp = client
+        .post(format!("{base}/farm/admin/server-token"))
+        .bearer_auth(token)
+        .json(&json!({ "name": "e2e-server", "region": "test" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let reg: Value = resp.json().await.unwrap();
+    let reg_token = reg["token"].as_str().unwrap().to_string();
+    let server_id = reg["server_id"].as_str().unwrap().to_string();
+
+    let ws_base = base.replacen("http://", "ws://", 1);
+    let ws_url = format!("{ws_base}/ws/agent");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("WS connect failed");
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+
+    ws_write
+        .send(Message::Text(
+            json!({"type":"hello","version":"0.1.0","token":reg_token})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    // Brief pause for the farm to process hello and register the sender.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Create a hub — farm should delegate the spawn to our connected agent.
+    let resp = client
+        .post(format!("{base}/farm/hubs"))
+        .bearer_auth(token)
+        .json(&json!({ "name": "e2e-hub", "visibility": "private" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create hub failed: {}",
+        resp.status()
+    );
+    let hub: Value = resp.json().await.unwrap();
+    let hub_id = hub["id"].as_str().unwrap().to_string();
+
+    // Read the spawn_hub command and reply hub_spawned so the hub row gets
+    // `server_id` + `process_port` set (both required for restart to route
+    // through the agent path).
+    let cmd_msg = tokio::time::timeout(Duration::from_secs(5), ws_read.next())
+        .await
+        .expect("timeout waiting for spawn_hub")
+        .unwrap()
+        .unwrap();
+    let cmd: Value = serde_json::from_str(&cmd_msg.into_text().unwrap()).unwrap();
+    assert_eq!(cmd["type"], "spawn_hub");
+
+    ws_write
+        .send(Message::Text(
+            json!({"type":"hub_spawned","hub_id":hub_id,"port":9200})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    (ws_write, ws_read, hub_id, server_id)
+}
+
+// ---------------------------------------------------------------------------
+// E2E: force-restart of an agent-hosted hub delegates over the agent WS
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn force_restart_agent_hosted_hub_delegates_to_agent() {
+    let (base, state, _guard) = start_farm().await;
+    let client = Client::new();
+
+    let admin = Identity::generate();
+    let token = authenticate(&client, &base, &admin).await;
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let (mut ws_write, mut ws_read, hub_id, server_id) =
+        create_hub_via_agent(&client, &base, &token).await;
+
+    // Simulate a few prior failed auto-restart attempts, so we can prove the
+    // force-restart route resets the counter.
+    sqlx::query("UPDATE hubs SET restart_attempts = 3 WHERE id = $1")
+        .bind(&hub_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    // --- Force-restart via HTTP ---
+    let resp = client
+        .post(format!("{base}/farm/hubs/{hub_id}/restart"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "restart failed: {}",
+        resp.status()
+    );
+
+    // --- Mock agent should receive restart_hub with the same shape as spawn_hub ---
+    let cmd_msg = tokio::time::timeout(Duration::from_secs(5), ws_read.next())
+        .await
+        .expect("timeout waiting for restart_hub")
+        .unwrap()
+        .unwrap();
+    let cmd: Value = serde_json::from_str(&cmd_msg.into_text().unwrap()).unwrap();
+    assert_eq!(
+        cmd["type"], "restart_hub",
+        "expected restart_hub, got: {cmd}"
+    );
+    assert_eq!(cmd["hub_id"], hub_id);
+    assert_eq!(cmd["port"], 9200);
+
+    // Agent replies hub_restarted, as the protocol specifies.
+    ws_write
+        .send(Message::Text(
+            json!({"type":"hub_restarted","hub_id":hub_id,"port":9200})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+
+    // --- restart_attempts reset to 0 by the force-restart route ---
+    let attempts: i32 = sqlx::query_scalar("SELECT restart_attempts FROM hubs WHERE id = $1")
+        .bind(&hub_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(attempts, 0, "force-restart should reset restart_attempts");
+
+    // server_id should remain assigned to the same agent (delegated, not
+    // fallen back to local spawn).
+    let assigned_server_id: Option<String> =
+        sqlx::query_scalar("SELECT server_id FROM hubs WHERE id = $1")
+            .bind(&hub_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(assigned_server_id.as_deref(), Some(server_id.as_str()));
+}
+
+// ---------------------------------------------------------------------------
+// E2E: force-restart of an agent-hosted hub whose agent has disconnected
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn force_restart_agent_hosted_hub_offline_agent_returns_503() {
+    let (base, state, _guard) = start_farm().await;
+    let client = Client::new();
+
+    let admin = Identity::generate();
+    let token = authenticate(&client, &base, &admin).await;
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let (ws_write, ws_read, hub_id, _server_id) =
+        create_hub_via_agent(&client, &base, &token).await;
+
+    // Drop the mock agent's WebSocket connection to simulate it going offline.
+    drop(ws_write);
+    drop(ws_read);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let resp = client
+        .post(format!("{base}/farm/hubs/{hub_id}/restart"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "restart should 503 when the owning agent is offline"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "agent_offline");
+}
+
+// ---------------------------------------------------------------------------
 // E2E: TOTP setup → confirm → login enforces TOTP
 // ---------------------------------------------------------------------------
 

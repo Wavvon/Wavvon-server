@@ -55,4 +55,33 @@ impl FarmState {
         use ed25519_dalek::VerifyingKey;
         hex::encode(VerifyingKey::from(self.keypair.as_ref()).as_bytes())
     }
+
+    /// Send a `restart_hub` command to the agent hosting `server_id`.
+    ///
+    /// Returns `Err(())` if that agent isn't currently connected (its sender
+    /// isn't in `agent_senders`) or its send channel is full — callers should
+    /// treat this as "agent offline" (503).
+    pub async fn send_restart_to_agent(
+        &self,
+        server_id: &str,
+        hub_id: &str,
+        db_path: &str,
+        port: u16,
+        owner_pubkey: Option<&str>,
+    ) -> Result<(), ()> {
+        let sender = {
+            let map = self.agent_senders.read().await;
+            map.get(server_id).cloned()
+        };
+        let sender = sender.ok_or(())?;
+        let cmd = serde_json::json!({
+            "type": "restart_hub",
+            "hub_id": hub_id,
+            "db_path": db_path,
+            "port": port,
+            "owner_pubkey": owner_pubkey,
+            "farm_url": self.farm_url,
+        });
+        sender.try_send(cmd.to_string()).map_err(|_| ())
+    }
 }
