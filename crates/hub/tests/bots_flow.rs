@@ -960,6 +960,145 @@ async fn bot_profile_game_descriptor_surfaces_on_directory_listing() {
     assert_eq!(entry["game"]["description"], "1v1");
 }
 
+// ---------------------------------------------------------------------------
+// GET /admin/bots/external -- admin management view (bots.md §4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn admin_lists_external_bots_across_pending_active_and_removed() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    // Pending: invited with a local note, never accepted.
+    let pending_bot = Identity::generate();
+    let pending_key = pending_bot.public_key_hex();
+    server
+        .post("/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "pubkey": pending_key, "note": "mod bot, pending" }))
+        .await
+        .assert_status_success();
+
+    // Active: invited and fully authenticated.
+    let active_bot = Identity::generate();
+    let active_key = active_bot.public_key_hex();
+    let _active_token = invite_and_auth_bot(&server, &owner_token, &active_bot).await;
+
+    // Removed: invited, accepted, then removed by an admin.
+    let removed_bot = Identity::generate();
+    let removed_key = removed_bot.public_key_hex();
+    invite_and_auth_bot(&server, &owner_token, &removed_bot).await;
+    server
+        .delete(&format!("/bots/{removed_key}"))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let list: serde_json::Value = server
+        .get("/admin/bots/external")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    let rows = list.as_array().unwrap();
+
+    let find = |key: &str| rows.iter().find(|r| r["public_key"] == key).unwrap();
+
+    let pending_row = find(&pending_key);
+    assert_eq!(pending_row["approval_status"], "pending");
+    assert_eq!(pending_row["local_note"], "mod bot, pending");
+
+    let active_row = find(&active_key);
+    assert_eq!(active_row["approval_status"], "active");
+
+    let removed_row = find(&removed_key);
+    assert_eq!(removed_row["approval_status"], "removed");
+}
+
+#[tokio::test]
+async fn non_admin_cannot_list_external_bots() {
+    let server = common::setup().await;
+    let _owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let rando_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let resp = server
+        .get("/admin/bots/external")
+        .authorization_bearer(&rando_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+// ---------------------------------------------------------------------------
+// PUT /admin/bots/:pubkey/channels -- channel scope (bots.md §14)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn admin_can_set_and_reset_bot_channel_scope() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let bot = Identity::generate();
+    let bot_pubkey = bot.public_key_hex();
+    invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    let chan: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "scoped-channel" }))
+        .await
+        .json();
+    let channel_id = chan["id"].as_str().unwrap().to_string();
+
+    // Restrict to a single channel.
+    let resp = server
+        .put(&format!("/admin/bots/{bot_pubkey}/channels"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "channel_ids": [channel_id.clone()] }))
+        .await;
+    resp.assert_status_success();
+    let body: serde_json::Value = resp.json();
+    assert_eq!(
+        body["channel_ids"].as_array().unwrap(),
+        std::slice::from_ref(&channel_id)
+    );
+
+    // Reset to hub-wide with an empty list.
+    let resp2 = server
+        .put(&format!("/admin/bots/{bot_pubkey}/channels"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "channel_ids": [] }))
+        .await;
+    resp2.assert_status_success();
+    let body2: serde_json::Value = resp2.json();
+    assert!(body2["channel_ids"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn set_channel_scope_404s_for_unknown_bot() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let resp = server
+        .put("/admin/bots/not-a-real-bot/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "channel_ids": [] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn non_admin_cannot_set_bot_channel_scope() {
+    let (server, owner_token) = common::setup_with_owner().await;
+    let rando_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let bot = Identity::generate();
+    let bot_pubkey = bot.public_key_hex();
+    invite_and_auth_bot(&server, &owner_token, &bot).await;
+
+    let resp = server
+        .put(&format!("/admin/bots/{bot_pubkey}/channels"))
+        .authorization_bearer(&rando_token)
+        .json(&json!({ "channel_ids": [] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn bot_directory_listing_omits_game_field_when_undeclared() {
     let (server, owner_token) = common::setup_with_owner().await;

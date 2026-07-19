@@ -1845,6 +1845,13 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // Admin-only local label for an external bot row (bots.md §4 "Admin UI"):
+    // set at invite time via `POST /bots`, surfaced on `GET /admin/bots/external`.
+    // Distinct from `bot_profiles.name`, which the bot operator controls.
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN bot_local_note TEXT")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

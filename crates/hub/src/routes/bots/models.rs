@@ -255,6 +255,31 @@ pub struct AcceptInviteResponse {
     pub status: String,
 }
 
+/// `GET /admin/bots/external` row (bots.md §4 "Admin UI"): the admin
+/// management view over `users` rows with `is_bot=1`, unlike `BotListEntry`
+/// (the member-facing `GET /bots` directory) this includes pending invites,
+/// removed bots, and the admin-only local note.
+#[derive(Serialize)]
+pub struct ExternalBotAdminInfo {
+    pub public_key: String,
+    pub display_name: Option<String>,
+    pub local_note: Option<String>,
+    pub approval_status: &'static str,
+    pub last_seen_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct SetChannelScopeRequest {
+    #[serde(default)]
+    pub channel_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ChannelScopeResponse {
+    pub bot_pubkey: String,
+    pub channel_ids: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct BotListEntry {
     pub pubkey: String,

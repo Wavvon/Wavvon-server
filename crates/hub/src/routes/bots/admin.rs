@@ -12,8 +12,9 @@ use crate::state::AppState;
 use super::models::{generate_token, hash_token};
 use super::models::{
     AuditLogEntry, AuditLogQuery, AuditLogResponse, BotAdminInfo, BotCreatedResponse,
-    BotDetailResponse, BotRow, CapabilitiesReadResponse, CapabilitiesResponse, CreateBotRequest,
-    SetCapabilitiesRequest, SetWebhookRequest, SlashCommandInfo, SlashCommandRow,
+    BotDetailResponse, BotRow, CapabilitiesReadResponse, CapabilitiesResponse,
+    ChannelScopeResponse, CreateBotRequest, SetCapabilitiesRequest, SetChannelScopeRequest,
+    SetWebhookRequest, SlashCommandInfo, SlashCommandRow,
 };
 
 /// POST /admin/bots  — create a bot (any authenticated hub member)
@@ -391,6 +392,75 @@ pub async fn admin_get_bot_capabilities(
         requested,
         granted,
         effective,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// PUT /admin/bots/:pubkey/channels
+// ---------------------------------------------------------------------------
+
+/// Admin-only: atomically replaces a bot's channel scope (bots.md §14).
+/// `channel_ids` empty (or an empty/omitted body) resets to hub-wide access.
+/// Same "either an external bot or a self-service bot" pubkey resolution as
+/// `admin_set_bot_capabilities` -- `bot_channel_scope` is keyed on the bare
+/// pubkey and the enforcement in `bots/dispatch.rs` and `bots/events.rs`
+/// doesn't care which kind of bot row it is.
+pub async fn admin_set_bot_channel_scope(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(pubkey): Path<String>,
+    Json(req): Json<SetChannelScopeRequest>,
+) -> Result<Json<ChannelScopeResponse>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(permissions::ADMIN)?;
+
+    let known_bot: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE
+            UNION
+            SELECT 1 FROM bots WHERE public_key = $1
+         )",
+    )
+    .bind(&pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if !known_bot {
+        return Err((StatusCode::NOT_FOUND, "Bot not found".to_string()));
+    }
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    sqlx::query("DELETE FROM bot_channel_scope WHERE bot_pubkey = $1")
+        .bind(&pubkey)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for channel_id in &req.channel_ids {
+        sqlx::query(
+            "INSERT INTO bot_channel_scope (bot_pubkey, channel_id) VALUES ($1, $2)
+             ON CONFLICT (bot_pubkey, channel_id) DO NOTHING",
+        )
+        .bind(&pubkey)
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(ChannelScopeResponse {
+        bot_pubkey: pubkey,
+        channel_ids: req.channel_ids,
     }))
 }
 

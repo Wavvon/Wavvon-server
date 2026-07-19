@@ -282,6 +282,14 @@ pub fn create_router_full(
             "/admin/bots",
             get(routes::bots::admin_list_bots).post(routes::bots::admin_create_bot),
         )
+        // ---- External bot admin view (bots.md §4) ----
+        // Registered before /admin/bots/{pubkey} for the same reason as
+        // /bots/me below -- keeps "external" from ever being treated as a
+        // pubkey path parameter.
+        .route(
+            "/admin/bots/external",
+            get(routes::bots::admin_list_external_bots),
+        )
         .route(
             "/admin/bots/{pubkey}",
             get(routes::bots::admin_get_bot).delete(routes::bots::admin_delete_bot),
@@ -294,6 +302,10 @@ pub fn create_router_full(
             "/admin/bots/{pubkey}/capabilities",
             get(routes::bots::admin_get_bot_capabilities)
                 .put(routes::bots::admin_set_bot_capabilities),
+        )
+        .route(
+            "/admin/bots/{pubkey}/channels",
+            put(routes::bots::admin_set_bot_channel_scope),
         )
         .route("/admin/audit-log", get(routes::bots::admin_audit_log))
         // ---- Bot API (token auth, internal service accounts) ----
