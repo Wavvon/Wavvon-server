@@ -335,7 +335,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .or_default()
         .insert(cs.public_key.clone(), sender_id);
 
-    let participants = get_voice_participants(state, &channel_id).await;
+    let participants = get_voice_participants(state, &channel_id, Some(&cs.public_key)).await;
 
     let reply = WsServerMessage::VoiceJoined {
         channel_id: channel_id.clone(),
@@ -360,17 +360,22 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         }
     };
 
-    let _ = state.voice_event_tx.send((
-        channel_id.clone(),
-        WsServerMessage::VoiceParticipantJoined {
-            channel_id: channel_id.clone(),
-            participant: VoiceParticipantInfo {
-                public_key: cs.public_key.clone(),
-                display_name: display_name.clone(),
-                is_bot,
+    // An invisible joiner is announced to no one (decisions.md 2026-07-12:
+    // shown offline to everyone else). Their own client already got the
+    // VoiceJoined reply above, which includes their entry.
+    if !crate::routes::users::is_invisible(&state.db, &cs.public_key).await {
+        let _ = state.voice_event_tx.send((
+            channel_id.clone(),
+            WsServerMessage::VoiceParticipantJoined {
+                channel_id: channel_id.clone(),
+                participant: VoiceParticipantInfo {
+                    public_key: cs.public_key.clone(),
+                    display_name: display_name.clone(),
+                    is_bot,
+                },
             },
-        },
-    ));
+        ));
+    }
 
     let roster = get_voice_roster(state, &channel_id).await;
     let _ = state.voice_event_tx.send((
@@ -524,7 +529,7 @@ pub(in crate::routes::ws) async fn handle_voice_leave(
     DispatchResult::Continue
 }
 
-pub(in crate::routes::ws) fn handle_voice_speaking(
+pub(in crate::routes::ws) async fn handle_voice_speaking(
     cs: &ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
@@ -536,6 +541,11 @@ pub(in crate::routes::ws) fn handle_voice_speaking(
         } => (channel_id, speaking),
         _ => return DispatchResult::Continue,
     };
+    // A speaking indicator for a hidden participant would out them — same
+    // gate as the join/leave broadcasts. Their audio still relays.
+    if crate::routes::users::is_invisible(&state.db, &cs.public_key).await {
+        return DispatchResult::Continue;
+    }
     let _ = state.voice_event_tx.send((
         channel_id.clone(),
         WsServerMessage::VoiceParticipantSpeaking {

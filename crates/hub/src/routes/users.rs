@@ -57,6 +57,37 @@ pub(crate) async fn fetch_presence_status(db: &sqlx::PgPool, public_key: &str) -
     .flatten()
 }
 
+/// Convenience single-user form of the invisible check used by the voice
+/// participant surfaces (see `invisible_subset`).
+pub(crate) async fn is_invisible(db: &sqlx::PgPool, public_key: &str) -> bool {
+    fetch_presence_status(db, public_key).await.as_deref() == Some("invisible")
+}
+
+/// Subset of `keys` whose stored `presence_status` is "invisible". The voice
+/// participant surfaces (lists, rosters, populations) use this to hide
+/// invisible users from *other* members the same way `reported_online` hides
+/// them from the member roster — decisions.md 2026-07-12 specifies invisible
+/// as "shown offline to everyone else", and the voice participant list was
+/// the flagged known gap. Delivery/voice/relay paths are never filtered:
+/// only what other members are shown changes.
+pub(crate) async fn invisible_subset(
+    db: &sqlx::PgPool,
+    keys: &[String],
+) -> std::collections::HashSet<String> {
+    if keys.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    sqlx::query_scalar::<_, String>(
+        "SELECT public_key FROM users WHERE public_key = ANY($1) AND presence_status = 'invisible'",
+    )
+    .bind(keys)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect()
+}
+
 #[derive(Serialize)]
 pub struct UserInfo {
     pub public_key: String,

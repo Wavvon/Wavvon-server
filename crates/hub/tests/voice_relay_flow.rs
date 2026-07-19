@@ -1461,6 +1461,130 @@ async fn human_with_read_access_joins_voice_ws_normally() {
     );
 }
 
+/// Invisible presence gate on the voice surfaces (decisions.md 2026-07-12's
+/// flagged known gap): an invisible member who joins voice must be hidden
+/// from other members' `/voice/participants`, `/voice/active-users`, and
+/// `/voice/populations` — while staying fully registered in voice
+/// (functional, just not shown) and still seeing their own entry.
+#[tokio::test]
+async fn invisible_user_hidden_from_others_voice_participant_lists() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "invisible-voice").await;
+
+    let ghost = Identity::generate();
+    let ghost_token = authenticate_http(&base, &ghost).await;
+    // The gate reads users.presence_status (same column handle_set_status
+    // persists — the WS set_status path is covered by
+    // presence_multi_session_flow.rs); set it directly.
+    sqlx::query("UPDATE users SET presence_status = 'invisible' WHERE public_key = $1")
+        .bind(ghost.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &ghost_token, &ch.id).await;
+
+    // Invisible users stay functional in voice: the join succeeds and the
+    // ready frame's participant list still shows the joiner their own entry
+    // (viewer self-exemption).
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["type"], "voice_ws_ready");
+    assert!(
+        v["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["public_key"] == ghost.public_key_hex()),
+        "invisible joiner must still see their own entry in the ready frame"
+    );
+    assert!(
+        state
+            .voice_channels
+            .read()
+            .await
+            .get(&ch.id)
+            .map(|m| m.contains_key(&ghost.public_key_hex()))
+            .unwrap_or(false),
+        "invisible joiner must remain registered in voice_channels (functional)"
+    );
+
+    let client = reqwest::Client::new();
+
+    // Another member's view: the ghost is absent from every voice surface.
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == ghost.public_key_hex()))
+            .unwrap_or(false),
+        "invisible user must not appear in another member's /voice/participants"
+    );
+
+    let active: Vec<String> = client
+        .get(format!("{base}/voice/active-users"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !active.contains(&ghost.public_key_hex()),
+        "invisible user must not appear in another member's /voice/active-users"
+    );
+
+    let populations: std::collections::HashMap<String, usize> = client
+        .get(format!("{base}/voice/populations"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !populations.contains_key(&ch.id),
+        "a channel occupied only by an invisible user must count as empty to others"
+    );
+
+    // The invisible user's own view: self-exempt from the gate.
+    let own_roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&ghost_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        own_roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == ghost.public_key_hex()))
+            .unwrap_or(false),
+        "invisible user must still see their own entry in /voice/participants"
+    );
+}
+
 /// events.md §7.4 Phase 2 bypass, /voice/ws-transport-specific: a voice-only
 /// presence grant for (pubkey, channel) admits a human join over `/voice/ws`
 /// despite the channel being unreadable to them. `voice_move_flow.rs`

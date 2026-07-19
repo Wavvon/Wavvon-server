@@ -15,15 +15,34 @@ use crate::state::AppState;
 
 /// Returns a per-channel voice population snapshot. Channels with zero
 /// participants are omitted -- callers can treat "missing key" as zero.
+/// Invisible members are not counted (except the requester's own entry) --
+/// a count that includes a hidden user would leak their presence
+/// (decisions.md 2026-07-12, same gate as the participant list below).
 pub async fn voice_populations(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> Json<HashMap<String, usize>> {
-    let voice = state.voice_channels.read().await;
-    let mut out: HashMap<String, usize> = HashMap::with_capacity(voice.len());
-    for (channel_id, members) in voice.iter() {
-        if !members.is_empty() {
-            out.insert(channel_id.clone(), members.len());
+    let snapshot: Vec<(String, Vec<String>)> = {
+        let voice = state.voice_channels.read().await;
+        voice
+            .iter()
+            .map(|(ch, members)| (ch.clone(), members.keys().cloned().collect()))
+            .collect()
+    };
+    let all_keys: Vec<String> = snapshot
+        .iter()
+        .flat_map(|(_, ks)| ks.iter().cloned())
+        .collect();
+    let invisible = crate::routes::users::invisible_subset(&state.db, &all_keys).await;
+
+    let mut out: HashMap<String, usize> = HashMap::with_capacity(snapshot.len());
+    for (channel_id, members) in snapshot {
+        let count = members
+            .iter()
+            .filter(|pk| **pk == user.public_key || !invisible.contains(*pk))
+            .count();
+        if count > 0 {
+            out.insert(channel_id, count);
         }
     }
     Json(out)
@@ -35,10 +54,12 @@ pub async fn voice_populations(
 /// than just a count.
 ///
 /// Shape: { channel_id: [{ public_key, display_name }] }. Channels with
-/// zero participants are omitted.
+/// zero participants are omitted. Invisible members are hidden from
+/// everyone but themselves (decisions.md 2026-07-12 -- same gate as the
+/// member roster's `reported_online`).
 pub async fn voice_channel_participants(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> Result<Json<HashMap<String, Vec<VoiceParticipantInfo>>>, (StatusCode, String)> {
     let voice = state.voice_channels.read().await;
 
@@ -50,6 +71,8 @@ pub async fn voice_channel_participants(
             all_keys.insert(pk.clone());
         }
     }
+    let key_vec: Vec<String> = all_keys.iter().cloned().collect();
+    let invisible = crate::routes::users::invisible_subset(&state.db, &key_vec).await;
 
     struct UserInfo {
         display_name: Option<String>,
@@ -82,11 +105,9 @@ pub async fn voice_channel_participants(
 
     let mut out: HashMap<String, Vec<VoiceParticipantInfo>> = HashMap::new();
     for (channel_id, members) in voice.iter() {
-        if members.is_empty() {
-            continue;
-        }
-        let participants = members
+        let participants: Vec<VoiceParticipantInfo> = members
             .keys()
+            .filter(|pk| **pk == user.public_key || !invisible.contains(*pk))
             .map(|pk| {
                 let info = info_by_key.get(pk);
                 VoiceParticipantInfo {
@@ -96,7 +117,9 @@ pub async fn voice_channel_participants(
                 }
             })
             .collect();
-        out.insert(channel_id.clone(), participants);
+        if !participants.is_empty() {
+            out.insert(channel_id.clone(), participants);
+        }
     }
     Ok(Json(out))
 }
@@ -113,15 +136,22 @@ pub struct VoiceParticipantInfo {
 /// member list.
 pub async fn voice_active_users(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> Json<Vec<String>> {
-    let voice = state.voice_channels.read().await;
     let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for members in voice.values() {
-        for pk in members.keys() {
-            out.insert(pk.clone());
+    {
+        let voice = state.voice_channels.read().await;
+        for members in voice.values() {
+            for pk in members.keys() {
+                out.insert(pk.clone());
+            }
         }
     }
+    // Same invisible gate as the participant list: don't put a 🎙️ badge on
+    // a user everyone is being told is offline (self excepted).
+    let key_vec: Vec<String> = out.iter().cloned().collect();
+    let invisible = crate::routes::users::invisible_subset(&state.db, &key_vec).await;
+    out.retain(|pk| *pk == user.public_key || !invisible.contains(pk));
     Json(out.into_iter().collect())
 }
 

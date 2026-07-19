@@ -708,7 +708,7 @@ async fn dispatch_client_msg(
             DispatchResult::Continue
         }
         WsClientMessage::VoiceLeave { .. } => voice::handle_voice_leave(cs, state, msg).await,
-        WsClientMessage::VoiceSpeaking { .. } => voice::handle_voice_speaking(cs, state, msg),
+        WsClientMessage::VoiceSpeaking { .. } => voice::handle_voice_speaking(cs, state, msg).await,
         WsClientMessage::VoiceWhisperStart { .. } => {
             voice::handle_voice_whisper_start(cs, state, msg).await
         }
@@ -853,13 +853,19 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
         consumed.retain(|_, v| v.pubkey != public_key);
     }
 
-    let _ = state.voice_event_tx.send((
-        channel_id.to_string(),
-        WsServerMessage::VoiceParticipantLeft {
-            channel_id: channel_id.to_string(),
-            public_key: public_key.to_string(),
-        },
-    ));
+    // An invisible participant was never announced as joined, so don't
+    // announce them leaving either (a Left for someone who toggled invisible
+    // mid-call was already emitted by handle_set_status). Same gate as the
+    // join broadcast.
+    if !crate::routes::users::is_invisible(&state.db, public_key).await {
+        let _ = state.voice_event_tx.send((
+            channel_id.to_string(),
+            WsServerMessage::VoiceParticipantLeft {
+                channel_id: channel_id.to_string(),
+                public_key: public_key.to_string(),
+            },
+        ));
+    }
 
     // Remove sender_id mapping.
     {

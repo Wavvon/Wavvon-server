@@ -3,17 +3,29 @@ use std::collections::HashSet;
 use crate::routes::chat_models::{VoiceParticipantInfo, VoiceRosterEntry};
 use crate::state::AppState;
 
+/// Builds the participant list for `channel_id` as seen by `viewer`:
+/// invisible members are omitted (decisions.md 2026-07-12 — invisible users
+/// are shown offline to everyone else; the voice list was the known gap),
+/// except the viewer themselves, who always sees their own entry.
 pub async fn get_voice_participants(
     state: &AppState,
     channel_id: &str,
+    viewer: Option<&str>,
 ) -> Vec<VoiceParticipantInfo> {
-    let channels = state.voice_channels.read().await;
-    let Some(participants) = channels.get(channel_id) else {
-        return Vec::new();
+    let keys: Vec<String> = {
+        let channels = state.voice_channels.read().await;
+        let Some(participants) = channels.get(channel_id) else {
+            return Vec::new();
+        };
+        participants.keys().cloned().collect()
     };
+    let invisible = crate::routes::users::invisible_subset(&state.db, &keys).await;
 
     let mut result = Vec::new();
-    for pk in participants.keys() {
+    for pk in keys
+        .iter()
+        .filter(|pk| Some(pk.as_str()) == viewer || !invisible.contains(*pk))
+    {
         let row: Option<(Option<String>, bool)> =
             sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
                 .bind(pk)
@@ -251,6 +263,11 @@ pub async fn apply_pending_voice_move_assignment(
     );
 }
 
+/// Roster (sender_id ↔ pubkey map) for `VoiceRosterUpdate` broadcasts.
+/// Invisible members are omitted unconditionally — the broadcast is one
+/// payload for all recipients, so there is no per-viewer exemption here.
+/// Audio stays functional: clients play frames from unmapped sender_ids at
+/// default gain, so a hidden participant is still heard.
 pub(super) async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<VoiceRosterEntry> {
     let sender_ids = state.voice_sender_ids.read().await;
     let ch_map = match sender_ids.get(channel_id) {
@@ -259,8 +276,14 @@ pub(super) async fn get_voice_roster(state: &AppState, channel_id: &str) -> Vec<
     };
     drop(sender_ids);
 
+    let keys: Vec<String> = ch_map.keys().cloned().collect();
+    let invisible = crate::routes::users::invisible_subset(&state.db, &keys).await;
+
     let mut result = Vec::new();
     for (pk, sid) in ch_map {
+        if invisible.contains(&pk) {
+            continue;
+        }
         let display_name: Option<String> =
             sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
                 .bind(&pk)

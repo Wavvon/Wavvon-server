@@ -217,7 +217,7 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         .insert(pubkey.clone(), ws_tx);
 
     // Collect current participants and send the ready frame.
-    let participants = get_voice_participants(&state, &channel_id).await;
+    let participants = get_voice_participants(&state, &channel_id, Some(&pubkey)).await;
     let ready_msg = serde_json::json!({
         "type": "voice_ws_ready",
         "sender_id": sender_id,
@@ -229,18 +229,22 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         "channel_id": channel_id,
     });
 
-    // Broadcast VoiceParticipantJoined so other WS chat clients update their UI.
-    let join_broadcast = WsServerMessage::VoiceParticipantJoined {
-        channel_id: channel_id.clone(),
-        participant: VoiceParticipantInfo {
-            public_key: pubkey.clone(),
-            display_name,
-            is_bot,
-        },
-    };
-    let _ = state
-        .voice_event_tx
-        .send((channel_id.clone(), join_broadcast));
+    // Broadcast VoiceParticipantJoined so other WS chat clients update their
+    // UI — unless the joiner is invisible (decisions.md 2026-07-12: shown
+    // offline to everyone else). Their own ready frame above includes them.
+    if !crate::routes::users::is_invisible(&state.db, &pubkey).await {
+        let join_broadcast = WsServerMessage::VoiceParticipantJoined {
+            channel_id: channel_id.clone(),
+            participant: VoiceParticipantInfo {
+                public_key: pubkey.clone(),
+                display_name,
+                is_bot,
+            },
+        };
+        let _ = state
+            .voice_event_tx
+            .send((channel_id.clone(), join_broadcast));
+    }
 
     // Split the socket into sender and receiver halves.
     let (mut sink, mut stream) = socket.split();

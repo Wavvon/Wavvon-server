@@ -114,6 +114,60 @@ pub(in crate::routes::ws) async fn handle_set_status(
 
     let is_invisible_now = status.as_deref() == Some("invisible");
 
+    // Voice surfaces are presence-gated like the roster (decisions.md
+    // 2026-07-12). A mid-call transition into/out of invisible must remove
+    // the user from (or restore them to) other members' voice participant
+    // lists, which are otherwise only updated by join/leave broadcasts.
+    if is_invisible_now != was_invisible {
+        let voice_channel: Option<String> = {
+            let vc = state.voice_channels.read().await;
+            vc.iter()
+                .find(|(_, members)| members.contains_key(&cs.public_key))
+                .map(|(ch, _)| ch.clone())
+        };
+        if let Some(ch) = voice_channel {
+            if is_invisible_now {
+                let _ = state.voice_event_tx.send((
+                    ch.clone(),
+                    WsServerMessage::VoiceParticipantLeft {
+                        channel_id: ch.clone(),
+                        public_key: cs.public_key.clone(),
+                    },
+                ));
+            } else {
+                let row: Option<(Option<String>, bool)> =
+                    sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
+                        .bind(&cs.public_key)
+                        .fetch_optional(&state.db)
+                        .await
+                        .ok()
+                        .flatten();
+                let (display_name, is_bot) = row.unwrap_or((None, false));
+                let _ = state.voice_event_tx.send((
+                    ch.clone(),
+                    WsServerMessage::VoiceParticipantJoined {
+                        channel_id: ch.clone(),
+                        participant: crate::routes::chat_models::VoiceParticipantInfo {
+                            public_key: cs.public_key.clone(),
+                            display_name,
+                            is_bot,
+                        },
+                    },
+                ));
+            }
+            // Refresh the sender_id roster too — it is filtered by the same
+            // gate (get_voice_roster), and the DB status is already updated.
+            let roster = crate::routes::ws::voice::get_voice_roster(state, &ch).await;
+            let _ = state.voice_event_tx.send((
+                ch.clone(),
+                WsServerMessage::VoiceRosterUpdate {
+                    channel_id: ch,
+                    participants: roster,
+                },
+            ));
+        }
+    }
+
     if is_invisible_now {
         // Presence broadcasts are not per-recipient, so map invisible ->
         // offline in the outgoing broadcast rather than ever sending the
