@@ -603,15 +603,30 @@ pub async fn admin_approve(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Transfer roles from old key to new key.
+    // Transfer NON-OWNER roles from old key to new key. The owner role never
+    // rides along a recovery transfer (identity-recovery.md: owner needs the
+    // separate successor path) — otherwise K colluding contacts plus a fooled
+    // admin could mint a second owner.
     sqlx::query(
         "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
          SELECT $1, role_id, $2
-         FROM user_roles WHERE user_public_key = $3
+         FROM user_roles
+         WHERE user_public_key = $3 AND role_id != 'builtin-owner'
          ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(&row.new_pubkey)
     .bind(now)
+    .bind(&row.old_pubkey)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // A transfer, not a copy: the lost/compromised old key keeps nothing but
+    // owner (which only the successor path moves).
+    sqlx::query(
+        "DELETE FROM user_roles
+         WHERE user_public_key = $1 AND role_id != 'builtin-owner'",
+    )
     .bind(&row.old_pubkey)
     .execute(&state.db)
     .await

@@ -576,3 +576,83 @@ async fn pending_request_expires_after_14_days() {
     let bundle = resp.json::<serde_json::Value>();
     assert_eq!(bundle["status"], "expired");
 }
+
+// ---------------------------------------------------------------------------
+// Approve transfers non-owner roles only; owner never rides along
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn approve_transfers_non_owner_roles_and_never_owner() {
+    let server = common::setup().await;
+    let (hub_pubkey, request_id, owner, contact, new_key, owner_token) =
+        open_request_with_one_contact(&server).await;
+
+    // Old key holds owner + a custom role.
+    server
+        .put(&format!(
+            "/users/{}/roles/builtin-owner",
+            owner.public_key_hex()
+        ))
+        .authorization_bearer(&owner_token)
+        .await;
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "moderator", "priority": 10, "permissions": ["kick"] }))
+        .await;
+    let role_id = resp.json::<serde_json::Value>()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            owner.public_key_hex(),
+            role_id
+        ))
+        .authorization_bearer(&owner_token)
+        .await;
+
+    // Attest to threshold and approve.
+    let bundle = server
+        .get(&format!("/recovery/rotation-request/{}", request_id))
+        .await
+        .json::<serde_json::Value>();
+    let nonce = bundle["nonce"].as_str().unwrap().to_string();
+    let sig = attestation_signature(
+        &hub_pubkey,
+        &owner.public_key_hex(),
+        &new_key.public_key_hex(),
+        &nonce,
+        &contact,
+    );
+    server
+        .post(&format!("/recovery/rotation-request/{}/attest", request_id))
+        .json(&json!({ "attester": contact.public_key_hex(), "signature": sig }))
+        .await
+        .assert_status_ok();
+    server
+        .post(&format!("/admin/recovery/{}/approve", request_id))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    // New key gained the custom role but NOT owner; old key keeps only owner.
+    let new_roles = sqlx::query_scalar::<_, String>(
+        "SELECT role_id FROM user_roles WHERE user_public_key = $1 ORDER BY role_id",
+    )
+    .bind(new_key.public_key_hex())
+    .fetch_all(&server.state().db)
+    .await
+    .unwrap();
+    assert!(new_roles.contains(&role_id));
+    assert!(!new_roles.contains(&"builtin-owner".to_string()));
+    let old_roles = sqlx::query_scalar::<_, String>(
+        "SELECT role_id FROM user_roles WHERE user_public_key = $1 ORDER BY role_id",
+    )
+    .bind(owner.public_key_hex())
+    .fetch_all(&server.state().db)
+    .await
+    .unwrap();
+    assert_eq!(old_roles, vec!["builtin-owner".to_string()]);
+}
