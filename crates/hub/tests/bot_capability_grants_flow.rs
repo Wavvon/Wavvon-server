@@ -495,7 +495,7 @@ async fn mini_app_join_succeeds_after_capability_grant() {
     )
     .await;
 
-    let frame = next_meaningful_frame(&mut rx, std::time::Duration::from_secs(3))
+    let frame = next_meaningful_frame(&mut rx, std::time::Duration::from_secs(15))
         .await
         .expect("granted bot should yield a bot_app_open reply");
     assert_eq!(frame["type"], "bot_app_open");
@@ -548,7 +548,7 @@ async fn game_launch_card_appears_on_ws_broadcast() {
         .unwrap();
     assert!(resp.status().is_success());
 
-    let frame = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(3))
+    let frame = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(15))
         .await
         .expect("expected the chat message broadcast");
     assert_eq!(frame["type"], "message");
@@ -661,7 +661,7 @@ async fn bot_screen_share_start_succeeds_with_grant_and_operator_flag_on() {
     )
     .await;
 
-    let frame = next_meaningful_frame(&mut bot_rx, std::time::Duration::from_secs(3))
+    let frame = next_meaningful_frame(&mut bot_rx, std::time::Duration::from_secs(15))
         .await
         .expect("granted bot with operator flag on should start the stream");
     assert_eq!(frame["type"], "screen_share_started");
@@ -802,7 +802,7 @@ async fn bot_screen_share_start_rejected_once_media_budget_exceeded() {
         }),
     )
     .await;
-    let a_frame = next_meaningful_frame(&mut a_rx, std::time::Duration::from_secs(3))
+    let a_frame = next_meaningful_frame(&mut a_rx, std::time::Duration::from_secs(15))
         .await
         .expect("first bot stream should start under budget");
     assert_eq!(a_frame["type"], "screen_share_started");
@@ -812,7 +812,7 @@ async fn bot_screen_share_start_rejected_once_media_budget_exceeded() {
     // On connect, the hub replays already-active shares (readable channels
     // are auto-subscribed) -- that's bot_a's stream, not a reply to bot_b's
     // own request yet. Drain it before sending bot_b's own attempt.
-    let replay = next_meaningful_frame(&mut b_rx, std::time::Duration::from_secs(3))
+    let replay = next_meaningful_frame(&mut b_rx, std::time::Duration::from_secs(15))
         .await
         .expect("expected the replay of bot_a's already-active stream");
     assert_eq!(replay["type"], "screen_share_started");

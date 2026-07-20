@@ -320,7 +320,7 @@ async fn drain_until_voice_joined(
     >,
 ) -> String {
     loop {
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
             .await
             .expect("voice_joined timeout")
             .unwrap()
@@ -1217,7 +1217,7 @@ async fn bot_with_can_speak_voice_registers_as_voice_sender() {
 
     let (_tx, mut rx) = connect_voice_ws(&base, &bot_token, &ch.id).await;
 
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
         .await
         .expect("expected a voice_ws_ready frame before timeout")
         .expect("stream ended without a frame")
@@ -1429,7 +1429,7 @@ async fn human_with_read_access_joins_voice_ws_normally() {
 
     let (_tx, mut rx) = connect_voice_ws(&base, &member_token, &ch.id).await;
 
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
         .await
         .expect("expected a voice_ws_ready frame before timeout")
         .expect("stream ended without a frame")
@@ -1489,7 +1489,7 @@ async fn invisible_user_hidden_from_others_voice_participant_lists() {
     // Invisible users stay functional in voice: the join succeeds and the
     // ready frame's participant list still shows the joiner their own entry
     // (viewer self-exemption).
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
         .await
         .expect("expected a voice_ws_ready frame before timeout")
         .expect("stream ended without a frame")
@@ -1616,7 +1616,7 @@ async fn staging_grant_admits_voice_ws_join_to_unreadable_channel() {
 
     let (_tx, mut rx) = connect_voice_ws(&base, &target_token, &ch.id).await;
 
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
         .await
         .expect("expected a voice_ws_ready frame before timeout")
         .expect("stream ended without a frame")

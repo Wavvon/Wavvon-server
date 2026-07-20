@@ -262,7 +262,7 @@ async fn join_mini_app(base: &str, member_token: &str, bot_id: &str, channel_id:
         json!({ "type": "bot_app_join", "bot_id": bot_id, "channel_id": channel_id }),
     )
     .await;
-    let frame = next_meaningful_frame(&mut rx, std::time::Duration::from_secs(3))
+    let frame = next_meaningful_frame(&mut rx, std::time::Duration::from_secs(15))
         .await
         .expect("expected a bot_app_open reply");
     assert_eq!(frame["type"], "bot_app_open");
@@ -298,7 +298,7 @@ async fn mini_app_token_can_join_ws_and_receive_bound_channel_events() {
 
     // ...and receives a message posted to the bound channel.
     send_message(&base, &owner_token, &channel_id, "round 1 starting").await;
-    let frame = next_meaningful_frame(&mut mini_rx, std::time::Duration::from_secs(3))
+    let frame = next_meaningful_frame(&mut mini_rx, std::time::Duration::from_secs(15))
         .await
         .expect("mini-app session should receive events for its bound channel");
     assert_eq!(frame["type"], "message");

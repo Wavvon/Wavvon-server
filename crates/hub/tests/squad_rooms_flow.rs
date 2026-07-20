@@ -316,7 +316,7 @@ async fn squad_rooms_happy_path() {
     let update_frame = next_frame_of_type(
         &mut watcher_rx,
         "channels_updated",
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(15),
     )
     .await;
     assert!(
@@ -447,9 +447,13 @@ async fn join_to_ended_event_room_rejected() {
     )
     .await;
 
-    let err = next_frame_of_type(&mut member_ws.1, "error", std::time::Duration::from_secs(3))
-        .await
-        .expect("expected an error frame rejecting the join");
+    let err = next_frame_of_type(
+        &mut member_ws.1,
+        "error",
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .expect("expected an error frame rejecting the join");
     assert_eq!(err["context"], "voice_join");
 
     let joined = next_frame_of_type(

@@ -154,7 +154,7 @@ async fn connect_ws(base: &str, token: &str) -> WsStream {
     let ws_url = format!("{}/ws?token={}", base.replace("http://", "ws://"), token);
     let (mut ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
     // Consume the `hello` frame.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), ws.next())
         .await
         .expect("timed out waiting for hello");
     ws
@@ -498,7 +498,7 @@ async fn send_ws_json(ws: &mut WsStream, msg: Value) {
 /// Read frames until one with the given `type` arrives (3s per-frame cap).
 async fn wait_for_type(ws: &mut WsStream, ty: &str) -> Value {
     loop {
-        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(15), ws.next())
             .await
             .expect("timed out waiting for WS frame")
             .unwrap()

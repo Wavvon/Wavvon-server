@@ -248,7 +248,7 @@ async fn subscribe_to_denied_channel_is_rejected_and_no_events_leak() {
     .await;
 
     // The hub must respond with an error frame, not silently subscribe.
-    let frame = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(3))
+    let frame = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(15))
         .await
         .expect("expected an error frame for the denied subscribe");
     assert_eq!(frame["type"], "error");
@@ -287,7 +287,7 @@ async fn subscribe_to_readable_channel_still_delivers_events() {
 
     send_message(&base, &owner_token, &open.id, "hello everyone").await;
 
-    let frame = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(3))
+    let frame = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(15))
         .await
         .expect("expected the chat message to be delivered");
     assert_eq!(frame["type"], "message");

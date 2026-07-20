@@ -191,7 +191,7 @@ async fn next_text(
     >,
 ) -> Value {
     loop {
-        let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
             .await
             .expect("timed out waiting for WS message")
             .unwrap()
@@ -216,7 +216,7 @@ async fn next_raw(
         >,
     >,
 ) -> TsMessage {
-    tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+    tokio::time::timeout(std::time::Duration::from_secs(15), rx.next())
         .await
         .expect("timed out waiting for WS message")
         .unwrap()

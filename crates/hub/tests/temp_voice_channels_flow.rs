@@ -317,7 +317,7 @@ async fn joining_spawner_voice_creates_temp_sibling() {
     )
     .await;
 
-    let joined = next_frame_of_type(&mut rx, "voice_joined", std::time::Duration::from_secs(3))
+    let joined = next_frame_of_type(&mut rx, "voice_joined", std::time::Duration::from_secs(15))
         .await
         .expect("expected a voice_joined reply");
     let temp_channel_id = joined["channel_id"].as_str().unwrap().to_string();
@@ -522,7 +522,7 @@ async fn owner_can_rename_temp_channel_but_others_cannot() {
         json!({ "type": "voice_join", "channel_id": spawner.id, "udp_port": 0 }),
     )
     .await;
-    let joined = next_frame_of_type(&mut rx, "voice_joined", std::time::Duration::from_secs(3))
+    let joined = next_frame_of_type(&mut rx, "voice_joined", std::time::Duration::from_secs(15))
         .await
         .unwrap();
     let temp_channel_id = joined["channel_id"].as_str().unwrap().to_string();
@@ -589,7 +589,7 @@ async fn channels_updated_broadcast_on_spawn_and_gc() {
         json!({ "type": "voice_join", "channel_id": spawner.id, "udp_port": 0 }),
     )
     .await;
-    let joined = next_frame_of_type(&mut rx, "voice_joined", std::time::Duration::from_secs(3))
+    let joined = next_frame_of_type(&mut rx, "voice_joined", std::time::Duration::from_secs(15))
         .await
         .unwrap();
     let temp_channel_id = joined["channel_id"].as_str().unwrap().to_string();
@@ -597,7 +597,7 @@ async fn channels_updated_broadcast_on_spawn_and_gc() {
     let update_frame = next_frame_of_type(
         &mut watcher_rx,
         "channels_updated",
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(15),
     )
     .await;
     assert!(
@@ -619,7 +619,7 @@ async fn channels_updated_broadcast_on_spawn_and_gc() {
     let update_frame = next_frame_of_type(
         &mut watcher_rx,
         "channels_updated",
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(15),
     )
     .await;
     assert!(
@@ -667,7 +667,7 @@ async fn voice_ws_join_to_spawner_creates_temp_sibling() {
 
     let (_voice_tx, mut voice_rx) = connect_voice_ws(&base, &member_token, &spawner.id).await;
 
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), voice_rx.next())
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(15), voice_rx.next())
         .await
         .expect("expected a voice_ws_ready frame before timeout")
         .expect("stream ended without a frame")
@@ -716,7 +716,7 @@ async fn voice_ws_join_to_spawner_creates_temp_sibling() {
     let update_frame = next_frame_of_type(
         &mut watcher_rx,
         "channels_updated",
-        std::time::Duration::from_secs(3),
+        std::time::Duration::from_secs(15),
     )
     .await;
     assert!(

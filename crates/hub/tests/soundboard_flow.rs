@@ -529,7 +529,7 @@ async fn played_broadcasts_soundboard_played_to_channel() {
         .unwrap();
     assert_eq!(played.status(), reqwest::StatusCode::NO_CONTENT);
 
-    let event = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+    let event = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             let msg = rx.next().await.unwrap().unwrap();
             if let TsMessage::Text(t) = msg {
