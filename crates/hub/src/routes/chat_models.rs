@@ -52,6 +52,11 @@ pub struct ChannelResponse {
     /// Set only on spawner channels: the name template used for rooms it spawns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawner_name_template: Option<String>,
+    /// Set only on auto-spawned squad rooms (events.md §7.5): the event this
+    /// room was created for. Lets clients identify "this event's rooms" and
+    /// group them in the sidebar/staging panel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -118,6 +123,10 @@ pub struct SendMessageRequest {
     /// Optional parent message id to thread under.
     #[serde(default)]
     pub reply_to: Option<String>,
+    /// Game-modal launch card (bot-capability-layer.md §2). Bot authors
+    /// only -- `routes/messages.rs` rejects it for any other sender.
+    #[serde(default)]
+    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
 }
 
 /// Minimal preview of a parent message. We embed it in replies so the
@@ -165,6 +174,17 @@ pub struct MessageResponse {
     /// 0 for replies themselves; only root messages accumulate a non-zero count.
     #[serde(default)]
     pub reply_count: i64,
+    /// Bot-authored rich embeds (bots.md §11), persisted on `messages.embeds`.
+    /// None for any message that never had embeds (which is most of them) --
+    /// DM and federation reads use their own response types and never
+    /// populate this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embeds: Option<Vec<crate::routes::bot_models::Embed>>,
+    /// Game-modal launch card (bot-capability-layer.md §2, §6 Phase 1 item
+    /// 3), persisted on `messages.game`. None for any message that never
+    /// had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +195,13 @@ pub struct ReactionRequest {
 #[derive(Serialize, Deserialize)]
 pub struct EditMessageRequest {
     pub content: String,
+    /// Result embed on a game-modal launch card (bot-capability-layer.md §7
+    /// step 5: "PATCHes the message with a result embed"). Bot authors
+    /// only -- `routes/messages.rs::edit_message` rejects it for any other
+    /// sender, same rule as `SendMessageRequest.game`. Absent = leave
+    /// embeds untouched.
+    #[serde(default)]
+    pub embeds: Option<Vec<crate::routes::bot_models::Embed>>,
 }
 
 #[derive(Clone, Debug)]
@@ -260,6 +287,12 @@ pub enum ChatEvent {
         channel_id: String,
         to_pubkeys: Vec<String>,
     },
+    /// A voice-move push (events.md §7.1) targeted at exactly one recipient.
+    /// Unlike `WhisperSignal`, `channel_id()` truly returns "" for this
+    /// variant (see the dedicated hub-wide-bypass-plus-pubkey-filter branch
+    /// in the WS dispatch loop) so delivery never depends on the target
+    /// still being subscribed to any particular channel.
+    VoiceMove { to_pubkey: String },
     /// Bot mini-app announce/dismiss event. Routed to channel subscribers.
     BotApp { channel_id: String },
     /// Soundboard clip-played attribution event (soundboard.md §1). Routed
@@ -279,7 +312,9 @@ pub enum ChatEvent {
     /// without a reconnect.
     MemberUpdated { public_key: String },
     /// A user changed their presence status (away/DND/custom text);
-    /// delivered hub-wide like MemberOnline/MemberOffline.
+    /// delivered hub-wide like MemberOnline/MemberOffline. Never emitted for
+    /// a transition into "invisible" — that broadcasts as MemberOffline
+    /// instead (see `handle_set_status`).
     MemberStatus { public_key: String },
     /// An outgoing webhook auto-disabled itself after too many consecutive
     /// delivery failures. Hub-wide (admin UI filters/display client-side —
@@ -325,7 +360,8 @@ impl ChatEvent {
             | ChatEvent::MemberOffline { .. }
             | ChatEvent::MemberUpdated { .. }
             | ChatEvent::MemberStatus { .. }
-            | ChatEvent::WebhookDisabled { .. } => "",
+            | ChatEvent::WebhookDisabled { .. }
+            | ChatEvent::VoiceMove { .. } => "",
         }
     }
 }
@@ -366,8 +402,11 @@ pub enum WsClientMessage {
     VoiceSpeaking { channel_id: String, speaking: bool },
     #[serde(rename = "typing")]
     Typing { channel_id: String, typing: bool },
-    /// Set the sender's presence status. `status` is "online", "away", or
-    /// "dnd" ("online" clears); `custom` is an optional short status text.
+    /// Set the sender's presence status. `status` is "online", "away",
+    /// "dnd", or "invisible" ("online" clears); `custom` is an optional
+    /// short status text. "invisible" keeps the connection fully live
+    /// (DMs/messages/voice unaffected) but is reported as offline to other
+    /// members everywhere presence is surfaced (roster, broadcasts).
     #[serde(rename = "set_status")]
     SetStatus {
         status: String,
@@ -501,6 +540,20 @@ pub enum WsClientMessage {
     #[serde(rename = "voice_whisper_stop")]
     VoiceWhisperStop,
 
+    /// Request that the hub ask `target_pubkey` to leave-and-join
+    /// `target_channel_id` (events.md §7.1). `event_id` is present when the
+    /// move is driven by a staging panel (Phase 2); absent for the generic
+    /// Phase 1 right-click primitive. The hub never forces the move — it
+    /// pushes a `voice_move` control message and the target's own client
+    /// runs its normal join.
+    #[serde(rename = "voice_move")]
+    VoiceMove {
+        target_pubkey: String,
+        target_channel_id: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+
     /// Bot sends this after connecting to request replay of missed events.
     #[serde(rename = "resume")]
     Resume { since_seq: i64 },
@@ -563,6 +616,26 @@ pub enum WsClientMessage {
     /// Only valid from bot connections.
     #[serde(rename = "bot_app_dismiss")]
     BotAppDismiss { channel_id: String },
+
+    /// Generic mini-app <-> bot relay (bot-mini-apps.md "the mini-app
+    /// connects to the hub's existing /ws endpoint ... and exchanges
+    /// messages with the bot ... through the normal WS relay"). `payload` is
+    /// an opaque JSON-encoded string -- the hub never inspects it, same
+    /// convention as `screen_share_ice`'s `candidate` field.
+    ///
+    /// From a mini-app session (non-bot connection): hub forwards to every
+    /// active WS session for `bot_id`, tagged with the sender's pubkey.
+    /// From the bot itself: `to_pubkey` selects which joined player's
+    /// mini-app session receives it; absent `to_pubkey` is a no-op (there is
+    /// no channel-wide mini-app broadcast surface).
+    #[serde(rename = "mini_app_message")]
+    MiniAppMessage {
+        bot_id: String,
+        channel_id: String,
+        payload: String,
+        #[serde(default)]
+        to_pubkey: Option<String>,
+    },
 }
 
 #[derive(Serialize, Clone)]
@@ -855,6 +928,23 @@ pub enum WsServerMessage {
     #[serde(rename = "voice_whisper_stopped")]
     VoiceWhisperStopped { sender_pubkey: String },
 
+    /// Delivered only to the moved target (events.md §7.1). `target_channel_name`
+    /// is included so a voice-only-presence target (Phase 2) can still label
+    /// the voice UI even though the channel is absent from its read-gated
+    /// channel list. `auto: true` means the target has claimed a slot or
+    /// RSVP'd "going" on `event_id` (§7.2) and the client should immediately
+    /// leave-and-join; `auto: false` means the client should prompt with an
+    /// accept/decline modal. Decline is a client-side no-op — the hub is
+    /// never told about it.
+    #[serde(rename = "voice_move")]
+    VoiceMove {
+        target_channel_id: String,
+        target_channel_name: String,
+        source_channel_id: Option<String>,
+        event_id: Option<String>,
+        auto: bool,
+    },
+
     /// Hub-wide signal that the channel list changed; clients should re-fetch /channels.
     #[serde(rename = "channels_updated")]
     ChannelsUpdated,
@@ -951,6 +1041,19 @@ pub enum WsServerMessage {
     /// Hub fans a bot's dismiss to all subscribers — clients close open webviews.
     #[serde(rename = "bot_app_close")]
     BotAppClose { bot_id: String, channel_id: String },
+
+    /// Generic mini-app <-> bot relay, hub -> client leg. See
+    /// `WsClientMessage::MiniAppMessage`. `from_pubkey` is set when relaying
+    /// a player's move to the bot; absent when the bot is pushing state to a
+    /// specific player (the recipient already knows who the bot is).
+    #[serde(rename = "mini_app_message")]
+    MiniAppMessage {
+        bot_id: String,
+        channel_id: String,
+        payload: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_pubkey: Option<String>,
+    },
 
     /// An outgoing webhook was auto-disabled after too many consecutive
     /// delivery failures. Hub-wide; the admin settings UI is the intended

@@ -636,3 +636,844 @@ async fn forum_get_post_not_found_returns_404() {
         .await;
     assert_eq!(resp.status_code(), 404);
 }
+
+// ── Federation read-through (forum.md section 9, phase 1) ───────────────────
+//
+// These need two real HTTP hubs talking to each other over the federation
+// client, so `axum_test::TestServer` (in-process, no network) doesn't work
+// here -- mirrors the `start_hub` harness in `alliance_flow.rs`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use tokio::sync::{broadcast, RwLock};
+use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::federation::client::FederationClient;
+use wavvon_hub::routes::alliance_models::AllianceResponse;
+use wavvon_hub::routes::chat_models::ChannelResponse;
+use wavvon_hub::server;
+use wavvon_hub::state::AppState;
+
+async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
+    let (db, guard) = common::create_test_db().await;
+    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
+    let (chat_tx, _) = broadcast::channel(256);
+    let (voice_event_tx, _) = broadcast::channel(16);
+
+    let state = Arc::new(AppState {
+        hub_name: name.to_string(),
+        hub_identity: Identity::generate(),
+        db,
+        db_read: None,
+        store,
+        pending_challenges: RwLock::new(HashMap::new()),
+        chat_tx,
+        federation_client: FederationClient::new(),
+        peer_tokens: RwLock::new(HashMap::new()),
+        voice_channels: RwLock::new(HashMap::new()),
+        voice_addr_map: RwLock::new(HashMap::new()),
+        whisper_target_pubkeys: RwLock::new(HashMap::new()),
+        voice_sender_ids: RwLock::new(HashMap::new()),
+        voice_next_sender_id: RwLock::new(HashMap::new()),
+        voice_zones: RwLock::new(HashMap::new()),
+        voice_udp_port: 0,
+        voice_udp_addr: None,
+        voice_event_tx,
+        dm_tx: broadcast::channel(16).0,
+        online_users: RwLock::new(std::collections::HashMap::new()),
+        screen_shares: RwLock::new(HashMap::new()),
+        screen_share_tx: broadcast::channel(16).0,
+        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        http_client: reqwest::Client::new(),
+        farm_url: None,
+        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
+        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        started_at: std::time::Instant::now(),
+        whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_udp_socket: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        rate_limiters: Default::default(),
+        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
+        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
+        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        owner_pubkey: None,
+        bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
+        webauthn: {
+            let origin = url::Url::parse("http://localhost:3000").unwrap();
+            std::sync::Arc::new(
+                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
+                    .unwrap()
+                    .rp_name("test-hub")
+                    .build()
+                    .unwrap(),
+            )
+        },
+        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        device_token_ttl_secs: 30 * 86400,
+        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
+            wavvon_hub::state::WebhookCircuit::default(),
+        )),
+        lan_mode: false,
+        lan_tls_mode: None,
+        lan_fingerprint: None,
+    });
+
+    let app = server::create_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let url = format!("http://127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    (url, state, guard)
+}
+
+async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
+    let client = reqwest::Client::new();
+    let pub_key = identity.public_key_hex();
+
+    let challenge: ChallengeResponse = client
+        .post(format!("{hub_url}/auth/challenge"))
+        .json(&json!({ "public_key": pub_key }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
+    let signature = identity.sign(&challenge_bytes);
+
+    let verify: VerifyResponse = client
+        .post(format!("{hub_url}/auth/verify"))
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    verify.token
+}
+
+/// Hub B owns a forum channel shared into an alliance with Hub A. Hub A
+/// reads the post list and post detail (with replies) purely through the
+/// alliance read-through proxy -- Hub A never stores a copy, it federates
+/// the read to Hub B on every call.
+#[tokio::test]
+async fn alliance_forum_read_through_proxies_to_owning_hub() {
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+    let user_b = Identity::generate();
+    let token_b = authenticate_user(&hub_b_url, &user_b).await;
+
+    // Hub A creates the alliance.
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Forum Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let invite: wavvon_hub::routes::alliance_models::AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Hub B: create a forum channel with a post and a reply, then share it.
+    let channel: ChannelResponse = client
+        .post(format!("{hub_b_url}/channels"))
+        .bearer_auth(&token_b)
+        .json(&json!({ "name": "patch-notes", "channel_type": "forum" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(channel.channel_type, "forum");
+
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_b)
+        .json(&json!({ "channel_id": channel.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let post: PostDetail = client
+        .post(format!("{hub_b_url}/channels/{}/posts", channel.id))
+        .bearer_auth(&token_b)
+        .json(&json!({ "title": "v1.2 notes", "body": "Fixed the thing" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let _reply: Value = client
+        .post(format!(
+            "{hub_b_url}/channels/{}/posts/{}/replies",
+            channel.id, post.summary.id
+        ))
+        .bearer_auth(&token_b)
+        .json(&json!({ "body": "nice, thanks" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Hub A: list posts via the alliance proxy -- it owns no copy, this is
+    // a live federated read every time.
+    let resp = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts",
+            alliance.id, channel.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+    let list: PostListResponse = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts",
+            alliance.id, channel.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list.posts.len(), 1);
+    assert_eq!(list.posts[0].id, post.summary.id);
+    assert_eq!(list.posts[0].title.as_deref(), Some("v1.2 notes"));
+
+    // Hub A: get post detail (with the reply) via the proxy.
+    let detail: PostDetail = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts/{}",
+            alliance.id, channel.id, post.summary.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail.body.as_deref(), Some("Fixed the thing"));
+    assert_eq!(detail.replies.len(), 1);
+    assert_eq!(detail.replies[0].body.as_deref(), Some("nice, thanks"));
+}
+
+/// Reading posts for a channel that isn't shared with the alliance on any
+/// member hub is rejected with 404, mirroring the message-proxy rejection.
+#[tokio::test]
+async fn alliance_forum_read_through_rejects_unshared_channel() {
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Solo Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // A forum channel that was never shared into the alliance.
+    let channel: ChannelResponse = client
+        .post(format!("{hub_a_url}/channels"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "private-forum", "channel_type": "forum" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!(
+            "{hub_a_url}/alliances/{}/channels/{}/posts",
+            alliance.id, channel.id
+        ))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// ── Federation proxied writes (forum.md section 9, phase 2) ─────────────────
+
+/// Common two-hub setup shared by the proxied-write tests below: Hub B owns
+/// an alliance-shared forum channel with one post; Hub A is a fellow member
+/// with no local copy, everything routes through the write proxy.
+struct ForumAllianceSetup {
+    hub_a_url: String,
+    hub_a_state: Arc<AppState>,
+    _hub_a_guard: common::TestDbGuard,
+    hub_b_url: String,
+    _hub_b_state: Arc<AppState>,
+    _hub_b_guard: common::TestDbGuard,
+    token_a: String,
+    token_b: String,
+    alliance_id: String,
+    channel_id: String,
+    post_id: String,
+    client: reqwest::Client,
+}
+
+async fn setup_forum_alliance(forum_remote_write: Option<&str>) -> ForumAllianceSetup {
+    let (hub_a_url, hub_a_state, hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, hub_b_state, hub_b_guard) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+    let user_b = Identity::generate();
+    let token_b = authenticate_user(&hub_b_url, &user_b).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Forum Alliance" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let invite: wavvon_hub::routes::alliance_models::AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let channel: ChannelResponse = client
+        .post(format!("{hub_b_url}/channels"))
+        .bearer_auth(&token_b)
+        .json(&json!({ "name": "allied-forum", "channel_type": "forum" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let mut share_body = json!({ "channel_id": channel.id });
+    if let Some(policy) = forum_remote_write {
+        share_body["forum_remote_write"] = json!(policy);
+    }
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_b)
+        .json(&share_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
+
+    let post: PostDetail = client
+        .post(format!("{hub_b_url}/channels/{}/posts", channel.id))
+        .bearer_auth(&token_b)
+        .json(&json!({ "title": "seed post", "body": "seed body" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    ForumAllianceSetup {
+        hub_a_url,
+        hub_a_state,
+        _hub_a_guard: hub_a_guard,
+        hub_b_url,
+        _hub_b_state: hub_b_state,
+        _hub_b_guard: hub_b_guard,
+        token_a,
+        token_b,
+        alliance_id: alliance.id,
+        channel_id: channel.id,
+        post_id: post.summary.id,
+        client,
+    }
+}
+
+/// Hub A's user replies to Hub B's post through the write proxy. The reply
+/// lands on Hub B (the owning hub) with `author_hub` set to Hub A's own
+/// public key, and surfaces that way both directly on Hub B and through
+/// Hub A's phase-1 read-through.
+#[tokio::test]
+async fn alliance_forum_proxied_reply_carries_author_hub() {
+    let s = setup_forum_alliance(None).await; // default policy: replies_only
+
+    let resp = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "greetings from hub A" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let reply: Value = resp.json().await.unwrap();
+    assert_eq!(reply["body"].as_str(), Some("greetings from hub A"));
+    let hub_a_pubkey = s.hub_a_state.hub_identity.public_key_hex();
+    assert_eq!(reply["author_hub"].as_str(), Some(hub_a_pubkey.as_str()));
+
+    // Directly on the owning hub: the reply is there with author_hub set.
+    let detail: PostDetail = s
+        .client
+        .get(format!(
+            "{}/channels/{}/posts/{}",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail.replies.len(), 1);
+    assert_eq!(
+        detail.replies[0].author_hub.as_deref(),
+        Some(hub_a_pubkey.as_str())
+    );
+
+    // Through Hub A's own phase-1 read-through proxy.
+    let detail_via_proxy: PostDetail = s
+        .client
+        .get(format!(
+            "{}/alliances/{}/channels/{}/posts/{}",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail_via_proxy.replies.len(), 1);
+    assert_eq!(
+        detail_via_proxy.replies[0].author_hub.as_deref(),
+        Some(hub_a_pubkey.as_str())
+    );
+}
+
+/// `forum_remote_write = "none"` rejects every federated write, including
+/// replies.
+#[tokio::test]
+async fn alliance_forum_proxied_write_rejected_under_none_policy() {
+    let s = setup_forum_alliance(Some("none")).await;
+
+    let resp = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "should be rejected" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502, "{}", resp.text().await.unwrap());
+    // The requester's proxy surfaces the owning hub's 403 wrapped as a
+    // gateway error (`create_forum_reply` bubbles the HTTP status through
+    // `anyhow`, same shape as the other federation-client methods) --
+    // the underlying rejection reason is still visible in the body text.
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("forum_remote_write_disabled") || body.contains("403"),
+        "expected a forum_remote_write rejection, got: {body}"
+    );
+}
+
+/// `forum_remote_write = "replies_only"` (the default) accepts a federated
+/// reply but rejects a federated post.
+#[tokio::test]
+async fn alliance_forum_replies_only_allows_replies_blocks_posts() {
+    let s = setup_forum_alliance(Some("replies_only")).await;
+
+    let resp = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "reply ok" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+
+    let resp = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts",
+            s.hub_a_url, s.alliance_id, s.channel_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "title": "should fail", "body": "should fail" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502, "{}", resp.text().await.unwrap());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("forum_remote_write_posts_disabled") || body.contains("403"),
+        "expected posts to be rejected under replies_only, got: {body}"
+    );
+}
+
+/// `forum_remote_write = "posts_and_replies"` accepts a federated post too.
+#[tokio::test]
+async fn alliance_forum_posts_and_replies_allows_posts() {
+    let s = setup_forum_alliance(Some("posts_and_replies")).await;
+
+    let resp = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts",
+            s.hub_a_url, s.alliance_id, s.channel_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "title": "allied post", "body": "allied body" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{}", resp.text().await.unwrap());
+    let detail: PostDetail = resp.json().await.unwrap();
+    assert_eq!(detail.summary.title.as_deref(), Some("allied post"));
+    let hub_a_pubkey = s.hub_a_state.hub_identity.public_key_hex();
+    assert_eq!(
+        detail.summary.author_hub.as_deref(),
+        Some(hub_a_pubkey.as_str())
+    );
+}
+
+/// The per-origin-hub rate limiter (30 writes/60s, forum.md §9
+/// "Threat-model deltas") trips after enough proxied writes from the same
+/// origin hub, independent of whether the target post exists -- the limiter
+/// is checked before the post lookup so a flood can't dodge it with bogus IDs.
+#[tokio::test]
+async fn alliance_forum_proxied_write_rate_limited() {
+    let s = setup_forum_alliance(Some("posts_and_replies")).await;
+
+    let mut last_status = 0u16;
+    for _ in 0..31 {
+        let resp = s
+            .client
+            .post(format!(
+                "{}/alliances/{}/channels/{}/posts/no-such-post/replies",
+                s.hub_a_url, s.alliance_id, s.channel_id
+            ))
+            .bearer_auth(&s.token_a)
+            .json(&json!({ "body": "flood" }))
+            .send()
+            .await
+            .unwrap();
+        last_status = resp.status().as_u16();
+    }
+    // The 31st call trips the limiter on the owning hub; the requester's
+    // proxy surfaces that as a gateway error same as any other rejection.
+    assert_eq!(last_status, 502);
+}
+
+// ── Federation origin-hub retraction (forum.md section 9, phase 3) ─────────
+
+/// Hub A's user retracts their own reply on Hub B's post through the
+/// retraction proxy. The reply is tombstoned on the owning hub and shows
+/// as deleted both directly on Hub B and through Hub A's phase-1
+/// read-through.
+#[tokio::test]
+async fn alliance_forum_retraction_removes_own_reply() {
+    let s = setup_forum_alliance(Some("replies_only")).await;
+
+    let reply: Value = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "retract me" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+
+    let resp = s
+        .client
+        .delete(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies/{}",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id, reply_id
+        ))
+        .bearer_auth(&s.token_a)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "{}", resp.text().await.unwrap());
+
+    // Directly on the owning hub: tombstoned.
+    let detail: PostDetail = s
+        .client
+        .get(format!(
+            "{}/channels/{}/posts/{}",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
+    assert!(r.is_deleted);
+    assert!(r.body.is_none());
+
+    // Through Hub A's own phase-1 read-through proxy.
+    let detail_via_proxy: PostDetail = s
+        .client
+        .get(format!(
+            "{}/alliances/{}/channels/{}/posts/{}",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail_via_proxy
+        .replies
+        .iter()
+        .find(|r| r.id == reply_id)
+        .unwrap();
+    assert!(r.is_deleted);
+    assert!(r.body.is_none());
+}
+
+/// A different user on the SAME origin hub cannot retract someone else's
+/// content -- the owning hub's `author_pubkey` check rejects it even though
+/// `author_hub` matches (both users are on Hub A).
+#[tokio::test]
+async fn alliance_forum_retraction_rejects_different_user_same_hub() {
+    let s = setup_forum_alliance(Some("replies_only")).await;
+
+    let reply: Value = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "mine, not yours" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+
+    // A second local user on Hub A tries to retract the first user's reply.
+    let other_user = Identity::generate();
+    let other_token = authenticate_user(&s.hub_a_url, &other_user).await;
+
+    let resp = s
+        .client
+        .delete(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies/{}",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id, reply_id
+        ))
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 502, "{}", resp.text().await.unwrap());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("not_your_content") || body.contains("403"),
+        "expected a not-your-content rejection, got: {body}"
+    );
+
+    // Untouched on the owning hub.
+    let detail: PostDetail = s
+        .client
+        .get(format!(
+            "{}/channels/{}/posts/{}",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
+    assert!(!r.is_deleted);
+}
+
+/// A third hub -- one that never authored this content -- cannot retract it
+/// even when it asserts the correct `author_pubkey`. Hits the owning hub's
+/// federation endpoint directly (bypassing Hub A's proxy) with a distinct
+/// hub identity to exercise the `author_hub` mismatch directly.
+#[tokio::test]
+async fn alliance_forum_retraction_rejects_wrong_origin_hub() {
+    let s = setup_forum_alliance(Some("replies_only")).await;
+
+    let reply: Value = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "body": "authored by hub a's user" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+    let author_pubkey = reply["author_pubkey"].as_str().unwrap().to_string();
+
+    // A hub identity that never wrote this content, self-registered as a
+    // peer of Hub B via the ordinary hub-authentication path.
+    let third_hub_identity = Identity::generate();
+    let third_hub_client = FederationClient::new();
+    let third_hub_token = third_hub_client
+        .authenticate(&s.hub_b_url, &third_hub_identity)
+        .await
+        .unwrap();
+
+    let resp = s
+        .client
+        .delete(format!(
+            "{}/federation/forum/channels/{}/posts/{}/replies/{}",
+            s.hub_b_url, s.channel_id, s.post_id, reply_id
+        ))
+        .bearer_auth(&third_hub_token)
+        .json(&json!({ "author_pubkey": author_pubkey }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "{}", resp.text().await.unwrap());
+    assert!(resp.text().await.unwrap().contains("not_your_content"));
+
+    // Untouched on the owning hub.
+    let detail: PostDetail = s
+        .client
+        .get(format!(
+            "{}/channels/{}/posts/{}",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
+    assert!(!r.is_deleted);
+}

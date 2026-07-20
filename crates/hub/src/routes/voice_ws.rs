@@ -9,7 +9,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::routes::chat_models::{VoiceParticipantInfo, WsServerMessage};
-use crate::routes::ws::{get_voice_participants, leave_voice};
+use crate::routes::ws::{apply_pending_voice_move_assignment, get_voice_participants, leave_voice};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -28,10 +28,17 @@ pub async fn handle_voice_ws(
 
 async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppState>) {
     // Authenticate token — same validator the main WS endpoint uses.
-    let pubkey = match crate::auth::handlers::validate_ws_token(&state.db, &params.token).await {
-        Ok(pk) => pk,
+    let auth = match crate::auth::handlers::validate_ws_token(&state.db, &params.token).await {
+        Ok(a) => a,
         Err(_) => return,
     };
+    // Mini-app sessions (bot-mini-apps.md "Scoped session token") are bound
+    // to one channel for chat relay purposes — voice was never part of that
+    // scope, so reject rather than let a mini-app token join a voice call.
+    if auth.scope == "mini_app" {
+        return;
+    }
+    let pubkey = auth.public_key;
 
     // `channel_id` may be reassigned below by the spawn-on-join path
     // (temp-voice-channels.md §2) once we know the target is a spawner.
@@ -69,19 +76,12 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
     // WS voice relay as a first-class participant, gated on the
     // `can_speak_voice` capability plus channel-scoped `read_messages` like
     // any other voice joiner. Human callers are unaffected by this branch.
+    // The gate reads the *effective* capability set (bot-capability-layer.md
+    // §1, requested ∩ granted) rather than the self-declared
+    // `bot_profiles.capabilities` directly, so an admin revocation actually
+    // takes the bot off the relay.
     if is_bot {
-        let caps_json: Option<String> =
-            sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = $1")
-                .bind(&pubkey)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-        let capabilities: Vec<String> = caps_json
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
-        if !capabilities.iter().any(|c| c == "can_speak_voice") {
+        if !crate::bots::capabilities::has_capability(&state.db, &pubkey, "can_speak_voice").await {
             return;
         }
 
@@ -91,24 +91,40 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         }
     }
 
+    // Channel visibility gate (§3.4/§3.5), all human joins: a channel the
+    // caller can't effectively READ_MESSAGES isn't visible to them at all,
+    // so voice join is rejected the same way message history and the
+    // channel list are -- UNLESS a voice-only presence grant (events.md
+    // §7.4) covers this exact (pubkey, channel) pair, mirroring the same
+    // bypass in the main hub WS join gate
+    // (routes/ws/handlers/voice.rs::handle_voice_join). This runs against
+    // whatever channel was actually requested, before the spawn-on-join
+    // branch below possibly reassigns `channel_id` to a freshly spawned
+    // sibling room -- the sibling inherits the parent's visibility, so no
+    // further check is needed there. The is_bot branch above already ran
+    // its own read_messages check and is untouched by this gate.
+    if !is_bot {
+        let has_grant = state
+            .staging_voice_grants
+            .read()
+            .await
+            .get(&pubkey)
+            .map(|grants| grants.contains(&channel_id))
+            .unwrap_or(false);
+        if !has_grant {
+            match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await {
+                Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+                _ => return,
+            }
+        }
+    }
+
     // Spawn-on-join (join-to-create temp voice channels,
     // temp-voice-channels.md §2): mirrors the main hub WS path in
     // routes/ws/handlers/voice.rs::handle_voice_join. The web client's audio
     // transport is this separate /voice/ws relay, so it needs the same
     // detection independently.
     if channel_type == "spawner" {
-        // The bot branch above already gated on channel-scoped
-        // read_messages against the spawner when applicable; human callers
-        // are gated here, same rule (§3.4/§3.5: no effective READ_MESSAGES
-        // means the channel — and therefore its spawn action — isn't
-        // visible to them at all).
-        if !is_bot {
-            match crate::permissions::channel_permissions(&state.db, &pubkey, &channel_id).await {
-                Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
-                _ => return,
-            }
-        }
-
         match crate::routes::channels::spawn_temp_channel(
             &state.db,
             &channel_id,
@@ -187,6 +203,11 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         .or_default()
         .insert(pubkey.clone(), sentinel);
 
+    // events.md §7.3: apply any queued voice-move assignment now that the
+    // join has fully succeeded (mirrors the same call in the main hub WS
+    // voice-join handler, routes/ws/handlers/voice.rs).
+    apply_pending_voice_move_assignment(&state, &pubkey, &channel_id).await;
+
     // Create the mpsc channel used to push outbound binary frames to this client.
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     state
@@ -196,7 +217,7 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         .insert(pubkey.clone(), ws_tx);
 
     // Collect current participants and send the ready frame.
-    let participants = get_voice_participants(&state, &channel_id).await;
+    let participants = get_voice_participants(&state, &channel_id, Some(&pubkey)).await;
     let ready_msg = serde_json::json!({
         "type": "voice_ws_ready",
         "sender_id": sender_id,
@@ -208,18 +229,22 @@ async fn voice_ws_task(socket: WebSocket, params: VoiceWsParams, state: Arc<AppS
         "channel_id": channel_id,
     });
 
-    // Broadcast VoiceParticipantJoined so other WS chat clients update their UI.
-    let join_broadcast = WsServerMessage::VoiceParticipantJoined {
-        channel_id: channel_id.clone(),
-        participant: VoiceParticipantInfo {
-            public_key: pubkey.clone(),
-            display_name,
-            is_bot,
-        },
-    };
-    let _ = state
-        .voice_event_tx
-        .send((channel_id.clone(), join_broadcast));
+    // Broadcast VoiceParticipantJoined so other WS chat clients update their
+    // UI — unless the joiner is invisible (decisions.md 2026-07-12: shown
+    // offline to everyone else). Their own ready frame above includes them.
+    if !crate::routes::users::is_invisible(&state.db, &pubkey).await {
+        let join_broadcast = WsServerMessage::VoiceParticipantJoined {
+            channel_id: channel_id.clone(),
+            participant: VoiceParticipantInfo {
+                public_key: pubkey.clone(),
+                display_name,
+                is_bot,
+            },
+        };
+        let _ = state
+            .voice_event_tx
+            .send((channel_id.clone(), join_broadcast));
+    }
 
     // Split the socket into sender and receiver halves.
     let (mut sink, mut stream) = socket.split();

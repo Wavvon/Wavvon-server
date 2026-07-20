@@ -1,6 +1,7 @@
 use axum_test::TestServer;
 use serde_json::json;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
+use wavvon_hub::routes::hub::HubSettings;
 use wavvon_hub::routes::invite_models::InviteResponse;
 use wavvon_hub::routes::role_models::RoleResponse;
 use wavvon_identity::Identity;
@@ -281,6 +282,189 @@ async fn admin_granting_invite_is_forced_single_use() {
     );
 }
 
+// ── Follow-on: role-granting invites redeemed via /join/:code ────────────
+//
+// Task #34 shipped grant_role_id applied only on the /auth/verify
+// registration path (see the "Deferred" note in that commit). These three
+// tests cover the /join/:code existing-session redemption path, reusing the
+// same `apply_invite_role_grant` helper `join_with_invite` now calls.
+
+#[tokio::test]
+async fn join_with_invite_grants_role_on_join_code_path() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let role_id = create_role(&server, &owner_token, "Trusted", 10).await;
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "grant_role_id": role_id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+
+    // Member authenticates normally (open join, no invite needed to log in)
+    // then redeems the invite through the existing-session /join/:code path.
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&member_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    let role_ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        role_ids.contains(&role_id.as_str()),
+        "grant_role_id must be applied through /join/:code, not only /auth/verify"
+    );
+    assert!(role_ids.contains(&"builtin-everyone"));
+}
+
+#[tokio::test]
+async fn join_with_invite_priority_guard_blocks_grant_above_inviters_current_priority() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    // A mid-priority role with manage_channels, so its holder can mint
+    // invites (create_invite requires MANAGE_CHANNELS).
+    let manager_resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .await;
+    manager_resp.assert_status(axum::http::StatusCode::CREATED);
+    let manager_role: RoleResponse = manager_resp.json();
+
+    // The role the invite will (attempt to) grant — priority well below 500.
+    let bonus_role_id = create_role(&server, &owner_token, "Bonus", 50).await;
+
+    let manager = Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            manager_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    // While the manager still outranks "Bonus" (500 > 50), they mint a
+    // role-granting invite for it — allowed at creation time.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "grant_role_id": bonus_role_id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+
+    // The manager is demoted (Manager role removed) *after* minting the
+    // invite — their current max priority drops back to builtin-everyone's
+    // (0), which no longer outranks "Bonus" (50).
+    server
+        .delete(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            manager_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    // A new user redeems the now-stale invite through /join/:code. The join
+    // itself must still succeed...
+    let joiner = Identity::generate();
+    let joiner_token = common::authenticate(&server, &joiner).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&joiner_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // ...but the bonus role must be withheld: the priority guard is
+    // re-checked at redemption time, not just at mint time.
+    let resp = server
+        .get(&format!("/users/{}/roles", joiner.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    let role_ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        !role_ids.contains(&bonus_role_id.as_str()),
+        "the grant must be withheld once the inviter no longer outranks the granted role"
+    );
+    assert!(role_ids.contains(&"builtin-everyone"));
+}
+
+#[tokio::test]
+async fn join_with_invite_role_grant_respects_single_use_admin_invite() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let role_id = create_role(&server, &owner_token, "Sub-Admin", 100).await;
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+        .bind(&role_id)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+
+    // Admin-holding role -> create_invite forces max_uses=1 regardless of
+    // what's requested (task #34's existing guard).
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "grant_role_id": role_id, "max_uses": 50 }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+    assert_eq!(invite.max_uses, Some(1));
+
+    // First redemption through /join/:code succeeds and grants the role.
+    let first = Identity::generate();
+    let first_token = common::authenticate(&server, &first).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&first_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", first.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(roles.iter().any(|r| r.id == role_id));
+
+    // Second redemption attempt by a different user must be rejected as
+    // exhausted (single-use enforcement), and must not grant the role.
+    let second = Identity::generate();
+    let second_token = common::authenticate(&server, &second).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&second_token)
+        .await
+        .assert_status(axum::http::StatusCode::GONE);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", second.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(!roles.iter().any(|r| r.id == role_id));
+}
+
 #[tokio::test]
 async fn first_boot_owner_invite_grants_owner_and_is_one_time() {
     let server = common::setup_raw().await;
@@ -334,4 +518,550 @@ async fn first_boot_owner_invite_grants_owner_and_is_one_time() {
         }))
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+/// The end-to-end bootstrap flow demo-seed relies on (task: fix demo-seed vs
+/// invite-first defaults): a brand-new, ownerless, `invite_only=true` hub
+/// mints its first-boot owner invite; the admin identity redeems it (single
+/// use, so it can't be reused for anyone else); the now-owner admin mints a
+/// fresh multi-use invite via `POST /invites`; further identities redeem
+/// *that* invite to join as regular (non-owner) members.
+#[tokio::test]
+async fn first_boot_owner_invite_then_admin_minted_invite_onboards_members() {
+    let server = common::setup_raw().await;
+    let db = &server.state().db;
+
+    // Step 1: the hub mints the owner-granting invite for the ownerless hub,
+    // exactly as `maybe_mint_first_boot_owner_invite` is called from
+    // `main.rs` at real startup / `--doctor`.
+    let owner_code = wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(db)
+        .await
+        .unwrap()
+        .expect("a fresh, ownerless hub should mint a first-boot invite");
+
+    // Step 2: the admin identity (demo-seed's "Nova") redeems it and becomes
+    // builtin-owner.
+    let admin = Identity::generate();
+    let admin_token = authenticate_with_invite(&server, &admin, Some(owner_code.as_str())).await;
+    assert!(!admin_token.is_empty());
+
+    let resp = server
+        .get(&format!("/users/{}/roles", admin.public_key_hex()))
+        .authorization_bearer(&admin_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(roles.iter().any(|r| r.id == "builtin-owner"));
+
+    // Step 3: the admin mints a fresh invite for the rest of the roster —
+    // the owner invite is already exhausted (max_uses = 1) so it cannot be
+    // reused, matching demo-seed's fixed member-onboarding flow.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&admin_token)
+        .json(&json!({ "max_uses": 7 }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let members_invite: InviteResponse = resp.json();
+
+    // Step 4: a plain member identity redeems the admin-minted invite and
+    // joins successfully, without becoming owner.
+    let member = Identity::generate();
+    let member_token =
+        authenticate_with_invite(&server, &member, Some(members_invite.code.as_str())).await;
+    assert!(!member_token.is_empty());
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&admin_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(!roles.iter().any(|r| r.id == "builtin-owner"));
+
+    // Step 5: the same admin-minted invite still has uses left, so a second
+    // member can redeem it too (max_uses = 7, only 1 consumed so far).
+    let member2 = Identity::generate();
+    let member2_token =
+        authenticate_with_invite(&server, &member2, Some(members_invite.code.as_str())).await;
+    assert!(!member2_token.is_empty());
+
+    // Step 6: the original owner invite is still exhausted — a third party
+    // cannot reuse it even after the admin invite exists.
+    let intruder = Identity::generate();
+    let pub_key = intruder.public_key_hex();
+    let resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await;
+    let challenge: ChallengeResponse = resp.json();
+    let signature = intruder.sign(&hex::decode(&challenge.challenge).unwrap());
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+            "invite_code": owner_code,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+// ── Invite role policies: scenario 1 — inviter-chosen grant (mint-time gap check) ──
+//
+// role_granting_invite_assigns_role_on_join and
+// join_with_invite_priority_guard_blocks_grant_above_inviters_current_priority
+// (above) already cover the owner minting a grant invite and the
+// redemption-time re-check. These two close the specific gap called out for
+// invite role policies: a *non-admin* member who only holds the
+// invite-creation permission (`manage_channels`), not `admin`, still has the
+// mint-time priority guard enforced against their own current priority.
+
+#[tokio::test]
+async fn non_admin_member_with_invite_permission_can_grant_role_below_own_priority() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    // Mid-priority role carrying only `manage_channels` — enough to create
+    // invites, nowhere near `admin`.
+    let manager_resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .await;
+    manager_resp.assert_status(axum::http::StatusCode::CREATED);
+    let manager_role: RoleResponse = manager_resp.json();
+
+    // A role strictly below the manager's priority.
+    let low_role_id = create_role(&server, &owner_token, "LowRole", 50).await;
+
+    let manager = Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            manager_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "grant_role_id": low_role_id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+    assert_eq!(invite.grant_role_id.as_deref(), Some(low_role_id.as_str()));
+
+    // Redeemer gets the granted role via the existing-session /join/:code path.
+    let joiner = Identity::generate();
+    let joiner_token = common::authenticate(&server, &joiner).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&joiner_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", joiner.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    let role_ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        role_ids.contains(&low_role_id.as_str()),
+        "a non-admin member with only manage_channels should still be able to grant a role below their own priority"
+    );
+}
+
+#[tokio::test]
+async fn non_admin_member_with_invite_permission_cannot_grant_role_at_or_above_own_priority() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let manager_resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .await;
+    manager_resp.assert_status(axum::http::StatusCode::CREATED);
+    let manager_role: RoleResponse = manager_resp.json();
+
+    // Exactly the manager's own priority, and one strictly above it.
+    let equal_role_id = create_role(&server, &owner_token, "EqualRole", 500).await;
+    let higher_role_id = create_role(&server, &owner_token, "HigherRole", 900).await;
+
+    let manager = Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            manager_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    server
+        .post("/invites")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "grant_role_id": equal_role_id }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    server
+        .post("/invites")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "grant_role_id": higher_role_id }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn member_without_invite_permission_cannot_create_any_invite() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    // A brand-new member holds only `builtin-everyone`, which carries no
+    // permissions at all — confirms invite creation is actually gated on
+    // `manage_channels`, not merely on being an authenticated member.
+    let plain = Identity::generate();
+    let plain_token = common::authenticate(&server, &plain).await;
+
+    server
+        .post("/invites")
+        .authorization_bearer(&plain_token)
+        .json(&json!({}))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    // Sanity: the owner (admin) can still mint one.
+    server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+}
+
+// ── Invite role policies: scenario 2 — hub-level default_invite_role_id ────
+
+#[tokio::test]
+async fn default_invite_role_applies_via_join_code_path() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let role_id = create_role(&server, &owner_token, "Newcomer", 10).await;
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": role_id }))
+        .await
+        .assert_status_ok();
+
+    // Plain invite — no explicit grant_role_id.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+    assert!(invite.grant_role_id.is_none());
+
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&member_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    let role_ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        role_ids.contains(&role_id.as_str()),
+        "the hub-level default_invite_role_id should be granted when the invite has no explicit grant"
+    );
+}
+
+#[tokio::test]
+async fn default_invite_role_applies_via_auth_verify_path() {
+    let server = common::setup_raw().await;
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at)
+         VALUES ('ownercode', 'system', 1, 0, NULL, $1)",
+    )
+    .bind(now)
+    .execute(&server.state().db)
+    .await
+    .unwrap();
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_with_invite(&server, &owner, Some("ownercode")).await;
+
+    let role_id = create_role(&server, &owner_token, "Newcomer", 10).await;
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": role_id }))
+        .await
+        .assert_status_ok();
+
+    // Owner mints a plain (non-role-granting) invite for new registrations.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "max_uses": 5 }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+
+    let member = Identity::generate();
+    let member_token = authenticate_with_invite(&server, &member, Some(invite.code.as_str())).await;
+    assert!(!member_token.is_empty());
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    let role_ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        role_ids.contains(&role_id.as_str()),
+        "the hub-level default_invite_role_id should be granted on the /auth/verify registration path too"
+    );
+}
+
+#[tokio::test]
+async fn explicit_grant_role_overrides_default_invite_role() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let default_role_id = create_role(&server, &owner_token, "DefaultRole", 5).await;
+    let explicit_role_id = create_role(&server, &owner_token, "ExplicitRole", 10).await;
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": default_role_id }))
+        .await
+        .assert_status_ok();
+
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "grant_role_id": explicit_role_id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&member_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    let role_ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
+    assert!(
+        role_ids.contains(&explicit_role_id.as_str()),
+        "the invite's own explicit grant_role_id must be applied"
+    );
+    assert!(
+        !role_ids.contains(&default_role_id.as_str()),
+        "an explicit grant must win over the hub-level default, not stack with it"
+    );
+}
+
+#[tokio::test]
+async fn default_invite_role_skipped_when_role_deleted() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let role_id = create_role(&server, &owner_token, "Newcomer", 10).await;
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": role_id }))
+        .await
+        .assert_status_ok();
+
+    // Delete the role after it's been configured as the default.
+    server
+        .delete(&format!("/roles/{role_id}"))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&member_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(
+        !roles.iter().any(|r| r.id == role_id),
+        "a default role deleted since it was configured must be silently skipped"
+    );
+    assert!(roles.iter().any(|r| r.id == "builtin-everyone"));
+}
+
+#[tokio::test]
+async fn default_invite_role_skipped_when_role_gains_admin_after_being_configured() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let role_id = create_role(&server, &owner_token, "PromotedLater", 10).await;
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": role_id }))
+        .await
+        .assert_status_ok();
+
+    // The role gains `admin` directly at the DB layer after being configured
+    // as the default — simulates an admin editing role permissions later.
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+        .bind(&role_id)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invite: InviteResponse = resp.json();
+
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+    server
+        .post(&format!("/join/{}", invite.code))
+        .authorization_bearer(&member_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/users/{}/roles", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await;
+    let roles: Vec<RoleResponse> = resp.json();
+    assert!(
+        !roles.iter().any(|r| r.id == role_id),
+        "a default role that gained admin since being configured must be silently refused, not granted"
+    );
+}
+
+#[tokio::test]
+async fn setting_admin_permission_role_as_default_invite_role_is_rejected() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let role_id = create_role(&server, &owner_token, "Sub-Admin", 100).await;
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+        .bind(&role_id)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+
+    let resp = server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": role_id }))
+        .await;
+    assert!(
+        !resp.status_code().is_success(),
+        "setting an admin-permission role as the invite default must be rejected"
+    );
+
+    let resp = server
+        .get("/hub/settings")
+        .authorization_bearer(&owner_token)
+        .await;
+    let settings: HubSettings = resp.json();
+    assert!(
+        settings.default_invite_role_id.is_none(),
+        "the rejected value must never have been persisted"
+    );
+}
+
+#[tokio::test]
+async fn default_invite_role_can_be_set_and_cleared() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let role_id = create_role(&server, &owner_token, "Newcomer", 10).await;
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": role_id }))
+        .await
+        .assert_status_ok();
+
+    let resp = server
+        .get("/hub/settings")
+        .authorization_bearer(&owner_token)
+        .await;
+    let settings: HubSettings = resp.json();
+    assert_eq!(
+        settings.default_invite_role_id.as_deref(),
+        Some(role_id.as_str())
+    );
+
+    // Empty string clears it, matching the convention used elsewhere in
+    // this same PATCH /hub endpoint.
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "default_invite_role_id": "" }))
+        .await
+        .assert_status_ok();
+
+    let resp = server
+        .get("/hub/settings")
+        .authorization_bearer(&owner_token)
+        .await;
+    let settings: HubSettings = resp.json();
+    assert!(settings.default_invite_role_id.is_none());
 }

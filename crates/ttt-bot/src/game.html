@@ -1,0 +1,109 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Tic-Tac-Toe</title>
+<style>
+  body { font-family: sans-serif; background: #1e1f22; color: #eee; display: flex;
+         flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  #status { margin-bottom: 16px; font-size: 18px; }
+  #board { display: grid; grid-template-columns: repeat(3, 80px); grid-gap: 6px; }
+  .cell { width: 80px; height: 80px; font-size: 36px; background: #2b2d31; color: #fff;
+          border: 1px solid #444; cursor: pointer; }
+  .cell:disabled { cursor: default; opacity: 0.85; }
+</style>
+</head>
+<body>
+  <div id="status">Waiting for the hub connection…</div>
+  <div id="board"></div>
+<script>
+  // Phase 1 demo game modal (bot-capability-layer.md §7 step 4). Context
+  // arrives via postMessage from the GameModal host (packages/ui
+  // GameModal.tsx sends `{type:"wavvon_context", hub_url, token,
+  // channel_id, bot_id}` on iframe load). Moves ride the hub's ordinary WS
+  // relay via the generic `mini_app_message` envelope -- the hub never
+  // inspects the payload; the bot owns and validates the board.
+  let ctx = null;
+  let ws = null;
+  let lastState = null;
+
+  const boardEl = document.getElementById("board");
+  const statusEl = document.getElementById("status");
+  const cells = [];
+  for (let i = 0; i < 9; i++) {
+    const btn = document.createElement("button");
+    btn.className = "cell";
+    // Disabled until the first state round-trip (render() below) — otherwise
+    // a click before "hello" gets a reply silently no-ops on the `!lastState`
+    // guard in onCellClick instead of visibly doing nothing.
+    btn.disabled = true;
+    btn.addEventListener("click", () => onCellClick(i));
+    boardEl.appendChild(btn);
+    cells.push(btn);
+  }
+
+  window.addEventListener("message", (ev) => {
+    if (ev.data && ev.data.type === "wavvon_context") {
+      ctx = ev.data;
+      connect();
+    }
+  });
+
+  function connect() {
+    const wsUrl = ctx.hub_url.replace(/^http/, "ws") + "/ws?token=" + encodeURIComponent(ctx.token);
+    ws = new WebSocket(wsUrl);
+    ws.addEventListener("open", () => send({ kind: "hello" }));
+    ws.addEventListener("message", onMessage);
+    ws.addEventListener("close", () => { statusEl.textContent = "Disconnected."; });
+  }
+
+  // Liveness convention (bot-capability-layer.md §10): a ~10s heartbeat so
+  // the bot's roster notices a hung/crashed tab, plus a best-effort `bye`
+  // on unload so a clean close is noticed immediately instead of waiting
+  // out the heartbeat timeout.
+  setInterval(() => send({ kind: "ping" }), 10000);
+  window.addEventListener("beforeunload", () => send({ kind: "bye" }));
+
+  function send(payloadObj) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: "mini_app_message",
+      bot_id: ctx.bot_id,
+      channel_id: ctx.channel_id,
+      payload: JSON.stringify(payloadObj),
+    }));
+  }
+
+  function onMessage(ev) {
+    let frame;
+    try { frame = JSON.parse(ev.data); } catch { return; }
+    if (frame.type !== "mini_app_message") return;
+    let state;
+    try { state = JSON.parse(frame.payload); } catch { return; }
+    render(state);
+  }
+
+  function onCellClick(i) {
+    if (!lastState || lastState.finished) return;
+    if (lastState.board[i] !== null) return;
+    if (lastState.turn !== lastState.you) return;
+    send({ kind: "move", cell: i });
+  }
+
+  function render(state) {
+    lastState = state;
+    for (let i = 0; i < 9; i++) {
+      cells[i].textContent = state.board[i] || "";
+      cells[i].disabled = state.finished || state.board[i] !== null || state.turn !== state.you;
+    }
+    if (state.finished) {
+      statusEl.textContent = state.winner
+        ? (state.winner === state.you ? "You win!" : "You lose.")
+        : "Draw!";
+    } else {
+      statusEl.textContent = state.turn === state.you ? "Your move" : "Waiting for opponent…";
+    }
+  }
+</script>
+</body>
+</html>

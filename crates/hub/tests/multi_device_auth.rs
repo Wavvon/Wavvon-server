@@ -36,6 +36,7 @@ async fn setup() -> (common::TestHarness, PgPool) {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx: broadcast::channel(16).0,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -51,6 +52,7 @@ async fn setup() -> (common::TestHarness, PgPool) {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -62,6 +64,8 @@ async fn setup() -> (common::TestHarness, PgPool) {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(

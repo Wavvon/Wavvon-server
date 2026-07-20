@@ -6,11 +6,86 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
+use crate::routes::me::{parse_favorite_hubs, FavoriteHub};
 use crate::state::AppState;
+
+/// Row shape for the profile fields SELECT in `get_user_profile`:
+/// display_name, avatar, first_seen_at, bio, pronouns, status_message,
+/// activities, accent_color, cover, favorite_hubs, show_hubs.
+#[allow(clippy::type_complexity)]
+type UserProfileRow = (
+    Option<String>,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<bool>,
+);
 
 #[derive(Deserialize)]
 pub struct UserSearchParams {
     pub q: Option<String>,
+}
+
+/// Whether a user's presence should be *reported* to other members as
+/// online, given whether they have a live connection and their stored
+/// `presence_status`. A user with `presence_status == "invisible"` always
+/// reports as offline here, regardless of `is_connected` — they remain
+/// fully connected for delivery purposes (DMs, messages, voice); only what
+/// other members are told about their presence changes.
+pub(crate) fn reported_online(is_connected: bool, presence_status: Option<&str>) -> bool {
+    is_connected && presence_status != Some("invisible")
+}
+
+/// Fetch a user's stored `presence_status` column. Used by the WS presence
+/// paths (connect/disconnect/set_status) to decide whether the invisible
+/// gate applies, independent of the roster read path above.
+pub(crate) async fn fetch_presence_status(db: &sqlx::PgPool, public_key: &str) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT presence_status FROM users WHERE public_key = $1",
+    )
+    .bind(public_key)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+}
+
+/// Convenience single-user form of the invisible check used by the voice
+/// participant surfaces (see `invisible_subset`).
+pub(crate) async fn is_invisible(db: &sqlx::PgPool, public_key: &str) -> bool {
+    fetch_presence_status(db, public_key).await.as_deref() == Some("invisible")
+}
+
+/// Subset of `keys` whose stored `presence_status` is "invisible". The voice
+/// participant surfaces (lists, rosters, populations) use this to hide
+/// invisible users from *other* members the same way `reported_online` hides
+/// them from the member roster — decisions.md 2026-07-12 specifies invisible
+/// as "shown offline to everyone else", and the voice participant list was
+/// the flagged known gap. Delivery/voice/relay paths are never filtered:
+/// only what other members are shown changes.
+pub(crate) async fn invisible_subset(
+    db: &sqlx::PgPool,
+    keys: &[String],
+) -> std::collections::HashSet<String> {
+    if keys.is_empty() {
+        return std::collections::HashSet::new();
+    }
+    sqlx::query_scalar::<_, String>(
+        "SELECT public_key FROM users WHERE public_key = ANY($1) AND presence_status = 'invisible'",
+    )
+    .bind(keys)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .collect()
 }
 
 #[derive(Serialize)]
@@ -22,6 +97,8 @@ pub struct UserInfo {
     pub online: bool,
     /// Presence status for online users: None = plain online, "away", "dnd".
     /// Always None while offline (the stored value is not surfaced).
+    /// Also always None for a connected user whose stored status is
+    /// "invisible" — see `reported_online`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     /// Optional short custom status text; only surfaced while online.
@@ -92,7 +169,8 @@ pub async fn list_users(
     let result: Vec<UserInfo> = rows
         .into_iter()
         .map(|r| {
-            let is_online = online.contains_key(&r.public_key);
+            let is_connected = online.contains_key(&r.public_key);
+            let is_online = reported_online(is_connected, r.presence_status.as_deref());
             UserInfo {
                 online: is_online,
                 status: r.presence_status.filter(|_| is_online),
@@ -139,7 +217,8 @@ pub async fn channel_members(
     Ok(Json(
         rows.into_iter()
             .map(|r| {
-                let is_online = online.contains_key(&r.public_key);
+                let is_connected = online.contains_key(&r.public_key);
+                let is_online = reported_online(is_connected, r.presence_status.as_deref());
                 UserInfo {
                     online: is_online,
                     status: r.presence_status.filter(|_| is_online),
@@ -186,6 +265,8 @@ pub struct RoleSummary {
     pub id: String,
     pub name: String,
     pub color: Option<String>,
+    pub icon: Option<String>,
+    pub category_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -199,6 +280,22 @@ pub struct UserProfileResponse {
     pub public_key: String,
     pub display_name: Option<String>,
     pub avatar: Option<String>,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub pronouns: Option<String>,
+    #[serde(default)]
+    pub status_message: Option<String>,
+    #[serde(default)]
+    pub activities: Option<String>,
+    #[serde(default)]
+    pub accent_color: Option<String>,
+    #[serde(default)]
+    pub cover: Option<String>,
+    #[serde(default)]
+    pub show_hubs: bool,
+    #[serde(default)]
+    pub favorite_hubs: Vec<FavoriteHub>,
     pub joined_at: i64,
     pub roles: Vec<RoleSummary>,
     pub badges: Vec<BadgeSummary>,
@@ -207,19 +304,41 @@ pub struct UserProfileResponse {
 /// GET /users/:pubkey/profile
 pub async fn get_user_profile(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(pubkey): Path<String>,
 ) -> Result<Json<UserProfileResponse>, (StatusCode, String)> {
-    let row: Option<(Option<String>, Option<String>, i64)> = sqlx::query_as(
-        "SELECT display_name, avatar, first_seen_at FROM users WHERE public_key = $1",
+    let row: Option<UserProfileRow> = sqlx::query_as(
+        "SELECT display_name, avatar, first_seen_at, bio, pronouns, status_message, activities, accent_color, cover, favorite_hubs, show_hubs FROM users WHERE public_key = $1",
     )
     .bind(&pubkey)
     .fetch_optional(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (display_name, avatar, joined_at) =
-        row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+    let (
+        display_name,
+        avatar,
+        joined_at,
+        bio,
+        pronouns,
+        status_message,
+        activities,
+        accent_color,
+        cover,
+        favorite_hubs_raw,
+        show_hubs_raw,
+    ) = row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    let show_hubs = show_hubs_raw.unwrap_or(false);
+    // Privacy gate: a hidden favorite-hubs list is never exposed to other
+    // members, but the profile owner viewing their own profile always sees
+    // their real stored list regardless of show_hubs (the web editor reads
+    // its own profile through this endpoint).
+    let favorite_hubs = if show_hubs || user.public_key == pubkey {
+        parse_favorite_hubs(&favorite_hubs_raw)
+    } else {
+        Vec::new()
+    };
 
     // Fetch roles assigned to this user (reuse the RoleResponse pattern from me.rs).
     #[derive(sqlx::FromRow)]
@@ -227,10 +346,12 @@ pub async fn get_user_profile(
         id: String,
         name: String,
         color: Option<String>,
+        icon: Option<String>,
+        category_id: Option<String>,
     }
 
     let roles: Vec<RoleRow> = sqlx::query_as(
-        "SELECT r.id, r.name, NULL as color
+        "SELECT r.id, r.name, r.color, r.icon, r.category_id
          FROM roles r
          INNER JOIN user_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
@@ -247,6 +368,8 @@ pub async fn get_user_profile(
             id: r.id,
             name: r.name,
             color: r.color,
+            icon: r.icon,
+            category_id: r.category_id,
         })
         .collect();
 
@@ -278,8 +401,44 @@ pub async fn get_user_profile(
         public_key: pubkey,
         display_name,
         avatar,
+        bio,
+        pronouns,
+        status_message,
+        activities,
+        accent_color,
+        cover,
+        show_hubs,
+        favorite_hubs,
         joined_at,
         roles: role_summaries,
         badges: badge_summaries,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reported_online;
+
+    #[test]
+    fn connected_plain_online_reports_online() {
+        assert!(reported_online(true, None));
+    }
+
+    #[test]
+    fn connected_away_or_dnd_reports_online_with_status_intact() {
+        assert!(reported_online(true, Some("away")));
+        assert!(reported_online(true, Some("dnd")));
+    }
+
+    #[test]
+    fn connected_invisible_reports_offline() {
+        assert!(!reported_online(true, Some("invisible")));
+    }
+
+    #[test]
+    fn disconnected_never_reports_online_regardless_of_status() {
+        assert!(!reported_online(false, None));
+        assert!(!reported_online(false, Some("away")));
+        assert!(!reported_online(false, Some("invisible")));
+    }
 }

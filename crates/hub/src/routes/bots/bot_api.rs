@@ -96,6 +96,8 @@ pub async fn bot_send_message(
         reply_to: None,
         visible_to_pubkey: None,
         reply_count: 0,
+        embeds: None,
+        game: None,
     };
     {
         let ws_msg = WsServerMessage::ChatMessage {

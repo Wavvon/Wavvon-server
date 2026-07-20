@@ -15,6 +15,19 @@ async fn create_channel(server: &TestServer, token: &str) -> String {
     resp.json::<Value>()["id"].as_str().unwrap().to_string()
 }
 
+/// Denies `permission` for `@everyone` on `channel_id` via the
+/// channel-permission-overwrites admin route (§3.6).
+async fn deny_everyone(server: &TestServer, owner_token: &str, channel_id: &str, permission: &str) {
+    let resp = server
+        .put(&format!(
+            "/channels/{channel_id}/permissions/builtin-everyone"
+        ))
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .json(&json!({ "allow": [], "deny": [permission] }))
+        .await;
+    resp.assert_status_ok();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -208,4 +221,141 @@ async fn poll_delete_rejected_for_non_creator() {
         .add_header("Authorization", format!("Bearer {token_other}"))
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+/// GET /channels/:id/polls happy path: created polls come back newest-first,
+/// with vote totals and the caller's own vote merged into each option.
+#[tokio::test]
+async fn list_polls_happy_path() {
+    let server = common::setup().await;
+    let id = Identity::generate();
+    let token = common::authenticate(&server, &id).await;
+    let channel_id = create_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "question": "First poll",
+            "options": [
+                { "id": "a", "text": "A" },
+                { "id": "b", "text": "B" },
+            ],
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let first_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
+
+    // created_at has second granularity; sleep past the second boundary so
+    // the two polls sort deterministically by newest-first.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "question": "Second poll",
+            "options": [
+                { "id": "y", "text": "Yes" },
+                { "id": "n", "text": "No" },
+            ],
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let second_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
+
+    // Vote on the second poll and confirm the listing reflects it.
+    let resp = server
+        .post(&format!("/polls/{second_id}/vote"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "option_ids": ["y"] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let resp = server
+        .get(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    resp.assert_status_ok();
+    let polls: Value = resp.json();
+    let arr = polls.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+
+    // Newest first: the second poll created should come before the first.
+    assert_eq!(arr[0]["id"], second_id);
+    assert_eq!(arr[1]["id"], first_id);
+
+    // Second poll: option "y" carries the vote, matches client Poll shape.
+    let second = &arr[0];
+    assert_eq!(second["question"], "Second poll");
+    assert_eq!(second["total_votes"], 1);
+    assert_eq!(second["is_deleted"], false);
+    let options = second["options"].as_array().unwrap();
+    let yes_opt = options.iter().find(|o| o["id"] == "y").unwrap();
+    assert_eq!(yes_opt["vote_count"], 1);
+    assert_eq!(yes_opt["voted"], true);
+    let no_opt = options.iter().find(|o| o["id"] == "n").unwrap();
+    assert_eq!(no_opt["vote_count"], 0);
+    assert_eq!(no_opt["voted"], false);
+
+    // First poll: no votes yet.
+    let first = &arr[1];
+    assert_eq!(first["total_votes"], 0);
+}
+
+/// A member denied `read_messages` on a channel gets 403 on the poll
+/// listing; the channel owner (admin, immune) still sees it.
+#[tokio::test]
+async fn list_polls_rejected_for_member_denied_read_messages() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    let channel_id = create_channel(&server, &owner_token).await;
+    let resp = server
+        .post(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .json(&json!({
+            "question": "Secret poll",
+            "options": [
+                { "id": "a", "text": "A" },
+                { "id": "b", "text": "B" },
+            ],
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+
+    deny_everyone(&server, &owner_token, &channel_id, "read_messages").await;
+
+    server
+        .get(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    let resp = server
+        .get(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .await;
+    resp.assert_status_ok();
+    assert_eq!(resp.json::<Value>().as_array().unwrap().len(), 1);
+}
+
+/// A channel with no polls returns an empty array, not a 404.
+#[tokio::test]
+async fn list_polls_empty_channel_returns_empty_array() {
+    let server = common::setup().await;
+    let id = Identity::generate();
+    let token = common::authenticate(&server, &id).await;
+    let channel_id = create_channel(&server, &token).await;
+
+    let resp = server
+        .get(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    resp.assert_status_ok();
+    let polls: Value = resp.json();
+    assert!(polls.as_array().unwrap().is_empty());
 }

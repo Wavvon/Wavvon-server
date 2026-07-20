@@ -115,12 +115,14 @@ async fn full_pairing_handshake() {
         other => panic!("expected Claimed, got {other:?}"),
     }
 
-    // Existing device completes
+    // Existing device completes, including the wrapped canonical DH scalar
+    // (decisions.md "DH capability via a wrapped canonical scalar").
     let cert = make_cert(&master, &phone.public_key_hex(), "phone");
     let complete = PairingComplete {
         pairing_token: token.clone(),
         cert: cert.clone(),
         wrapped_blob_key_hex: "deadbeef".to_string(),
+        wrapped_dh_seed_hex: Some("cafef00d".to_string()),
     };
     server
         .post("/identity/pairing/complete")
@@ -128,7 +130,7 @@ async fn full_pairing_handshake() {
         .await
         .assert_status_ok();
 
-    // Status: complete, with cert + wrapped key
+    // Status: complete, with cert + wrapped key + wrapped DH scalar
     let resp = server
         .get(&format!("/identity/pairing/status/{token}"))
         .await;
@@ -137,10 +139,12 @@ async fn full_pairing_handshake() {
         PairingStatus::Complete {
             cert: returned_cert,
             wrapped_blob_key_hex,
+            wrapped_dh_seed_hex,
         } => {
             assert_eq!(returned_cert.subkey_pubkey, phone.public_key_hex());
             assert!(returned_cert.verify().is_ok());
             assert_eq!(wrapped_blob_key_hex, "deadbeef");
+            assert_eq!(wrapped_dh_seed_hex, Some("cafef00d".to_string()));
         }
         other => panic!("expected Complete, got {other:?}"),
     }
@@ -250,6 +254,7 @@ async fn complete_before_claim_is_rejected() {
         pairing_token: token,
         cert,
         wrapped_blob_key_hex: "deadbeef".into(),
+        wrapped_dh_seed_hex: None,
     };
 
     let resp = server
@@ -284,6 +289,7 @@ async fn complete_rejects_subkey_mismatch() {
         pairing_token: token,
         cert,
         wrapped_blob_key_hex: "deadbeef".into(),
+        wrapped_dh_seed_hex: None,
     };
 
     let resp = server
@@ -319,6 +325,7 @@ async fn complete_rejects_master_mismatch() {
         pairing_token: token,
         cert,
         wrapped_blob_key_hex: "deadbeef".into(),
+        wrapped_dh_seed_hex: None,
     };
 
     let resp = server

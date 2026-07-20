@@ -163,6 +163,31 @@ pub struct SetWebhookRequest {
     pub webhook_url: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct SetCapabilitiesRequest {
+    pub capabilities: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct CapabilitiesResponse {
+    pub bot_pubkey: String,
+    pub capabilities: Vec<String>,
+}
+
+/// GET /admin/bots/:pubkey/capabilities response (bot-capability-layer.md
+/// §1, §6 Phase 1 item 2 follow-up): the three sets side by side so the
+/// admin panel can render requested vs. granted vs. what's actually live.
+#[derive(Serialize)]
+pub struct CapabilitiesReadResponse {
+    /// Self-declared capabilities (external bots' `bot_profiles.capabilities`).
+    /// Empty for a self-service bot -- it has no self-declaration mechanism.
+    pub requested: Vec<String>,
+    /// Admin-granted rows from `bot_capability_grants`.
+    pub granted: Vec<String>,
+    /// `effective_capabilities()` output -- the only set any runtime gate trusts.
+    pub effective: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Bot API request / response types
 // ---------------------------------------------------------------------------
@@ -230,6 +255,31 @@ pub struct AcceptInviteResponse {
     pub status: String,
 }
 
+/// `GET /admin/bots/external` row (bots.md §4 "Admin UI"): the admin
+/// management view over `users` rows with `is_bot=1`, unlike `BotListEntry`
+/// (the member-facing `GET /bots` directory) this includes pending invites,
+/// removed bots, and the admin-only local note.
+#[derive(Serialize)]
+pub struct ExternalBotAdminInfo {
+    pub public_key: String,
+    pub display_name: Option<String>,
+    pub local_note: Option<String>,
+    pub approval_status: &'static str,
+    pub last_seen_at: Option<i64>,
+}
+
+#[derive(Deserialize)]
+pub struct SetChannelScopeRequest {
+    #[serde(default)]
+    pub channel_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct ChannelScopeResponse {
+    pub bot_pubkey: String,
+    pub channel_ids: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct BotListEntry {
     pub pubkey: String,
@@ -242,6 +292,10 @@ pub struct BotListEntry {
     pub last_seen_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_url: Option<String>,
+    /// Profile-declared game descriptor (bot-capability-layer.md §11): the
+    /// per-hub bot directory's Play affordance. Absent = no game declared.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
     pub commands: Vec<BotCommandSummary>,
 }
 

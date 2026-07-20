@@ -44,6 +44,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -59,6 +60,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: RwLock::new(HashMap::new()),
         voice_consumed_tokens: RwLock::new(HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -70,6 +72,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -488,6 +492,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>, common::TestDbGuar
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: udp_port,
+        voice_udp_addr: None,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -503,6 +508,7 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>, common::TestDbGuar
         whisper_targets: RwLock::new(HashMap::new()),
         whisper_target_defs: RwLock::new(HashMap::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: RwLock::new(HashMap::new()),
         voice_consumed_tokens: RwLock::new(HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -514,6 +520,8 @@ async fn start_hub_with_udp() -> (String, u16, Arc<AppState>, common::TestDbGuar
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -1132,6 +1140,31 @@ async fn invite_and_auth_bot(
     verify.token
 }
 
+/// Grants a set of capabilities to a bot via `PUT
+/// /admin/bots/:pubkey/capabilities` (bot-capability-layer.md §1, §6 Phase
+/// 1 item 2). `admin_token` must belong to a member with the `admin`
+/// permission (the hub's first authenticated user, per `setup`/`start_hub`
+/// conventions used throughout this file).
+async fn grant_capabilities(
+    base: &str,
+    admin_token: &str,
+    bot_pubkey: &str,
+    capabilities: &[&str],
+) {
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/admin/bots/{bot_pubkey}/capabilities"))
+        .bearer_auth(admin_token)
+        .json(&json!({ "capabilities": capabilities }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "capability grant should succeed: {}",
+        resp.status()
+    );
+}
+
 /// Connects to `/voice/ws?token=..&channel_id=..`, the same wire format
 /// `/voice/ws` uses for human web clients.
 async fn connect_voice_ws(
@@ -1161,9 +1194,10 @@ async fn connect_voice_ws(
     ws.split()
 }
 
-/// A bot session with the `can_speak_voice` capability can join `/voice/ws`
-/// as a first-class participant: it receives `voice_ws_ready` and shows up
-/// in the HTTP voice roster.
+/// A bot session with `can_speak_voice` both requested (bot_meta at auth)
+/// AND granted (admin, bot-capability-layer.md §1) can join `/voice/ws` as
+/// a first-class participant: it receives `voice_ws_ready` and shows up in
+/// the HTTP voice roster.
 #[tokio::test]
 async fn bot_with_can_speak_voice_registers_as_voice_sender() {
     let (base, _state, _guard) = start_hub().await;
@@ -1173,6 +1207,13 @@ async fn bot_with_can_speak_voice_registers_as_voice_sender() {
 
     let bot = Identity::generate();
     let bot_token = invite_and_auth_bot(&base, &owner_token, &bot, &["can_speak_voice"]).await;
+    grant_capabilities(
+        &base,
+        &owner_token,
+        &bot.public_key_hex(),
+        &["can_speak_voice"],
+    )
+    .await;
 
     let (_tx, mut rx) = connect_voice_ws(&base, &bot_token, &ch.id).await;
 
@@ -1253,5 +1294,357 @@ async fn bot_without_can_speak_voice_capability_is_rejected() {
             .map(|m| m.iter().any(|p| p["public_key"] == bot.public_key_hex()))
             .unwrap_or(false),
         "uncapable bot must not appear in the voice roster"
+    );
+}
+
+/// bot-capability-layer.md §1's core behavior change: a bot that *requests*
+/// `can_speak_voice` (self-declared in `bot_meta` at auth) but which no
+/// admin has *granted* it is still refused -- the effective gate is
+/// requested ∩ granted, never the self-declared set alone.
+#[tokio::test]
+async fn bot_with_requested_but_ungranted_capability_is_rejected() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "bot-voice-ungranted").await;
+
+    let bot = Identity::generate();
+    // Requests the capability at auth time, but no admin ever grants it.
+    let bot_token = invite_and_auth_bot(&base, &owner_token, &bot, &["can_speak_voice"]).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &bot_token, &ch.id).await;
+
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rx.next()).await;
+    if let Ok(Some(Ok(TsMessage::Text(t)))) = outcome {
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_ne!(
+            v["type"], "voice_ws_ready",
+            "requested-but-ungranted bot must not be registered as a voice sender"
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == bot.public_key_hex()))
+            .unwrap_or(false),
+        "requested-but-ungranted bot must not appear in the voice roster"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// H: human joins to /voice/ws had no read gate at all (see ROADMAP.md Known
+// issues, docs/docs/events.md §7.4 implementation note). A plain human join
+// to a normal channel must now be rejected the same way the main hub WS
+// `voice_join` handler rejects it -- UNLESS a voice-only presence grant
+// (events.md §7.4) covers the (pubkey, channel) pair.
+// ---------------------------------------------------------------------------
+
+/// Denies `permission` for `@everyone` on `channel_id` via the
+/// channel-permission-overwrites admin route (§3.6). Mirrors
+/// `ws_read_gating_flow.rs`'s `deny_everyone`.
+async fn deny_everyone(base: &str, owner_token: &str, channel_id: &str, permission: &str) {
+    let resp = reqwest::Client::new()
+        .put(format!(
+            "{base}/channels/{channel_id}/permissions/builtin-everyone"
+        ))
+        .bearer_auth(owner_token)
+        .json(&json!({ "allow": [], "deny": [permission] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+}
+
+/// Regression test for the read-gate hole: a plain human member, denied
+/// `read_messages` on a channel, must be rejected by `/voice/ws` rather than
+/// silently admitted -- no `voice_ws_ready` frame, and no entry in the voice
+/// roster.
+#[tokio::test]
+async fn human_without_read_access_is_rejected_over_voice_ws() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "human-voice-denied").await;
+    deny_everyone(&base, &owner_token, &ch.id, "read_messages").await;
+
+    let member = Identity::generate();
+    let member_token = authenticate_http(&base, &member).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &member_token, &ch.id).await;
+
+    // The gate makes the server task return without ever sending a frame,
+    // so the connection closes (or the stream ends) instead of yielding a
+    // voice_ws_ready message. Close frame, stream end, or a transport error
+    // are all acceptable "rejected" outcomes.
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), rx.next()).await;
+    if let Ok(Some(Ok(TsMessage::Text(t)))) = outcome {
+        let v: Value = serde_json::from_str(&t).unwrap();
+        assert_ne!(
+            v["type"], "voice_ws_ready",
+            "a member without read_messages must not be admitted to /voice/ws"
+        );
+    }
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == member.public_key_hex()))
+            .unwrap_or(false),
+        "rejected member must not appear in the voice roster"
+    );
+}
+
+/// Sanity check: an ordinary member on a normal, readable channel still
+/// joins `/voice/ws` fine -- guards against over-tightening the new gate.
+#[tokio::test]
+async fn human_with_read_access_joins_voice_ws_normally() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "human-voice-ok").await;
+
+    let member = Identity::generate();
+    let member_token = authenticate_http(&base, &member).await;
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &member_token, &ch.id).await;
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["type"], "voice_ws_ready");
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let members = roster
+        .get(&ch.id)
+        .expect("readable channel should have a voice roster entry");
+    assert!(
+        members
+            .iter()
+            .any(|m| m["public_key"] == member.public_key_hex()),
+        "member with read access should appear in the voice roster"
+    );
+}
+
+/// Invisible presence gate on the voice surfaces (decisions.md 2026-07-12's
+/// flagged known gap): an invisible member who joins voice must be hidden
+/// from other members' `/voice/participants`, `/voice/active-users`, and
+/// `/voice/populations` — while staying fully registered in voice
+/// (functional, just not shown) and still seeing their own entry.
+#[tokio::test]
+async fn invisible_user_hidden_from_others_voice_participant_lists() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "invisible-voice").await;
+
+    let ghost = Identity::generate();
+    let ghost_token = authenticate_http(&base, &ghost).await;
+    // The gate reads users.presence_status (same column handle_set_status
+    // persists — the WS set_status path is covered by
+    // presence_multi_session_flow.rs); set it directly.
+    sqlx::query("UPDATE users SET presence_status = 'invisible' WHERE public_key = $1")
+        .bind(ghost.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &ghost_token, &ch.id).await;
+
+    // Invisible users stay functional in voice: the join succeeds and the
+    // ready frame's participant list still shows the joiner their own entry
+    // (viewer self-exemption).
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(v["type"], "voice_ws_ready");
+    assert!(
+        v["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["public_key"] == ghost.public_key_hex()),
+        "invisible joiner must still see their own entry in the ready frame"
+    );
+    assert!(
+        state
+            .voice_channels
+            .read()
+            .await
+            .get(&ch.id)
+            .map(|m| m.contains_key(&ghost.public_key_hex()))
+            .unwrap_or(false),
+        "invisible joiner must remain registered in voice_channels (functional)"
+    );
+
+    let client = reqwest::Client::new();
+
+    // Another member's view: the ghost is absent from every voice surface.
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == ghost.public_key_hex()))
+            .unwrap_or(false),
+        "invisible user must not appear in another member's /voice/participants"
+    );
+
+    let active: Vec<String> = client
+        .get(format!("{base}/voice/active-users"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !active.contains(&ghost.public_key_hex()),
+        "invisible user must not appear in another member's /voice/active-users"
+    );
+
+    let populations: std::collections::HashMap<String, usize> = client
+        .get(format!("{base}/voice/populations"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !populations.contains_key(&ch.id),
+        "a channel occupied only by an invisible user must count as empty to others"
+    );
+
+    // The invisible user's own view: self-exempt from the gate.
+    let own_roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&ghost_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        own_roster
+            .get(&ch.id)
+            .map(|m| m.iter().any(|p| p["public_key"] == ghost.public_key_hex()))
+            .unwrap_or(false),
+        "invisible user must still see their own entry in /voice/participants"
+    );
+}
+
+/// events.md §7.4 Phase 2 bypass, /voice/ws-transport-specific: a voice-only
+/// presence grant for (pubkey, channel) admits a human join over `/voice/ws`
+/// despite the channel being unreadable to them. `voice_move_flow.rs`
+/// exercises the grant's creation and its bypass of the *main* hub WS
+/// `voice_join` gate end-to-end; this test drives the /voice/ws transport
+/// directly against the same `state.staging_voice_grants` map to confirm the
+/// bypass this fix introduces here composes correctly with it.
+#[tokio::test]
+async fn staging_grant_admits_voice_ws_join_to_unreadable_channel() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let ch = create_channel(&base, &owner_token, "grant-voice-ws").await;
+    deny_everyone(&base, &owner_token, &ch.id, "read_messages").await;
+
+    let target = Identity::generate();
+    let target_token = authenticate_http(&base, &target).await;
+    let target_pubkey = target.public_key_hex();
+
+    // Grant voice-only presence for this exact (pubkey, channel) pair, same
+    // as `handle_voice_move` does for an event-scoped move (events.md §7.4).
+    state
+        .staging_voice_grants
+        .write()
+        .await
+        .entry(target_pubkey.clone())
+        .or_default()
+        .insert(ch.id.clone());
+
+    let (_tx, mut rx) = connect_voice_ws(&base, &target_token, &ch.id).await;
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), rx.next())
+        .await
+        .expect("expected a voice_ws_ready frame before timeout")
+        .expect("stream ended without a frame")
+        .expect("websocket error");
+    let TsMessage::Text(t) = msg else {
+        panic!("expected a text frame, got {msg:?}");
+    };
+    let v: Value = serde_json::from_str(&t).unwrap();
+    assert_eq!(
+        v["type"], "voice_ws_ready",
+        "a staging voice grant should admit the join despite no read_messages"
+    );
+
+    let client = reqwest::Client::new();
+    let roster: std::collections::HashMap<String, Vec<Value>> = client
+        .get(format!("{base}/voice/participants"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let members = roster
+        .get(&ch.id)
+        .expect("granted target should have a voice roster entry");
+    assert!(
+        members.iter().any(|m| m["public_key"] == target_pubkey),
+        "grant-admitted target should appear in the voice roster"
     );
 }

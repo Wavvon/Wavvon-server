@@ -88,6 +88,33 @@ async fn handle_message(
                 Err(e) => Some(serde_json::json!({"type": "error", "hub_id": hub_id, "code": "spawn_failed", "message": e.to_string()}).to_string()),
             }
         }
+        "restart_hub" => {
+            let hub_id = msg.get("hub_id")?.as_str()?.to_string();
+            let db_path = msg.get("db_path")?.as_str()?.to_string();
+            let port = msg.get("port")?.as_u64()? as u16;
+            let owner_pubkey = msg
+                .get("owner_pubkey")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let farm_url = msg
+                .get("farm_url")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+
+            match manager
+                .restart_hub(
+                    &hub_id,
+                    &db_path,
+                    port,
+                    owner_pubkey.as_deref(),
+                    farm_url.as_deref(),
+                )
+                .await
+            {
+                Ok(()) => Some(serde_json::json!({"type": "hub_restarted", "hub_id": hub_id, "port": port}).to_string()),
+                Err(e) => Some(serde_json::json!({"type": "error", "hub_id": hub_id, "code": "restart_failed", "message": e.to_string()}).to_string()),
+            }
+        }
         "stop_hub" => {
             let hub_id = msg.get("hub_id")?.as_str()?.to_string();
             match manager.stop_hub(&hub_id).await {

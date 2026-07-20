@@ -42,6 +42,7 @@ async fn setup_with_pool() -> (common::TestHarness, PgPool) {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -57,6 +58,7 @@ async fn setup_with_pool() -> (common::TestHarness, PgPool) {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -68,6 +70,8 @@ async fn setup_with_pool() -> (common::TestHarness, PgPool) {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -189,6 +193,57 @@ async fn list_my_conversations() {
 }
 
 #[tokio::test]
+async fn get_single_conversation_as_member() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let alice_token = common::authenticate(&server, &alice).await;
+    let bob = Identity::generate();
+    common::authenticate(&server, &bob).await;
+
+    let created: ConversationResponse = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex()] }))
+        .await
+        .json();
+
+    let resp = server
+        .get(&format!("/conversations/{}", created.id))
+        .authorization_bearer(&alice_token)
+        .await;
+    resp.assert_status_ok();
+    let conv: ConversationResponse = resp.json();
+    assert_eq!(conv.id, created.id);
+    assert_eq!(conv.members.len(), 2);
+    assert!(conv.members.contains(&alice.public_key_hex()));
+}
+
+#[tokio::test]
+async fn get_single_conversation_hidden_from_non_member() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let alice_token = common::authenticate(&server, &alice).await;
+    let bob = Identity::generate();
+    common::authenticate(&server, &bob).await;
+    let mallory = Identity::generate();
+    let mallory_token = common::authenticate(&server, &mallory).await;
+
+    let created: ConversationResponse = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex()] }))
+        .await
+        .json();
+
+    // Non-member gets the same 404 as a nonexistent id (no existence leak).
+    let resp = server
+        .get(&format!("/conversations/{}", created.id))
+        .authorization_bearer(&mallory_token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn cannot_send_to_conversation_youre_not_in() {
     let server = common::setup().await;
     let alice = Identity::generate();
@@ -270,6 +325,7 @@ async fn start_real_hub(name: &str) -> (String, common::TestDbGuard) {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -285,6 +341,7 @@ async fn start_real_hub(name: &str) -> (String, common::TestDbGuard) {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -296,6 +353,8 @@ async fn start_real_hub(name: &str) -> (String, common::TestDbGuard) {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -443,6 +502,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -458,6 +518,7 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -469,6 +530,8 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -638,6 +701,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx: voice_event_tx_b,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -653,6 +717,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -664,6 +729,8 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(

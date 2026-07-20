@@ -897,6 +897,14 @@ async fn main() -> Result<()> {
         // hub already has a real user — see maybe_mint_first_boot_owner_invite.
         match wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(&db).await {
             Ok(Some(code)) => {
+                // The /join link must be copy-pasteable: an explicit scheme in
+                // public_url wins; a bare public host is assumed TLS-fronted;
+                // the localhost fallback matches this process's own TLS state.
+                let join_scheme = match settings.public_url.as_deref() {
+                    Some(u) if u.starts_with("http://") => "http",
+                    Some(_) => "https",
+                    None => scheme,
+                };
                 let raw_host = settings
                     .public_url
                     .clone()
@@ -908,7 +916,7 @@ async fn main() -> Result<()> {
                 let serial = hub_identity.public_key_hex();
                 tracing::warn!(
                     "First-boot owner invite: wavvon://{host}/i/{serial}/{code}  \
-                     (or https://{host}/join/{code})"
+                     (or {join_scheme}://{host}/join/{code})"
                 );
             }
             Ok(None) => {}
@@ -979,6 +987,19 @@ async fn main() -> Result<()> {
 
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
 
+    // Publicly-reachable host for the voice UDP relay: WAVVON_PUBLIC_URL's
+    // host wins (explicit operator override), falling back to the LAN-mode
+    // advertise address when set. No public host is known otherwise — the
+    // hub doesn't guess at its own internet-facing IP.
+    let voice_udp_host: Option<String> = settings
+        .public_url
+        .as_deref()
+        .and_then(|u| Url::parse(u).ok())
+        .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
+        .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
+    let voice_udp_addr: Option<String> =
+        voice_udp_host.map(|host| format!("{host}:{voice_udp_port}"));
+
     // ---- WebAuthn / passkey setup ----
     let rp_id: String = settings
         .webauthn_rp_id
@@ -1035,6 +1056,7 @@ async fn main() -> Result<()> {
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_udp_port,
+        voice_udp_addr,
         voice_event_tx,
         dm_tx,
         online_users: RwLock::new(HashMap::new()),
@@ -1051,6 +1073,7 @@ async fn main() -> Result<()> {
         whisper_target_defs: RwLock::new(HashMap::new()),
         whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: RwLock::new(HashMap::new()),
         voice_pending_binds: RwLock::new(HashMap::new()),
         voice_consumed_tokens: RwLock::new(HashMap::new()),
         voice_ws_senders: RwLock::new(HashMap::new()),
@@ -1062,6 +1085,8 @@ async fn main() -> Result<()> {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
         bots_allow_camera: settings.bots_allow_camera,
+        bots_allow_video: settings.bots_allow_video,
+        bot_video_stream_budget: settings.bot_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),

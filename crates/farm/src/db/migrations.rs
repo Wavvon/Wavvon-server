@@ -184,5 +184,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Process supervision (farm-impl.md Phase 2 "process supervision" — see
+    // monitor.rs): tracks whether auto-restart is active for a hub, how many
+    // consecutive restart attempts have been made, and when the last one ran.
+    let _ = sqlx::query(
+        "ALTER TABLE hubs ADD COLUMN auto_restart_enabled BOOLEAN NOT NULL DEFAULT TRUE",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query("ALTER TABLE hubs ADD COLUMN restart_attempts INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE hubs ADD COLUMN last_restart_at BIGINT")
+        .execute(pool)
+        .await;
+
     Ok(())
 }

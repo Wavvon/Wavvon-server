@@ -60,6 +60,34 @@ pub struct PollWithTotals {
     pub your_vote: Option<Vec<String>>,
 }
 
+/// Poll option shape used by the channel poll listing, matching the web
+/// client's `Poll`/`PollOption` types (`clients/apps/web/src/types.ts`)
+/// byte-for-byte so `getPolls()` can cast the response directly.
+#[derive(Serialize)]
+pub struct PollOptionOut {
+    pub id: String,
+    pub text: String,
+    pub vote_count: i64,
+    pub voted: bool,
+}
+
+/// Poll shape returned by `GET /channels/:channel_id/polls`. Unlike
+/// `PollWithTotals` (used by `GET /polls/:poll_id`), this flattens vote
+/// totals and the caller's own vote directly into each option, matching
+/// the client's `Poll` interface exactly.
+#[derive(Serialize)]
+pub struct PollListItem {
+    pub id: String,
+    pub channel_id: String,
+    pub question: String,
+    pub options: Vec<PollOptionOut>,
+    pub total_votes: i64,
+    pub created_by: String,
+    pub created_at: i64,
+    pub ends_at: Option<i64>,
+    pub is_deleted: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -123,6 +151,8 @@ async fn post_poll_card(
         reply_to: None,
         visible_to_pubkey: None,
         reply_count: 0,
+        embeds: None,
+        game: None,
     };
 
     let ws_msg = WsServerMessage::ChatMessage {
@@ -220,6 +250,83 @@ pub async fn create_poll(
     post_poll_card(&state, &channel_id, &poll).await?;
 
     Ok((StatusCode::CREATED, Json(poll)))
+}
+
+/// GET /channels/:channel_id/polls
+///
+/// Returns every poll on the channel, newest first, in the flattened shape
+/// the web client's `getPolls()` expects (vote totals and the caller's own
+/// vote already merged into each option). Gated behind the same effective
+/// READ_MESSAGES permission as message history and pinned messages (§3.5).
+pub async fn list_polls(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(channel_id): Path<String>,
+) -> Result<Json<Vec<PollListItem>>, (StatusCode, String)> {
+    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
+        .bind(&channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if exists.is_none() {
+        return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
+    }
+
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    perms.require(permissions::READ_MESSAGES)?;
+
+    let polls: Vec<PollResponse> = sqlx::query_as(
+        "SELECT id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at
+         FROM polls WHERE channel_id = $1
+         ORDER BY created_at DESC, id DESC",
+    )
+    .bind(&channel_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let mut out = Vec::with_capacity(polls.len());
+    for poll in polls {
+        let totals = load_poll_totals(&state.db, &poll.id).await?;
+
+        let your_vote_raw: Option<String> = sqlx::query_scalar(
+            "SELECT option_ids FROM poll_votes WHERE poll_id = $1 AND user_pubkey = $2",
+        )
+        .bind(&poll.id)
+        .bind(&user.public_key)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        let your_vote: Vec<String> = your_vote_raw
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default();
+
+        let options: Vec<PollOption> = serde_json::from_str(&poll.options).unwrap_or_default();
+        let total_votes: i64 = totals.values().sum();
+        let options_out = options
+            .into_iter()
+            .map(|o| PollOptionOut {
+                vote_count: totals.get(&o.id).copied().unwrap_or(0),
+                voted: your_vote.contains(&o.id),
+                id: o.id,
+                text: o.text,
+            })
+            .collect();
+
+        out.push(PollListItem {
+            id: poll.id,
+            channel_id: poll.channel_id,
+            question: poll.question,
+            options: options_out,
+            total_votes,
+            created_by: poll.creator_pubkey,
+            created_at: poll.created_at,
+            ends_at: poll.ends_at,
+            is_deleted: false,
+        });
+    }
+
+    Ok(Json(out))
 }
 
 /// GET /polls/:poll_id

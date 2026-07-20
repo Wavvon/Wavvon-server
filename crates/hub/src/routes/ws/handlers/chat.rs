@@ -59,9 +59,15 @@ pub(in crate::routes::ws) async fn handle_typing(
     DispatchResult::Continue
 }
 
-/// Presence status (away/dnd + optional custom text). Persisted on the
-/// users row so it survives reconnects; "online" clears it. Broadcast
-/// hub-wide like member_online/member_offline.
+/// Presence status (away/dnd/invisible + optional custom text). Persisted
+/// on the users row so it survives reconnects; "online" clears it.
+///
+/// Broadcast is hub-wide like member_online/member_offline, but "invisible"
+/// is never broadcast literally: to every *other* client the user must look
+/// like they went offline (they stay connected — DMs/messages/voice are
+/// unaffected, only what other members are told changes). The setter's own
+/// client tracks its invisible state locally and does not rely on this
+/// broadcast to know it's invisible.
 pub(in crate::routes::ws) async fn handle_set_status(
     cs: &ConnState,
     state: &Arc<AppState>,
@@ -74,7 +80,7 @@ pub(in crate::routes::ws) async fn handle_set_status(
 
     let status = match status.as_str() {
         "online" => None,
-        "away" | "dnd" => Some(status),
+        "away" | "dnd" | "invisible" => Some(status),
         // Unknown status value — drop silently, same policy as other
         // malformed ephemeral WS messages.
         _ => return DispatchResult::Continue,
@@ -83,6 +89,15 @@ pub(in crate::routes::ws) async fn handle_set_status(
     let custom = custom
         .map(|c| c.trim().chars().take(100).collect::<String>())
         .filter(|c| !c.is_empty());
+
+    // Snapshot the prior status before overwriting it: we need this to know
+    // whether this transition is *leaving* invisible (in which case other
+    // clients, who were told this user was offline, need to be told they're
+    // back online again before the plain status update).
+    let was_invisible = crate::routes::users::fetch_presence_status(&state.db, &cs.public_key)
+        .await
+        .as_deref()
+        == Some("invisible");
 
     if sqlx::query(
         "UPDATE users SET presence_status = $1, presence_custom = $2 WHERE public_key = $3",
@@ -95,6 +110,92 @@ pub(in crate::routes::ws) async fn handle_set_status(
     .is_err()
     {
         return DispatchResult::Continue;
+    }
+
+    let is_invisible_now = status.as_deref() == Some("invisible");
+
+    // Voice surfaces are presence-gated like the roster (decisions.md
+    // 2026-07-12). A mid-call transition into/out of invisible must remove
+    // the user from (or restore them to) other members' voice participant
+    // lists, which are otherwise only updated by join/leave broadcasts.
+    if is_invisible_now != was_invisible {
+        let voice_channel: Option<String> = {
+            let vc = state.voice_channels.read().await;
+            vc.iter()
+                .find(|(_, members)| members.contains_key(&cs.public_key))
+                .map(|(ch, _)| ch.clone())
+        };
+        if let Some(ch) = voice_channel {
+            if is_invisible_now {
+                let _ = state.voice_event_tx.send((
+                    ch.clone(),
+                    WsServerMessage::VoiceParticipantLeft {
+                        channel_id: ch.clone(),
+                        public_key: cs.public_key.clone(),
+                    },
+                ));
+            } else {
+                let row: Option<(Option<String>, bool)> =
+                    sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
+                        .bind(&cs.public_key)
+                        .fetch_optional(&state.db)
+                        .await
+                        .ok()
+                        .flatten();
+                let (display_name, is_bot) = row.unwrap_or((None, false));
+                let _ = state.voice_event_tx.send((
+                    ch.clone(),
+                    WsServerMessage::VoiceParticipantJoined {
+                        channel_id: ch.clone(),
+                        participant: crate::routes::chat_models::VoiceParticipantInfo {
+                            public_key: cs.public_key.clone(),
+                            display_name,
+                            is_bot,
+                        },
+                    },
+                ));
+            }
+            // Refresh the sender_id roster too — it is filtered by the same
+            // gate (get_voice_roster), and the DB status is already updated.
+            let roster = crate::routes::ws::voice::get_voice_roster(state, &ch).await;
+            let _ = state.voice_event_tx.send((
+                ch.clone(),
+                WsServerMessage::VoiceRosterUpdate {
+                    channel_id: ch,
+                    participants: roster,
+                },
+            ));
+        }
+    }
+
+    if is_invisible_now {
+        // Presence broadcasts are not per-recipient, so map invisible ->
+        // offline in the outgoing broadcast rather than ever sending the
+        // literal "invisible" value over the wire to other clients.
+        let ev = crate::routes::chat_models::ChatEvent::MemberOffline {
+            public_key: cs.public_key.clone(),
+        };
+        let ws_msg = WsServerMessage::MemberOffline {
+            public_key: cs.public_key.clone(),
+        };
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((ev, json));
+        return DispatchResult::Continue;
+    }
+
+    if was_invisible {
+        // Coming back from invisible: other clients believe this user is
+        // offline, so re-announce them online before the status details.
+        let ev = crate::routes::chat_models::ChatEvent::MemberOnline {
+            public_key: cs.public_key.clone(),
+        };
+        let ws_msg = WsServerMessage::MemberOnline {
+            public_key: cs.public_key.clone(),
+        };
+        let json: std::sync::Arc<str> =
+            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+        let _ = state.chat_tx.send((ev, json));
     }
 
     let ev = crate::routes::chat_models::ChatEvent::MemberStatus {

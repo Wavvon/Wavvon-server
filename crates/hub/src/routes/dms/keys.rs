@@ -34,6 +34,59 @@ pub(super) fn envelope_signing_bytes(
     }
 }
 
+/// Verify a 1:1 encrypted DM envelope's signature, tiered by whether a
+/// `signer_cert` is attached (docs/docs/decisions.md "Paired-device DMs
+/// attribute to canonical via cert-chained envelopes").
+///
+/// `authoritative_sender` is the pubkey the caller already trusts as the
+/// canonical sender: the authenticated session's canonical pubkey for
+/// `send_dm`, or `req.sender` for `receive_federated_dm`.
+///
+/// - `signer_cert` absent: verifies `env.signature_hex` against
+///   `authoritative_sender` — today's behavior, unchanged. Returns `None`.
+/// - `signer_cert` present: verifies the cert (master→subkey) and the
+///   envelope signature against `cert.subkey_pubkey`. Returns
+///   `Some(cert.master_pubkey)` so the caller can bind it to
+///   `authoritative_sender` however is appropriate for that call site —
+///   this helper does not perform that binding itself, since it differs
+///   between an authenticated session (trivial) and a federated request
+///   (may need a device-registry lookup).
+pub(super) fn verify_envelope_sender(
+    env: &crate::routes::dm_models::EncryptedDmEnvelope,
+    authoritative_sender: &str,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let msg = envelope_signing_bytes(env);
+    let sig_bytes = hex::decode(&env.signature_hex)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
+
+    match &env.signer_cert {
+        None => {
+            wavvon_identity::verify_signature(authoritative_sender, &msg, &sig_bytes).map_err(
+                |e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid envelope signature: {e}"),
+                    )
+                },
+            )?;
+            Ok(None)
+        }
+        Some(cert) => {
+            cert.verify()
+                .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid signer cert: {e}")))?;
+            wavvon_identity::verify_signature(&cert.subkey_pubkey, &msg, &sig_bytes).map_err(
+                |e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid envelope signature: {e}"),
+                    )
+                },
+            )?;
+            Ok(Some(cert.master_pubkey.clone()))
+        }
+    }
+}
+
 pub(super) fn group_envelope_signing_bytes(
     conv_id: &str,
     version: u32,

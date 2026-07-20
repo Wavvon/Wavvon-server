@@ -19,6 +19,21 @@ pub struct BotMeta {
     pub commands: Option<Vec<BotCommandDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
+    /// Mini-app / game-modal registration (bot-mini-apps.md, bots.md §17).
+    /// Absent = this bot has no interactive-UI surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mini_app_url: Option<String>,
+    /// Requests camera access for the mini-app webview. Still gated on the
+    /// hub operator's `bots_allow_camera` setting at `bot_app_join` time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_camera: Option<bool>,
+    /// Profile-declared game descriptor (bot-capability-layer.md §11): lets
+    /// the per-hub bot directory show a Play affordance for this bot without
+    /// a live launch-card message in view. Absent = this bot has no game to
+    /// advertise. Independent of the per-message `game` launch card
+    /// (`BotResponse.game`) -- this one lives on the profile, not a message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameLaunchCard>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -205,6 +220,25 @@ pub struct BotResponse {
     pub reactions: Option<Vec<BotReaction>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defer: Option<bool>,
+    /// Game-modal launch card (bot-capability-layer.md §2, §6 Phase 1 item
+    /// 3): a "Play" CTA attached to `reply`'s message. Baseline UI -- no
+    /// capability grant needed to render the card itself; opening the
+    /// webview it points at is what `can_use_interactive_ui` gates
+    /// (`bot_app_join`, routes/ws/handlers/mini_app.rs). Ignored if `reply`
+    /// is absent -- there is no message for the card to attach to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<GameLaunchCard>,
+}
+
+/// A bot-authored "Play" launch card (bot-capability-layer.md §2).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GameLaunchCard {
+    pub entry_url: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

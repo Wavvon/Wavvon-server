@@ -10,12 +10,23 @@ use crate::state::AppState;
 
 pub struct AuthUser {
     pub public_key: String,
-    /// Session scope: "member" (full access, subject to normal role/permission
-    /// checks) or "lobby" (lobby-bot-survey.md Feature 1 — confined to
-    /// `LOBBY_ALLOWED_PATHS` below, regardless of any roles held). Defaults to
-    /// "member" for token paths that predate scoping (bot tokens, farm
-    /// tokens, webauthn/device-token/mini-app logins) — none of those are
-    /// subject to the lobby gate.
+    /// The master pubkey bound to this canonical identity, when known —
+    /// mirrors `users.master_pubkey` for `public_key`. `None` for a legacy
+    /// single-key user that has never paired a second device. Used by
+    /// cert-chained DM attribution (docs/docs/decisions.md "Paired-device
+    /// DMs attribute to canonical via cert-chained envelopes") to bind a
+    /// `signer_cert.master_pubkey` to the authenticated session without a
+    /// re-query.
+    pub master_pubkey: Option<String>,
+    /// Session scope:
+    /// - `"member"` — full access, subject to normal role/permission checks.
+    ///   Default for token paths that predate scoping (bot tokens, farm
+    ///   tokens, webauthn/device-token logins).
+    /// - `"lobby"` (lobby-bot-survey.md Feature 1) — confined to
+    ///   `LOBBY_ALLOWED_PATHS` below, regardless of any roles held.
+    /// - `"mini_app"` (bot-mini-apps.md "Scoped session token") — minted by
+    ///   `bot_app_join`; confined to `MINI_APP_ALLOWED_PATHS` (empty — REST
+    ///   is fully off-limits, `/ws` is the only surface this scope reaches).
     pub scope: String,
 }
 
@@ -88,6 +99,19 @@ const LOBBY_ALLOWED_PATHS: &[&str] = &[
     "/survey/current",
     "/survey/submit",
 ];
+
+/// REST paths a `scope: "mini_app"` session may reach (bot-mini-apps.md
+/// "Scoped session token": "Cannot call admin or federation endpoints").
+///
+/// Deliberately empty: every documented mini-app interaction (launch card
+/// click, in-game messages, the bot relay) rides `/ws`, which this scope is
+/// explicitly allowed to reach (see `validate_ws_token`) and which confines
+/// auto-subscription to the bound channel (see `connection::handle_socket`).
+/// A mini-app session has no legitimate REST use today — including
+/// `/me` mutations, which the token this scope replaces (a full user
+/// session) used to allow. If a real mini-app REST need shows up later,
+/// add it here explicitly rather than falling back to the member default.
+const MINI_APP_ALLOWED_PATHS: &[&str] = &[];
 
 /// Minimum seconds between farm pubkey re-fetch attempts (handles key rotation
 /// without hammering the farm on every bad-token request).
@@ -445,7 +469,34 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             }
         }
 
-        Ok(AuthUser { public_key, scope })
+        // Mini-app confinement (bot-mini-apps.md "Scoped session token"): a
+        // `bot_app_join`-minted session is bound to one channel over `/ws`
+        // and must not reach admin, federation, or any other REST route —
+        // see `MINI_APP_ALLOWED_PATHS`'s doc comment for why that's empty.
+        if scope == "mini_app" {
+            let path = parts.uri.path();
+            if !MINI_APP_ALLOWED_PATHS.contains(&path) {
+                return Err((StatusCode::FORBIDDEN, "mini_app_scope_confined".to_string()));
+            }
+        }
+
+        // Single indexed (primary-key) lookup for the master binding used by
+        // cert-chained DM attribution. Cheap enough to do unconditionally
+        // rather than threading an extra flag through every token path
+        // above (farm token, session, bot token).
+        let master_pubkey: Option<String> =
+            sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
+                .bind(&public_key)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
+
+        Ok(AuthUser {
+            public_key,
+            master_pubkey,
+            scope,
+        })
     }
 }
 

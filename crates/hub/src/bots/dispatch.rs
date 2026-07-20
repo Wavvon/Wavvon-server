@@ -216,9 +216,20 @@ pub async fn dispatch_slash(
             }
         });
 
+        // Game-modal launch card (bot-capability-layer.md §2): the reply
+        // this bot posted may carry a "Play" CTA. No capability gate here --
+        // the sender is already a bot by construction (this is the
+        // slash-command dispatch path) and rendering the card is baseline
+        // UI; `can_use_interactive_ui` gates opening the webview instead
+        // (bot_app_join, routes/ws/handlers/mini_app.rs).
+        let game_json = bot_response
+            .game
+            .as_ref()
+            .and_then(|g| serde_json::to_string(g).ok());
+
         sqlx::query(
-            "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey, embeds)
-             VALUES($1,$2,$3,$4,$5,$6,$7)",
+            "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey, embeds, game)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
         )
         .bind(&msg_id)
         .bind(channel_id)
@@ -227,6 +238,7 @@ pub async fn dispatch_slash(
         .bind(now)
         .bind(visible_to)
         .bind(&embeds_json)
+        .bind(&game_json)
         .execute(&state.db)
         .await
         .ok();
@@ -253,6 +265,8 @@ pub async fn dispatch_slash(
             reply_to: None,
             visible_to_pubkey: visible_to.map(|s| s.to_string()),
             reply_count: 0,
+            embeds: reply.embeds,
+            game: bot_response.game,
         };
 
         {
@@ -315,6 +329,8 @@ pub async fn insert_ephemeral_error(
         reply_to: None,
         visible_to_pubkey: Some(invoker_pubkey.to_string()),
         reply_count: 0,
+        embeds: None,
+        game: None,
     };
 
     {
@@ -610,6 +626,10 @@ async fn apply_component_response(
             reply_to: None,
             visible_to_pubkey: Some(interacting_user.to_string()),
             reply_count: 0,
+            // EphemeralReply carries only a body -- no embeds/game field exists
+            // on that type to read from.
+            embeds: None,
+            game: None,
         };
 
         {
@@ -633,8 +653,18 @@ async fn load_updated_message(
     state: &Arc<AppState>,
     message_id: &str,
 ) -> Result<MessageResponse, sqlx::Error> {
-    let row: (String, String, Option<String>, String, i64, Option<i64>) = sqlx::query_as(
-        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at
+    #[allow(clippy::type_complexity)]
+    let row: (
+        String,
+        String,
+        Option<String>,
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at, m.embeds, m.game
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -655,5 +685,15 @@ async fn load_updated_message(
         reply_to: None,
         visible_to_pubkey: None,
         reply_count: 0,
+        embeds: row
+            .6
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str(s).ok()),
+        game: row
+            .7
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str(s).ok()),
     })
 }

@@ -22,6 +22,9 @@ pub const START_GAME: &str = "start_game";
 pub const CREATE_EVENTS: &str = "create_events";
 pub const USE_SOUNDBOARD: &str = "use_soundboard";
 pub const MANAGE_SOUNDBOARD: &str = "manage_soundboard";
+/// Move a voice participant into another channel (events.md §7.1). Resolved
+/// channel-scoped against the *destination* channel via `channel_permissions`.
+pub const MOVE_MEMBERS: &str = "move_members";
 
 /// Every permission string recognized by the server. Used to validate
 /// admin-supplied permission strings for channel overwrites (see
@@ -46,6 +49,7 @@ pub const ALL_PERMISSIONS: &[&str] = &[
     CREATE_EVENTS,
     USE_SOUNDBOARD,
     MANAGE_SOUNDBOARD,
+    MOVE_MEMBERS,
 ];
 
 #[derive(sqlx::FromRow)]

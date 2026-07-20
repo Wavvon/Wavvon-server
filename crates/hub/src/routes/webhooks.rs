@@ -401,6 +401,13 @@ pub async fn post_webhook_message(
         reply_to: None,
         visible_to_pubkey: None,
         reply_count: 0,
+        // NOTE: WebhookPostRequest.embeds (freeform serde_json::Value) is a
+        // separate, deeper gap than the bot-reply embeds fix elsewhere in
+        // this change -- it isn't persisted to `messages.embeds` at all
+        // (no INSERT column, no type mapping to bot_models::Embed). Left
+        // untouched here; a real fix needs a decision on schema and format.
+        embeds: None,
+        game: None,
     };
 
     {

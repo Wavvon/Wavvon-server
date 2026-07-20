@@ -14,9 +14,10 @@
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha512};
 use wavvon_identity::{
-    dm_envelope_signing_bytes, group_dm_envelope_signing_bytes, sender_key_dist_signing_bytes,
-    DhKeyRecord, HomeHubList, PairingClaim, PairingOffer, RevocationEntry, SignedPrefsBlob,
-    SubkeyCert,
+    dm_envelope_signing_bytes, group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
+    recovery_request_signing_bytes, sender_key_dist_signing_bytes, unwrap_blob_key, wrap_blob_key,
+    DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer, PairingStatus,
+    RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 const TS: u64 = 1_700_000_000;
@@ -33,6 +34,17 @@ fn subkey_signing_key() -> SigningKey {
     let mut seed = [0u8; 32];
     for (i, b) in seed.iter_mut().enumerate() {
         *b = (i + 0x21) as u8;
+    }
+    SigningKey::from_bytes(&seed)
+}
+
+/// A third fixed identity — stands in for the "new key" being rotated to in
+/// the recovery-attestation vectors. Continues the incrementing seed pattern
+/// (master 0x01..0x20, subkey 0x21..0x40, this one 0x41..0x60).
+fn new_key_signing_key() -> SigningKey {
+    let mut seed = [0u8; 32];
+    for (i, b) in seed.iter_mut().enumerate() {
+        *b = (i + 0x41) as u8;
     }
     SigningKey::from_bytes(&seed)
 }
@@ -131,6 +143,33 @@ const SENDER_KEY_DIST_SIGNING_BYTES: &str =
     "776176766f6e2f67726f75702d6b65792d646973742f76310007000000636f6e76313233010000003140000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636340800000031313232333334344000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630080000003535363637373838";
 const SENDER_KEY_DIST_SIG: &str =
     "b3edd408f6a0700da3a9445be38cc6de2dcee4a927049b98e9f423e9654ee0b9c6adf9ff9ff4364f8ccd4f629d672b0c9cb517a0bb5b4e4de200f8a66f88fd04";
+
+// Recovery-attestation bundle (recovery-attestation.md §2, §4). HUB_PUB and
+// OLD_PUB reuse the existing MASTER_PUB/SUBKEY_PUB fixtures (any fixed
+// pubkey-shaped string works — the encoder treats them as opaque); NEW_PUB
+// is the third fixed identity above.
+const HUB_PUB: &str = MASTER_PUB;
+const OLD_PUB: &str = SUBKEY_PUB;
+const REQUEST_NONCE: &str = "req-nonce-0001";
+
+// Requester's new-key proof — signed by NEW_PUB's key, no nonce (see the
+// doc comment on `recovery_request_signing_bytes`: the hub hasn't minted a
+// nonce yet at proof time).
+const RECOVERY_REQUEST_SIGNING_BYTES: &str =
+    "776176766f6e2f7265636f766572792d726571756573742f763100400000003739623535363265386665363534663934303738623131326538613938626137393031663835336165363935626564376530653339313062616430343936363440000000653766313632613130626563353539616665613139356534646365383462363935363864356432636230393633656234343663303638356532623137663266304000000061646331343031316638326431633536643935366161346639643733643838353833363161363036303438353235653064303863363338646337356464386337";
+const RECOVERY_REQUEST_PROOF: &str =
+    "31d6892113f05da64c22ee7b3a108bf61e4df1592f820d53de0eeb15a7d3a1c50859df4dc08e72d4997047f590b001b2fa3378e77a64d678e277c5edc78a160b";
+
+// Contact attestation — signed by the contact's master key (stood in for by
+// master_key(), same convention every other envelope in this file uses).
+const RECOVERY_ATTESTATION_SIGNING_BYTES: &str =
+    "776176766f6e2f7265636f766572792d6174746573746174696f6e2f7631004000000037396235353632653866653635346639343037386231313265386139386261373930316638353361653639356265643765306533393130626164303439363634400000006537663136326131306265633535396166656131393565346463653834623639353638643564326362303936336562343436633036383565326231376632663040000000616463313430313166383264316335366439353661613466396437336438383538333631613630363034383532356530643038633633386463373564643863370e0000007265712d6e6f6e63652d30303031";
+const RECOVERY_ATTESTATION_SIG: &str =
+    "878bd554b21b60e63d1725db9a829d0107830e58ed0d8e80149368a833f1c09948490afd7cba160f34bc808092b15cf99141a86656c0d383fbaf04151edfb302";
+
+fn new_pub() -> String {
+    hex_pubkey(&new_key_signing_key())
+}
 
 fn dist_recipients() -> Vec<(String, String)> {
     vec![
@@ -327,6 +366,128 @@ fn pairing_claim_verify_vector() {
     assert!(claim.verify().is_ok());
 }
 
+// ---------------------------------------------------------------------------
+// PairingComplete.wrapped_dh_seed_hex — DM-attribution fix (see
+// docs/docs/decisions.md "Paired-device DMs attribute to canonical via
+// cert-chained envelopes"). `PairingComplete` itself carries no signing
+// bytes (only the nested `cert` is signed), so the new field is a plain
+// JSON addition — these are serde-compatibility checks, not signature
+// vectors. `wrap_blob_key`/`unwrap_blob_key` are the same ECIES primitive
+// `wrapped_blob_key_hex` already uses; the design reuses them verbatim to
+// wrap the canonical X25519 DH **scalar** instead of the prefs-blob key,
+// so no new primitive needs its own vector.
+// ---------------------------------------------------------------------------
+
+fn sample_cert() -> SubkeyCert {
+    SubkeyCert {
+        master_pubkey: MASTER_PUB.to_string(),
+        subkey_pubkey: SUBKEY_PUB.to_string(),
+        device_label: "laptop".to_string(),
+        issued_at: TS,
+        not_after: None,
+        fallback_hubs: vec![],
+        signature: SUBKEY_CERT_SIG.to_string(),
+    }
+}
+
+#[test]
+fn pairing_complete_without_wrapped_dh_seed_parses_as_none() {
+    // Old JSON shape (predates this field) must still deserialize —
+    // no wire-vector break for the existing pairing-complete path.
+    let json = serde_json::json!({
+        "pairing_token": "tok123",
+        "cert": sample_cert(),
+        "wrapped_blob_key_hex": "deadbeef",
+    });
+    let complete: PairingComplete = serde_json::from_value(json).unwrap();
+    assert_eq!(complete.wrapped_dh_seed_hex, None);
+}
+
+#[test]
+fn pairing_complete_round_trips_wrapped_dh_seed_hex() {
+    let complete = PairingComplete {
+        pairing_token: "tok123".to_string(),
+        cert: sample_cert(),
+        wrapped_blob_key_hex: "deadbeef".to_string(),
+        wrapped_dh_seed_hex: Some("cafef00d".to_string()),
+    };
+    let json = serde_json::to_value(&complete).unwrap();
+    let round_tripped: PairingComplete = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        round_tripped.wrapped_dh_seed_hex,
+        Some("cafef00d".to_string())
+    );
+}
+
+#[test]
+fn pairing_status_complete_round_trips_wrapped_dh_seed_hex() {
+    let status = PairingStatus::Complete {
+        cert: sample_cert(),
+        wrapped_blob_key_hex: "deadbeef".to_string(),
+        wrapped_dh_seed_hex: Some("cafef00d".to_string()),
+    };
+    let json = serde_json::to_value(&status).unwrap();
+    let round_tripped: PairingStatus = serde_json::from_value(json).unwrap();
+    match round_tripped {
+        PairingStatus::Complete {
+            wrapped_dh_seed_hex,
+            ..
+        } => assert_eq!(wrapped_dh_seed_hex, Some("cafef00d".to_string())),
+        other => panic!("expected Complete, got {other:?}"),
+    }
+}
+
+#[test]
+fn pairing_status_complete_without_wrapped_dh_seed_parses_as_none() {
+    let json = serde_json::json!({
+        "state": "complete",
+        "cert": sample_cert(),
+        "wrapped_blob_key_hex": "deadbeef",
+    });
+    let status: PairingStatus = serde_json::from_value(json).unwrap();
+    match status {
+        PairingStatus::Complete {
+            wrapped_dh_seed_hex,
+            ..
+        } => assert_eq!(wrapped_dh_seed_hex, None),
+        other => panic!("expected Complete, got {other:?}"),
+    }
+}
+
+/// The wrapped-DH-scalar mechanism (decisions.md Mechanism A): the
+/// enrolling device wraps the canonical X25519 **scalar** (not the
+/// Ed25519 seed) with `wrap_blob_key` for the claiming subkey; the
+/// claiming device unwraps with its own subkey seed via `unwrap_blob_key`.
+/// This is the same primitive `wrapped_blob_key_hex` uses — this test
+/// pins that it round-trips a DH scalar just as well as a symmetric key.
+#[test]
+fn wrapped_dh_scalar_round_trips_through_existing_ecies_primitive() {
+    let master = master_key();
+    let (master_dh_secret, _master_dh_pub) = {
+        use sha2::{Digest, Sha512};
+        let hash = Sha512::digest(master.to_bytes());
+        let mut scalar = [0u8; 32];
+        scalar.copy_from_slice(&hash[..32]);
+        scalar[0] &= 248;
+        scalar[31] &= 127;
+        scalar[31] |= 64;
+        let secret = x25519_dalek::StaticSecret::from(scalar);
+        let public = x25519_dalek::PublicKey::from(&secret);
+        (scalar, public)
+    };
+
+    let subkey = subkey_signing_key();
+    let subkey_pubkey_hex = hex_pubkey(&subkey);
+
+    let wrapped_hex = wrap_blob_key(&master_dh_secret, &subkey_pubkey_hex)
+        .expect("wrapping the DH scalar should succeed");
+
+    let unwrapped = unwrap_blob_key(&wrapped_hex, &subkey.to_bytes())
+        .expect("the claiming subkey should unwrap its own wrapped scalar");
+
+    assert_eq!(unwrapped, master_dh_secret);
+}
+
 #[test]
 fn test_master_dh_pubkey_vector() {
     assert_eq!(master_dh_pub_hex(), MASTER_DH_PUB);
@@ -393,6 +554,69 @@ fn sender_key_dist_signature_vector() {
     let sb = sender_key_dist_signing_bytes(DM_CONV_ID, 1, &dist_recipients());
     let sig = master_key().sign(&sb);
     assert_eq!(hex::encode(sig.to_bytes()), SENDER_KEY_DIST_SIG);
+}
+
+#[test]
+fn recovery_request_signing_bytes_vector() {
+    let new_pub = new_pub();
+    let sb = recovery_request_signing_bytes(HUB_PUB, OLD_PUB, &new_pub);
+    assert_eq!(hex::encode(&sb), RECOVERY_REQUEST_SIGNING_BYTES);
+}
+
+#[test]
+fn recovery_request_proof_vector() {
+    let new_pub = new_pub();
+    let sb = recovery_request_signing_bytes(HUB_PUB, OLD_PUB, &new_pub);
+    let sig = new_key_signing_key().sign(&sb);
+    assert_eq!(hex::encode(sig.to_bytes()), RECOVERY_REQUEST_PROOF);
+}
+
+#[test]
+fn recovery_attestation_signing_bytes_vector() {
+    let new_pub = new_pub();
+    let sb = recovery_attestation_signing_bytes(HUB_PUB, OLD_PUB, &new_pub, REQUEST_NONCE);
+    assert_eq!(hex::encode(&sb), RECOVERY_ATTESTATION_SIGNING_BYTES);
+}
+
+#[test]
+fn recovery_attestation_signature_vector() {
+    let new_pub = new_pub();
+    let sb = recovery_attestation_signing_bytes(HUB_PUB, OLD_PUB, &new_pub, REQUEST_NONCE);
+    let sig = master_key().sign(&sb);
+    assert_eq!(hex::encode(sig.to_bytes()), RECOVERY_ATTESTATION_SIG);
+}
+
+/// Distinct-tag guard: the same (hub, old, new) triple signed for two
+/// different purposes (request proof vs. attestation) must never produce
+/// the same signing bytes, or a proof signature could be replayed as an
+/// attestation (or vice versa).
+#[test]
+fn recovery_request_and_attestation_bytes_differ() {
+    let new_pub = new_pub();
+    let request_sb = recovery_request_signing_bytes(HUB_PUB, OLD_PUB, &new_pub);
+    let attestation_sb =
+        recovery_attestation_signing_bytes(HUB_PUB, OLD_PUB, &new_pub, REQUEST_NONCE);
+    assert_ne!(request_sb, attestation_sb);
+}
+
+#[test]
+#[ignore]
+fn gen_recovery_vectors() {
+    let new_pub = new_pub();
+
+    let sb = recovery_request_signing_bytes(HUB_PUB, OLD_PUB, &new_pub);
+    println!("RECOVERY_REQUEST_SIGNING_BYTES: {}", hex::encode(&sb));
+    println!(
+        "RECOVERY_REQUEST_PROOF: {}",
+        hex::encode(new_key_signing_key().sign(&sb).to_bytes())
+    );
+
+    let sb = recovery_attestation_signing_bytes(HUB_PUB, OLD_PUB, &new_pub, REQUEST_NONCE);
+    println!("RECOVERY_ATTESTATION_SIGNING_BYTES: {}", hex::encode(&sb));
+    println!(
+        "RECOVERY_ATTESTATION_SIG: {}",
+        hex::encode(master_key().sign(&sb).to_bytes())
+    );
 }
 
 #[test]

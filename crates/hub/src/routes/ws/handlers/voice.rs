@@ -10,8 +10,8 @@ use crate::state::{AppState, PendingVoiceBind};
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 use crate::routes::ws::voice::{
-    get_voice_participants, get_voice_roster, re_resolve_whisper_sessions, resolve_role_addrs,
-    resolve_whisper_targets,
+    apply_pending_voice_move_assignment, get_voice_participants, get_voice_roster,
+    re_resolve_whisper_sessions, resolve_role_addrs, resolve_whisper_targets,
 };
 
 type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
@@ -66,17 +66,31 @@ pub(in crate::routes::ws) async fn handle_voice_join(
 
     // Channel visibility gate (§3.4/§3.5): a channel the caller can't
     // effectively READ_MESSAGES isn't visible to them at all, so voice join
-    // is rejected the same way message history and the channel list are.
+    // is rejected the same way message history and the channel list are --
+    // UNLESS a voice-only presence grant (events.md §7.4) covers this exact
+    // (pubkey, channel) pair, in which case the organizer's consented move
+    // is the authorization and the join proceeds without READ_MESSAGES.
+    // This is the single enforcement point that bypasses read-gating; the
+    // grant is never consulted anywhere else.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
         Ok(perms) if !perms.has(crate::permissions::READ_MESSAGES) => {
-            let err = WsServerMessage::Error {
-                context: "voice_join".to_string(),
-                message: "You do not have access to this channel.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            let has_grant = state
+                .staging_voice_grants
+                .read()
+                .await
+                .get(&cs.public_key)
+                .map(|grants| grants.contains(&channel_id))
+                .unwrap_or(false);
+            if !has_grant {
+                let err = WsServerMessage::Error {
+                    context: "voice_join".to_string(),
+                    message: "You do not have access to this channel.".to_string(),
+                };
+                let _ = ws_tx
+                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                    .await;
+                return DispatchResult::Continue;
+            }
         }
         Err(_) => {
             let err = WsServerMessage::Error {
@@ -89,6 +103,37 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             return DispatchResult::Continue;
         }
         Ok(_) => {}
+    }
+
+    // events.md §7.5 (updated lifetime): a squad room linked to an event
+    // whose `ends_at` has passed blocks *new* joins -- it never yanks anyone
+    // already inside. Existing occupants keep talking; the room dies via
+    // the ordinary temp-channel empty-GC once it drains, or is deleted
+    // immediately if already empty by the reminder worker's sweep.
+    let squad_room_event_ended: bool = sqlx::query_scalar::<_, bool>(
+        "SELECT e.ends_at IS NOT NULL AND e.ends_at <= $2
+         FROM channels c
+         JOIN hub_events e ON e.id = c.event_id
+         WHERE c.id = $1",
+    )
+    .bind(&channel_id)
+    .bind(crate::auth::handlers::unix_timestamp())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
+
+    if squad_room_event_ended {
+        let err = WsServerMessage::Error {
+            context: "voice_join".to_string(),
+            message: "This event has ended; its squad room no longer accepts new joins."
+                .to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
     }
 
     // Spawn-on-join (join-to-create temp voice channels,
@@ -290,7 +335,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .or_default()
         .insert(cs.public_key.clone(), sender_id);
 
-    let participants = get_voice_participants(state, &channel_id).await;
+    let participants = get_voice_participants(state, &channel_id, Some(&cs.public_key)).await;
 
     let reply = WsServerMessage::VoiceJoined {
         channel_id: channel_id.clone(),
@@ -315,17 +360,22 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         }
     };
 
-    let _ = state.voice_event_tx.send((
-        channel_id.clone(),
-        WsServerMessage::VoiceParticipantJoined {
-            channel_id: channel_id.clone(),
-            participant: VoiceParticipantInfo {
-                public_key: cs.public_key.clone(),
-                display_name: display_name.clone(),
-                is_bot,
+    // An invisible joiner is announced to no one (decisions.md 2026-07-12:
+    // shown offline to everyone else). Their own client already got the
+    // VoiceJoined reply above, which includes their entry.
+    if !crate::routes::users::is_invisible(&state.db, &cs.public_key).await {
+        let _ = state.voice_event_tx.send((
+            channel_id.clone(),
+            WsServerMessage::VoiceParticipantJoined {
+                channel_id: channel_id.clone(),
+                participant: VoiceParticipantInfo {
+                    public_key: cs.public_key.clone(),
+                    display_name: display_name.clone(),
+                    is_bot,
+                },
             },
-        },
-    ));
+        ));
+    }
 
     let roster = get_voice_roster(state, &channel_id).await;
     let _ = state.voice_event_tx.send((
@@ -431,6 +481,10 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         });
     }
 
+    // events.md §7.3: apply any queued voice-move assignment now that the
+    // join has fully succeeded.
+    apply_pending_voice_move_assignment(state, &cs.public_key, &channel_id).await;
+
     tracing::info!(
         "Voice join: {} in channel",
         &cs.public_key[..16.min(cs.public_key.len())]
@@ -475,7 +529,7 @@ pub(in crate::routes::ws) async fn handle_voice_leave(
     DispatchResult::Continue
 }
 
-pub(in crate::routes::ws) fn handle_voice_speaking(
+pub(in crate::routes::ws) async fn handle_voice_speaking(
     cs: &ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
@@ -487,6 +541,11 @@ pub(in crate::routes::ws) fn handle_voice_speaking(
         } => (channel_id, speaking),
         _ => return DispatchResult::Continue,
     };
+    // A speaking indicator for a hidden participant would out them — same
+    // gate as the join/leave broadcasts. Their audio still relays.
+    if crate::routes::users::is_invisible(&state.db, &cs.public_key).await {
+        return DispatchResult::Continue;
+    }
     let _ = state.voice_event_tx.send((
         channel_id.clone(),
         WsServerMessage::VoiceParticipantSpeaking {
@@ -614,6 +673,215 @@ pub(in crate::routes::ws) async fn handle_voice_whisper_stop(
             std::sync::Arc::from(serde_json::to_string(&reply).unwrap().as_str());
         let _ = state.chat_tx.send((ev, json));
     }
+    DispatchResult::Continue
+}
+
+/// Sends a `voice_move`-context `Error` back to the mover on `ws_tx`.
+async fn send_voice_move_error(ws_tx: &mut WsTx, message: impl Into<String>) -> DispatchResult {
+    let err = WsServerMessage::Error {
+        context: "voice_move".to_string(),
+        message: message.into(),
+    };
+    let _ = ws_tx
+        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+        .await;
+    DispatchResult::Continue
+}
+
+/// Move primitive (events.md §7.1, §7.3, §7.4): the mover asks the hub to
+/// move `target_pubkey` into `target_channel_id`. The hub never yanks the
+/// target server-side — it pushes a `voice_move` control message and the
+/// target's own client runs its normal leave-and-join.
+///
+/// Phase 2 additions over the Phase 1 primitive:
+/// - Target **not in voice** + `event_id` present → the move is queued as an
+///   `event_move_assignments` row instead of rejected (§7.3); with no
+///   `event_id` the Phase 1 rejection still applies (no event context to
+///   apply it against later).
+/// - Target **lacks `READ_MESSAGES`** on the destination + `event_id`
+///   present → a voice-only presence grant is created (§7.4) and the move
+///   proceeds instead of being rejected; with no `event_id` the Phase 1
+///   rejection still applies (a generic mod-tool move must not reveal a
+///   hidden channel).
+pub(in crate::routes::ws) async fn handle_voice_move(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    ws_tx: &mut WsTx,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let (target_pubkey, target_channel_id, event_id) = match msg {
+        WsClientMessage::VoiceMove {
+            target_pubkey,
+            target_channel_id,
+            event_id,
+        } => (target_pubkey, target_channel_id, event_id),
+        _ => return DispatchResult::Continue,
+    };
+
+    // Authorize the mover: MOVE_MEMBERS resolved channel-scoped against the
+    // destination channel.
+    match crate::permissions::channel_permissions(&state.db, &cs.public_key, &target_channel_id)
+        .await
+    {
+        Ok(perms) if perms.has(crate::permissions::MOVE_MEMBERS) => {}
+        Ok(_) => {
+            return send_voice_move_error(
+                ws_tx,
+                "You do not have permission to move members into this channel.",
+            )
+            .await;
+        }
+        Err(_) => {
+            return send_voice_move_error(ws_tx, "Unable to verify move permission.").await;
+        }
+    }
+
+    // Destination must be a real, non-category channel.
+    let target_channel_name: Option<String> =
+        sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND is_category = false")
+            .bind(&target_channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    let target_channel_name = match target_channel_name {
+        Some(name) => name,
+        None => {
+            return send_voice_move_error(ws_tx, "Target channel does not exist.").await;
+        }
+    };
+
+    // Resolve the target's current voice channel, if any.
+    let source_channel_id = {
+        let vc = state.voice_channels.read().await;
+        vc.iter()
+            .find(|(_, participants)| participants.contains_key(&target_pubkey))
+            .map(|(channel_id, _)| channel_id.clone())
+    };
+
+    let source_channel_id = match source_channel_id {
+        Some(ch) => ch,
+        None => {
+            // Target not in voice: with an event context, queue the
+            // assignment (§7.3) for auto-application on their next voice
+            // join instead of rejecting. No event context => Phase 1's
+            // rejection still applies (there's no later trigger to apply
+            // a bare, event-less move against).
+            let Some(eid) = &event_id else {
+                return send_voice_move_error(ws_tx, "Target is not currently in voice.").await;
+            };
+
+            let now = crate::auth::handlers::unix_timestamp();
+            let res = sqlx::query(
+                "INSERT INTO event_move_assignments
+                     (event_id, user_pubkey, target_channel_id, assigned_by, created_at)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (event_id, user_pubkey) DO UPDATE
+                 SET target_channel_id = EXCLUDED.target_channel_id,
+                     assigned_by = EXCLUDED.assigned_by,
+                     created_at = EXCLUDED.created_at",
+            )
+            .bind(eid)
+            .bind(&target_pubkey)
+            .bind(&target_channel_id)
+            .bind(&cs.public_key)
+            .bind(now)
+            .execute(&state.db)
+            .await;
+
+            if let Err(e) = res {
+                return send_voice_move_error(ws_tx, format!("Unable to queue assignment: {e}"))
+                    .await;
+            }
+
+            // No ack to the mover on success (mirrors the live-push path
+            // below, which also replies only on error) — the staging panel
+            // confirms via GET /events/:id/assignments.
+            tracing::info!(
+                "Voice move queued: {} assigned by {} -> channel {} (event {})",
+                &target_pubkey[..16.min(target_pubkey.len())],
+                &cs.public_key[..16.min(cs.public_key.len())],
+                &target_channel_id[..8.min(target_channel_id.len())],
+                eid
+            );
+            return DispatchResult::Continue;
+        }
+    };
+
+    // Does the target already hold effective READ_MESSAGES on the
+    // destination?
+    let target_can_read = match crate::permissions::channel_permissions(
+        &state.db,
+        &target_pubkey,
+        &target_channel_id,
+    )
+    .await
+    {
+        Ok(perms) => perms.has(crate::permissions::READ_MESSAGES),
+        Err(_) => {
+            return send_voice_move_error(ws_tx, "Unable to verify target's channel access.").await;
+        }
+    };
+
+    if !target_can_read {
+        if event_id.is_none() {
+            // No event context => Phase 1's rejection still applies: a
+            // generic mod-tool move must not reveal a hidden channel.
+            return send_voice_move_error(ws_tx, "Target cannot read the destination channel.")
+                .await;
+        }
+        // §7.4: the organizer's consented, event-scoped move is the
+        // authorization for voice-only presence. Insert the grant BEFORE
+        // the push below so the target's imminent join passes the
+        // voice-join read gate.
+        state
+            .staging_voice_grants
+            .write()
+            .await
+            .entry(target_pubkey.clone())
+            .or_default()
+            .insert(target_channel_id.clone());
+    }
+
+    // §7.2 consent model: auto-accept when the target has claimed a slot or
+    // RSVP'd "going" on the driving event. A slot claim is stored as
+    // status='going' + slot_id, so a plain status check covers both cases.
+    // No event_id => auto: false.
+    let auto = match &event_id {
+        Some(eid) => sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM event_rsvps
+                 WHERE event_id = $1 AND user_pubkey = $2 AND status = 'going'
+             )",
+        )
+        .bind(eid)
+        .bind(&target_pubkey)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false),
+        None => false,
+    };
+
+    let push = WsServerMessage::VoiceMove {
+        target_channel_id: target_channel_id.clone(),
+        target_channel_name,
+        source_channel_id: Some(source_channel_id),
+        event_id: event_id.clone(),
+        auto,
+    };
+    let ev = crate::routes::chat_models::ChatEvent::VoiceMove {
+        to_pubkey: target_pubkey.clone(),
+    };
+    let json: std::sync::Arc<str> =
+        std::sync::Arc::from(serde_json::to_string(&push).unwrap().as_str());
+    let _ = state.chat_tx.send((ev, json));
+
+    tracing::info!(
+        "Voice move: {} requested by {} -> channel {}",
+        &target_pubkey[..16.min(target_pubkey.len())],
+        &cs.public_key[..16.min(cs.public_key.len())],
+        &target_channel_id[..8.min(target_channel_id.len())]
+    );
     DispatchResult::Continue
 }
 

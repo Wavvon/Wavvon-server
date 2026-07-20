@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use wavvon_identity::{recovery_attestation_signing_bytes, recovery_request_signing_bytes};
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
@@ -41,11 +42,29 @@ pub struct RotateKeyRequest {
     pub new_pubkey: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Ed25519 signature by `new_pubkey` over
+    /// `recovery_request_signing_bytes(hub_pubkey, old_pubkey, new_pubkey)`
+    /// (hex). Proves the requester holds the key they're rotating to
+    /// (recovery-attestation.md §4 "New-key proof: required").
+    pub new_key_signature: String,
+    /// No longer accepted — attestations are gathered one at a time via
+    /// `POST /recovery/rotation-request/:id/attest` after this request is
+    /// open. Present only so a legacy/misbehaving client gets a clear
+    /// rejection instead of having its attestations silently dropped.
+    #[serde(default)]
     pub attestations: Vec<AttestationInput>,
 }
 
 #[derive(Deserialize)]
 pub struct AttestationInput {
+    #[allow(dead_code)]
+    pub attester: String,
+    #[allow(dead_code)]
+    pub signature: String,
+}
+
+#[derive(Deserialize)]
+pub struct AttestRequest {
     pub attester: String,
     pub signature: String,
 }
@@ -58,6 +77,19 @@ pub struct RotationRequestResponse {
     pub status: String,
     pub created_at: i64,
     pub attestation_count: i64,
+    pub nonce: String,
+}
+
+#[derive(Serialize)]
+pub struct RotationRequestBundle {
+    pub id: String,
+    pub hub_pubkey: String,
+    pub old_pubkey: String,
+    pub new_pubkey: String,
+    pub nonce: String,
+    pub status: String,
+    pub attestation_count: i64,
+    pub threshold: i64,
 }
 
 #[derive(Serialize)]
@@ -206,16 +238,26 @@ pub async fn delete_contact(
 // Key rotation request
 // ---------------------------------------------------------------------------
 
-/// POST /recovery/rotate-key — new key opens a rotation request with
-/// pre-gathered attestations included inline.
+/// POST /recovery/rotate-key — the new key opens a rotation request.
 ///
-/// The request is accepted immediately if at least one attestation is valid.
-/// Status 'pending' means fewer attestations than threshold; once attestation
-/// count >= threshold the row flips to 'ready_for_review'.
+/// Requires `new_key_signature`: proof the requester holds `new_pubkey`
+/// (recovery-attestation.md §4). Attestations are no longer gathered inline
+/// — the request opens `pending` with zero attestations; contacts vouch one
+/// at a time via `POST /recovery/rotation-request/:id/attest`.
 pub async fn post_rotate_key(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RotateKeyRequest>,
 ) -> Result<(StatusCode, Json<RotationRequestResponse>), (StatusCode, String)> {
+    if !req.attestations.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Inline attestations are no longer accepted; open the request with zero \
+             attestations, then have each contact call POST \
+             /recovery/rotation-request/:id/attest"
+                .to_string(),
+        ));
+    }
+
     // Validate that old_pubkey has contacts configured on this hub.
     let threshold: Option<i64> =
         sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = $1")
@@ -224,7 +266,7 @@ pub async fn post_rotate_key(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let threshold = threshold.ok_or_else(|| {
+    threshold.ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             "The old pubkey has no recovery contacts configured on this hub".to_string(),
@@ -239,75 +281,41 @@ pub async fn post_rotate_key(
         ));
     }
 
+    // New-key proof: new_pubkey must sign the request bundle, proving the
+    // requester holds that key.
+    let hub_pubkey = state.hub_identity.public_key_hex();
+    let proof_bytes = recovery_request_signing_bytes(&hub_pubkey, &req.old_pubkey, &req.new_pubkey);
+    let proof_sig = hex::decode(&req.new_key_signature).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid new_key_signature hex".to_string(),
+        )
+    })?;
+    wavvon_identity::verify_signature(&req.new_pubkey, &proof_bytes, &proof_sig).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "new_key_signature does not verify against new_pubkey".to_string(),
+        )
+    })?;
+
     let request_id = Uuid::new_v4().to_string();
+    let nonce = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
 
-    // Insert the request row.
     sqlx::query(
         "INSERT INTO key_rotation_requests
-            (id, old_pubkey, new_pubkey, reason, status, created_at)
-         VALUES ($1, $2, $3, $4, 'pending', $5)",
+            (id, old_pubkey, new_pubkey, reason, status, created_at, nonce)
+         VALUES ($1, $2, $3, $4, 'pending', $5, $6)",
     )
     .bind(&request_id)
     .bind(&req.old_pubkey)
     .bind(&req.new_pubkey)
     .bind(&req.reason)
     .bind(now)
+    .bind(&nonce)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    // Store valid attestations.
-    let mut valid_count: i64 = 0;
-    for att in &req.attestations {
-        // Self-attestation guard: attester must not be old or new key.
-        if att.attester == req.old_pubkey || att.attester == req.new_pubkey {
-            continue;
-        }
-        // Attester must be in the contact set for old_pubkey.
-        let is_contact: bool = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM recovery_contacts
-             WHERE owner_pubkey = $1 AND contact_pubkey = $2",
-        )
-        .bind(&req.old_pubkey)
-        .bind(&att.attester)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-            > 0;
-
-        if !is_contact {
-            continue;
-        }
-
-        sqlx::query(
-            "INSERT INTO rotation_attestations
-                (id, request_id, attester_pubkey, signature, attested_at)
-             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (request_id, attester_pubkey) DO NOTHING",
-        )
-        .bind(Uuid::new_v4().to_string())
-        .bind(&request_id)
-        .bind(&att.attester)
-        .bind(&att.signature)
-        .bind(now)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-        valid_count += 1;
-    }
-
-    // Flip to ready_for_review if threshold reached.
-    let status = if valid_count >= threshold {
-        sqlx::query("UPDATE key_rotation_requests SET status = 'ready_for_review' WHERE id = $1")
-            .bind(&request_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        "ready_for_review".to_string()
-    } else {
-        "pending".to_string()
-    };
 
     Ok((
         StatusCode::CREATED,
@@ -315,11 +323,153 @@ pub async fn post_rotate_key(
             id: request_id,
             old_pubkey: req.old_pubkey,
             new_pubkey: req.new_pubkey,
-            status,
+            status: "pending".to_string(),
             created_at: now,
-            attestation_count: valid_count,
+            attestation_count: 0,
+            nonce,
         }),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Contact-side: fetch a request bundle to sign, then attest
+// ---------------------------------------------------------------------------
+
+/// GET /recovery/rotation-request/:id — the bundle a recovery contact needs
+/// to sign, plus progress. No session required: a contact learns the
+/// request id out-of-band (recovery-attestation.md §2) and may not hold an
+/// account on this hub at all.
+pub async fn get_rotation_request(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RotationRequestBundle>, (StatusCode, String)> {
+    let row = fetch_rotation_request(&state, &id).await?;
+
+    let threshold: i64 =
+        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = $1")
+            .bind(&row.old_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .unwrap_or(0);
+
+    Ok(Json(RotationRequestBundle {
+        id: row.id,
+        hub_pubkey: state.hub_identity.public_key_hex(),
+        old_pubkey: row.old_pubkey,
+        new_pubkey: row.new_pubkey,
+        nonce: row.nonce.unwrap_or_default(),
+        status: row.status,
+        attestation_count: row.attestation_count,
+        threshold,
+    }))
+}
+
+/// POST /recovery/rotation-request/:id/attest — a recovery contact vouches
+/// for an open rotation request.
+///
+/// Verifies the Ed25519 signature over the canonical bundle bytes, confirms
+/// the attester is a designated contact for `old_pubkey` and isn't the old
+/// or new key itself, upserts (deduped per contact), and flips
+/// `pending -> ready_for_review` once the count reaches threshold.
+pub async fn post_attest(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<AttestRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let row = fetch_rotation_request(&state, &id).await?;
+
+    if row.status != "pending" {
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Request is '{}', no longer accepting attestations",
+                row.status
+            ),
+        ));
+    }
+
+    if req.attester == row.old_pubkey || req.attester == row.new_pubkey {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "attester must not be the old or new key".to_string(),
+        ));
+    }
+
+    let is_contact: bool = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM recovery_contacts WHERE owner_pubkey = $1 AND contact_pubkey = $2",
+    )
+    .bind(&row.old_pubkey)
+    .bind(&req.attester)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        > 0;
+
+    if !is_contact {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "attester is not a designated recovery contact for this owner".to_string(),
+        ));
+    }
+
+    let nonce = row.nonce.clone().unwrap_or_default();
+    let bundle = recovery_attestation_signing_bytes(
+        &state.hub_identity.public_key_hex(),
+        &row.old_pubkey,
+        &row.new_pubkey,
+        &nonce,
+    );
+    let sig = hex::decode(&req.signature)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
+    wavvon_identity::verify_signature(&req.attester, &bundle, &sig).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "signature does not verify against attester's bundle".to_string(),
+        )
+    })?;
+
+    let now = crate::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO rotation_attestations
+            (id, request_id, attester_pubkey, signature, attested_at)
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT (request_id, attester_pubkey) DO NOTHING",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&id)
+    .bind(&req.attester)
+    .bind(&req.signature)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let threshold: i64 =
+        sqlx::query_scalar("SELECT threshold FROM recovery_settings WHERE owner_pubkey = $1")
+            .bind(&row.old_pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            .unwrap_or(0);
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM rotation_attestations WHERE request_id = $1")
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if count >= threshold {
+        sqlx::query(
+            "UPDATE key_rotation_requests SET status = 'ready_for_review' WHERE id = $1 AND status = 'pending'",
+        )
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    Ok(StatusCode::OK)
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +492,7 @@ pub async fn get_my_requests(
     user: AuthUser,
 ) -> Result<Json<Vec<MyRotationRequest>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, RotationRow>(
-        "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at,
+        "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at, r.nonce,
                 COUNT(a.id) AS attestation_count
          FROM key_rotation_requests r
          LEFT JOIN rotation_attestations a ON a.request_id = r.id
@@ -391,7 +541,7 @@ pub async fn admin_list_pending(
     perms.require(permissions::ADMIN)?;
 
     let rows = sqlx::query_as::<_, RotationRow>(
-        "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at,
+        "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at, r.nonce,
                 COUNT(a.id) AS attestation_count
          FROM key_rotation_requests r
          LEFT JOIN rotation_attestations a ON a.request_id = r.id
@@ -453,15 +603,30 @@ pub async fn admin_approve(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Transfer roles from old key to new key.
+    // Transfer NON-OWNER roles from old key to new key. The owner role never
+    // rides along a recovery transfer (identity-recovery.md: owner needs the
+    // separate successor path) — otherwise K colluding contacts plus a fooled
+    // admin could mint a second owner.
     sqlx::query(
         "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
          SELECT $1, role_id, $2
-         FROM user_roles WHERE user_public_key = $3
+         FROM user_roles
+         WHERE user_public_key = $3 AND role_id != 'builtin-owner'
          ON CONFLICT (user_public_key, role_id) DO NOTHING",
     )
     .bind(&row.new_pubkey)
     .bind(now)
+    .bind(&row.old_pubkey)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // A transfer, not a copy: the lost/compromised old key keeps nothing but
+    // owner (which only the successor path moves).
+    sqlx::query(
+        "DELETE FROM user_roles
+         WHERE user_public_key = $1 AND role_id != 'builtin-owner'",
+    )
     .bind(&row.old_pubkey)
     .execute(&state.db)
     .await
@@ -533,7 +698,7 @@ async fn fetch_rotation_request(
     id: &str,
 ) -> Result<RotationRow, (StatusCode, String)> {
     sqlx::query_as::<_, RotationRow>(
-        "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at,
+        "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at, r.nonce,
                 COUNT(a.id) AS attestation_count
          FROM key_rotation_requests r
          LEFT JOIN rotation_attestations a ON a.request_id = r.id
@@ -558,6 +723,7 @@ struct RotationRow {
     old_pubkey: String,
     new_pubkey: String,
     reason: Option<String>,
+    nonce: Option<String>,
     status: String,
     created_at: i64,
     attestation_count: i64,

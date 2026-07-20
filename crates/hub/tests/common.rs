@@ -144,9 +144,16 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         base_url: base_url.clone(),
     }));
 
-    // Connect to the newly created test database.
+    // Connect to the newly created test database. Kept small and given a
+    // generous acquire timeout: under full-suite parallel load, dozens of
+    // these pools exist at once against the same PostgreSQL server, and a
+    // pool sized/timed for a single isolated test run was starving other
+    // tests' `fetch_*` calls out of a connection within the default 30s,
+    // producing sporadic pool-acquire-timeout failures that don't reproduce
+    // when a test file is run alone.
     let pool = PgPoolOptions::new()
-        .max_connections(5)
+        .max_connections(3)
+        .acquire_timeout(std::time::Duration::from_secs(60))
         .connect(&format!("{base_url}/{db_name}"))
         .await
         .expect("Failed to connect to test database");
@@ -289,6 +296,7 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
+        voice_udp_addr: None,
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -304,6 +312,7 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         whisper_targets: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_consumed_tokens: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_ws_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -315,6 +324,8 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         bots_allow_camera: false,
+        bots_allow_video: false,
+        bot_video_stream_budget: 2,
         webauthn: make_test_webauthn(),
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),

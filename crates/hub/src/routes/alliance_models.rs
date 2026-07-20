@@ -39,6 +39,13 @@ pub struct ShareChannelRequest {
     /// single leaf channel behaves exactly as before.
     #[serde(default)]
     pub include_descendants: bool,
+    /// Federated-forum-write policy for this share (forum.md §9
+    /// "Threat-model deltas"): `"none"` | `"replies_only"` |
+    /// `"posts_and_replies"`. `None` leaves the existing value untouched on
+    /// a re-share (or applies the DB default, `"replies_only"`, on first
+    /// share) rather than forcing every caller to always restate it.
+    #[serde(default)]
+    pub forum_remote_write: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -59,10 +66,20 @@ pub struct SharedChannelResponse {
     /// Whether this entry is a container (category) rather than a leaf.
     #[serde(default)]
     pub is_category: bool,
+    /// Federated-forum-write policy in effect for this share (forum.md §9):
+    /// `"none"` | `"replies_only"` | `"posts_and_replies"`. Defaults to
+    /// `"replies_only"` so responses from peers that haven't upgraded yet
+    /// still parse under the same default the migration applies.
+    #[serde(default = "default_forum_remote_write")]
+    pub forum_remote_write: String,
 }
 
 fn default_channel_type() -> String {
     "text".to_string()
+}
+
+fn default_forum_remote_write() -> String {
+    "replies_only".to_string()
 }
 
 #[derive(Serialize, Deserialize)]

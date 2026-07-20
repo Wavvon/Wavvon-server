@@ -86,6 +86,11 @@ pub struct ScreenStreamMeta {
     pub mime: String,
     pub has_audio: bool,
     pub sharer_pubkey: String,
+    /// Whether the sharer is a bot (`can_inject_video` gate,
+    /// bot-capability-layer.md §3/§6 Phase 2). Used to scope the per-hub
+    /// concurrent bot-video-stream budget to bot streams only -- human
+    /// screen shares never count against it.
+    pub is_bot: bool,
     /// Unique WS session id of the connection that started this stream.
     /// Used to discriminate cleanup: on disconnect only streams from the
     /// disconnecting session are removed, leaving streams from other
@@ -211,6 +216,13 @@ pub struct RateLimiters {
     /// Per-hub-pubkey rate limiter for /federation/badge-offer (20 offers/3600 s).
     /// Keyed by the sender's hub public key hex.
     pub badge_offer: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-origin-hub rate limiter for federated forum writes
+    /// (`/federation/forum/...`, forum.md §9 "Threat-model deltas": "Add a
+    /// per-origin-hub rate limiter on federated forum writes"). Keyed by the
+    /// calling hub's public key hex. 30 writes/60 s -- mirrors `badge_offer`'s
+    /// shape (fixed window, same eviction policy) at a cadence sized for
+    /// chat-like content rather than the much rarer badge handshake.
+    pub forum_federated_write: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 impl Default for RateLimiters {
@@ -219,6 +231,7 @@ impl Default for RateLimiters {
             messages: Mutex::new(HashMap::new()),
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
+            forum_federated_write: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -269,6 +282,14 @@ pub struct AppState {
     /// Next available sender_id counter per channel
     pub voice_next_sender_id: RwLock<HashMap<String, u16>>,
     pub voice_udp_port: u16,
+    /// Publicly-reachable `host:port` for this hub's voice UDP relay, or
+    /// `None` when no public host is known (no `WAVVON_PUBLIC_URL` and not
+    /// in LAN mode). Derived once at startup from (in priority order)
+    /// `WAVVON_PUBLIC_URL`'s host, then the LAN-mode advertise address, both
+    /// paired with `voice_udp_port`. Surfaced on `/info` so a farm-routed
+    /// client (or any client) can dial voice directly without guessing the
+    /// hub's public address — see "UDP voice" in farm-impl.md.
+    pub voice_udp_addr: Option<String>,
     pub voice_event_tx: broadcast::Sender<(String, WsServerMessage)>,
     // DM relay: broadcast DMs to all WS clients (they filter by conversation membership)
     pub dm_tx: broadcast::Sender<DmEvent>,
@@ -343,6 +364,19 @@ pub struct AppState {
     /// `RwLock<HashSet>` to avoid adding a new crate dependency.
     pub voice_relay_active: RwLock<HashSet<String>>,
 
+    /// Voice-only presence grants (events.md §7.4): pubkey → set of
+    /// channel_ids the pubkey may join voice on despite lacking effective
+    /// `READ_MESSAGES` there.
+    ///
+    /// Ephemeral, in-memory only — never persisted, never survives a
+    /// restart. Created just before the hub pushes a `voice_move` whose
+    /// target lacks read access on the destination; consumed (checked, not
+    /// removed) by the voice-join read gate; removed by `leave_voice` on
+    /// leave/disconnect. Exactly one enforcement point (the voice-join gate)
+    /// consults this map — message history, WS subscribe, channel list, and
+    /// event read-gating all stay strict per the decisions.md entry.
+    pub staging_voice_grants: RwLock<HashMap<String, HashSet<String>>>,
+
     /// Pending UDP address-binds waiting for the client's VXRG register packet.
     ///
     /// Key is the hex register token (64 chars, 32 random bytes).
@@ -407,6 +441,21 @@ pub struct AppState {
     /// When true, bot mini-apps that declare `requires_camera` receive camera
     /// access in the client webview/iframe sandbox.
     pub bots_allow_camera: bool,
+
+    /// Mirror of `Settings::bots_allow_video` (bot-capability-layer.md §1/§4/§6
+    /// Phase 2). Operator kill-switch for `can_inject_video`: a grant alone is
+    /// never sufficient, this flag must also be on. Defaults to false.
+    pub bots_allow_video: bool,
+    /// Mirror of `Settings::bot_video_stream_budget` (bot-capability-layer.md
+    /// §4 "media budget"). Max number of concurrent bot-initiated video
+    /// streams across the whole hub; frames aren't buffered/queued past this,
+    /// `screen_share_start` is simply rejected once the cap is hit.
+    ///
+    /// ponytail: coarse hub-wide counter, not per-channel/per-bot. Docs leave
+    /// the exact shape open ("the precise number is a hub config knob") --
+    /// upgrade to a finer-grained (per-channel or per-bot) budget if a single
+    /// hub-wide cap proves too coarse in practice.
+    pub bot_video_stream_budget: usize,
 
     /// WebAuthn relying-party instance. Shared across all requests.
     pub webauthn: Arc<Webauthn>,

@@ -19,7 +19,8 @@ pub use pow::{compute_security_level, leading_zero_bits, verify_security_level};
 pub use subkey::DeviceSubkey;
 pub use wire::{
     dm_envelope_signing_bytes, dr_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
-    group_dm_envelope_signing_bytes, sender_key_dist_signing_bytes, DhKeyRecord, HomeHubList,
+    group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
+    recovery_request_signing_bytes, sender_key_dist_signing_bytes, DhKeyRecord, HomeHubList,
     PairingClaim, PairingComplete, PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile,
     RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
@@ -43,6 +44,16 @@ impl Identity {
     pub fn public_key_hex(&self) -> String {
         let verifying_key: VerifyingKey = self.signing_key.verifying_key();
         hex::encode(verifying_key.as_bytes())
+    }
+
+    /// Hex-encoded Ed25519 secret key (32 bytes = 64 hex chars). Same
+    /// encoding `save()` writes to the identity file. Callers that persist
+    /// this value are responsible for keeping it as confidential as any
+    /// other private key material — it round-trips through
+    /// `SigningKey::from_bytes`, so anyone holding it can reconstruct this
+    /// identity in full.
+    pub fn secret_key_hex(&self) -> String {
+        hex::encode(self.signing_key.to_bytes())
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -199,6 +210,23 @@ mod tests {
 
         let result = verify_signature(&pub_key_hex, message, &signature.to_bytes());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn secret_key_hex_round_trips_through_save() {
+        let identity = Identity::generate();
+        let secret_hex = identity.secret_key_hex();
+
+        // 32 bytes, hex-encoded.
+        assert_eq!(secret_hex.len(), 64);
+        let bytes = hex::decode(&secret_hex).expect("secret_key_hex must be valid hex");
+        let array: [u8; 32] = bytes.try_into().expect("secret key must be 32 bytes");
+        let reconstructed = SigningKey::from_bytes(&array);
+
+        assert_eq!(
+            reconstructed.verifying_key().as_bytes(),
+            identity.verifying_key().as_bytes()
+        );
     }
 
     #[test]

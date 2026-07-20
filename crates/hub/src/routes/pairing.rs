@@ -215,11 +215,13 @@ pub async fn post_complete(
             state = 'complete',
             cert_json = $1,
             wrapped_key_hex = $2,
-            updated_at = $3
-         WHERE pairing_token = $4 AND state = 'claimed'",
+            wrapped_dh_seed_hex = $3,
+            updated_at = $4
+         WHERE pairing_token = $5 AND state = 'claimed'",
     )
     .bind(&cert_json)
     .bind(&complete.wrapped_blob_key_hex)
+    .bind(&complete.wrapped_dh_seed_hex)
     .bind(now_secs())
     .bind(&complete.pairing_token)
     .execute(&mut *tx)
@@ -236,7 +238,8 @@ pub async fn get_status(
     Path(token): Path<String>,
 ) -> Result<Json<PairingStatus>, (StatusCode, String)> {
     let row = sqlx::query(
-        "SELECT state, expires_at, subkey_pubkey, device_label, cert_json, wrapped_key_hex
+        "SELECT state, expires_at, subkey_pubkey, device_label, cert_json, wrapped_key_hex,
+                wrapped_dh_seed_hex
          FROM pairing_offers WHERE pairing_token = $1",
     )
     .bind(&token)
@@ -265,11 +268,13 @@ pub async fn get_status(
         "complete" => {
             let cert_json: String = row.get("cert_json");
             let wrapped_blob_key_hex: String = row.get("wrapped_key_hex");
+            let wrapped_dh_seed_hex: Option<String> = row.get("wrapped_dh_seed_hex");
             let cert: SubkeyCert = serde_json::from_str(&cert_json)
                 .map_err(|e| db_err(format!("parse cert_json: {e}")))?;
             PairingStatus::Complete {
                 cert,
                 wrapped_blob_key_hex,
+                wrapped_dh_seed_hex,
             }
         }
         other => {

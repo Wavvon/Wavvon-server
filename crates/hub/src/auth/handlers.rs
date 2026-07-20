@@ -176,13 +176,19 @@ pub async fn verify(
         // Upsert bot_profiles from bot_meta and register commands.
         if let Some(meta) = &req.bot_meta {
             let now = unix_timestamp();
+            let game_json = meta
+                .game
+                .as_ref()
+                .map(|g| serde_json::to_string(g).unwrap_or_default());
             sqlx::query(
-                "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, updated_at)
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+                "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, game, updated_at)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
                  ON CONFLICT(pubkey) DO UPDATE SET
                    name=excluded.name, avatar_url=excluded.avatar_url,
                    description=excluded.description, webhook_url=excluded.webhook_url,
                    homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
+                   mini_app_url=excluded.mini_app_url, requires_camera=excluded.requires_camera,
+                   game=excluded.game,
                    updated_at=excluded.updated_at",
             )
             .bind(&canonical_pubkey)
@@ -192,6 +198,9 @@ pub async fn verify(
             .bind(&meta.webhook_url)
             .bind(&meta.homepage_url)
             .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
+            .bind(&meta.mini_app_url)
+            .bind(meta.requires_camera.unwrap_or(false))
+            .bind(&game_json)
             .bind(now)
             .execute(&state.db)
             .await
@@ -566,14 +575,25 @@ pub async fn verify(
     // Role granted by a role-granting invite (task #34), if the joining
     // user presented one. Assigned alongside builtin-everyone below.
     let mut invite_grant_role_id: Option<String> = None;
+    let mut invite_created_by: Option<String> = None;
 
-    if has_roles == 0 {
+    // A bot already passed the is_bot-specific admission gate above (a
+    // pre-existing 'bot_pending'/'approved' users row created by an admin's
+    // `POST /bots` invite-by-pubkey, bots.md §2) — that *is* this bot's
+    // invite. Applying the human invite-code gate on top made every
+    // external bot 403 on any invite_only hub (the default for a fresh hub,
+    // per WelcomeScreen's join-by-code requirement) even after an admin had
+    // already invited and capability-granted it — found live running the
+    // ttt-bot demo end to end (bot-capability-layer.md §7).
+    if has_roles == 0 && req.is_bot != Some(true) {
         // New user — check if hub requires an invite
         if crate::routes::invites::is_invite_only(&state.db).await? {
             match &req.invite_code {
                 Some(code) => {
-                    invite_grant_role_id =
+                    let (created_by, grant_role_id) =
                         crate::routes::invites::validate_and_use_invite(&state.db, code).await?;
+                    invite_created_by = Some(created_by);
+                    invite_grant_role_id = grant_role_id;
                 }
                 None => {
                     return Err((
@@ -607,22 +627,25 @@ pub async fn verify(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         }
-        // Role-granting invite (task #34). ON CONFLICT DO NOTHING covers the
-        // (rare, harmless) case where this is also the same role granted
-        // above — e.g. the first-boot owner invite grants builtin-owner to
-        // the very first user, who already received it via existing_users == 0.
-        if let Some(role_id) = &invite_grant_role_id {
-            sqlx::query(
-                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
+        // Role-granting invite (task #34) — or, absent an explicit grant, the
+        // hub-level `default_invite_role_id` (invite role policies) — applied
+        // through the shared helper also used by the `/join/:code` redemption
+        // path (its ON CONFLICT DO NOTHING covers the rare, harmless case
+        // where this is also the same role granted above — e.g. the
+        // first-boot owner invite grants builtin-owner to the very first
+        // user, who already received it via existing_users == 0). Only
+        // consulted when an invite was actually redeemed this call
+        // (`invite_created_by` is `Some`) — registrations that didn't use an
+        // invite at all don't pick up the default.
+        if let Some(created_by) = &invite_created_by {
+            crate::routes::invites::apply_invite_role_grant(
+                &state.db,
+                created_by,
+                invite_grant_role_id.as_deref(),
+                &canonical_pubkey,
+                now,
             )
-            .bind(&canonical_pubkey)
-            .bind(role_id)
-            .bind(now)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            .await?;
         }
     }
 
@@ -735,6 +758,21 @@ pub async fn verify(
     }))
 }
 
+/// Result of a successful [`validate_ws_token`] call.
+pub struct WsAuth {
+    pub public_key: String,
+    /// Session scope: `"member"`, `"mini_app"`, or (bot tokens / legacy rows)
+    /// effectively `"member"`. Never `"lobby"` — that scope is rejected
+    /// before this is constructed.
+    pub scope: String,
+    /// Set only when `scope == "mini_app"`: the single channel this
+    /// mini-app session (bot-mini-apps.md "Scoped session token") is bound
+    /// to. Callers use this to confine auto-subscription/roster loading to
+    /// just this channel instead of every channel the underlying user can
+    /// read.
+    pub mini_app_channel_id: Option<String>,
+}
+
 /// Validate a hub session token for WebSocket connections.
 ///
 /// Mirrors the checks in the HTTP `AuthUser` extractor so the two paths
@@ -750,16 +788,21 @@ pub async fn verify(
 ///      deferred (v1 polls `/lobby/status`), so there is nothing a lobby
 ///      session legitimately needs a WS for yet.
 ///
-/// Returns the canonical public key on success.
+/// A `mini_app`-scoped session (bot-mini-apps.md) is allowed through — the
+/// mini-app webview's whole purpose is to talk over `/ws` — but callers
+/// must consult `WsAuth::mini_app_channel_id` to confine what it can see.
 pub async fn validate_ws_token(
     db: &PgPool,
     token: &str,
-) -> Result<String, (axum::http::StatusCode, String)> {
+) -> Result<WsAuth, (axum::http::StatusCode, String)> {
     use axum::http::StatusCode;
 
+    // (public_key, approval_status, expires_at, scope, mini_app_channel_id)
+    type WsSessionRow = (String, String, Option<i64>, String, Option<String>);
+
     // Try session table first.
-    let row: Option<(String, String, Option<i64>, String)> = sqlx::query_as(
-        "SELECT s.public_key, u.approval_status, s.expires_at, s.scope
+    let row: Option<WsSessionRow> = sqlx::query_as(
+        "SELECT s.public_key, u.approval_status, s.expires_at, s.scope, s.mini_app_channel_id
          FROM sessions s
          INNER JOIN users u ON s.public_key = u.public_key
          WHERE s.token = $1",
@@ -769,42 +812,43 @@ pub async fn validate_ws_token(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (pk, approval_status) = if let Some((pk, status, expires_at, scope)) = row {
-        if let Some(exp) = expires_at {
-            let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            if exp < now_ts {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    r#"{"error":"token_expired"}"#.to_string(),
-                ));
+    let (pk, approval_status, scope, mini_app_channel_id) =
+        if let Some((pk, status, expires_at, scope, mini_app_channel_id)) = row {
+            if let Some(exp) = expires_at {
+                let now_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if exp < now_ts {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        r#"{"error":"token_expired"}"#.to_string(),
+                    ));
+                }
             }
-        }
-        if scope == "lobby" {
-            return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
-        }
-        (pk, status)
-    } else {
-        // Try bot tokens.
-        let bot_key: Option<String> =
-            sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = $1")
-                .bind(token)
-                .fetch_optional(db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if scope == "lobby" {
+                return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
+            }
+            (pk, status, scope, mini_app_channel_id)
+        } else {
+            // Try bot tokens.
+            let bot_key: Option<String> =
+                sqlx::query_scalar("SELECT public_key FROM bot_tokens WHERE token = $1")
+                    .bind(token)
+                    .fetch_optional(db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-        match bot_key {
-            Some(k) => (k, "approved".to_string()),
-            None => {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    "Invalid or expired token".to_string(),
-                ))
+            match bot_key {
+                Some(k) => (k, "approved".to_string(), "member".to_string(), None),
+                None => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "Invalid or expired token".to_string(),
+                    ))
+                }
             }
-        }
-    };
+        };
 
     // Subkey revocation check.
     let revoked_count: i64 =
@@ -830,7 +874,11 @@ pub async fn validate_ws_token(
         return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
     }
 
-    Ok(pk)
+    Ok(WsAuth {
+        public_key: pk,
+        scope,
+        mini_app_channel_id,
+    })
 }
 
 /// Assign builtin roles to a brand-new user who has none yet.

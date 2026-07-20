@@ -11,7 +11,12 @@ use super::conn_state::{ConnState, DispatchResult};
 use super::handlers::{bot, chat, mini_app, screen, voice};
 use super::voice::get_voice_roster;
 
-pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, public_key: String) {
+pub(super) async fn handle_socket(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    public_key: String,
+    mini_app_channel_id: Option<String>,
+) {
     // ── Connection setup ─────────────────────────────────────────────────────
 
     let is_bot: bool =
@@ -63,10 +68,17 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     let mut dm_rx = state.dm_tx.subscribe();
 
     // Notify all clients (including this one, since chat_rx is now subscribed)
-    // that this user is online. Only fires on the first session (refcount == 1).
+    // that this user is online. Only fires on the first session (refcount == 1),
+    // and never while the user's stored presence is "invisible" — an
+    // invisible user must never be broadcast as online to other clients,
+    // even though they are (and stay) genuinely connected for delivery.
     {
+        let is_invisible = crate::routes::users::fetch_presence_status(&state.db, &public_key)
+            .await
+            .as_deref()
+            == Some("invisible");
         let online = state.online_users.read().await;
-        if online.get(&public_key).copied().unwrap_or(0) == 1 {
+        if online.get(&public_key).copied().unwrap_or(0) == 1 && !is_invisible {
             let ws_msg = WsServerMessage::MemberOnline {
                 public_key: public_key.clone(),
             };
@@ -83,16 +95,28 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     let mut voice_rx = state.voice_event_tx.subscribe();
     let mut screen_share_rx = state.screen_share_tx.subscribe();
 
-    // Load DM conversation memberships (once at connect time).
-    let my_conversations: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
-        "SELECT conversation_id FROM conversation_members WHERE public_key = $1",
-    )
-    .bind(&public_key)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default()
-    .into_iter()
-    .collect();
+    // A mini-app session (bot-mini-apps.md "Scoped session token") is bound
+    // to exactly one channel and never sees DMs — it's a game/interactive
+    // relay for one channel, not a general-purpose login. Skip the normal
+    // "every readable channel" auto-subscribe and DM-membership load
+    // entirely in that case.
+    let is_mini_app = mini_app_channel_id.is_some();
+
+    // Load DM conversation memberships (once at connect time). Never for a
+    // mini-app session — see above.
+    let my_conversations: std::collections::HashSet<String> = if is_mini_app {
+        std::collections::HashSet::new()
+    } else {
+        sqlx::query_scalar::<_, String>(
+            "SELECT conversation_id FROM conversation_members WHERE public_key = $1",
+        )
+        .bind(&public_key)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect()
+    };
 
     // Read-gating (§3.5): a channel the caller can't effectively read is
     // never auto-subscribed, so no chat/typing/etc. events for it are ever
@@ -106,7 +130,10 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
         .await
         .unwrap_or_default();
 
-    // Auto-subscribe to non-banned, readable channels.
+    // Auto-subscribe to non-banned, readable channels — or, for a mini-app
+    // session, to its single bound channel only (still gated by the same
+    // ban + read-permission checks; a mini-app session grants no extra
+    // visibility beyond what the underlying user already has).
     let subscribed: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
         "SELECT id FROM channels
          WHERE is_category = false
@@ -120,6 +147,11 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     .unwrap_or_default()
     .into_iter()
     .filter(|id| readable_channels.contains(id))
+    .filter(|id| {
+        mini_app_channel_id
+            .as_deref()
+            .is_none_or(|bound| bound == id)
+    })
     .collect();
 
     // Send `hello` with live_seq.
@@ -195,7 +227,17 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
                                 | crate::routes::chat_models::ChatEvent::MemberUpdated { .. }
                                 | crate::routes::chat_models::ChatEvent::MemberStatus { .. }
                                 | crate::routes::chat_models::ChatEvent::WebhookDisabled { .. }
+                                | crate::routes::chat_models::ChatEvent::VoiceMove { .. }
                         ) {
+                            // VoiceMove is hub-wide-bypass in the sense that it
+                            // never depends on channel subscription, but it is
+                            // still targeted to exactly one recipient (events.md
+                            // §7.1) — filter on pubkey before delivering.
+                            if let crate::routes::chat_models::ChatEvent::VoiceMove {
+                                to_pubkey,
+                            } = &event {
+                                if to_pubkey != &cs.public_key { continue; }
+                            }
                             let json = pre_json.to_string();
                             if ws_tx.send(Message::Text(json.into())).await.is_err() {
                                 break;
@@ -603,17 +645,28 @@ pub(super) async fn handle_socket(socket: WebSocket, state: Arc<AppState>, publi
     };
 
     if went_offline {
-        let ws_msg = WsServerMessage::MemberOffline {
-            public_key: public_key.clone(),
-        };
-        let json: std::sync::Arc<str> =
-            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state.chat_tx.send((
-            crate::routes::chat_models::ChatEvent::MemberOffline {
+        // If the user's current presence is "invisible", other clients were
+        // never told they came online in the first place (see connect,
+        // above) — or were already told they went offline the moment
+        // invisible was set (see handle_set_status) — so skip the redundant
+        // member_offline broadcast here.
+        let is_invisible = crate::routes::users::fetch_presence_status(&state.db, &public_key)
+            .await
+            .as_deref()
+            == Some("invisible");
+        if !is_invisible {
+            let ws_msg = WsServerMessage::MemberOffline {
                 public_key: public_key.clone(),
-            },
-            json,
-        ));
+            };
+            let json: std::sync::Arc<str> =
+                std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+            let _ = state.chat_tx.send((
+                crate::routes::chat_models::ChatEvent::MemberOffline {
+                    public_key: public_key.clone(),
+                },
+                json,
+            ));
+        }
     }
 
     tracing::info!(
@@ -655,11 +708,12 @@ async fn dispatch_client_msg(
             DispatchResult::Continue
         }
         WsClientMessage::VoiceLeave { .. } => voice::handle_voice_leave(cs, state, msg).await,
-        WsClientMessage::VoiceSpeaking { .. } => voice::handle_voice_speaking(cs, state, msg),
+        WsClientMessage::VoiceSpeaking { .. } => voice::handle_voice_speaking(cs, state, msg).await,
         WsClientMessage::VoiceWhisperStart { .. } => {
             voice::handle_voice_whisper_start(cs, state, msg).await
         }
         WsClientMessage::VoiceWhisperStop => voice::handle_voice_whisper_stop(cs, state).await,
+        WsClientMessage::VoiceMove { .. } => voice::handle_voice_move(cs, state, ws_tx, msg).await,
 
         // ── Proximity voice ────────────────────────────────────────────────
         WsClientMessage::VoiceZoneCreate { .. } => {
@@ -683,7 +737,7 @@ async fn dispatch_client_msg(
 
         // ── Screen share ───────────────────────────────────────────────────
         WsClientMessage::ScreenShareStart { .. } => {
-            screen::handle_screen_share_start(cs, state, msg).await
+            screen::handle_screen_share_start(cs, state, ws_tx, msg).await
         }
         WsClientMessage::ScreenShareChunk { .. } => {
             screen::handle_screen_share_chunk_header(cs, msg)
@@ -723,6 +777,9 @@ async fn dispatch_client_msg(
         }
         WsClientMessage::BotAppDismiss { .. } => {
             mini_app::handle_bot_app_dismiss(cs, state, msg).await
+        }
+        WsClientMessage::MiniAppMessage { .. } => {
+            mini_app::handle_mini_app_message(cs, state, msg).await
         }
 
         // ── V4 voice encryption ────────────────────────────────────────────
@@ -796,13 +853,19 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
         consumed.retain(|_, v| v.pubkey != public_key);
     }
 
-    let _ = state.voice_event_tx.send((
-        channel_id.to_string(),
-        WsServerMessage::VoiceParticipantLeft {
-            channel_id: channel_id.to_string(),
-            public_key: public_key.to_string(),
-        },
-    ));
+    // An invisible participant was never announced as joined, so don't
+    // announce them leaving either (a Left for someone who toggled invisible
+    // mid-call was already emitted by handle_set_status). Same gate as the
+    // join broadcast.
+    if !crate::routes::users::is_invisible(&state.db, public_key).await {
+        let _ = state.voice_event_tx.send((
+            channel_id.to_string(),
+            WsServerMessage::VoiceParticipantLeft {
+                channel_id: channel_id.to_string(),
+                public_key: public_key.to_string(),
+            },
+        ));
+    }
 
     // Remove sender_id mapping.
     {
@@ -875,6 +938,21 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
 
     // Revoke the UDP relay slot.
     state.voice_relay_active.write().await.remove(public_key);
+
+    // events.md §7.4: a voice-only presence grant for this exact
+    // (pubkey, channel) pair evaporates on leave -- never persisted, never
+    // outlives the voice session. Both transports (main hub WS VoiceLeave
+    // and the /voice/ws relay's disconnect cleanup) funnel through this
+    // shared teardown.
+    {
+        let mut grants = state.staging_voice_grants.write().await;
+        if let Some(set) = grants.get_mut(public_key) {
+            set.remove(channel_id);
+            if set.is_empty() {
+                grants.remove(public_key);
+            }
+        }
+    }
 
     // Broadcast updated roster.
     let roster = get_voice_roster(state, channel_id).await;

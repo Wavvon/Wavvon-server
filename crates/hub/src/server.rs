@@ -282,6 +282,14 @@ pub fn create_router_full(
             "/admin/bots",
             get(routes::bots::admin_list_bots).post(routes::bots::admin_create_bot),
         )
+        // ---- External bot admin view (bots.md §4) ----
+        // Registered before /admin/bots/{pubkey} for the same reason as
+        // /bots/me below -- keeps "external" from ever being treated as a
+        // pubkey path parameter.
+        .route(
+            "/admin/bots/external",
+            get(routes::bots::admin_list_external_bots),
+        )
         .route(
             "/admin/bots/{pubkey}",
             get(routes::bots::admin_get_bot).delete(routes::bots::admin_delete_bot),
@@ -289,6 +297,16 @@ pub fn create_router_full(
         .route(
             "/admin/bots/{pubkey}/webhook",
             put(routes::bots::admin_set_webhook),
+        )
+        .route(
+            "/admin/bots/{pubkey}/capabilities",
+            get(routes::bots::admin_get_bot_capabilities)
+                .put(routes::bots::admin_set_bot_capabilities),
+        )
+        .route(
+            "/admin/bots/{pubkey}/channels",
+            get(routes::bots::admin_get_bot_channel_scope)
+                .put(routes::bots::admin_set_bot_channel_scope),
         )
         .route("/admin/audit-log", get(routes::bots::admin_audit_log))
         // ---- Bot API (token auth, internal service accounts) ----
@@ -405,6 +423,10 @@ pub fn create_router_full(
         .route("/voice/ws", get(routes::voice_ws::handle_voice_ws))
         .route("/ws", get(routes::ws::ws_handler))
         .route("/conversations", get(routes::dms::list_conversations))
+        .route(
+            "/conversations/{conversation_id}",
+            get(routes::dms::get_conversation),
+        )
         .route(
             "/conversations/{conversation_id}/messages",
             get(routes::dms::list_dm_messages),
@@ -626,6 +648,48 @@ pub fn create_router_full(
                 .post(routes::alliances::post_alliance_channel_message),
         )
         .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts",
+            get(routes::alliances::get_alliance_forum_posts)
+                .post(routes::alliances::post_alliance_forum_post),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}",
+            get(routes::alliances::get_alliance_forum_post)
+                .delete(routes::alliances::delete_alliance_forum_post),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/replies",
+            post(routes::alliances::post_alliance_forum_reply),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/replies/{reply_id}",
+            delete(routes::alliances::delete_alliance_forum_reply),
+        )
+        .route(
+            "/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}/reactions",
+            post(routes::alliances::react_alliance_forum),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts",
+            post(routes::posts::federated_create_post),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}",
+            delete(routes::posts::federated_delete_post),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}/replies",
+            post(routes::posts::federated_create_reply),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}/replies/{reply_id}",
+            delete(routes::posts::federated_delete_reply),
+        )
+        .route(
+            "/federation/forum/channels/{channel_id}/posts/{post_id}/reactions",
+            post(routes::posts::federated_add_post_reaction),
+        )
+        .route(
             "/federation/alliance-invite",
             post(routes::alliances::receive_federation_alliance_invite),
         )
@@ -813,6 +877,14 @@ pub fn create_router_full(
         )
         .route("/recovery/requests", get(routes::recovery::get_my_requests))
         .route(
+            "/recovery/rotation-request/{id}",
+            get(routes::recovery::get_rotation_request),
+        )
+        .route(
+            "/recovery/rotation-request/{id}/attest",
+            post(routes::recovery::post_attest),
+        )
+        .route(
             "/admin/recovery/pending",
             get(routes::recovery::admin_list_pending),
         )
@@ -865,6 +937,14 @@ pub fn create_router_full(
             "/events/{event_id}/slots/{slot_id}",
             patch(routes::events::update_slot).delete(routes::events::delete_slot),
         )
+        .route(
+            "/events/{event_id}/assignments",
+            get(routes::events::list_event_assignments),
+        )
+        .route(
+            "/events/{event_id}/squad-rooms",
+            post(routes::events::create_squad_rooms),
+        )
         // ---- File uploads ----
         .route(
             "/channels/{channel_id}/upload",
@@ -897,7 +977,7 @@ pub fn create_router_full(
         // ---- Native polls (Task #31) ----
         .route(
             "/channels/{channel_id}/polls",
-            post(routes::polls::create_poll),
+            get(routes::polls::list_polls).post(routes::polls::create_poll),
         )
         .route(
             "/polls/{poll_id}",

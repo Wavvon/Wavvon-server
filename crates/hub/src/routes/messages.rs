@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
+use crate::routes::bot_models::{Embed, GameLaunchCard};
 use crate::routes::chat_models::{
     Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
     ReactionSummary, ReplyContext, SendMessageRequest, MAX_ATTACHMENTS_BYTES,
@@ -110,6 +111,31 @@ pub async fn send_message(
         )
     };
 
+    // Game-modal launch card (bot-capability-layer.md §2): bot authors only,
+    // same rule as embeds/components elsewhere in the bot wire surface
+    // (bots.md §11, §15 "rejected on messages authored by non-bots").
+    let game_json = if req.game.is_some() {
+        let is_bot: Option<bool> =
+            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+                .bind(&user.public_key)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
+        if is_bot != Some(true) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "game launch card is bot-authored only".to_string(),
+            ));
+        }
+        Some(
+            serde_json::to_string(&req.game)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?,
+        )
+    } else {
+        None
+    };
+
     // If a reply_to is provided, sanity-check the parent exists in this
     // same channel. Cross-channel replies would surprise everyone.
     if let Some(parent_id) = &req.reply_to {
@@ -173,6 +199,8 @@ pub async fn send_message(
                     reply_to: None,
                     visible_to_pubkey: Some(user.public_key),
                     reply_count: 0,
+                    embeds: None,
+                    game: None,
                 };
                 return Ok((StatusCode::OK, Json(placeholder)));
             }
@@ -319,7 +347,7 @@ pub async fn send_message(
     }
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at, game) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -328,6 +356,7 @@ pub async fn send_message(
     .bind(&attachments_json)
     .bind(&req.reply_to)
     .bind(now)
+    .bind(&game_json)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -382,6 +411,10 @@ pub async fn send_message(
         reply_to: reply_ctx,
         visible_to_pubkey: None,
         reply_count: 0,
+        // No embeds on user-authored messages -- bot-only, and this path
+        // already rejected req.game above unless the sender is a bot.
+        embeds: None,
+        game: req.game,
     };
 
     {
@@ -456,14 +489,49 @@ pub async fn edit_message(
         ));
     }
 
+    // Result embed on edit (bot-capability-layer.md §7 step 5): bot authors
+    // only, same rule as `SendMessageRequest.game` in `send_message` above.
+    let embeds_json = if req.embeds.is_some() {
+        let is_bot: Option<bool> =
+            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+                .bind(&user.public_key)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .flatten();
+        if is_bot != Some(true) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "embeds are bot-authored only".to_string(),
+            ));
+        }
+        Some(
+            serde_json::to_string(&req.embeds)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?,
+        )
+    } else {
+        None
+    };
+
     let now = crate::auth::handlers::unix_timestamp();
-    sqlx::query("UPDATE messages SET content = $1, edited_at = $2 WHERE id = $3")
-        .bind(&req.content)
-        .bind(now)
-        .bind(&message_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some(embeds_json) = embeds_json {
+        sqlx::query("UPDATE messages SET content = $1, edited_at = $2, embeds = $3 WHERE id = $4")
+            .bind(&req.content)
+            .bind(now)
+            .bind(&embeds_json)
+            .bind(&message_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    } else {
+        sqlx::query("UPDATE messages SET content = $1, edited_at = $2 WHERE id = $3")
+            .bind(&req.content)
+            .bind(now)
+            .bind(&message_id)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
 
     let updated = load_message(&state, &message_id).await?;
     {
@@ -570,7 +638,7 @@ async fn load_message(
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
                 m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
-                COALESCE(m.reply_count, 0) as reply_count
+                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -598,6 +666,8 @@ async fn load_message(
         reply_to,
         visible_to_pubkey: None,
         reply_count: row.reply_count,
+        embeds: parse_embeds(row.embeds),
+        game: parse_game(row.game),
     })
 }
 
@@ -622,7 +692,7 @@ pub async fn get_messages(
     let rows = if let Some(ref root_id) = params.thread_root {
         // Thread mode: return all replies to this root, oldest first.
         sqlx::query_as::<_, MessageRow>(
-            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
              ORDER BY m.created_at ASC, m.id ASC LIMIT $3",
@@ -662,7 +732,7 @@ pub async fn get_messages(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
                      ORDER BY m.created_at DESC, m.id DESC"
@@ -675,7 +745,7 @@ pub async fn get_messages(
             }
             (None, Some(before_id)) => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
                        AND (m.created_at, m.id) < (
@@ -691,7 +761,7 @@ pub async fn get_messages(
             }
             (None, None) => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
                      ORDER BY m.created_at DESC, m.id DESC LIMIT $2",
@@ -734,6 +804,8 @@ pub async fn get_messages(
                 reply_to,
                 visible_to_pubkey: None,
                 reply_count: r.reply_count,
+                embeds: parse_embeds(r.embeds),
+                game: parse_game(r.game),
             }
         })
         .collect();
@@ -753,6 +825,20 @@ struct MessageRow {
     created_at: i64,
     edited_at: Option<i64>,
     reply_count: i64,
+    embeds: Option<String>,
+    game: Option<String>,
+}
+
+fn parse_embeds(json: Option<String>) -> Option<Vec<Embed>> {
+    json.as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
+}
+
+fn parse_game(json: Option<String>) -> Option<GameLaunchCard> {
+    json.as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
 }
 
 /// Bulk variant of load_reactions: one query for all messages in a page,

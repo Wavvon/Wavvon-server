@@ -527,6 +527,124 @@ async fn suspend_hub_returns_404_for_unknown() {
 }
 
 // ---------------------------------------------------------------------------
+// POST /farm/hubs/:hub_id/restart
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn force_restart_requires_auth() {
+    let (server, state, _guard) = setup().await;
+    let owner = Identity::generate();
+    insert_hub(&state, "hubrst", &owner.public_key_hex(), "Hub", "public").await;
+
+    let resp = server.post("/farm/hubs/hubrst/restart").await;
+    resp.assert_status_unauthorized();
+}
+
+#[tokio::test]
+async fn force_restart_requires_admin() {
+    let (server, state, _guard) = setup().await;
+    let owner = Identity::generate();
+    let non_admin = Identity::generate();
+
+    insert_hub(&state, "hubrst", &owner.public_key_hex(), "Hub", "public").await;
+    set_admin(&state, &owner.public_key_hex()).await;
+
+    let token = authenticate(&server, &state, &non_admin).await;
+    let resp = server
+        .post("/farm/hubs/hubrst/restart")
+        .add_header(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(resp.json::<Value>()["error"], "farm_admin_only");
+}
+
+#[tokio::test]
+async fn force_restart_happy_path_resets_attempts() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+
+    insert_hub(&state, "hubrst", &admin.public_key_hex(), "Hub", "public").await;
+    set_admin(&state, &admin.public_key_hex()).await;
+
+    // Simulate an exhausted auto-restart supervisor: attempts maxed out,
+    // auto-restart disabled, a process_port on record.
+    sqlx::query(
+        "UPDATE hubs SET process_port = 9100, restart_attempts = 5,
+                          auto_restart_enabled = FALSE
+         WHERE id = 'hubrst'",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let token = authenticate(&server, &state, &admin).await;
+    let resp = server
+        .post("/farm/hubs/hubrst/restart")
+        .add_header(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    assert_eq!(body["id"], "hubrst");
+    assert!(body["restarted_at"].is_number());
+
+    // Effect: attempts reset, auto-restart re-enabled, last_restart_at stamped.
+    let row: (i32, bool, Option<i64>) = sqlx::query_as(
+        "SELECT restart_attempts, auto_restart_enabled, last_restart_at
+         FROM hubs WHERE id = 'hubrst'",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(row.0, 0);
+    assert!(row.1);
+    assert!(row.2.is_some());
+}
+
+#[tokio::test]
+async fn force_restart_returns_409_when_hub_not_running() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+
+    // insert_hub leaves process_port NULL — the hub has never been spawned.
+    insert_hub(&state, "hubrst", &admin.public_key_hex(), "Hub", "public").await;
+    set_admin(&state, &admin.public_key_hex()).await;
+
+    let token = authenticate(&server, &state, &admin).await;
+    let resp = server
+        .post("/farm/hubs/hubrst/restart")
+        .add_header(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    resp.assert_status(axum::http::StatusCode::CONFLICT);
+    assert_eq!(resp.json::<Value>()["error"], "hub_not_running");
+}
+
+#[tokio::test]
+async fn force_restart_returns_404_for_unknown() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    set_admin(&state, &admin.public_key_hex()).await;
+    let token = authenticate(&server, &state, &admin).await;
+
+    let resp = server
+        .post("/farm/hubs/nope/restart")
+        .add_header(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .await;
+    resp.assert_status_not_found();
+}
+
+// ---------------------------------------------------------------------------
 // DELETE /farm/hubs/:hub_id
 // ---------------------------------------------------------------------------
 

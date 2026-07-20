@@ -186,6 +186,13 @@ async fn load_envelope(
         None
     };
 
+    // Re-derive the top-level signer_cert from the stored envelope so a
+    // retried delivery carries the same cert-chained attribution proof the
+    // original send did (see dm_models.rs::FederatedDmRequest::signer_cert).
+    let signer_cert = encrypted_envelope
+        .as_ref()
+        .and_then(|e| e.signer_cert.clone());
+
     Ok(Some(FederatedDmRequest {
         message_id: msg.0,
         conversation_id: msg.1,
@@ -199,6 +206,7 @@ async fn load_envelope(
         encrypted_envelope,
         group_encrypted_envelope,
         sender_hub_url: None,
+        signer_cert,
     }))
 }
 
