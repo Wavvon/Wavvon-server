@@ -877,6 +877,14 @@ pub fn create_router_full(
         )
         .route("/recovery/requests", get(routes::recovery::get_my_requests))
         .route(
+            "/recovery/rotation-request/{id}",
+            get(routes::recovery::get_rotation_request),
+        )
+        .route(
+            "/recovery/rotation-request/{id}/attest",
+            post(routes::recovery::post_attest),
+        )
+        .route(
             "/admin/recovery/pending",
             get(routes::recovery::admin_list_pending),
         )

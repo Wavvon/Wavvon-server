@@ -13,7 +13,8 @@ pub fn spawn(state: Arc<AppState>) {
     });
 }
 
-async fn run_sweep(state: &AppState) {
+/// Single sweep pass. Public for tests.
+pub async fn run_sweep(state: &AppState) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -42,6 +43,22 @@ async fn run_sweep(state: &AppState) {
         )",
     )
     .bind(now)
+    .execute(&state.db)
+    .await;
+
+    // Expire stale key-rotation requests (recovery-attestation.md §4
+    // "Expiry: 14-day sweep"). A request that never gathers enough
+    // attestations to reach admin review shouldn't linger indefinitely --
+    // only 'pending' rows are touched, never 'ready_for_review' (already
+    // earned admin attention) or a decided/expired terminal state.
+    const ROTATION_REQUEST_EXPIRY_SECS: i64 = 14 * 86400;
+    let _ = sqlx::query(
+        "UPDATE key_rotation_requests
+         SET status = 'expired'
+         WHERE status = 'pending' AND created_at < $1 - $2",
+    )
+    .bind(now)
+    .bind(ROTATION_REQUEST_EXPIRY_SECS)
     .execute(&state.db)
     .await;
 
