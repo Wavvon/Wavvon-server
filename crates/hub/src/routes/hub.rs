@@ -93,8 +93,43 @@ pub async fn update_hub(
             upsert_setting(&state.db, "default_invite_role_id", role_id).await?;
         }
     }
+    if let Some(tz) = req.timezone.as_deref() {
+        validate_timezone(tz)?;
+        upsert_setting(&state.db, "hub_timezone", tz).await?;
+    }
+    if let Some(flag) = req.birthdays_enabled {
+        upsert_setting(
+            &state.db,
+            "birthdays_enabled",
+            if flag { "true" } else { "false" },
+        )
+        .await?;
+    }
 
     Ok(StatusCode::OK)
+}
+
+/// Validates the operator-supplied hub timezone (an IANA timezone name, e.g.
+/// "Europe/Rome"). No timezone database dependency here — this only checks
+/// shape, not that the name actually exists in tzdata. Empty string clears
+/// the setting.
+fn validate_timezone(tz: &str) -> Result<(), (StatusCode, String)> {
+    if tz.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "timezone must be 64 characters or fewer".to_string(),
+        ));
+    }
+    if !tz
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '/' | '-'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "timezone contains invalid characters".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Validates the operator-supplied welcome invite link (Feature: welcome
@@ -280,12 +315,23 @@ pub async fn get_hub_settings(
         .await
         .filter(|v| !v.is_empty());
 
+    let timezone: Option<String> = read_setting(&state.db, "hub_timezone")
+        .await
+        .filter(|v| !v.is_empty());
+
+    let birthdays_enabled: bool = read_setting(&state.db, "birthdays_enabled")
+        .await
+        .map(|v| v == "true")
+        .unwrap_or(true);
+
     Ok(Json(HubSettings {
         require_approval,
         invite_only,
         min_security_level,
         max_channel_depth,
         default_invite_role_id,
+        timezone,
+        birthdays_enabled,
     }))
 }
 
@@ -300,6 +346,17 @@ pub struct HubSettings {
     /// policies, hub-level default). `null` when unset.
     #[serde(default)]
     pub default_invite_role_id: Option<String>,
+    /// IANA timezone name (e.g. "Europe/Rome"). `null` when unset.
+    #[serde(default)]
+    pub timezone: Option<String>,
+    /// Whether member birthdays are shown/settable at all. Defaults to true
+    /// when never set.
+    #[serde(default = "default_true")]
+    pub birthdays_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -362,6 +419,15 @@ pub struct UpdateHubRequest {
     /// not carry the `admin` permission. Empty string clears the setting.
     #[serde(default)]
     pub default_invite_role_id: Option<String>,
+    /// IANA timezone name (e.g. "Europe/Rome") used for hub-local birthday
+    /// reminders etc. Max 64 chars, charset `[A-Za-z0-9_+/-]`. Empty string
+    /// clears the setting.
+    #[serde(default)]
+    pub timezone: Option<String>,
+    /// Whether member birthdays are shown to other members at all. Setting a
+    /// birthday via PATCH /me is rejected while this is false.
+    #[serde(default)]
+    pub birthdays_enabled: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -464,6 +530,16 @@ pub async fn current_hub_name(state: &AppState) -> String {
         .unwrap_or_else(|| state.hub_name.clone())
 }
 
+/// Whether member birthdays are shown to other members / settable at all.
+/// Defaults to true when never configured. Shared by `me.rs` (gates PATCH)
+/// and `users.rs` (gates what's shown in profiles/listings).
+pub async fn birthdays_enabled(db: &sqlx::PgPool) -> bool {
+    read_setting(db, "birthdays_enabled")
+        .await
+        .map(|v| v == "true")
+        .unwrap_or(true)
+}
+
 async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String> {
     sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
         .bind(key)
@@ -482,12 +558,14 @@ pub async fn list_members(
     perms.require(ADMIN)?;
 
     let users = sqlx::query_as::<_, UserAdminRow>(
-        "SELECT public_key, display_name, first_seen_at, last_seen_at, is_bot
+        "SELECT public_key, display_name, first_seen_at, last_seen_at, is_bot, birthday
          FROM users ORDER BY first_seen_at LIMIT 1000",
     )
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let show_birthdays = birthdays_enabled(&state.db).await;
 
     if users.is_empty() {
         return Ok(Json(vec![]));
@@ -586,6 +664,7 @@ pub async fn list_members(
                 last_seen_at: u.last_seen_at,
                 roles,
                 is_bot: u.is_bot,
+                birthday: if show_birthdays { u.birthday } else { None },
             }
         })
         .collect();
@@ -603,6 +682,10 @@ pub struct MemberAdminInfo {
     pub roles: Vec<RoleResponse>,
     #[serde(default)]
     pub is_bot: bool,
+    /// "MM-DD", never a year. `null` when unset or when `birthdays_enabled`
+    /// is false hub-wide.
+    #[serde(default)]
+    pub birthday: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -612,4 +695,5 @@ struct UserAdminRow {
     first_seen_at: i64,
     last_seen_at: i64,
     is_bot: bool,
+    birthday: Option<String>,
 }

@@ -89,7 +89,7 @@ fn validate_favorite_hubs(hubs: &[FavoriteHub]) -> Result<(), (StatusCode, Strin
 
 /// Row shape shared by the GET and PATCH `/me` handlers: display_name,
 /// approval_status, avatar, bio, pronouns, status_message, activities,
-/// accent_color, cover, favorite_hubs, show_hubs.
+/// accent_color, cover, favorite_hubs, show_hubs, birthday.
 #[allow(clippy::type_complexity)]
 type MeProfileRow = (
     Option<String>,
@@ -103,9 +103,10 @@ type MeProfileRow = (
     Option<String>,
     Option<String>,
     Option<bool>,
+    Option<String>,
 );
 
-const ME_SELECT: &str = "SELECT display_name, approval_status, avatar, bio, pronouns, status_message, activities, accent_color, cover, favorite_hubs, show_hubs FROM users WHERE public_key = $1";
+const ME_SELECT: &str = "SELECT display_name, approval_status, avatar, bio, pronouns, status_message, activities, accent_color, cover, favorite_hubs, show_hubs, birthday FROM users WHERE public_key = $1";
 
 fn empty_row() -> MeProfileRow {
     (
@@ -120,7 +121,32 @@ fn empty_row() -> MeProfileRow {
         None,
         None,
         None,
+        None,
     )
+}
+
+/// Matches "MM-DD" — month/day only, never a year (privacy). Month 01-12,
+/// day 01-31 (02 allows up to 29; callers don't need real per-month/leap-year
+/// day counts since no year is stored).
+fn is_valid_birthday(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 5 || bytes[2] != b'-' {
+        return false;
+    }
+    if !bytes[0..2].iter().all(u8::is_ascii_digit) || !bytes[3..5].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    let month: u32 = s[0..2].parse().unwrap_or(0);
+    let day: u32 = s[3..5].parse().unwrap_or(0);
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    let max_day = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 => 29,
+        _ => 31,
+    };
+    (1..=max_day).contains(&day)
 }
 
 pub async fn me(
@@ -145,6 +171,7 @@ pub async fn me(
         cover,
         favorite_hubs,
         show_hubs,
+        birthday,
     ) = row.unwrap_or_else(empty_row);
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
@@ -163,6 +190,7 @@ pub async fn me(
         show_hubs: show_hubs.unwrap_or(false),
         approval_status,
         roles,
+        birthday,
     }))
 }
 
@@ -297,6 +325,23 @@ pub async fn update_me(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
+    if let Some(ref birthday) = req.birthday {
+        if !birthday.is_empty() {
+            if !crate::routes::hub::birthdays_enabled(&state.db).await {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "birthdays are disabled on this hub".to_string(),
+                ));
+            }
+            if !is_valid_birthday(birthday) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "birthday must be MM-DD (no year)".to_string(),
+                ));
+            }
+        }
+        update_text_field(&state.db, pk, "birthday", birthday, usize::MAX, "birthday").await?;
+    }
 
     // Return fresh me
     let row: Option<MeProfileRow> = sqlx::query_as(ME_SELECT)
@@ -317,6 +362,7 @@ pub async fn update_me(
         cover,
         favorite_hubs,
         show_hubs,
+        birthday,
     ) = row.unwrap_or_else(empty_row);
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
@@ -357,6 +403,7 @@ pub async fn update_me(
         show_hubs: show_hubs.unwrap_or(false),
         approval_status,
         roles,
+        birthday,
     }))
 }
 
@@ -433,6 +480,10 @@ pub struct MeResponse {
     pub approval_status: String,
     #[serde(default)]
     pub roles: Vec<RoleResponse>,
+    /// "MM-DD", never a year. `null` when unset. The owner's own GET /me
+    /// always returns the stored value regardless of `birthdays_enabled`.
+    #[serde(default)]
+    pub birthday: Option<String>,
 }
 
 fn default_approval_status() -> String {
@@ -461,6 +512,11 @@ pub struct UpdateMeRequest {
     pub favorite_hubs: Option<Vec<FavoriteHub>>,
     #[serde(default)]
     pub show_hubs: Option<bool>,
+    /// "MM-DD", never a year. Empty string clears it. Rejected with 400 when
+    /// `birthdays_enabled` is false hub-wide, or when the format doesn't
+    /// match "MM-DD" with a valid month/day.
+    #[serde(default)]
+    pub birthday: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

@@ -121,6 +121,17 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
 
+    let timezone: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'hub_timezone'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s| !s.is_empty());
+
+    let birthdays_enabled = crate::routes::hub::birthdays_enabled(&state.db).await;
+
     Json(InfoResponse {
         name: branding.name,
         description: branding.description,
@@ -146,6 +157,8 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         welcome_label,
         welcome_invite_url,
         voice_udp_addr: state.voice_udp_addr.clone(),
+        timezone,
+        birthdays_enabled,
     })
 }
 
@@ -233,4 +246,16 @@ pub struct InfoResponse {
     /// address after fetching `/info` — see "UDP voice" in farm-impl.md.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub voice_udp_addr: Option<String>,
+    /// Operator-configured IANA timezone name (e.g. "Europe/Rome"). Absent
+    /// when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Whether member birthdays are shown/settable on this hub. Defaults to
+    /// true when never configured.
+    #[serde(default = "default_true")]
+    pub birthdays_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }

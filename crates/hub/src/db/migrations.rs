@@ -1863,6 +1863,12 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Member birthday, month+day only -- never a year (privacy). Stored as
+    // "MM-DD"; validated at the route layer (routes/me.rs), never here.
+    let _ = sqlx::query("ALTER TABLE users ADD COLUMN birthday TEXT")
+        .execute(pool)
+        .await;
+
     // =======================================================================
     // One-time data cleanup
     // =======================================================================

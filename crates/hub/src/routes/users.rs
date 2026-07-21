@@ -11,7 +11,7 @@ use crate::state::AppState;
 
 /// Row shape for the profile fields SELECT in `get_user_profile`:
 /// display_name, avatar, first_seen_at, bio, pronouns, status_message,
-/// activities, accent_color, cover, favorite_hubs, show_hubs.
+/// activities, accent_color, cover, favorite_hubs, show_hubs, birthday.
 #[allow(clippy::type_complexity)]
 type UserProfileRow = (
     Option<String>,
@@ -25,6 +25,7 @@ type UserProfileRow = (
     Option<String>,
     Option<String>,
     Option<bool>,
+    Option<String>,
 );
 
 #[derive(Deserialize)]
@@ -110,6 +111,10 @@ pub struct UserInfo {
     pub group_role: Option<String>,
     #[serde(default)]
     pub is_bot: bool,
+    /// "MM-DD", never a year. `null` when unset or when `birthdays_enabled`
+    /// is false hub-wide.
+    #[serde(default)]
+    pub birthday: Option<String>,
 }
 
 pub async fn list_users(
@@ -131,7 +136,7 @@ pub async fn list_users(
         let search = format!("%{q}%");
         sqlx::query_as::<_, UserRowWithRole>(
             "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
-                    u.presence_status, u.presence_custom,
+                    u.presence_status, u.presence_custom, u.birthday,
                     (SELECT r.name FROM roles r
                      INNER JOIN user_roles ur ON r.id = ur.role_id
                      WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
@@ -150,7 +155,7 @@ pub async fn list_users(
     } else {
         sqlx::query_as::<_, UserRowWithRole>(
             "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
-                    u.presence_status, u.presence_custom,
+                    u.presence_status, u.presence_custom, u.birthday,
                     (SELECT r.name FROM roles r
                      INNER JOIN user_roles ur ON r.id = ur.role_id
                      WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
@@ -166,6 +171,9 @@ pub async fn list_users(
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    // Checked once per request, not per row.
+    let show_birthdays = crate::routes::hub::birthdays_enabled(&state.db).await;
+
     let result: Vec<UserInfo> = rows
         .into_iter()
         .map(|r| {
@@ -180,6 +188,7 @@ pub async fn list_users(
                 avatar: r.avatar,
                 group_role: r.group_role,
                 is_bot: r.is_bot,
+                birthday: if show_birthdays { r.birthday } else { None },
             }
         })
         .collect();
@@ -199,7 +208,7 @@ pub async fn channel_members(
 
     let rows = sqlx::query_as::<_, UserRow>(
         "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
-                u.presence_status, u.presence_custom
+                u.presence_status, u.presence_custom, u.birthday
          FROM users u
          WHERE u.public_key NOT IN (
              SELECT target_public_key FROM channel_bans WHERE channel_id = $1
@@ -213,6 +222,9 @@ pub async fn channel_members(
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Checked once per request, not per row.
+    let show_birthdays = crate::routes::hub::birthdays_enabled(&state.db).await;
 
     Ok(Json(
         rows.into_iter()
@@ -228,6 +240,7 @@ pub async fn channel_members(
                     avatar: r.avatar,
                     group_role: None,
                     is_bot: r.is_bot,
+                    birthday: if show_birthdays { r.birthday } else { None },
                 }
             })
             .collect(),
@@ -242,6 +255,7 @@ struct UserRow {
     is_bot: bool,
     presence_status: Option<String>,
     presence_custom: Option<String>,
+    birthday: Option<String>,
 }
 
 /// Like UserRow but includes the pre-joined group_role column.
@@ -253,6 +267,7 @@ struct UserRowWithRole {
     is_bot: bool,
     presence_status: Option<String>,
     presence_custom: Option<String>,
+    birthday: Option<String>,
     group_role: Option<String>,
 }
 
@@ -299,6 +314,10 @@ pub struct UserProfileResponse {
     pub joined_at: i64,
     pub roles: Vec<RoleSummary>,
     pub badges: Vec<BadgeSummary>,
+    /// "MM-DD", never a year. `null` when unset or when `birthdays_enabled`
+    /// is false hub-wide (unless viewing your own profile).
+    #[serde(default)]
+    pub birthday: Option<String>,
 }
 
 /// GET /users/:pubkey/profile
@@ -308,7 +327,7 @@ pub async fn get_user_profile(
     Path(pubkey): Path<String>,
 ) -> Result<Json<UserProfileResponse>, (StatusCode, String)> {
     let row: Option<UserProfileRow> = sqlx::query_as(
-        "SELECT display_name, avatar, first_seen_at, bio, pronouns, status_message, activities, accent_color, cover, favorite_hubs, show_hubs FROM users WHERE public_key = $1",
+        "SELECT display_name, avatar, first_seen_at, bio, pronouns, status_message, activities, accent_color, cover, favorite_hubs, show_hubs, birthday FROM users WHERE public_key = $1",
     )
     .bind(&pubkey)
     .fetch_optional(&state.db)
@@ -327,7 +346,17 @@ pub async fn get_user_profile(
         cover,
         favorite_hubs_raw,
         show_hubs_raw,
+        birthday_raw,
     ) = row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
+
+    // Gate: hide birthday from other members when disabled hub-wide; the
+    // profile owner viewing their own profile always sees their real value.
+    let birthday =
+        if user.public_key == pubkey || crate::routes::hub::birthdays_enabled(&state.db).await {
+            birthday_raw
+        } else {
+            None
+        };
 
     let show_hubs = show_hubs_raw.unwrap_or(false);
     // Privacy gate: a hidden favorite-hubs list is never exposed to other
@@ -412,6 +441,7 @@ pub async fn get_user_profile(
         joined_at,
         roles: role_summaries,
         badges: badge_summaries,
+        birthday,
     }))
 }
 
