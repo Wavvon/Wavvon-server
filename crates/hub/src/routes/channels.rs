@@ -315,6 +315,7 @@ pub async fn create_channel(
         owner_pubkey: None,
         spawner_name_template: req.spawner_name_template.clone(),
         event_id: None,
+        forum_require_tag: false,
     };
 
     // Publish channel.created audit event.
@@ -374,6 +375,7 @@ pub async fn update_channel(
         req.icon.is_some() || req.color.is_some() || req.custom_icon_svg.is_some();
     let changing_talk_power = req.min_talk_power.is_some();
     let changing_retention = req.retention_days.is_some();
+    let changing_forum_require_tag = req.forum_require_tag.is_some();
 
     // Owner powers, v1: rename only (temp-voice-channels.md §3). A temp
     // channel's owner may change its name without MANAGE_CHANNELS, but any
@@ -394,6 +396,15 @@ pub async fn update_channel(
     }
     if changing_talk_power || changing_retention {
         perms.require(permissions::ADMIN)?;
+    }
+    if changing_forum_require_tag {
+        if existing_type != "forum" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "forum_require_tag is only valid for forum channels".to_string(),
+            ));
+        }
+        perms.require(permissions::MANAGE_POSTS)?;
     }
 
     if let Some(Some(parent_id)) = &req.parent_id {
@@ -500,7 +511,8 @@ pub async fn update_channel(
         || req.min_talk_power.is_some()
         || req.retention_days.is_some()
         || req.banner_url.is_some()
-        || req.banner_file_id.is_some();
+        || req.banner_file_id.is_some()
+        || req.forum_require_tag.is_some();
 
     if needs_update {
         let mut qb = sqlx::QueryBuilder::new("UPDATE channels SET ");
@@ -546,6 +558,10 @@ pub async fn update_channel(
             sep.push("banner_file_id = ");
             sep.push_bind_unseparated(req.banner_file_id.as_deref());
             sep.push("banner_url = NULL");
+        }
+        if let Some(require_tag) = req.forum_require_tag {
+            sep.push("forum_require_tag = ");
+            sep.push_bind_unseparated(require_tag);
         }
         qb.push(" WHERE id = ");
         qb.push_bind(&channel_id);
@@ -598,7 +614,7 @@ pub async fn list_channels(
     user: AuthUser,
 ) -> Result<Json<Vec<ChannelResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id, is_temporary, owner_pubkey, spawner_name_template, event_id
+        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id, is_temporary, owner_pubkey, spawner_name_template, event_id, forum_require_tag
          FROM channels
          ORDER BY display_order, created_at",
     )
@@ -639,6 +655,7 @@ pub async fn list_channels(
             owner_pubkey: r.owner_pubkey,
             spawner_name_template: r.spawner_name_template,
             event_id: r.event_id,
+            forum_require_tag: r.forum_require_tag,
         })
         .collect();
 
@@ -787,6 +804,7 @@ struct ChannelRow {
     owner_pubkey: Option<String>,
     spawner_name_template: Option<String>,
     event_id: Option<String>,
+    forum_require_tag: bool,
 }
 
 /// Returns the code-depth a new item would sit at if placed under `parent_id`

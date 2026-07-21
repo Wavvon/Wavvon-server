@@ -57,6 +57,11 @@ pub struct ChannelResponse {
     /// group them in the sidebar/staging panel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
+    /// Forum-only (forum.md §10.1): when true, `POST`/`PATCH` on a post in
+    /// this channel must carry at least one `tag_id`. Always `false` on
+    /// non-forum channels.
+    #[serde(default)]
+    pub forum_require_tag: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -88,6 +93,11 @@ pub struct UpdateChannelRequest {
     pub banner_url: Option<String>,
     #[serde(default)]
     pub banner_file_id: Option<String>,
+    /// Forum-only "require at least one tag" toggle (forum.md §10.1). No
+    /// null-clear state needed -- the column is a plain `NOT NULL BOOLEAN`,
+    /// so absent = unchanged, `Some(bool)` = set.
+    #[serde(default)]
+    pub forum_require_tag: Option<bool>,
 }
 
 /// Lets us distinguish "field missing" from "field explicitly null" in JSON.

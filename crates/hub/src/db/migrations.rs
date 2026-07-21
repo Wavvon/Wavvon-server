@@ -1845,6 +1845,54 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // Post tags (forum.md §10 "Post tags"): admin-curated, channel-scoped
+    // labels for filtering the forum post list. Definitions table + join
+    // table, not a JSON column on `posts` -- tag CRUD must work
+    // independently of any one post, and the join gives an indexed EXISTS
+    // filter plus FK cascade (delete a tag -> assignments vanish, no
+    // app-side sweep) for free.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS forum_tags (
+            id         TEXT PRIMARY KEY,
+            channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+            label      TEXT NOT NULL,
+            color      TEXT,
+            position   BIGINT NOT NULL DEFAULT 0,
+            created_at BIGINT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_forum_tags_channel ON forum_tags(channel_id, position)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS post_tags (
+            post_id TEXT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            tag_id  TEXT NOT NULL REFERENCES forum_tags(id) ON DELETE CASCADE,
+            PRIMARY KEY (post_id, tag_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_post_tags_tag ON post_tags(tag_id)")
+        .execute(pool)
+        .await?;
+
+    // Per-channel "require at least one tag" toggle (forum.md §10.1 Q2),
+    // default off. Only meaningful on `channel_type='forum'` leaves, like
+    // the other forum-only columns.
+    let _ = sqlx::query(
+        "ALTER TABLE channels ADD COLUMN forum_require_tag BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+
     // Admin-only local label for an external bot row (bots.md §4 "Admin UI"):
     // set at invite time via `POST /bots`, surfaced on `GET /admin/bots/external`.
     // Distinct from `bot_profiles.name`, which the bot operator controls.

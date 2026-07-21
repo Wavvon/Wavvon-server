@@ -1222,6 +1222,7 @@ pub async fn create_squad_rooms(
                         owner_pubkey: None,
                         spawner_name_template: None,
                         event_id: Some(event_id.clone()),
+                        forum_require_tag: false,
                     });
                     break;
                 }

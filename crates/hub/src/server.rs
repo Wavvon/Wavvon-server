@@ -862,6 +862,15 @@ pub fn create_router_full(
             "/channels/{channel_id}/posts/{post_id}/replies/{reply_id}/reactions/{emoji}",
             delete(routes::posts::remove_reply_reaction),
         )
+        // ---- Forum tags (forum.md §10.2) ----
+        .route(
+            "/channels/{channel_id}/tags",
+            get(routes::posts::list_tags).post(routes::posts::create_tag),
+        )
+        .route(
+            "/tags/{tag_id}",
+            patch(routes::posts::edit_tag).delete(routes::posts::delete_tag),
+        )
         // ---- Recovery contacts (Task #24) ----
         .route(
             "/recovery/contacts",

@@ -10,10 +10,11 @@ use crate::permissions;
 use crate::routes::chat_models::ChatEvent;
 use crate::routes::post_models::{
     post_to_summary, reply_to_view, Attachment, CreatePostRequest, CreateReplyRequest,
-    EditPostRequest, EditReplyRequest, FederatedCreatePostRequest, FederatedCreateReplyRequest,
-    FederatedReactionRequest, FederatedRetractRequest, PostDetail, PostListParams,
-    PostListResponse, PostRow, PostSearchHit, PostSearchResponse, ReactionCount, ReplyListParams,
-    ReplyRow, ReplyView, SearchParams,
+    CreateTagRequest, EditPostRequest, EditReplyRequest, EditTagRequest,
+    FederatedCreatePostRequest, FederatedCreateReplyRequest, FederatedReactionRequest,
+    FederatedRetractRequest, ForumTag, PostDetail, PostListParams, PostListResponse, PostRow,
+    PostSearchHit, PostSearchResponse, ReactionCount, ReplyListParams, ReplyRow, ReplyView,
+    SearchParams, TagRef,
 };
 use crate::state::AppState;
 
@@ -172,6 +173,125 @@ async fn load_reply_reactions(
         .collect()
 }
 
+// ── Tag helpers (forum.md §10) ───────────────────────────────────────────────
+
+/// Load tag refs for a single post. Used by the single-post write paths
+/// (create/edit/get); the list route uses the batched variant below to stay
+/// at one query per page.
+async fn load_post_tags(db: &sqlx::PgPool, post_id: &str) -> Vec<TagRef> {
+    let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT ft.id, ft.label, ft.color
+         FROM post_tags pt JOIN forum_tags ft ON ft.id = pt.tag_id
+         WHERE pt.post_id = $1
+         ORDER BY ft.position, ft.created_at",
+    )
+    .bind(post_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .map(|(id, label, color)| TagRef { id, label, color })
+        .collect()
+}
+
+/// Batched variant of [`load_post_tags`]: one query for every post in a page
+/// (forum.md §10.2 "one batched query over the page, not N+1").
+async fn batch_load_post_tags(
+    db: &sqlx::PgPool,
+    post_ids: &[String],
+) -> std::collections::HashMap<String, Vec<TagRef>> {
+    if post_ids.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let rows: Vec<(String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT pt.post_id, ft.id, ft.label, ft.color
+         FROM post_tags pt JOIN forum_tags ft ON ft.id = pt.tag_id
+         WHERE pt.post_id = ANY($1)
+         ORDER BY ft.position, ft.created_at",
+    )
+    .bind(post_ids)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    let mut map: std::collections::HashMap<String, Vec<TagRef>> = std::collections::HashMap::new();
+    for (post_id, id, label, color) in rows {
+        map.entry(post_id)
+            .or_default()
+            .push(TagRef { id, label, color });
+    }
+    map
+}
+
+/// Validate a hex color string (`#RRGGBB`), if present. Empty string is
+/// treated the same as absent (clears to no color).
+fn validate_tag_color(color: Option<&str>) -> Result<Option<String>, (StatusCode, String)> {
+    match color {
+        None => Ok(None),
+        Some(c) if c.trim().is_empty() => Ok(None),
+        Some(c) => {
+            let bytes = c.as_bytes();
+            let valid = bytes.len() == 7
+                && bytes[0] == b'#'
+                && bytes[1..].iter().all(u8::is_ascii_hexdigit);
+            if valid {
+                Ok(Some(c.to_string()))
+            } else {
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    "color must be a #RRGGBB hex value".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// Validate `tag_ids` against the channel's tag set: dedupe, cap at 5,
+/// every id must belong to this channel, and (when `require_tag`) at least
+/// one must be present. Returns the deduped list to actually assign.
+/// `require_tag` is always checked on create; on edit the caller only
+/// invokes this when `tag_ids` was actually provided (omitted = unchanged,
+/// never re-validated against the require-tag rule).
+async fn validate_post_tags(
+    db: &sqlx::PgPool,
+    channel_id: &str,
+    tag_ids: &[String],
+    require_tag: bool,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<String> = tag_ids
+        .iter()
+        .filter(|id| seen.insert((*id).clone()))
+        .cloned()
+        .collect();
+
+    if deduped.len() > 5 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "a post may carry at most 5 tags".to_string(),
+        ));
+    }
+    if require_tag && deduped.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "forum_require_tag".to_string()));
+    }
+    if deduped.is_empty() {
+        return Ok(deduped);
+    }
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM forum_tags WHERE channel_id = $1 AND id = ANY($2)",
+    )
+    .bind(channel_id)
+    .bind(&deduped)
+    .fetch_one(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if count as usize != deduped.len() {
+        return Err((StatusCode::BAD_REQUEST, "tag_id_not_in_channel".to_string()));
+    }
+    Ok(deduped)
+}
+
 fn encode_attachments(attachments: &Option<Vec<Attachment>>) -> String {
     attachments
         .as_deref()
@@ -197,8 +317,29 @@ pub async fn list_posts(
 
     let limit = params.limit.unwrap_or(50).min(100);
 
-    // Parse cursor: "last_activity_at:id"
-    let rows: Vec<PostRow> = if let Some(cursor) = &params.cursor {
+    // Built with QueryBuilder rather than two static strings x a tag branch
+    // (forum.md §10.2 tag filter) -- avoids a 2x2 combinatorial blowup of
+    // near-identical SQL for cursor x tag-filter.
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, channel_id, author_pubkey, title, body,
+                created_at, edited_at, is_pinned, is_locked,
+                reply_count, last_activity_at, deleted_at,
+                COALESCE(attachments, '[]') AS attachments, author_hub
+         FROM posts
+         WHERE channel_id = ",
+    );
+    qb.push_bind(&channel_id);
+    qb.push(" AND deleted_at IS NULL");
+
+    if let Some(tag_id) = &params.tag {
+        qb.push(
+            " AND EXISTS (SELECT 1 FROM post_tags pt WHERE pt.post_id = posts.id AND pt.tag_id = ",
+        );
+        qb.push_bind(tag_id);
+        qb.push(")");
+    }
+
+    if let Some(cursor) = &params.cursor {
         let parts: Vec<&str> = cursor.splitn(2, ':').collect();
         if parts.len() != 2 {
             return Err((StatusCode::BAD_REQUEST, "invalid_cursor".to_string()));
@@ -206,45 +347,25 @@ pub async fn list_posts(
         let cursor_ts: i64 = parts[0]
             .parse()
             .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_cursor".to_string()))?;
-        let cursor_id = parts[1];
+        let cursor_id = parts[1].to_string();
 
-        sqlx::query_as::<_, PostRow>(
-            "SELECT id, channel_id, author_pubkey, title, body,
-                    created_at, edited_at, is_pinned, is_locked,
-                    reply_count, last_activity_at, deleted_at,
-                    COALESCE(attachments, '[]') AS attachments, author_hub
-             FROM posts
-             WHERE channel_id = $1
-               AND (last_activity_at < $2 OR (last_activity_at = $3 AND id < $4))
-               AND deleted_at IS NULL
-             ORDER BY is_pinned DESC, last_activity_at DESC, id DESC
-             LIMIT $5",
-        )
-        .bind(&channel_id)
-        .bind(cursor_ts)
-        .bind(cursor_ts)
-        .bind(cursor_id)
-        .bind(limit + 1)
+        qb.push(" AND (last_activity_at < ");
+        qb.push_bind(cursor_ts);
+        qb.push(" OR (last_activity_at = ");
+        qb.push_bind(cursor_ts);
+        qb.push(" AND id < ");
+        qb.push_bind(cursor_id);
+        qb.push("))");
+    }
+
+    qb.push(" ORDER BY is_pinned DESC, last_activity_at DESC, id DESC LIMIT ");
+    qb.push_bind(limit + 1);
+
+    let rows: Vec<PostRow> = qb
+        .build_query_as()
         .fetch_all(&state.db)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    } else {
-        sqlx::query_as::<_, PostRow>(
-            "SELECT id, channel_id, author_pubkey, title, body,
-                    created_at, edited_at, is_pinned, is_locked,
-                    reply_count, last_activity_at, deleted_at,
-                    COALESCE(attachments, '[]') AS attachments, author_hub
-             FROM posts
-             WHERE channel_id = $1 AND deleted_at IS NULL
-             ORDER BY is_pinned DESC, last_activity_at DESC, id DESC
-             LIMIT $2",
-        )
-        .bind(&channel_id)
-        .bind(limit + 1)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    };
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let has_more = rows.len() as i64 > limit;
     let rows: Vec<PostRow> = rows.into_iter().take(limit as usize).collect();
@@ -256,11 +377,17 @@ pub async fn list_posts(
         None
     };
 
-    // Populate unread_reply_count and reactions for each post.
+    // Populate unread_reply_count, reactions, and tags for each post. Tags
+    // are batched (one query for the whole page); reactions still fetch
+    // per-post (pre-existing behavior, unchanged here).
+    let post_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    let mut tags_by_post = batch_load_post_tags(&state.db, &post_ids).await;
+
     let mut posts: Vec<_> = Vec::with_capacity(rows.len());
     for row in &rows {
         let reactions = load_post_reactions(&state.db, &row.id, &user.public_key).await;
-        let mut summary = post_to_summary(row, can_moderate, reactions);
+        let tags = tags_by_post.remove(&row.id).unwrap_or_default();
+        let mut summary = post_to_summary(row, can_moderate, reactions, tags);
 
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM post_replies
@@ -305,9 +432,25 @@ pub async fn create_post(
         return Err((StatusCode::BAD_REQUEST, "body_required".to_string()));
     }
 
+    // Tags (forum.md §10.2): forum_require_tag always applies on create.
+    let require_tag: bool =
+        sqlx::query_scalar("SELECT forum_require_tag FROM channels WHERE id = $1")
+            .bind(&channel_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let requested_tags = req.tag_ids.clone().unwrap_or_default();
+    let tag_ids = validate_post_tags(&state.db, &channel_id, &requested_tags, require_tag).await?;
+
     let id = Uuid::new_v4().to_string();
     let now = unix_now();
     let attachments_json = encode_attachments(&req.attachments);
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     sqlx::query(
         "INSERT INTO posts (id, channel_id, author_pubkey, title, body, attachments, created_at, last_activity_at)
@@ -321,14 +464,28 @@ pub async fn create_post(
     .bind(&attachments_json)
     .bind(now)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for tag_id in &tag_ids {
+        sqlx::query("INSERT INTO post_tags (post_id, tag_id) VALUES ($1, $2)")
+            .bind(&id)
+            .bind(tag_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let row = require_post(&state.db, &channel_id, &id).await?;
     let can_moderate = perms.has(permissions::MANAGE_POSTS);
     let reactions = load_post_reactions(&state.db, &id, &user.public_key).await;
-    let summary = post_to_summary(&row, can_moderate, reactions);
+    let tags = load_post_tags(&state.db, &id).await;
+    let summary = post_to_summary(&row, can_moderate, reactions, tags);
     let detail = PostDetail {
         body: Some(row.body.clone()),
         replies: Vec::new(),
@@ -364,7 +521,8 @@ pub async fn get_post(
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     let reactions = load_post_reactions(&state.db, &post_id, &user.public_key).await;
-    let mut summary = post_to_summary(&row, can_moderate, reactions);
+    let tags = load_post_tags(&state.db, &post_id).await;
+    let mut summary = post_to_summary(&row, can_moderate, reactions, tags);
 
     // Populate unread_reply_count using the caller's read cursor.
     let unread: i64 = sqlx::query_scalar(
@@ -474,19 +632,62 @@ pub async fn edit_post(
         return Err((StatusCode::BAD_REQUEST, "title_required".to_string()));
     }
 
+    // Tags (forum.md §10.2): omitted `tag_ids` = unchanged, never cleared.
+    // `forum_require_tag` is only (re-)enforced when the caller actually
+    // provided tag_ids on this edit.
+    let new_tag_ids: Option<Vec<String>> = match &req.tag_ids {
+        Some(requested) => {
+            let require_tag: bool =
+                sqlx::query_scalar("SELECT forum_require_tag FROM channels WHERE id = $1")
+                    .bind(&channel_id)
+                    .fetch_one(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            Some(validate_post_tags(&state.db, &channel_id, requested, require_tag).await?)
+        }
+        None => None,
+    };
+
     let now = unix_now();
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
     sqlx::query("UPDATE posts SET title = $1, body = $2, edited_at = $3 WHERE id = $4")
         .bind(&new_title)
         .bind(&new_body)
         .bind(now)
         .bind(&post_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if let Some(tag_ids) = &new_tag_ids {
+        sqlx::query("DELETE FROM post_tags WHERE post_id = $1")
+            .bind(&post_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        for tag_id in tag_ids {
+            sqlx::query("INSERT INTO post_tags (post_id, tag_id) VALUES ($1, $2)")
+                .bind(&post_id)
+                .bind(tag_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        }
+    }
+
+    tx.commit()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let updated_row = require_post(&state.db, &channel_id, &post_id).await?;
     let reactions = load_post_reactions(&state.db, &post_id, &user.public_key).await;
-    let summary = post_to_summary(&updated_row, can_moderate, reactions);
+    let tags = load_post_tags(&state.db, &post_id).await;
+    let summary = post_to_summary(&updated_row, can_moderate, reactions, tags);
     let detail = PostDetail {
         body: Some(updated_row.body.clone()),
         replies: Vec::new(),
@@ -1133,6 +1334,183 @@ pub async fn search_posts(
     }))
 }
 
+// ── Tag CRUD (forum.md §10.2) ────────────────────────────────────────────────
+//
+// Tag definitions live on a forum channel; assignment/filtering ride the
+// post routes above. `GET`/`POST` are channel-scoped (`/channels/:cid/tags`)
+// so `require_forum_channel` applies the same 409 as the rest of this file.
+// `PATCH`/`DELETE` take a bare tag id (`/tags/:tid`, no channel in the path)
+// -- the channel is looked up from the tag row itself, so there's no
+// separate not-a-forum check there: a `forum_tags` row only ever exists on
+// a channel that was a forum at creation time (fixed at creation, no
+// conversion, forum.md §8).
+
+// ── GET /channels/:cid/tags ─────────────────────────────────────────────────
+
+pub async fn list_tags(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Path(channel_id): Path<String>,
+) -> Result<Json<Vec<ForumTag>>, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+
+    let rows = sqlx::query_as::<_, ForumTag>(
+        "SELECT id, channel_id, label, color, position, created_at
+         FROM forum_tags WHERE channel_id = $1
+         ORDER BY position, created_at",
+    )
+    .bind(&channel_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(rows))
+}
+
+// ── POST /channels/:cid/tags ─────────────────────────────────────────────────
+
+pub async fn create_tag(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(channel_id): Path<String>,
+    Json(req): Json<CreateTagRequest>,
+) -> Result<(StatusCode, Json<ForumTag>), (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    perms.require(permissions::MANAGE_POSTS)?;
+
+    let label = req.label.trim().to_string();
+    if label.is_empty() || label.chars().count() > 50 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "label must be 1..50 characters".to_string(),
+        ));
+    }
+    let color = validate_tag_color(req.color.as_deref())?;
+    let position = req.position.unwrap_or(0);
+
+    let id = Uuid::new_v4().to_string();
+    let now = unix_now();
+    sqlx::query(
+        "INSERT INTO forum_tags (id, channel_id, label, color, position, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(&id)
+    .bind(&channel_id)
+    .bind(&label)
+    .bind(&color)
+    .bind(position)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ForumTag {
+            id,
+            channel_id,
+            label,
+            color,
+            position,
+            created_at: now,
+        }),
+    ))
+}
+
+// ── PATCH /tags/:tid ─────────────────────────────────────────────────────────
+
+pub async fn edit_tag(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(tag_id): Path<String>,
+    Json(req): Json<EditTagRequest>,
+) -> Result<Json<ForumTag>, (StatusCode, String)> {
+    let row = sqlx::query_as::<_, ForumTag>(
+        "SELECT id, channel_id, label, color, position, created_at FROM forum_tags WHERE id = $1",
+    )
+    .bind(&tag_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    .ok_or_else(|| (StatusCode::NOT_FOUND, "tag_not_found".to_string()))?;
+
+    let perms =
+        permissions::channel_permissions(&state.db, &user.public_key, &row.channel_id).await?;
+    perms.require(permissions::MANAGE_POSTS)?;
+
+    let new_label = match &req.label {
+        Some(l) => {
+            let trimmed = l.trim().to_string();
+            if trimmed.is_empty() || trimmed.chars().count() > 50 {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "label must be 1..50 characters".to_string(),
+                ));
+            }
+            trimmed
+        }
+        None => row.label.clone(),
+    };
+    let new_color = match &req.color {
+        Some(inner) => validate_tag_color(inner.as_deref())?,
+        None => row.color.clone(),
+    };
+    let new_position = req.position.unwrap_or(row.position);
+
+    sqlx::query("UPDATE forum_tags SET label = $1, color = $2, position = $3 WHERE id = $4")
+        .bind(&new_label)
+        .bind(&new_color)
+        .bind(new_position)
+        .bind(&tag_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(ForumTag {
+        id: tag_id,
+        channel_id: row.channel_id,
+        label: new_label,
+        color: new_color,
+        position: new_position,
+        created_at: row.created_at,
+    }))
+}
+
+// ── DELETE /tags/:tid ────────────────────────────────────────────────────────
+
+pub async fn delete_tag(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(tag_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let channel_id: Option<String> =
+        sqlx::query_scalar("SELECT channel_id FROM forum_tags WHERE id = $1")
+            .bind(&tag_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some(channel_id) = channel_id else {
+        // Already gone -- delete is idempotent, same as the post/reply
+        // soft-delete routes above.
+        return Ok(StatusCode::NO_CONTENT);
+    };
+
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    perms.require(permissions::MANAGE_POSTS)?;
+
+    // FK cascade (`post_tags.tag_id ... ON DELETE CASCADE`) removes every
+    // assignment of this tag -- no app-side sweep needed (forum.md §10.1).
+    sqlx::query("DELETE FROM forum_tags WHERE id = $1")
+        .bind(&tag_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Federation: proxied writes (forum.md §9 phase 2) ────────────────────────
 //
 // Hit only by an allied hub over `/federation/forum/...`, never by an end
@@ -1295,8 +1673,11 @@ pub async fn federated_create_post(
 
     let row = require_post(&state.db, &channel_id, &id).await?;
     // A freshly-created post is never a moderation-hidden tombstone, so the
-    // viewer_can_moderate flag has no effect here.
-    let summary = post_to_summary(&row, false, Vec::new());
+    // viewer_can_moderate flag has no effect here. No tags -- forum.md §10.4:
+    // `FederatedCreatePostRequest` carries no tag field, so a remote-hub
+    // create can never assign the owner's tags. The owner's own
+    // `manage_posts` mods can tag it locally afterward.
+    let summary = post_to_summary(&row, false, Vec::new(), Vec::new());
     let detail = PostDetail {
         body: Some(row.body.clone()),
         replies: Vec::new(),

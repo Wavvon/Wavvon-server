@@ -499,6 +499,7 @@ pub async fn get_alliance_forum_posts(
                 &channel_id,
                 params.cursor.as_deref(),
                 params.limit,
+                params.tag.as_deref(),
             )
             .await
             .map(Json)

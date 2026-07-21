@@ -58,6 +58,61 @@ pub struct Attachment {
     pub size: i64,
 }
 
+// ── Post tags (forum.md §10) ────────────────────────────────────────────────
+
+/// A tag definition on a forum channel (admin-curated, forum.md §10.1).
+#[derive(Serialize, Deserialize, Clone, Debug, sqlx::FromRow)]
+pub struct ForumTag {
+    pub id: String,
+    pub channel_id: String,
+    pub label: String,
+    pub color: Option<String>,
+    pub position: i64,
+    pub created_at: i64,
+}
+
+/// Create a tag definition (`POST /channels/:cid/tags`).
+#[derive(Deserialize)]
+pub struct CreateTagRequest {
+    pub label: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+/// Edit a tag definition (`PATCH /tags/:tid`). `label`/`position` follow the
+/// usual "absent = unchanged" rule; `color` is tri-state
+/// (`Option<Option<String>>`) because it is the one nullable field here and
+/// the omitted-vs-null trap (CLAUDE.md) has bitten this exact shape before
+/// (role color/icon) -- `None` = unchanged, `Some(None)` = clear to no color.
+#[derive(Deserialize, Default)]
+pub struct EditTagRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_some_nested")]
+    pub color: Option<Option<String>>,
+    #[serde(default)]
+    pub position: Option<i64>,
+}
+
+fn deserialize_some_nested<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// A tag as it appears attached to a post (forum.md §10.2). Populated per
+/// post from the `post_tags` join, never stored inline.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct TagRef {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
 /// Summary of a post as it appears in the list view.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PostSummary {
@@ -87,6 +142,10 @@ pub struct PostSummary {
     /// peers still parse the shape.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_hub: Option<String>,
+    /// Tags assigned to this post (forum.md §10.2). `#[serde(default)]` so
+    /// un-upgraded peers parse.
+    #[serde(default)]
+    pub tags: Vec<TagRef>,
 }
 
 /// Full post including body and first page of replies.
@@ -136,6 +195,11 @@ pub struct CreatePostRequest {
     pub body: String,
     #[serde(default)]
     pub attachments: Option<Vec<Attachment>>,
+    /// Tag ids to assign at creation (forum.md §10.2). Every id must belong
+    /// to this channel's tag set; capped at 5; enforced against
+    /// `forum_require_tag` on the channel.
+    #[serde(default)]
+    pub tag_ids: Option<Vec<String>>,
 }
 
 /// Edit an existing post's title and/or body.
@@ -145,6 +209,10 @@ pub struct EditPostRequest {
     pub title: Option<String>,
     #[serde(default)]
     pub body: Option<String>,
+    /// Replace the post's tag assignments. Omitted = unchanged (never
+    /// clears); `Some(vec![])` clears all tags (forum.md §10.2).
+    #[serde(default)]
+    pub tag_ids: Option<Vec<String>>,
 }
 
 /// Create a reply in a post's thread.
@@ -190,6 +258,10 @@ pub struct PostListParams {
     pub cursor: Option<String>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Filter to posts carrying this tag id (forum.md §10.2). Single-tag
+    /// filter only in v1.
+    #[serde(default)]
+    pub tag: Option<String>,
 }
 
 /// Parameters for reply list pagination.
@@ -272,6 +344,7 @@ pub fn post_to_summary(
     row: &PostRow,
     viewer_can_moderate: bool,
     reactions: Vec<ReactionCount>,
+    tags: Vec<TagRef>,
 ) -> PostSummary {
     let is_deleted = row.deleted_at.is_some();
     PostSummary {
@@ -302,6 +375,7 @@ pub fn post_to_summary(
         } else {
             row.author_hub.clone()
         },
+        tags,
     }
 }
 

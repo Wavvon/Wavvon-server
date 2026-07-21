@@ -125,6 +125,7 @@ impl FederationClient {
     /// owns it. Siblings of `get_messages`/`send_message` -- same
     /// bearer-auth'd hop, just against the local (non-alliance-prefixed)
     /// forum route, since the peer serves its own channel locally.
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_forum_posts(
         &self,
         base_url: &str,
@@ -132,6 +133,7 @@ impl FederationClient {
         channel_id: &str,
         cursor: Option<&str>,
         limit: Option<i64>,
+        tag: Option<&str>,
     ) -> Result<PostListResponse> {
         let mut query: Vec<(&str, String)> = Vec::new();
         if let Some(c) = cursor {
@@ -139,6 +141,9 @@ impl FederationClient {
         }
         if let Some(l) = limit {
             query.push(("limit", l.to_string()));
+        }
+        if let Some(t) = tag {
+            query.push(("tag", t.to_string()));
         }
         self.http
             .get(format!("{base_url}/channels/{channel_id}/posts"))
