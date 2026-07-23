@@ -111,6 +111,66 @@ pub(super) async fn resolve_role_addrs(
     addrs
 }
 
+/// Resolve all users with `role_id` that are currently present in any voice
+/// channel into their pubkeys (UDP or WS -- unlike `resolve_role_addrs`, this
+/// doesn't need a real SocketAddr, so it also picks up WS-only participants,
+/// who register in `voice_channels` with the sentinel address).
+async fn resolve_role_pubkeys(state: &AppState, role_id: &str) -> HashSet<String> {
+    let role_users: Vec<String> =
+        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+            .bind(role_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+
+    let voice_channels = state.voice_channels.read().await;
+    role_users
+        .into_iter()
+        .filter(|pk| voice_channels.values().any(|p| p.contains_key(pk)))
+        .collect()
+}
+
+/// Resolve "user"/"channel"/"role" whisper target defs into the pubkey set
+/// used for pubkey-keyed delivery (the WS voice relay's `voice_ws_senders`
+/// lookup in `voice_ws.rs` and the UDP relay's whisper branch in `main.rs`) --
+/// this is what makes a whisper reach a web (WS-only) listener, which has no
+/// stable UDP `SocketAddr` for the `resolve_whisper_targets`/`resolve_role_addrs`
+/// machinery above to resolve. Shared by the initial resolution in
+/// `handle_voice_whisper_start` and the membership-change rebuild in
+/// `re_resolve_whisper_sessions` below, so both stay in sync.
+pub(super) async fn resolve_whisper_target_pubkeys(
+    state: &AppState,
+    defs: &[crate::state::WhisperTargetDef],
+    exclude_pubkey: &str,
+) -> HashSet<String> {
+    let mut pks = HashSet::new();
+    {
+        let vc = state.voice_channels.read().await;
+        for def in defs {
+            match def.target_type.as_str() {
+                "user" => {
+                    pks.insert(def.id.clone());
+                }
+                "channel" => {
+                    if let Some(p) = vc.get(&def.id) {
+                        for pk in p.keys() {
+                            pks.insert(pk.clone());
+                        }
+                    }
+                }
+                _ => {} // "role" resolved separately below (needs its own DB query).
+            }
+        }
+    }
+    for def in defs {
+        if def.target_type == "role" {
+            pks.extend(resolve_role_pubkeys(state, &def.id).await);
+        }
+    }
+    pks.remove(exclude_pubkey);
+    pks
+}
+
 /// Walk every active whisper session and rebuild its resolved SocketAddr set from stored defs.
 /// Called after any VoiceJoin or VoiceLeave so the live target set stays correct.
 pub(super) async fn re_resolve_whisper_sessions(state: &AppState) {
@@ -147,7 +207,15 @@ pub(super) async fn re_resolve_whisper_sessions(state: &AppState) {
             .whisper_targets
             .write()
             .await
-            .insert(sender_pk, new_addrs);
+            .insert(sender_pk.clone(), new_addrs);
+
+        // Keep the pubkey-keyed set (WS delivery) in sync with the same defs.
+        let new_pks = resolve_whisper_target_pubkeys(state, &defs, &sender_pk).await;
+        state
+            .whisper_target_pubkeys
+            .write()
+            .await
+            .insert(sender_pk, new_pks);
     }
 }
 

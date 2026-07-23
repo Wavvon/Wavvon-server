@@ -1302,13 +1302,25 @@ async fn main() -> Result<()> {
                             let ws_senders = voice_state.voice_ws_senders.read().await;
 
                             if packet_type == 0x01 {
-                                // Whisper: deliver to resolved target set only.
-                                // WS clients are not yet supported as whisper targets.
+                                // Whisper: deliver to the resolved target set only.
+                                // Two parallel target sets are kept for a whisper
+                                // session (routes/ws/handlers/voice.rs): a
+                                // SocketAddr set for UDP targets and a pubkey set
+                                // for WS targets (voice_ws_senders), since a WS
+                                // client has no stable UDP address to resolve.
                                 let wt = voice_state.whisper_targets.read().await;
                                 if let Some(whisper_addrs) = wt.get(&sender_pk) {
                                     for addr in whisper_addrs {
                                         if addr_map.contains_key(addr) {
                                             let _ = voice_socket.send_to(&outbound, *addr).await;
+                                        }
+                                    }
+                                }
+                                let wtp = voice_state.whisper_target_pubkeys.read().await;
+                                if let Some(whisper_pks) = wtp.get(&sender_pk) {
+                                    for pk in whisper_pks {
+                                        if let Some(ws_tx) = ws_senders.get(pk.as_str()) {
+                                            let _ = ws_tx.send(outbound.clone());
                                         }
                                     }
                                 }

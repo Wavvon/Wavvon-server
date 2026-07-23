@@ -11,7 +11,8 @@ use crate::state::{AppState, PendingVoiceBind};
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 use crate::routes::ws::voice::{
     apply_pending_voice_move_assignment, get_voice_participants, get_voice_roster,
-    re_resolve_whisper_sessions, resolve_role_addrs, resolve_whisper_targets,
+    re_resolve_whisper_sessions, resolve_role_addrs, resolve_whisper_target_pubkeys,
+    resolve_whisper_targets,
 };
 
 type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
@@ -600,29 +601,11 @@ pub(in crate::routes::ws) async fn handle_voice_whisper_start(
 
     // Resolve targets to pubkeys directly (works for web clients, which have
     // no stable UDP addr). "user" → the pubkey; "channel" → everyone in that
-    // voice channel. This set drives both the notification delivery and the
-    // WS voice relay's whisper routing (`voice_ws.rs`).
-    let target_pks: std::collections::HashSet<String> = {
-        let mut set = std::collections::HashSet::new();
-        let vc = state.voice_channels.read().await;
-        for def in &targets {
-            match def.target_type.as_str() {
-                "user" => {
-                    set.insert(def.id.clone());
-                }
-                "channel" => {
-                    if let Some(p) = vc.get(&def.id) {
-                        for pk in p.keys() {
-                            set.insert(pk.clone());
-                        }
-                    }
-                }
-                _ => {} // "role" targets still route via the UDP addr set above.
-            }
-        }
-        set.remove(&cs.public_key); // never whisper to self
-        set
-    };
+    // voice channel; "role" → every role member currently in voice. This set
+    // drives both the notification delivery and the whisper relay's
+    // pubkey-keyed routing (WS voice relay in `voice_ws.rs` and the UDP
+    // relay's whisper branch in `main.rs`).
+    let target_pks = resolve_whisper_target_pubkeys(state, &targets, &cs.public_key).await;
     state
         .whisper_target_pubkeys
         .write()
