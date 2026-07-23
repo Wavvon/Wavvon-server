@@ -17,3 +17,4 @@ hub_identity.json
 # `cargo test`'s default cwd writes files for tests that hit upload routes
 # without overriding the env var.
 crates/hub/uploads/
+/uploads/
