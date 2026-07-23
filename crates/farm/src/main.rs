@@ -86,15 +86,25 @@ async fn main() -> Result<()> {
         tracing_opentelemetry::layer().with_tracer(provider.tracer(env!("CARGO_PKG_NAME")))
     });
 
+    // Respect RUST_LOG; default to info (same fix as hub — an unfiltered
+    // subscriber logs TRACE from every dependency).
+    let env_filter = || {
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+    };
     if json_logs {
         tracing_subscriber::registry()
             .with(otel_layer)
-            .with(tracing_subscriber::fmt::layer().json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_filter(env_filter()),
+            )
             .init();
     } else {
         tracing_subscriber::registry()
             .with(otel_layer)
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_filter(env_filter()))
             .init();
     }
 
