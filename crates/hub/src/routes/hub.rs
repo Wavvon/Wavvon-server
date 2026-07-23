@@ -106,6 +106,15 @@ pub async fn update_hub(
         .await?;
     }
 
+    let json: std::sync::Arc<str> = std::sync::Arc::from(
+        serde_json::to_string(&crate::routes::chat_models::WsServerMessage::HubUpdated)
+            .unwrap()
+            .as_str(),
+    );
+    let _ = state
+        .chat_tx
+        .send((crate::routes::chat_models::ChatEvent::HubUpdated, json));
+
     Ok(StatusCode::OK)
 }
 

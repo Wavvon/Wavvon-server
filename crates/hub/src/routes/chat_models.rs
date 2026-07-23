@@ -313,6 +313,10 @@ pub enum ChatEvent {
     /// Returns "" from channel_id() so the subscription filter never matches; the WS
     /// dispatch loop handles it as a special broadcast-to-all case.
     ChannelsUpdated,
+    /// Hub-wide notification that hub branding/settings changed (PATCH /hub).
+    /// Payload-free — clients just refetch /info. Same broadcast-to-all handling
+    /// as `ChannelsUpdated`.
+    HubUpdated,
     /// A user's first WS session connected; delivered hub-wide.
     MemberOnline { public_key: String },
     /// A user's last WS session disconnected; delivered hub-wide.
@@ -362,10 +366,11 @@ impl ChatEvent {
             ChatEvent::StreamSubscriptionEnded {
                 source_channel_id, ..
             } => source_channel_id,
-            // ChannelsUpdated, MemberOnline, MemberOffline, WebhookDisabled are
-            // hub-wide; "" is never in any subscription set — handled as
-            // special broadcast-to-all cases.
+            // ChannelsUpdated, HubUpdated, MemberOnline, MemberOffline,
+            // WebhookDisabled are hub-wide; "" is never in any subscription
+            // set — handled as special broadcast-to-all cases.
             ChatEvent::ChannelsUpdated
+            | ChatEvent::HubUpdated
             | ChatEvent::MemberOnline { .. }
             | ChatEvent::MemberOffline { .. }
             | ChatEvent::MemberUpdated { .. }
@@ -958,6 +963,10 @@ pub enum WsServerMessage {
     /// Hub-wide signal that the channel list changed; clients should re-fetch /channels.
     #[serde(rename = "channels_updated")]
     ChannelsUpdated,
+
+    /// Hub-wide signal that hub branding/settings changed; clients should re-fetch /info.
+    #[serde(rename = "hub_updated")]
+    HubUpdated,
 
     /// Soundboard clip-played attribution (soundboard.md §1). Purely
     /// informational -- the server does not verify the clip was actually

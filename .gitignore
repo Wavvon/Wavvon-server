@@ -1,4 +1,5 @@
 /target
+/target-test
 .claude/
 .obsidian/
 # demo-seed credentials output (contains session tokens / recovery phrases)

@@ -222,6 +222,7 @@ pub(super) async fn handle_socket(
                         if matches!(
                             event,
                             crate::routes::chat_models::ChatEvent::ChannelsUpdated
+                                | crate::routes::chat_models::ChatEvent::HubUpdated
                                 | crate::routes::chat_models::ChatEvent::MemberOnline { .. }
                                 | crate::routes::chat_models::ChatEvent::MemberOffline { .. }
                                 | crate::routes::chat_models::ChatEvent::MemberUpdated { .. }
