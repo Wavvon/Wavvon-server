@@ -30,10 +30,12 @@ use crate::routes::chat_models::{ChatEvent, WsServerMessage};
 use crate::state::AppState;
 
 /// How often the worker wakes to sweep temp channels.
-const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const POLL_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Grace period, in seconds, a temp channel may sit empty before deletion.
-pub const GRACE_SECS: i64 = 60;
+/// Long enough to absorb voice reconnects and "oops, wrong room" rejoins,
+/// short enough that dead rooms don't linger (was 60s; felt too slow).
+pub const GRACE_SECS: i64 = 30;
 
 pub fn spawn(state: Arc<AppState>) {
     tokio::spawn(async move {
