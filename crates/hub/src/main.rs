@@ -1520,34 +1520,75 @@ async fn main() -> Result<()> {
     );
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
-    if let (Some(cert), Some(key)) = (effective_tls_cert.as_deref(), effective_tls_key.as_deref()) {
-        let cert_path = PathBuf::from(cert);
-        let key_path = PathBuf::from(key);
-        let rustls_config =
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-                .await
-                .with_context(|| format!("Failed to load TLS cert/key from {cert:?} / {key:?}"))?;
-        tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
-        axum_server::bind_rustls(addr, rustls_config)
-            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+    let serve = async {
+        if let (Some(cert), Some(key)) =
+            (effective_tls_cert.as_deref(), effective_tls_key.as_deref())
+        {
+            let cert_path = PathBuf::from(cert);
+            let key_path = PathBuf::from(key);
+            let rustls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to load TLS cert/key from {cert:?} / {key:?}")
+                    })?;
+            tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
+            axum_server::bind_rustls(addr, rustls_config)
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await?;
+        } else {
+            tracing::info!(
+                "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
+            );
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
             .await?;
-    } else {
-        tracing::info!(
-            "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
-        );
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await?;
-    }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    // Whichever comes first — the listener giving up, or the operator asking
+    // us to stop. The signal arm is what makes `stop_embedded` reachable at
+    // all; see its doc comment for why an orphaned postmaster matters.
+    let result = tokio::select! {
+        r = serve => r,
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Shutdown requested");
+            Ok(())
+        }
+    };
+
+    stop_embedded(embedded).await;
 
     if let Some(provider) = otlp_provider {
         let _ = provider.shutdown();
     }
 
-    Ok(())
+    result
+}
+
+/// Stop the PostgreSQL this process started, if it started one.
+///
+/// The handle above says it is held so "shutdown can stop it deliberately",
+/// and until now nothing did: the serve future never returned, so an
+/// operator's Ctrl-C left the postmaster running with the data directory
+/// open. Adopting an orphan on the next start is handled (embedded_pg
+/// `already_running`) — the hazard is the *upgrade* path, where the hub's own
+/// refusal tells the operator to move `pgdata` aside. On Windows that fails
+/// while a postmaster holds it; on Linux it succeeds and the live postmaster
+/// keeps writing to the moved directory, which is the half-migration the
+/// version check exists to prevent.
+async fn stop_embedded(embedded: Option<wavvon_hub::embedded_pg::EmbeddedPostgres>) {
+    let Some(pg) = embedded else { return };
+    match pg.stop().await {
+        Ok(()) => tracing::info!("Stopped the embedded PostgreSQL"),
+        // Worth a line and not a failure: the process is going away either
+        // way, and the next start adopts a server that is still up.
+        Err(e) => tracing::warn!("Could not stop the embedded PostgreSQL: {e:#}"),
+    }
 }
 
 fn self_update_asset_name() -> Option<&'static str> {
@@ -1675,6 +1716,10 @@ async fn cli_database_url() -> (String, Option<wavvon_hub::embedded_pg::Embedded
     // different database is a backup of nothing, reported as success.
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     if let Some(url) = wavvon_hub::embedded_pg::running_url(&root) {
+        // Adopting, not starting — so nothing has pointed the dump tools at
+        // the bundled install yet, and `pg_dump` is not on PATH on the setup
+        // that owns this branch.
+        wavvon_hub::embedded_pg::point_tools_at_bundled(&root);
         return (url, None);
     }
     // Not running: start it for the length of this command. It is the hub's
