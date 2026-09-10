@@ -189,13 +189,20 @@ hub **refuses with instructions** rather than starting — half-migrating a data
 directory is unrecoverable. `--doctor` reports which mode is active and where
 the data lives; `backup`/`restore` go through the bundled `pg_dump`.
 
-Two live caveats: **bundled mode does not work on musl** (the archive's `initdb`
+One live caveat: **bundled mode does not work on musl** (the archive's `initdb`
 wants `libicuuc.so.74`, which no current Alpine ships, and its `libpq.so.5` also
 wants krb5) even though the release still publishes musl targets advertising a
-no-prerequisites path; and **the major-upgrade path has never been walked end to
-end** — the refusal is tested, the dump-with-old/restore-with-new it names is
-not. Both are open items in the wiki's `next-up.md`. The Docker image is
-unaffected: it is `debian:trixie-slim`, so it gets the glibc archive.
+no-prerequisites path. It is an open item in the wiki's `next-up.md`. The Docker
+image is unaffected: it is `debian:trixie-slim`, so it gets the glibc archive.
+
+The **major-upgrade path is walked end to end** as of 2026-09-10, by
+`e2e-topology`'s `pgupgrade` stage — fill a bundled hub, back it up, meet the
+refusal, follow its instructions, and come back under the same public key with
+the data intact. Reach for that stage before touching `embedded_pg.rs` or
+`db/dump.rs`: it found two bugs on its first run that no in-process test could,
+because both live in the sequence rather than in a function. What still needs
+two binaries carrying two majors, and is PostgreSQL's contract rather than
+ours, is whether a `pg_dump` from major N restores into N+1.
 
 **List endpoints paginate with one dialect:** an array plus `limit` and a keyset
 cursor. No envelope, no offset paging, no second shape. A paginated endpoint also
