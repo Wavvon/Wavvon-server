@@ -195,14 +195,20 @@ wants krb5) even though the release still publishes musl targets advertising a
 no-prerequisites path. It is an open item in the wiki's `next-up.md`. The Docker
 image is unaffected: it is `debian:trixie-slim`, so it gets the glibc archive.
 
-The **major-upgrade path is walked end to end** as of 2026-09-10, by
-`e2e-topology`'s `pgupgrade` stage — fill a bundled hub, back it up, meet the
-refusal, follow its instructions, and come back under the same public key with
-the data intact. Reach for that stage before touching `embedded_pg.rs` or
-`db/dump.rs`: it found two bugs on its first run that no in-process test could,
-because both live in the sequence rather than in a function. What still needs
-two binaries carrying two majors, and is PostgreSQL's contract rather than
-ours, is whether a `pg_dump` from major N restores into N+1.
+The **major-upgrade path is walked end to end** as of 2026-09-10, across two
+real majors, by `e2e-topology`'s `pgupgrade` stage: a hub carrying PostgreSQL
+17 fills a genuine 17 data directory, takes a backup with its own binaries, the
+18 hub refuses it, and 18's `pg_restore` reads 17's dump — coming back under
+the same public key with the data intact and both version-scoped installs still
+on disk. Reach for that stage before touching `embedded_pg.rs` or `db/dump.rs`:
+it found two bugs on its first run that no in-process test could, because both
+live in the sequence rather than in a function.
+
+**A binary bundles exactly one archive, chosen at build time**, so the stage
+needs a second one:
+`POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17`
+(or point `E2E_OLD_HUB_BIN` elsewhere). That env var is also the answer to
+"how do I test anything about two majors" in general.
 
 **List endpoints paginate with one dialect:** an array plus `limit` and a keyset
 cursor. No envelope, no offset paging, no second shape. A paginated endpoint also
