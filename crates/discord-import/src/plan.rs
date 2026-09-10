@@ -59,6 +59,12 @@ pub struct RoleStep {
     pub display_separately: bool,
     pub color: Option<String>,
     pub permissions: Vec<String>,
+    /// The source permissions with no equivalent here. Carried through to
+    /// the report and never applied — the manifest field says exactly that
+    /// ("Kept for the report"), and until 2026-09-11 nothing carried it, so
+    /// an operator was never told which of a role's powers did not survive
+    /// the import.
+    pub unmapped: Vec<String>,
 }
 
 /// The three channel shapes the hub's `POST /channels` route accepts
@@ -151,6 +157,7 @@ pub fn build_plan(manifest: &Manifest) -> Result<Plan, PlanError> {
             display_separately: r.display_separately,
             color: r.color.clone(),
             permissions: r.permissions.clone(),
+            unmapped: r.unmapped.clone(),
         });
     }
 

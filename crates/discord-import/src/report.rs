@@ -15,6 +15,10 @@ pub struct ApplyReport {
     pub overwrites_applied: usize,
     pub overwrites_skipped: Vec<(String, String, String)>,
     pub overwrites_failed: Vec<(String, String, String)>,
+    /// Per role, the source permissions that have no equivalent here. Not a
+    /// failure — the role was created — but a loss, and a loss nobody is told
+    /// about is the thing this file exists to prevent.
+    pub roles_unmapped: Vec<(String, Vec<String>)>,
     /// Carried over verbatim from the manifest's `warnings` (export-time
     /// notes: skipped Discord channel kinds, member overwrites, possible
     /// allow/deny conflicts, text+voice merge suggestions).
@@ -47,6 +51,16 @@ impl ApplyReport {
             out.push_str(&format!("Roles failed: {}\n", self.roles_failed.len()));
             for (name, err) in &self.roles_failed {
                 out.push_str(&format!("  ! {name}: {err}\n"));
+            }
+        }
+
+        if !self.roles_unmapped.is_empty() {
+            out.push_str(&format!(
+                "Permissions with no Wavvon equivalent, dropped: {}\n",
+                self.roles_unmapped.len()
+            ));
+            for (name, perms) in &self.roles_unmapped {
+                out.push_str(&format!("  ~ {name}: {}\n", perms.join(", ")));
             }
         }
 

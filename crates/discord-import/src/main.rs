@@ -7,7 +7,11 @@
 //!   discord-import export --guild <id> [--out import-manifest.json]
 //!       Reads DISCORD_BOT_TOKEN from the environment.
 //!
-//!   discord-import apply --hub <url> [--manifest import-manifest.json] [--report import-report.txt]
+//!   discord-import apply --hub <url> [--invite <code>] [--manifest import-manifest.json] [--report import-report.txt]
+//!
+//! `--invite` is the one-time owner invite a fresh hub prints on first boot.
+//! It is required on any hub that is still invite-only, which is every hub
+//! nobody has opened yet.
 //!       Runs against a fresh hub only (refuses if channels already exist).
 
 mod discord_client;
@@ -57,7 +61,7 @@ async fn main() -> Result<()> {
             eprintln!(
                 "Usage:\n  \
                  discord-import export --guild <id> [--out import-manifest.json]\n  \
-                 discord-import apply --hub <url> [--manifest import-manifest.json] [--report import-report.txt] [--insecure]\n\n\
+                 discord-import apply --hub <url> [--invite <code>] [--manifest import-manifest.json] [--report import-report.txt] [--insecure]\n\n\
                  --hub must be https:// unless the host is loopback (localhost/127.0.0.1/::1).\n\
                  --insecure disables TLS certificate verification and is only accepted for a loopback --hub."
             );
@@ -140,6 +144,7 @@ async fn run_apply(args: &[String]) -> Result<()> {
         .unwrap_or("import-report.txt")
         .to_string();
     let insecure = args.iter().any(|a| a == "--insecure");
+    let invite_code = get_flag(args, "--invite").map(|s| s.to_string());
 
     // D2: this tool authenticates with an owner-level token -- refuse to
     // send it over plaintext to a non-local hub. Loopback targets (local
@@ -200,12 +205,15 @@ async fn run_apply(args: &[String]) -> Result<()> {
     }
     println!("Hub is reachable.");
 
-    // Same admin-bootstrap posture as demo-seed: the first identity to
-    // authenticate on a fresh hub is assigned builtin-owner, which carries
-    // the 'admin' permission needed for role/channel management.
+    // This tool creates roles and channels, so it has to arrive as the owner.
+    // On a fresh hub that means redeeming the one-time owner invite the hub
+    // mints on first boot: the "first identity becomes owner" posture this
+    // inherited from demo-seed stopped being true when invite-first landed
+    // (migrations.rs), and until 2026-09-11 apply simply got a 403 here — the
+    // documented path had never been run against a real hub.
     let admin = Identity::generate();
     println!("Authenticating admin identity ...");
-    let token = hub_client::authenticate(&client, &hub_url, &admin)
+    let token = hub_client::authenticate(&client, &hub_url, &admin, invite_code.as_deref())
         .await
         .context("Admin authentication failed. If the hub already has users it is not fresh.")?;
 
@@ -266,6 +274,11 @@ async fn apply_roles(
             Ok(id) => {
                 resolver.insert(&step.ref_id, &id);
                 report.roles_created.push((step.name.clone(), id));
+                if !step.unmapped.is_empty() {
+                    report
+                        .roles_unmapped
+                        .push((step.name.clone(), step.unmapped.clone()));
+                }
             }
             Err(e) => {
                 report.roles_failed.push((step.name.clone(), e.to_string()));

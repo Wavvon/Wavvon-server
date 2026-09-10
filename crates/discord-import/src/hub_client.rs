@@ -30,7 +30,12 @@ struct IdResponse {
 }
 
 /// POST /auth/challenge + POST /auth/verify -> session token.
-pub async fn authenticate(client: &Client, hub: &str, identity: &Identity) -> Result<String> {
+pub async fn authenticate(
+    client: &Client,
+    hub: &str,
+    identity: &Identity,
+    invite_code: Option<&str>,
+) -> Result<String> {
     let pub_key = identity.public_key_hex();
 
     let resp: ChallengeResponse = send(
@@ -50,18 +55,34 @@ pub async fn authenticate(client: &Client, hub: &str, identity: &Identity) -> Re
     let signature = identity.sign(&challenge_bytes);
     let sig_hex = hex::encode(signature.to_bytes());
 
-    let verify: VerifyResponse = send(client.post(format!("{hub}/auth/verify")).json(&json!({
+    let mut body = json!({
         "public_key": pub_key,
         "challenge": resp.challenge,
         "signature": sig_hex,
-    })))
-    .await
-    .context("POST /auth/verify failed")?
-    .error_for_status()
-    .context("verify returned error status")?
-    .json()
-    .await
-    .context("verify response parse failed")?;
+    });
+    // A fresh hub is invite_only (migrations.rs, "invite-first default") and
+    // mints exactly one owner-granting invite on first boot. That is how a
+    // brand-new identity claims a hub, and this tool needs to be the owner:
+    // it creates roles and channels. Without the code the hub answers 403 and
+    // the import cannot start.
+    if let Some(code) = invite_code {
+        body["invite_code"] = json!(code);
+    }
+
+    let response = send(client.post(format!("{hub}/auth/verify")).json(&body))
+        .await
+        .context("POST /auth/verify failed")?;
+    if response.status() == reqwest::StatusCode::FORBIDDEN && invite_code.is_none() {
+        bail!(
+            "The hub refused a new identity (403). A fresh hub is invite-only and mints a              one-time owner invite on first boot — it is in the hub's startup log as              \"First-boot owner invite: <hub>/join/<code>\", and \"wavvon-hub --doctor\"              prints it too. Re-run with --invite <code>."
+        );
+    }
+    let verify: VerifyResponse = response
+        .error_for_status()
+        .context("verify returned error status")?
+        .json()
+        .await
+        .context("verify response parse failed")?;
 
     if verify.scope == "lobby" {
         bail!(
