@@ -444,3 +444,116 @@ async fn sender_id_present_in_key_received() {
         "from_sender_id in voice_key_received must match B's assigned sender_id"
     );
 }
+
+/// Two sessions of one pubkey, and the one that stays gets the key.
+///
+/// Registration used to be one sender per pubkey: the newer socket
+/// overwrote the older, and then the *older* socket's disconnect cleanup
+/// removed the entry the newer one had just written. Whoever was left was
+/// registered nowhere, and a targeted message to them went into the void
+/// with nothing reporting it — for voice that is no sender key, so every
+/// datagram is dropped at the key lookup and the call is silent while the
+/// roster, the transport and the relay all look perfect. Two tabs, a paired
+/// device, or the overlap of an ordinary reconnect is enough to arrange it.
+#[tokio::test]
+async fn a_closed_second_session_does_not_unregister_the_first() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let token_a = authenticate_http(&base, &id_a).await;
+    let token_b = authenticate_http(&base, &id_b).await;
+    let ch = create_channel(&base, &token_a, "enc-two-sessions").await;
+
+    // A's real session, and then a second one — the shape of a second tab, or
+    // of the invite-minting context the browser suite opens with the owner's
+    // own saved session.
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token_a).await;
+    let (_tx_a2, rx_a2) = connect_ws(&base, &token_a).await;
+
+    send_ws(
+        &mut tx_a,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    // Wait for the join to land before the second session goes away, so the
+    // ordering under test is "registered, then a sibling disconnects".
+    let _ = next_msg_of_type(&mut rx_a, "voice_joined").await;
+
+    // The second session leaves. Dropping both halves closes the socket.
+    drop(rx_a2);
+    drop(_tx_a2);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let (mut tx_b, _rx_b) = connect_ws(&base, &token_b).await;
+    send_ws(
+        &mut tx_b,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    send_ws(
+        &mut tx_b,
+        json!({
+            "type": "voice_key_offer",
+            "channel_id": ch.id,
+            "bundles": [{
+                "recipient_pubkey": id_a.public_key_hex(),
+                "ciphertext_hex": "aabb",
+                "nonce_hex": "ccdd"
+            }]
+        }),
+    )
+    .await;
+
+    let msg = next_msg_of_type(&mut rx_a, "voice_key_received").await;
+    assert_eq!(
+        msg["from_pubkey"].as_str().unwrap(),
+        id_b.public_key_hex(),
+        "the surviving session must still receive keys addressed to its pubkey"
+    );
+}
+
+/// Both live sessions of one pubkey get the bundle.
+///
+/// The hub cannot tell which of a user's sockets is the one in voice, so it
+/// tells all of them; a client with no voice session ignores it. Picking one
+/// would be a guess, and the guess is what silenced people.
+#[tokio::test]
+async fn a_key_offer_reaches_every_live_session_of_the_recipient() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let token_a = authenticate_http(&base, &id_a).await;
+    let token_b = authenticate_http(&base, &id_b).await;
+    let ch = create_channel(&base, &token_a, "enc-fanout").await;
+
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token_a).await;
+    let (_tx_a2, mut rx_a2) = connect_ws(&base, &token_a).await;
+    send_ws(
+        &mut tx_a,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    let _ = next_msg_of_type(&mut rx_a, "voice_joined").await;
+
+    let (mut tx_b, _rx_b) = connect_ws(&base, &token_b).await;
+    send_ws(
+        &mut tx_b,
+        json!({
+            "type": "voice_key_offer",
+            "channel_id": ch.id,
+            "bundles": [{
+                "recipient_pubkey": id_a.public_key_hex(),
+                "ciphertext_hex": "0101",
+                "nonce_hex": "0202"
+            }]
+        }),
+    )
+    .await;
+
+    for rx in [&mut rx_a, &mut rx_a2] {
+        let msg = next_msg_of_type(rx, "voice_key_received").await;
+        assert_eq!(msg["ciphertext_hex"].as_str().unwrap(), "0101");
+    }
+}

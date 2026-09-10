@@ -215,10 +215,10 @@ pub(in crate::routes::ws) async fn handle_mini_app_message(
             payload,
             from_pubkey: None,
         };
-        let senders = state.ws_key_senders.read().await;
-        if let Some(tx) = senders.get(&target) {
-            let _ = tx.send(server_msg);
-        }
+        // Every session the addressee has open, for the same reason voice
+        // keys go to all of them: the hub cannot tell which socket is
+        // playing the mini-app.
+        state.send_to_user(&target, server_msg).await;
     } else {
         let server_msg = WsServerMessage::MiniAppMessage {
             bot_id: bot_id.clone(),

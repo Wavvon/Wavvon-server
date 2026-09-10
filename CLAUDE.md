@@ -234,6 +234,20 @@ so the two failures are now distinguished, `Db` ending the pass and
 429 from the shared per-IP auth limiter while waiting to be invited, which
 kept the clients' live workflow red for days.
 
+Its 2026-09-10 shape: **one slot for a thing that has several.**
+`ws_key_senders` was `HashMap<pubkey, sender>` with an unconditional insert on
+connect and an unconditional remove on disconnect — so a second socket for the
+same identity overwrote the first, and then the first socket's teardown removed
+the entry the second had just written. The survivor was registered nowhere and
+every targeted message to it was dropped silently; for voice that is no sender
+key, so every datagram is discarded at the key lookup and the call is silent
+while the roster, the transport and the relay all look right. Two tabs, a
+paired device, or the overlap of an ordinary reconnect arranges it. The map is
+now nested by `session_id`, which `bot_sessions` and the screen-share teardown
+next door had been doing all along, each with a comment saying why. **When you
+add a per-user map, ask how many sockets one user has** — the answer is not
+one, and the failure is quiet.
+
 **The auth limiter is per IP and one login costs two requests** — a shared
 address (office, school, CGNAT) spends the default budget on ordinary
 arrivals, and to the person turned away it looks like a hub that will not have

@@ -421,11 +421,23 @@ pub struct AppState {
     /// session-accept attempt.
     pub voice_pending_binds: RwLock<HashMap<String, PendingVoiceBind>>,
 
-    /// Per-user WS sender for targeted voice key distribution messages (V4).
-    /// Registered on WS connect, deregistered on disconnect.
-    /// Key: user public key hex.
-    pub ws_key_senders:
-        RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>>,
+    /// Per-*session* WS senders for targeted delivery: voice key
+    /// distribution (V4) and mini-app messages addressed to a user.
+    /// Keyed `pubkey -> session_id -> sender`, registered on WS connect and
+    /// deregistered on that session's own disconnect.
+    ///
+    /// Nested, and not one sender per pubkey, for the reason `bot_sessions`
+    /// is nested: one pubkey has several sockets more often than not — a
+    /// second tab, a paired device, or the overlap while a reconnect stands
+    /// up its socket before the old one finishes tearing down. A flat map
+    /// took the newest socket and then let the *older* socket's cleanup
+    /// remove it, so the survivor was registered nowhere and every targeted
+    /// message to that user was dropped with nothing reporting it. For voice
+    /// that means no sender key arrives, so every datagram is discarded at
+    /// the key lookup and the call is silent — see `send_to_user`.
+    pub ws_key_senders: RwLock<
+        HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>>,
+    >,
 
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
@@ -501,6 +513,27 @@ pub struct AppState {
     /// when `lan_mode` is on and `lan_tls_mode == Some("self")`. Surfaced on
     /// `/info` and in the mDNS `fp` TXT record so clients can pin it TOFU-style.
     pub lan_fingerprint: Option<String>,
+}
+
+impl AppState {
+    /// Deliver a targeted WS message to **every** session a pubkey has open,
+    /// and report how many took it.
+    ///
+    /// All of them rather than a chosen one: the hub cannot tell which of a
+    /// user's sockets is the one in voice, and the messages routed this way
+    /// are ignored by a client that has no session for them (the web client
+    /// no-ops when `voiceSessionRef` is null). Sending to one guessed socket
+    /// is how a user with two tabs open hears nothing.
+    pub async fn send_to_user(&self, pubkey: &str, msg: WsServerMessage) -> usize {
+        let senders = self.ws_key_senders.read().await;
+        let Some(sessions) = senders.get(pubkey) else {
+            return 0;
+        };
+        sessions
+            .values()
+            .filter(|tx| tx.send(msg.clone()).is_ok())
+            .count()
+    }
 }
 
 pub struct PendingChallenge {

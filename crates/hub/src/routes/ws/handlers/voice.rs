@@ -486,11 +486,8 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             new_sender_id: sender_id,
             new_pubkey: cs.public_key.clone(),
         };
-        let senders = state.ws_key_senders.read().await;
         for pk in &existing_pubkeys {
-            if let Some(tx) = senders.get(pk) {
-                let _ = tx.send(req.clone());
-            }
+            state.send_to_user(pk, req.clone()).await;
         }
     }
 
@@ -1354,19 +1351,18 @@ pub(in crate::routes::ws) async fn handle_voice_key_offer(
         .copied()
         .unwrap_or(0);
 
-    let senders = state.ws_key_senders.read().await;
     for bundle in bundles {
-        if let Some(tx) = senders.get(&bundle.recipient_pubkey) {
-            let delivery = WsServerMessage::VoiceKeyReceived {
-                channel_id: channel_id.clone(),
-                from_sender_id,
-                from_pubkey: cs.public_key.clone(),
-                ciphertext_hex: bundle.ciphertext_hex,
-                nonce_hex: bundle.nonce_hex,
-            };
-            let _ = tx.send(delivery);
-        }
-        // Unknown recipients are silently dropped — not an error.
+        let delivery = WsServerMessage::VoiceKeyReceived {
+            channel_id: channel_id.clone(),
+            from_sender_id,
+            from_pubkey: cs.public_key.clone(),
+            ciphertext_hex: bundle.ciphertext_hex,
+            nonce_hex: bundle.nonce_hex,
+        };
+        // Every session that pubkey has open: the hub cannot tell which
+        // socket is the one in voice. Unknown recipients are silently
+        // dropped — not an error.
+        state.send_to_user(&bundle.recipient_pubkey, delivery).await;
     }
     DispatchResult::Continue
 }
