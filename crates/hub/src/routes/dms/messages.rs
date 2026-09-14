@@ -12,7 +12,9 @@ use crate::state::{AppState, DmEvent};
 use super::keys::{
     bind_cert_master, group_envelope_signing_bytes, verify_envelope_sender, verify_tiered_signature,
 };
-use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
+use super::models::{
+    ensure_user_stub, first_bot_among, load_members, parse_dm_attachments, DmMessageRow,
+};
 
 pub async fn send_dm(
     State(state): State<Arc<AppState>>,
@@ -25,6 +27,19 @@ pub async fn send_dm(
         return Err((
             StatusCode::FORBIDDEN,
             "Not a member of this conversation".to_string(),
+        ));
+    }
+
+    // The conversation routes keep bots out of a DM in the first place; this
+    // is the same rule at the point of speech, for a bot that was seated
+    // before the rule existed or through a route that grows later.
+    if first_bot_among(&state.db, std::slice::from_ref(&user.public_key))
+        .await?
+        .is_some()
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Bots cannot take part in direct messages".to_string(),
         ));
     }
 
