@@ -112,6 +112,8 @@ pub async fn mint_voice_grant(
     Path(alliance_id): Path<String>,
     Json(req): Json<MintGrantRequest>,
 ) -> Result<Json<MintGrantResponse>, (StatusCode, String)> {
+    super::models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+
     let our_pubkey = state.hub_identity.public_key_hex();
 
     // Good standing here, checked explicitly rather than left to the auth

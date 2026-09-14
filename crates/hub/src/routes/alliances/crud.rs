@@ -62,16 +62,28 @@ pub async fn create_alliance(
 
 pub async fn list_alliances(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> Result<Json<Vec<AllianceResponse>>, (StatusCode, String)> {
+    // A peer hub is told about the alliances it shares with this one and no
+    // others: a hub in many alliances shares different channels into each, and
+    // the id is what every other alliance route is addressed by.
+    let peer = super::models::caller_is_peer(&state, &user.public_key).await?;
     let rows = sqlx::query_as::<_, AllianceRow>(
         "SELECT DISTINCT a.id, a.name, a.created_by, a.created_at
          FROM alliances a
          INNER JOIN alliance_members am ON a.id = am.alliance_id
          WHERE am.hub_public_key = $1
+           AND ($2::text IS NULL OR EXISTS(
+                 SELECT 1 FROM alliance_members peer_am
+                 WHERE peer_am.alliance_id = a.id AND peer_am.hub_public_key = $2))
          ORDER BY a.created_at",
     )
     .bind(state.hub_identity.public_key_hex())
+    .bind(if peer {
+        Some(user.public_key.clone())
+    } else {
+        None
+    })
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -90,9 +102,11 @@ pub async fn list_alliances(
 
 pub async fn get_alliance(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(alliance_id): Path<String>,
 ) -> Result<Json<AllianceDetailResponse>, (StatusCode, String)> {
+    super::models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+
     let alliance = sqlx::query_as::<_, AllianceRow>(
         "SELECT id, name, created_by, created_at FROM alliances WHERE id = $1",
     )
