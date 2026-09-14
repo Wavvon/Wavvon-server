@@ -694,6 +694,10 @@ pub fn create_router_full(
             post(routes::alliances::receive_federation_alliance_invite),
         )
         .route(
+            "/federation/alliance-member",
+            post(routes::alliances::receive_alliance_member),
+        )
+        .route(
             "/identity/{master}/designation",
             get(routes::identity::get_designation).post(routes::identity::put_designation),
         )

@@ -14,7 +14,7 @@ pub use channels::{
 pub use crud::{create_alliance, get_alliance, leave_alliance, list_alliances};
 pub use membership::{
     accept_pending_invite, create_invite, decline_pending_invite, join_alliance,
-    join_alliance_local, list_pending_invites, push_invite_handler,
+    join_alliance_local, list_pending_invites, push_invite_handler, receive_alliance_member,
     receive_federation_alliance_invite,
 };
 pub use voice::{

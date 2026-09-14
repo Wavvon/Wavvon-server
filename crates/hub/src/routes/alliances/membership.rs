@@ -221,6 +221,57 @@ pub(super) async fn do_join_alliance(
         }
     }
 
+    // The inviter reports its own row as "self", which is how the mirroring
+    // above recognises it; its key is what vouches for us to everybody else.
+    let inviter_key = detail
+        .members
+        .iter()
+        .find(|m| m.hub_url == "self")
+        .map(|m| m.hub_public_key.clone());
+
+    // Tell the members who were already here. A join only ever told two
+    // hubs — the joiner pulled the list, the inviter recorded the joiner —
+    // and every hub's fan-out walks its own member rows, so without this an
+    // existing member never sees the newcomer's shared channels at all.
+    //
+    // Best-effort: a member that is down stays behind, the same way the rest
+    // of this file treats an unreachable peer. The announcement is
+    // idempotent, so a later one repairs it.
+    for m in inviter_key.iter().flat_map(|_| detail.members.iter()) {
+        if m.hub_public_key == state.hub_identity.public_key_hex() {
+            continue;
+        }
+        let member_url = if m.hub_url == "self" {
+            inviter_url
+        } else {
+            m.hub_url.as_str()
+        };
+        if member_url == inviter_url {
+            continue; // it recorded us as part of the join
+        }
+        let announcement = crate::routes::alliance_models::AllianceMemberAnnouncement {
+            alliance_id: detail.id.clone(),
+            hub_url: own_hub_url.to_string(),
+            inviter_public_key: inviter_key.clone().unwrap_or_default(),
+            invite_token: invite_token.to_string(),
+        };
+        let target = member_url.trim_end_matches('/');
+        match state
+            .http_client
+            .post(format!("{target}/federation/alliance-member"))
+            .json(&announcement)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {}
+            Ok(r) => tracing::warn!(
+                "Alliance member announcement to {target} refused: {}",
+                r.status()
+            ),
+            Err(e) => tracing::warn!("Alliance member announcement to {target} failed: {e}"),
+        }
+    }
+
     tracing::info!("Joined alliance '{}' via {}", detail.name, inviter_url);
     Ok(detail)
 }
@@ -511,5 +562,111 @@ pub async fn join_alliance(
         &alliance_id[..8]
     );
 
+    Ok(StatusCode::OK)
+}
+
+/// `POST /federation/alliance-member`
+///
+/// "I joined this alliance, and here is a member's signature saying I was
+/// invited." Sent by a hub that has just joined, to every other member it
+/// learned about from the inviter.
+///
+/// It exists because a join only ever told two hubs: the joiner pulled the
+/// member list from the inviter, and the inviter recorded the joiner. Nobody
+/// told the members who were already there, and every hub's fan-out walks its
+/// **own** member rows — so in an alliance of three, the hub that was there
+/// first kept asking the one hub it knew and never saw the newcomer's shared
+/// channels at all. The federation client's own comment claimed membership was
+/// "already replicated to every hub at join time"; this is what makes that
+/// true.
+///
+/// No new trust: the announcement carries the same invite token
+/// `create_invite` mints — a signature by the inviting hub over the alliance
+/// id — and the receiver verifies it against a hub **already in its own
+/// member list**. A stranger cannot write itself into an alliance, and an
+/// existing member cannot use it to reach an alliance it is not in.
+pub async fn receive_alliance_member(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::routes::alliance_models::AllianceMemberAnnouncement>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    // We must be in this alliance ourselves. Answering otherwise would let any
+    // hub discover whether an alliance exists here.
+    let ours: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM alliance_members WHERE alliance_id = $1 AND hub_public_key = $2)",
+    )
+    .bind(&req.alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if !ours {
+        return Err((StatusCode::NOT_FOUND, "Alliance not found".to_string()));
+    }
+
+    // The voucher must be a member we already know.
+    let voucher: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM alliance_members WHERE alliance_id = $1 AND hub_public_key = $2)",
+    )
+    .bind(&req.alliance_id)
+    .bind(&req.inviter_public_key)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if !voucher {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Vouching hub is not a member of this alliance".to_string(),
+        ));
+    }
+
+    let sig = hex::decode(&req.invite_token).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid invite token hex".to_string(),
+        )
+    })?;
+    wavvon_identity::verify_signature(&req.inviter_public_key, req.alliance_id.as_bytes(), &sig)
+        .map_err(|_| (StatusCode::FORBIDDEN, "Invalid invite token".to_string()))?;
+
+    // Who is announcing, asked of the address rather than taken on trust: the
+    // pubkey has to be the one that answers at that URL.
+    let hub_info = state
+        .federation_client
+        .get_info(&req.hub_url)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Cannot reach hub: {e}")))?;
+
+    let now = crate::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (alliance_id, hub_public_key) DO NOTHING",
+    )
+    .bind(&req.alliance_id)
+    .bind(&hub_info.public_key)
+    .bind(&hub_info.name)
+    .bind(&req.hub_url)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    sqlx::query(
+        "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (public_key) DO NOTHING",
+    )
+    .bind(&hub_info.public_key)
+    .bind(&hub_info.name)
+    .bind(&req.hub_url)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    tracing::info!(
+        "Alliance {}: hub '{}' announced by {}",
+        &req.alliance_id[..8.min(req.alliance_id.len())],
+        hub_info.name,
+        &req.inviter_public_key[..8.min(req.inviter_public_key.len())],
+    );
     Ok(StatusCode::OK)
 }

@@ -150,6 +150,20 @@ pub struct FederationAllianceInvitePayload {
     pub message: Option<String>,
 }
 
+/// Sent by a hub that has just joined an alliance to every other member it
+/// learned about, so their member lists converge. Carries the same invite
+/// token the inviter minted, which every member can verify against a hub
+/// already in its own list (alliances.md).
+#[derive(Serialize, Deserialize)]
+pub struct AllianceMemberAnnouncement {
+    pub alliance_id: String,
+    /// The announcing hub's own address, asked for its pubkey rather than
+    /// trusted to state one.
+    pub hub_url: String,
+    pub inviter_public_key: String,
+    pub invite_token: String,
+}
+
 /// A row from `pending_alliance_invites` as returned to the client.
 #[derive(Serialize, Deserialize)]
 pub struct PendingAllianceInviteRow {
