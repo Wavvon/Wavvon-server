@@ -619,6 +619,21 @@ pub async fn receive_federated_dm(
         return Ok(StatusCode::OK);
     }
 
+    // The bot rule, as far as it can reach across a hub boundary: `is_bot` is
+    // a local flag and nothing in the wire format carries it, so this can only
+    // recognise a bot **this** hub knows — the same identity invited here and
+    // there. A bot unknown locally is indistinguishable from a person, and the
+    // hub that holds its row is the one that refuses it at the send.
+    if first_bot_among(&state.db, std::slice::from_ref(&req.sender))
+        .await?
+        .is_some()
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Bots cannot take part in direct messages".to_string(),
+        ));
+    }
+
     // Block check for federated inbound DM: if any local recipient has blocked the sender,
     // return 200 (success-shaped) so the sending hub cannot detect the block.
     for member_key in &req.members {

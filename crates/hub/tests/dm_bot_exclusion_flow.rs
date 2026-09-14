@@ -108,3 +108,62 @@ async fn a_bot_cannot_be_added_to_an_existing_group() {
 
     resp.assert_status_forbidden();
 }
+
+#[tokio::test]
+async fn a_bot_this_hub_knows_cannot_arrive_by_federation() {
+    let (server, owner_token) = common::setup_with_owner().await;
+    let bot = Identity::generate();
+    let _bot_token = invite_and_auth_bot(&server, &owner_token, &bot).await;
+    let victim = Identity::generate();
+
+    // A peer hub, registered the way the federation path expects.
+    let peer = Identity::generate();
+    let peer_token = {
+        let challenge: serde_json::Value = server
+            .post("/auth/challenge")
+            .json(&json!({ "public_key": peer.public_key_hex() }))
+            .await
+            .json();
+        let bytes = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
+        let verify: serde_json::Value = server
+            .post("/auth/verify")
+            .json(&json!({
+                "public_key": peer.public_key_hex(),
+                "challenge": challenge["challenge"],
+                "signature": hex::encode(peer.sign(&bytes).to_bytes()),
+                "is_hub": true,
+            }))
+            .await
+            .json();
+        verify["token"].as_str().unwrap().to_string()
+    };
+
+    let conv_id = "eeee0000111122223333444455556666";
+    let content = "a bot reaching in from the outside";
+    let signature = hex::encode(
+        bot.sign(&wavvon_identity::federated_plaintext_dm_signing_bytes(
+            conv_id, "dm", content,
+        ))
+        .to_bytes(),
+    );
+
+    let resp = server
+        .post("/federation/dm")
+        .authorization_bearer(&peer_token)
+        .json(&json!({
+            "message_id": "ffff0000111122223333444455556666",
+            "conversation_id": conv_id,
+            "conv_type": "dm",
+            "sender": bot.public_key_hex(),
+            "members": [bot.public_key_hex(), victim.public_key_hex()],
+            "content": content,
+            "attachments": [],
+            "signature": signature,
+            "created_at": 1_700_000_000i64,
+        }))
+        .await;
+
+    // The signature is genuine and the peer is registered: the only thing
+    // refusing this is the sender being a bot on this hub.
+    resp.assert_status_forbidden();
+}
