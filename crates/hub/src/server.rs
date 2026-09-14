@@ -695,7 +695,8 @@ pub fn create_router_full(
         )
         .route(
             "/federation/alliance-member",
-            post(routes::alliances::receive_alliance_member),
+            post(routes::alliances::receive_alliance_member)
+                .delete(routes::alliances::receive_alliance_member_left),
         )
         .route(
             "/identity/{master}/designation",

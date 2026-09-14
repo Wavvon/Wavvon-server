@@ -164,6 +164,14 @@ pub struct AllianceMemberAnnouncement {
     pub invite_token: String,
 }
 
+/// Sent by a hub leaving an alliance. It names only the alliance: which hub
+/// is leaving comes from the authenticated peer, because a hub may unmake its
+/// own membership and nobody else's.
+#[derive(Serialize, Deserialize)]
+pub struct AllianceMemberDeparture {
+    pub alliance_id: String,
+}
+
 /// A row from `pending_alliance_invites` as returned to the client.
 #[derive(Serialize, Deserialize)]
 pub struct PendingAllianceInviteRow {

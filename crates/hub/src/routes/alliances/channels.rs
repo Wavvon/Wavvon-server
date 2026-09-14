@@ -222,6 +222,12 @@ pub async fn list_shared_channels(
     Query(q): Query<ListSharedChannelsQuery>,
 ) -> Result<Json<Vec<SharedChannelResponse>>, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+    // A stale member list loses content silently, and this is the read that
+    // depends on it. Local callers only: a peer answers `local_only` and must
+    // not start a second conversation about who is here.
+    if !q.local_only && !models::caller_is_peer(&state, &user.public_key).await? {
+        super::membership::reconcile_members(&state, &alliance_id).await;
+    }
     let hub_key = state.hub_identity.public_key_hex();
 
     // 1) Locally shared channels -- the effective set (explicit shares plus

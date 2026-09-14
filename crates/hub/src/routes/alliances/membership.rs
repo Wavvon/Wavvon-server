@@ -5,7 +5,8 @@ use axum::http::StatusCode;
 use axum::Json;
 use uuid::Uuid;
 
-use crate::auth::middleware::AuthUser;
+use super::models::MemberRow;
+use crate::auth::middleware::{AuthUser, PeerHub};
 use crate::permissions::{self, ADMIN};
 use crate::routes::alliance_models::*;
 use crate::state::AppState;
@@ -669,4 +670,166 @@ pub async fn receive_alliance_member(
         &req.inviter_public_key[..8.min(req.inviter_public_key.len())],
     );
     Ok(StatusCode::OK)
+}
+
+/// `DELETE /federation/alliance-member`
+///
+/// "I am leaving this alliance." Sent by a hub to every member it knows, and
+/// it removes **the caller's own row** — a hub can unmake only its own
+/// membership, so `PeerHub` is the whole authorisation: it names who is
+/// asking, and nothing else is claimed.
+///
+/// Without it a departure was local. The partners kept the row, kept calling
+/// the hub, kept showing it as a member — and, since `alliance_members` is
+/// what `require_alliance_visibility` reads, a hub that had left could still
+/// read the channels shared into the alliance it left.
+pub async fn receive_alliance_member_left(
+    State(state): State<Arc<AppState>>,
+    peer: PeerHub,
+    Json(req): Json<crate::routes::alliance_models::AllianceMemberDeparture>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    sqlx::query("DELETE FROM alliance_members WHERE alliance_id = $1 AND hub_public_key = $2")
+        .bind(&req.alliance_id)
+        .bind(&peer.public_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    tracing::info!(
+        "Alliance {}: hub {} left",
+        &req.alliance_id[..8.min(req.alliance_id.len())],
+        &peer.public_key[..8.min(peer.public_key.len())],
+    );
+    Ok(StatusCode::OK)
+}
+
+/// Tell every other member that this hub is leaving `alliance_id`.
+///
+/// Best-effort per member, like the join announcement: a member that is down
+/// keeps a stale row until it asks again (`get_alliance` reconciles). Called
+/// before the local rows go, because afterwards there is nobody left to tell.
+pub(super) async fn announce_departure(state: &Arc<AppState>, alliance_id: &str) {
+    let members = sqlx::query_as::<_, MemberRow>(
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    for m in members {
+        if m.hub_url == "self" || m.hub_url.is_empty() {
+            continue;
+        }
+        let Some(token) = super::channels::peer_token(state, &m).await else {
+            continue;
+        };
+        let target = m.hub_url.trim_end_matches('/');
+        let body = crate::routes::alliance_models::AllianceMemberDeparture {
+            alliance_id: alliance_id.to_string(),
+        };
+        match state
+            .http_client
+            .delete(format!("{target}/federation/alliance-member"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {}
+            Ok(r) => tracing::warn!("Alliance departure to {target} refused: {}", r.status()),
+            Err(e) => tracing::warn!("Alliance departure to {target} failed: {e}"),
+        }
+    }
+}
+
+/// Pull in members this hub has not heard of, from the members it has.
+///
+/// The join announcement is best-effort by nature: a hub that is down when
+/// somebody joins is told nothing, and nothing re-sends. Without a second
+/// route to the same fact, one missed message would blind a hub to a member
+/// for good — the exact failure the announcement was added to fix, one level
+/// down.
+///
+/// So the question "who is in this alliance" answers itself: whenever a local
+/// caller asks, this hub asks the members it knows and adds whoever they name.
+/// Only additions, and only from hubs already in this alliance — a member
+/// vouches for a member, which is the same standing the announcement requires.
+/// A peer's own call does not reconcile, which is what keeps two hubs from
+/// asking each other about each other forever.
+pub(super) async fn reconcile_members(state: &Arc<AppState>, alliance_id: &str) {
+    let known = sqlx::query_as::<_, MemberRow>(
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let ours = state.hub_identity.public_key_hex();
+    for m in &known {
+        if m.hub_url == "self" || m.hub_url.is_empty() {
+            continue;
+        }
+        let Some(token) = super::channels::peer_token(state, m).await else {
+            continue;
+        };
+        let Ok(detail) = state
+            .federation_client
+            .get_alliance_detail(&m.hub_url, &token, alliance_id)
+            .await
+        else {
+            continue;
+        };
+
+        for reported in detail.members {
+            if reported.hub_public_key == ours
+                || known
+                    .iter()
+                    .any(|k| k.hub_public_key == reported.hub_public_key)
+            {
+                continue;
+            }
+            // "self" is self *from the reporter's* point of view — its own
+            // address is the one we just called.
+            let url = if reported.hub_url == "self" {
+                m.hub_url.clone()
+            } else {
+                reported.hub_url.clone()
+            };
+            if url.is_empty() {
+                continue;
+            }
+            let now = crate::auth::handlers::unix_timestamp();
+            let _ = sqlx::query(
+                "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (alliance_id, hub_public_key) DO NOTHING",
+            )
+            .bind(alliance_id)
+            .bind(&reported.hub_public_key)
+            .bind(&reported.hub_name)
+            .bind(&url)
+            .bind(reported.joined_at)
+            .execute(&state.db)
+            .await;
+            let _ = sqlx::query(
+                "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (public_key) DO NOTHING",
+            )
+            .bind(&reported.hub_public_key)
+            .bind(&reported.hub_name)
+            .bind(&url)
+            .bind(now)
+            .execute(&state.db)
+            .await;
+            tracing::info!(
+                "Alliance {}: learned of member {} from {}",
+                &alliance_id[..8.min(alliance_id.len())],
+                &reported.hub_public_key[..8.min(reported.hub_public_key.len())],
+                &m.hub_public_key[..8.min(m.hub_public_key.len())],
+            );
+        }
+    }
 }

@@ -151,6 +151,9 @@ pub async fn leave_alliance(
 
     let hub_key = state.hub_identity.public_key_hex();
 
+    // Tell the partners first: afterwards the rows that name them are gone.
+    super::membership::announce_departure(&state, &alliance_id).await;
+
     // Remove shared channels
     sqlx::query(
         "DELETE FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id IN (SELECT id FROM channels)",
