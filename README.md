@@ -152,7 +152,6 @@ own keypair lives in `hub_identity.json` in the working directory
 | `seed/` | Self-hostable cross-farm discovery registry |
 | `store/` | Trait-based storage layer with the PostgreSQL backend |
 | `demo-seed/` | Populates a running hub with demo content |
-| `discord-import/` | Import an existing Discord community into a hub |
 
 Multi-hub deployments use `docker-compose.farm.yml` — see
 [farm-model.md](https://github.com/Wavvon/Wavvon-docs/blob/main/docs/farm-model.md).

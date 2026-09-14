@@ -136,7 +136,7 @@ reaches `Settings`.
 - **`farm`** — fleet control plane: hub lifecycle (spawn, monitor, stop), server registration, reverse-proxy to hub processes, farm-level SSO. Partially implemented; see the wiki's `farm-model.md` and `farm-impl.md`.
 - **`agent`** — fleet worker node. Reverse-connects to farm over WebSocket, spawns and monitors local hub processes on its behalf. No HTTP surface.
 - **`demo-seed`** — populates a running hub with realistic demo data for screenshots.
-- **`bot-kit`, `ttt-bot`, `discord-import`** — bot SDK, example bot, importer.
+- **`bot-kit`, `ttt-bot`** — bot SDK and example bot.
 
 ---
 
