@@ -136,3 +136,27 @@ pub async fn find_existing_dm(
 
     Ok(None)
 }
+
+/// Names the first bot among `keys`, or `None` when they are all human.
+///
+/// DMs are the one surface a bot is kept out of (bots.md, "Hard-coded in
+/// v1"): a bot holds no DH key and no ratchet, so a conversation with one in
+/// it can only carry cleartext, and `is_encrypted` is decided by the sender
+/// alone. The rule is enforced here rather than in the client because a bot
+/// authenticates through the normal session flow and reaches every route a
+/// person does.
+pub async fn first_bot_among(
+    db: &sqlx::PgPool,
+    keys: &[String],
+) -> Result<Option<String>, (StatusCode, String)> {
+    if keys.is_empty() {
+        return Ok(None);
+    }
+    sqlx::query_scalar::<_, String>(
+        "SELECT public_key FROM users WHERE public_key = ANY($1) AND is_bot = TRUE LIMIT 1",
+    )
+    .bind(keys)
+    .fetch_optional(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+}

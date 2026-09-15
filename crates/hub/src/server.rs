@@ -90,7 +90,7 @@ pub fn create_router_full(
     trusted_proxy: bool,
     web_client: Option<Arc<WebClientConfig>>,
 ) -> Router {
-    let auth_limiter = RateLimiter::new(Config::AUTH, trusted_proxy);
+    let auth_limiter = RateLimiter::new(Config::auth(), trusted_proxy);
     let write_limiter = RateLimiter::new(Config::WRITE, trusted_proxy);
 
     // `GET /join/{code}` answers a browser with the web client and a program
@@ -692,6 +692,11 @@ pub fn create_router_full(
         .route(
             "/federation/alliance-invite",
             post(routes::alliances::receive_federation_alliance_invite),
+        )
+        .route(
+            "/federation/alliance-member",
+            post(routes::alliances::receive_alliance_member)
+                .delete(routes::alliances::receive_alliance_member_left),
         )
         .route(
             "/identity/{master}/designation",

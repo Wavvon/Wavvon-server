@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
+use super::models;
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, ADMIN};
 use crate::routes::alliance_models::*;
@@ -106,6 +107,7 @@ pub async fn share_channel(
     Path(alliance_id): Path<String>,
     Json(req): Json<ShareChannelRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
@@ -185,6 +187,7 @@ pub async fn unshare_channel(
     user: AuthUser,
     Path((alliance_id, channel_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ADMIN)?;
 
@@ -214,10 +217,17 @@ pub struct ListSharedChannelsQuery {
 
 pub async fn list_shared_channels(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(alliance_id): Path<String>,
     Query(q): Query<ListSharedChannelsQuery>,
 ) -> Result<Json<Vec<SharedChannelResponse>>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+    // A stale member list loses content silently, and this is the read that
+    // depends on it. Local callers only: a peer answers `local_only` and must
+    // not start a second conversation about who is here.
+    if !q.local_only && !models::caller_is_peer(&state, &user.public_key).await? {
+        super::membership::reconcile_members(&state, &alliance_id).await;
+    }
     let hub_key = state.hub_identity.public_key_hex();
 
     // 1) Locally shared channels -- the effective set (explicit shares plus
@@ -349,6 +359,7 @@ pub async fn post_alliance_channel_message(
     ),
     (StatusCode, String),
 > {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(crate::permissions::SEND_MESSAGES)?;
 
@@ -476,6 +487,7 @@ pub async fn get_alliance_forum_posts(
     Path((alliance_id, channel_id)): Path<(String, String)>,
     Query(params): Query<PostListParams>,
 ) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let hub_key = state.hub_identity.public_key_hex();
 
     let effective = effective_shared_channels(&state.db, &alliance_id)
@@ -572,6 +584,7 @@ pub async fn get_alliance_forum_post(
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
     Query(params): Query<ReplyListParams>,
 ) -> Result<Json<PostDetail>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let hub_key = state.hub_identity.public_key_hex();
 
     let effective = effective_shared_channels(&state.db, &alliance_id)
@@ -671,6 +684,7 @@ pub async fn post_alliance_forum_post(
     Path((alliance_id, channel_id)): Path<(String, String)>,
     Json(req): Json<CreatePostRequest>,
 ) -> Result<(StatusCode, Json<PostDetail>), (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -758,6 +772,7 @@ pub async fn post_alliance_forum_reply(
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
     Json(req): Json<CreateReplyRequest>,
 ) -> Result<(StatusCode, Json<ReplyView>), (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -853,6 +868,7 @@ pub async fn react_alliance_forum(
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -961,6 +977,7 @@ pub async fn delete_alliance_forum_post(
     user: AuthUser,
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -1046,6 +1063,7 @@ pub async fn delete_alliance_forum_reply(
     user: AuthUser,
     Path((alliance_id, channel_id, post_id, reply_id)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -1134,6 +1152,7 @@ pub async fn get_alliance_channel_messages(
     user: AuthUser,
     Path((alliance_id, channel_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<crate::routes::chat_models::MessageResponse>>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let hub_key = state.hub_identity.public_key_hex();
 
     // Locally-owned alliance channel (explicit share, or a descendant of an

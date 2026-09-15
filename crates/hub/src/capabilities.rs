@@ -31,6 +31,12 @@ pub const CAPABILITIES: &[&str] = &[
     // talking to a hub that still has `POST /admin/bots`, so its admin panel
     // must offer the hub-minted-token flow instead of an invite field.
     "bots.external",
+    // `DELETE /me` — a member can remove themselves from the hub: profile and
+    // roles cleared, the pubkey kept as the anchor moderation and message
+    // history point at. Gated because a client must not offer "leave this
+    // community" against a hub that would answer 404, leaving the person
+    // believing they left.
+    "hub.leave",
     // `/info` carries `max_attachment_bytes` and hub admin can change it. A
     // client that does not see this string is talking to a hub whose cap is a
     // compile-time 3 MB, so it must keep using its own constant rather than
@@ -49,12 +55,6 @@ pub const CAPABILITIES: &[&str] = &[
     // advertising only `list.cursor` would page an endpoint that ignores the
     // cursor and hand back the first page over and over.
     "list.cursor.lists",
-    // `DELETE /me` — a member can remove themselves from the hub: profile and
-    // roles cleared, the pubkey kept as the anchor moderation and message
-    // history point at. Gated because a client must not offer "leave this
-    // community" against a hub that would answer 404, leaving the person
-    // believing they left.
-    "hub.leave",
     // Device pairing: subkey certs presented at `/auth/verify`, and the
     // ECIES-wrapped canonical DH material a paired device needs for DMs.
     "pairing.subkey",

@@ -16,7 +16,8 @@ constraints. Read it; don't duplicate it here. This file is about how you work.
 - `crates/hub/` — axum + sqlx + PostgreSQL + tokio + Tantivy. Routes in `src/routes/`, federation in `src/federation/`, auth in `src/auth/`, schema in `src/db/migrations.rs`.
 - `crates/store/` — the `HubStore` trait split. Prefer it over raw `sqlx::query` in new hub code.
 - `crates/hub-env/` — names of `WAVVON_*` env keys that cross a process boundary. Never spell one as a string literal on either side.
-- `crates/farm/`, `agent/`, `seed/` — fleet control plane, worker node, cross-farm registry.
+- `crates/farm/`, `agent/` — fleet control plane and worker node.
+- `crates/bot-kit/`, `ttt-bot/`, `demo-seed/` — bot SDK, example bot, demo content seeder.
 
 ## How you work
 

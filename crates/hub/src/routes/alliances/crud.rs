@@ -62,16 +62,28 @@ pub async fn create_alliance(
 
 pub async fn list_alliances(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
 ) -> Result<Json<Vec<AllianceResponse>>, (StatusCode, String)> {
+    // A peer hub is told about the alliances it shares with this one and no
+    // others: a hub in many alliances shares different channels into each, and
+    // the id is what every other alliance route is addressed by.
+    let peer = super::models::caller_is_peer(&state, &user.public_key).await?;
     let rows = sqlx::query_as::<_, AllianceRow>(
         "SELECT DISTINCT a.id, a.name, a.created_by, a.created_at
          FROM alliances a
          INNER JOIN alliance_members am ON a.id = am.alliance_id
          WHERE am.hub_public_key = $1
+           AND ($2::text IS NULL OR EXISTS(
+                 SELECT 1 FROM alliance_members peer_am
+                 WHERE peer_am.alliance_id = a.id AND peer_am.hub_public_key = $2))
          ORDER BY a.created_at",
     )
     .bind(state.hub_identity.public_key_hex())
+    .bind(if peer {
+        Some(user.public_key.clone())
+    } else {
+        None
+    })
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -90,9 +102,27 @@ pub async fn list_alliances(
 
 pub async fn get_alliance(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(alliance_id): Path<String>,
 ) -> Result<Json<AllianceDetailResponse>, (StatusCode, String)> {
+    super::models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+
+    // And this hub has to be in it. The row can outlive membership for a
+    // moment — a departure announced to us by a peer, a mirror not yet
+    // cleaned — and answering from it would describe an alliance this hub is
+    // not part of.
+    let ours: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM alliance_members WHERE alliance_id = $1 AND hub_public_key = $2)",
+    )
+    .bind(&alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if !ours {
+        return Err((StatusCode::NOT_FOUND, "Alliance not found".to_string()));
+    }
+
     let alliance = sqlx::query_as::<_, AllianceRow>(
         "SELECT id, name, created_by, created_at FROM alliances WHERE id = $1",
     )
@@ -137,6 +167,9 @@ pub async fn leave_alliance(
 
     let hub_key = state.hub_identity.public_key_hex();
 
+    // Tell the partners first: afterwards the rows that name them are gone.
+    super::membership::announce_departure(&state, &alliance_id).await;
+
     // Remove shared channels
     sqlx::query(
         "DELETE FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id IN (SELECT id FROM channels)",
@@ -154,21 +187,29 @@ pub async fn leave_alliance(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // If no members left, delete the alliance
-    let member_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM alliance_members WHERE alliance_id = $1")
-            .bind(&alliance_id)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // And drop the rest of the mirror. What is left of an alliance this hub
+    // is no longer in is other hubs' membership rows, which serve nothing:
+    // they name peers this hub has no business calling about it, and they kept
+    // `GET /alliances/{id}` answering for an alliance it had walked out of.
+    // Counting members and only cleaning up at zero left exactly that residue
+    // on every departure but the last.
+    sqlx::query("DELETE FROM alliance_members WHERE alliance_id = $1")
+        .bind(&alliance_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    if member_count == 0 {
-        sqlx::query("DELETE FROM alliances WHERE id = $1")
-            .bind(&alliance_id)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    }
+    sqlx::query("DELETE FROM alliance_shared_channels WHERE alliance_id = $1")
+        .bind(&alliance_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    sqlx::query("DELETE FROM alliances WHERE id = $1")
+        .bind(&alliance_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }

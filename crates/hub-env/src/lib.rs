@@ -60,6 +60,17 @@ pub const FARM_HUB_ID: &str = "WAVVON_FARM_HUB_ID";
 /// what to launch — not read by the hub itself.
 pub const HUB_BIN: &str = "WAVVON_HUB_BIN";
 
+/// The auth handshake's per-IP budget: burst, and tokens refilled per second.
+/// Defaults live in `wavvon_hub::rate_limit::Config::auth`.
+///
+/// A knob because the limiter keys on IP and one authentication costs **two**
+/// requests (`/auth/challenge` then `/auth/verify`), so behind a shared
+/// address — an office, a school, CGNAT — the default budget is spent by a
+/// handful of people opening the app at once, and the hub answers a legitimate
+/// arrival exactly as it answers an attacker.
+pub const AUTH_RATE_BURST: &str = "WAVVON_AUTH_RATE_BURST";
+pub const AUTH_RATE_PER_SEC: &str = "WAVVON_AUTH_RATE_PER_SEC";
+
 /// Every key a launcher may set on a hub child process.
 ///
 /// `wavvon_hub::settings` has a test asserting each of these appears in the

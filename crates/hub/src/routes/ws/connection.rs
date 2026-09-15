@@ -48,20 +48,27 @@ pub(super) async fn handle_socket(
 
     let (bot_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
 
+    // Unique id for this specific WS session — used to discriminate
+    // bot_sessions and ws_key_senders entries so a newer session does not
+    // overwrite the older sender, and so the first disconnect does not evict
+    // the second session.
+    let session_id = uuid::Uuid::new_v4().to_string();
+
     // V4 voice encryption: per-connection unbounded channel for targeted key
     // distribution messages.  Registered in ws_key_senders so other connections
     // can send directly to this one without going through the broadcast bus.
+    // Filed under this session's own id, for the reason bot_sessions is: a
+    // pubkey with two sockets used to leave one of them registered nowhere,
+    // and a voice participant registered nowhere receives no sender key and
+    // hears silence (state.rs, `ws_key_senders`).
     let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<WsServerMessage>();
     state
         .ws_key_senders
         .write()
         .await
-        .insert(public_key.clone(), key_tx);
-
-    // Unique id for this specific WS session — used to discriminate
-    // bot_sessions entries so a newer session does not overwrite the older
-    // sender, and so the first disconnect does not evict the second session.
-    let session_id = uuid::Uuid::new_v4().to_string();
+        .entry(public_key.clone())
+        .or_default()
+        .insert(session_id.clone(), key_tx);
 
     if is_bot {
         state
@@ -596,8 +603,18 @@ pub(super) async fn handle_socket(
 
     // ── Disconnect cleanup ───────────────────────────────────────────────────
 
-    // V4 voice encryption: deregister this connection's key sender.
-    state.ws_key_senders.write().await.remove(&public_key);
+    // V4 voice encryption: deregister *this session's* key sender, leaving
+    // any concurrent session of the same pubkey registered — removing the
+    // whole entry is what used to silence the surviving socket.
+    {
+        let mut senders = state.ws_key_senders.write().await;
+        if let Some(sessions) = senders.get_mut(&public_key) {
+            sessions.remove(&session_id);
+            if sessions.is_empty() {
+                senders.remove(&public_key);
+            }
+        }
+    }
 
     if let Some(ch_id) = cs.voice_channel {
         leave_voice(&state, &public_key, &ch_id).await;

@@ -273,6 +273,51 @@ async fn backup_and_restore_work_against_the_bundled_server() {
     pg.stop().await.expect("stop");
 }
 
+/// Adopting a running server points the dump tools at the bundled binaries
+/// too — the path `wavvon-hub backup` actually takes.
+///
+/// `start` sets `WAVVON_PG_BIN_DIR` at the end, and the test above asserts it.
+/// That was the whole coverage, and it hid the case that matters: a CLI
+/// command run against a hub whose PostgreSQL is already up *adopts* it
+/// instead of starting it, so nothing set the variable and `pg_dump` was
+/// looked for on PATH. On the install story bundling exists for it is not
+/// there, so `backup` on a live bundled hub died with "pg_dump not found.
+/// Install the PostgreSQL client tools" — advice for a machine that is
+/// carrying them. Found by e2e-topology's `pgupgrade` stage.
+#[cfg(not(target_env = "musl"))]
+#[tokio::test]
+async fn adopting_a_running_server_still_finds_the_bundled_dump_tools() {
+    let _pg_lock = pg_lock().lock().await;
+    let root = scratch("adopt-tools");
+
+    let pg = embedded_pg::start(&root.0).await.expect("start");
+
+    // The state a CLI command starts in: the server is up, and this process
+    // knows nothing about where its binaries live.
+    std::env::remove_var(wavvon_hub::db::dump::PG_BIN_DIR_ENV);
+    assert!(
+        embedded_pg::running_url(&root.0).is_some(),
+        "the adopt path is only reachable while a server is running"
+    );
+
+    embedded_pg::point_tools_at_bundled(&root.0);
+
+    let dir = std::env::var(wavvon_hub::db::dump::PG_BIN_DIR_ENV)
+        .expect("adoption must point the dump tools somewhere");
+    let dump = std::path::Path::new(&dir).join(if cfg!(windows) {
+        "pg_dump.exe"
+    } else {
+        "pg_dump"
+    });
+    assert!(
+        dump.exists(),
+        "and it must be the directory that actually holds pg_dump: {}",
+        dump.display()
+    );
+
+    pg.stop().await.expect("stop");
+}
+
 // The musl build cannot run the bundled server at all, so on that target the
 // five tests above are not "skipped" — they assert something that is false
 // there, and the truth to assert instead is that the refusal is clean. A

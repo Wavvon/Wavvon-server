@@ -220,19 +220,48 @@ async fn fetch_hub_pubkey(http: &reqwest::Client, hub_url: &str) -> anyhow::Resu
 
 /// Challenge-response auth with `is_bot: true`, retrying while the bot
 /// hasn't been invited yet (`403 bot_not_invited`) -- see bots.md §1.
+///
+/// A failed attempt is never fatal. The wait for an invite is open-ended, and
+/// the hub's auth limiter is per-IP and shared: a bot sitting behind the same
+/// address as anything else that authenticates will eventually collect a 429
+/// it did nothing to earn. Exiting on one meant the invite that arrived a
+/// minute later had no process left to accept it.
 async fn authenticate(
     http: &reqwest::Client,
     hub_url: &str,
     identity: &Identity,
     public_url: &str,
 ) -> anyhow::Result<String> {
-    let pubkey = identity.public_key_hex();
     loop {
+        match try_authenticate(http, hub_url, identity, public_url).await {
+            Ok(Some(token)) => return Ok(token),
+            Ok(None) => {
+                println!(
+                    "Not invited yet -- waiting for the admin to run POST /bots. Retrying in 5s."
+                )
+            }
+            Err(e) => eprintln!("Auth attempt failed: {e}. Retrying in 5s."),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+}
+
+/// One handshake. `Ok(None)` means "not invited yet"; `Err` means the attempt
+/// itself failed and is worth retrying.
+async fn try_authenticate(
+    http: &reqwest::Client,
+    hub_url: &str,
+    identity: &Identity,
+    public_url: &str,
+) -> anyhow::Result<Option<String>> {
+    let pubkey = identity.public_key_hex();
+    {
         let challenge: ChallengeResponse = http
             .post(format!("{hub_url}/auth/challenge"))
             .json(&json!({ "public_key": pubkey }))
             .send()
             .await?
+            .error_for_status()?
             .json()
             .await?;
         let challenge_bytes = hex::decode(&challenge.challenge)?;
@@ -259,12 +288,10 @@ async fn authenticate(
             .await?;
 
         if resp.status() == reqwest::StatusCode::FORBIDDEN {
-            println!("Not invited yet -- waiting for the admin to run POST /bots. Retrying in 5s.");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            continue;
+            return Ok(None);
         }
         let verify: VerifyResponse = resp.error_for_status()?.json().await?;
-        return Ok(verify.token);
+        Ok(Some(verify.token))
     }
 }
 

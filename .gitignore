@@ -1,5 +1,6 @@
 ﻿/target
 /target-test
+/target-pg17
 .claude/settings.local.json
 .obsidian/
 # demo-seed credentials output (contains session tokens / recovery phrases)

@@ -248,6 +248,31 @@ fn random_password() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Point backup/restore at the bundled client tools, unless the operator
+/// already said where they are.
+///
+/// On the install story bundling exists for, PostgreSQL was never installed:
+/// `pg_dump` is not on PATH and never will be, so it has to be found inside
+/// our own version-scoped install directory. `start` has always done this at
+/// the end — and that was the whole coverage, because the one test that
+/// checked it started a server first. The path an operator actually takes does
+/// not: a hub that is *running* (or one that was killed, leaving its
+/// postmaster up) is adopted rather than started, and adoption skipped this —
+/// so `wavvon-hub backup` on a live bundled hub failed with "pg_dump not
+/// found. Install the PostgreSQL client tools", on the one setup that is
+/// carrying them.
+pub fn point_tools_at_bundled(data_root: &Path) {
+    if std::env::var_os(crate::db::dump::PG_BIN_DIR_ENV).is_some() {
+        return; // an operator who set it themselves is left alone
+    }
+    let bin = resolve_bin_dir(&data_root.join("pg"));
+    if !bin.is_dir() {
+        return; // nothing unpacked here yet; the caller will start one
+    }
+    // SAFETY-ish: single-threaded startup, before any worker is spawned.
+    std::env::set_var(crate::db::dump::PG_BIN_DIR_ENV, &bin);
+}
+
 /// The URL of an embedded server that is **already** running under
 /// `data_root`, without starting anything.
 ///
@@ -403,11 +428,10 @@ pub async fn start(data_root: &Path) -> Result<EmbeddedPostgres> {
             .with_context(|| format!("creating the {DATABASE_NAME} database"))?;
     }
 
-    // Point backup/restore at the binaries we are actually running. On the
-    // install story this exists for, PostgreSQL was never installed, so
-    // `pg_dump` is not on PATH and never will be — and a backup command that
-    // cannot find its tool on the one setup that needs bundled ones would be
-    // exactly backwards. An operator who set it themselves is left alone.
+    // Point backup/restore at the binaries we are actually running — see
+    // `point_tools_at_bundled`, which the adopt path calls for the same
+    // reason. Resolved from the settings here because they name the exact
+    // install this process is running.
     if std::env::var_os(crate::db::dump::PG_BIN_DIR_ENV).is_none() {
         let bin = resolve_bin_dir(&postgres.settings().installation_dir);
         // SAFETY-ish: single-threaded startup, before any worker is spawned.

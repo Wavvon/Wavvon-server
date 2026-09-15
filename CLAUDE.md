@@ -136,7 +136,7 @@ reaches `Settings`.
 - **`farm`** — fleet control plane: hub lifecycle (spawn, monitor, stop), server registration, reverse-proxy to hub processes, farm-level SSO. Partially implemented; see the wiki's `farm-model.md` and `farm-impl.md`.
 - **`agent`** — fleet worker node. Reverse-connects to farm over WebSocket, spawns and monitors local hub processes on its behalf. No HTTP surface.
 - **`demo-seed`** — populates a running hub with realistic demo data for screenshots.
-- **`bot-kit`, `ttt-bot`, `discord-import`** — bot SDK, example bot, importer.
+- **`bot-kit`, `ttt-bot`** — bot SDK and example bot.
 
 ---
 
@@ -189,13 +189,26 @@ hub **refuses with instructions** rather than starting — half-migrating a data
 directory is unrecoverable. `--doctor` reports which mode is active and where
 the data lives; `backup`/`restore` go through the bundled `pg_dump`.
 
-Two live caveats: **bundled mode does not work on musl** (the archive's `initdb`
+One live caveat: **bundled mode does not work on musl** (the archive's `initdb`
 wants `libicuuc.so.74`, which no current Alpine ships, and its `libpq.so.5` also
 wants krb5) even though the release still publishes musl targets advertising a
-no-prerequisites path; and **the major-upgrade path has never been walked end to
-end** — the refusal is tested, the dump-with-old/restore-with-new it names is
-not. Both are open items in the wiki's `next-up.md`. The Docker image is
-unaffected: it is `debian:trixie-slim`, so it gets the glibc archive.
+no-prerequisites path. It is an open item in the wiki's `next-up.md`. The Docker
+image is unaffected: it is `debian:trixie-slim`, so it gets the glibc archive.
+
+The **major-upgrade path is walked end to end** as of 2026-09-10, across two
+real majors, by `e2e-topology`'s `pgupgrade` stage: a hub carrying PostgreSQL
+17 fills a genuine 17 data directory, takes a backup with its own binaries, the
+18 hub refuses it, and 18's `pg_restore` reads 17's dump — coming back under
+the same public key with the data intact and both version-scoped installs still
+on disk. Reach for that stage before touching `embedded_pg.rs` or `db/dump.rs`:
+it found two bugs on its first run that no in-process test could, because both
+live in the sequence rather than in a function.
+
+**A binary bundles exactly one archive, chosen at build time**, so the stage
+needs a second one:
+`POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17`
+(or point `E2E_OLD_HUB_BIN` elsewhere). That env var is also the answer to
+"how do I test anything about two majors" in general.
 
 **List endpoints paginate with one dialect:** an array plus `limit` and a keyset
 cursor. No envelope, no offset paging, no second shape. A paginated endpoint also
@@ -224,6 +237,36 @@ name literals let farm/agent configure hubs with keys the hub never read, and a
 client's WebSocket enum matched unknown events as `Other => {}`, so four hub
 features were simply absent with no symptom. Both cost months. When you add a
 catch-all arm or a cross-process string, make the unknown case say something.
+
+Two hub-side instances from 2026-09-07, both the "transient read as final"
+variant: the DM outbox dropped an unparsable envelope with `.ok()` and
+delivered the message hollow, recording it a success — and the naive fix
+(propagate the error) would have parked the whole queue behind one bad row,
+so the two failures are now distinguished, `Db` ending the pass and
+`Unreadable` bouncing that row alone. The other was the demo bot exiting on a
+429 from the shared per-IP auth limiter while waiting to be invited, which
+kept the clients' live workflow red for days.
+
+Its 2026-09-10 shape: **one slot for a thing that has several.**
+`ws_key_senders` was `HashMap<pubkey, sender>` with an unconditional insert on
+connect and an unconditional remove on disconnect — so a second socket for the
+same identity overwrote the first, and then the first socket's teardown removed
+the entry the second had just written. The survivor was registered nowhere and
+every targeted message to it was dropped silently; for voice that is no sender
+key, so every datagram is discarded at the key lookup and the call is silent
+while the roster, the transport and the relay all look right. Two tabs, a
+paired device, or the overlap of an ordinary reconnect arranges it. The map is
+now nested by `session_id`, which `bot_sessions` and the screen-share teardown
+next door had been doing all along, each with a comment saying why. **When you
+add a per-user map, ask how many sockets one user has** — the answer is not
+one, and the failure is quiet.
+
+**The auth limiter is per IP and one login costs two requests** — a shared
+address (office, school, CGNAT) spends the default budget on ordinary
+arrivals, and to the person turned away it looks like a hub that will not have
+them. `WAVVON_AUTH_RATE_BURST` / `WAVVON_AUTH_RATE_PER_SEC` exist for that;
+the defaults are unchanged. If you are debugging "the client keeps landing on
+the welcome screen", check for 429s before anything else.
 
 **Recovery/attestation signing uses the identity key the hub knows the user by**
 (the roster pubkey), NOT a derived multi-device master key — contacts are

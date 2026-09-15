@@ -106,11 +106,43 @@ impl Config {
         refill_per_sec: 1.0,
     };
 
+    /// `AUTH`, unless the operator raised it.
+    ///
+    /// The budget is per IP and one authentication spends **two** tokens
+    /// (`/auth/challenge`, then `/auth/verify`), so behind a shared address
+    /// the default is a handful of people opening the app at once — and the
+    /// client cannot tell a 429 from a hub that will not have it, so it
+    /// retries into the same wall. The default is unchanged; this only gives
+    /// an operator who knows their users share an address a way to say so.
+    pub fn auth() -> Config {
+        Config {
+            burst: env_num(wavvon_hub_env::AUTH_RATE_BURST).unwrap_or(Self::AUTH.burst as f64)
+                as u32,
+            refill_per_sec: env_num(wavvon_hub_env::AUTH_RATE_PER_SEC)
+                .unwrap_or(Self::AUTH.refill_per_sec),
+        }
+    }
+
     /// Moderate limits for write endpoints: 30 burst, 10/s sustained.
     pub const WRITE: Config = Config {
         burst: 30,
         refill_per_sec: 10.0,
     };
+}
+
+/// A positive number from the environment, or nothing. A malformed or
+/// nonsensical value keeps the default rather than disabling the limiter —
+/// `WAVVON_AUTH_RATE_BURST=0` is far more likely a typo than an intent to
+/// refuse every login.
+fn env_num(key: &str) -> Option<f64> {
+    let raw = std::env::var(key).ok()?;
+    match raw.trim().parse::<f64>() {
+        Ok(v) if v > 0.0 && v.is_finite() => Some(v),
+        _ => {
+            tracing::warn!("{key}={raw:?} is not a positive number — keeping the default");
+            None
+        }
+    }
 }
 
 // ── Bucket ────────────────────────────────────────────────────────────────────
@@ -358,5 +390,39 @@ mod tests {
         let canonical = canonicalize_ip(raw_xff_ip);
         let expected: IpAddr = "203.0.113.42".parse().unwrap();
         assert_eq!(canonical, expected);
+    }
+
+    // ---- auth budget from the environment -----------------------------------
+
+    /// These mutate process-wide environment state, so they run as one test.
+    #[test]
+    fn auth_budget_is_overridable_but_never_accidentally_disabled() {
+        // Unset: exactly the compiled-in default, which is the promise this
+        // knob makes to every operator who never touches it.
+        std::env::remove_var(wavvon_hub_env::AUTH_RATE_BURST);
+        std::env::remove_var(wavvon_hub_env::AUTH_RATE_PER_SEC);
+        let d = Config::auth();
+        assert_eq!(d.burst, Config::AUTH.burst);
+        assert_eq!(d.refill_per_sec, Config::AUTH.refill_per_sec);
+
+        std::env::set_var(wavvon_hub_env::AUTH_RATE_BURST, "120");
+        std::env::set_var(wavvon_hub_env::AUTH_RATE_PER_SEC, "20");
+        let raised = Config::auth();
+        assert_eq!(raised.burst, 120);
+        assert_eq!(raised.refill_per_sec, 20.0);
+
+        // A typo must not become a hub that refuses every login, nor one with
+        // no limiter at all.
+        for bad in ["0", "-5", "lots", ""] {
+            std::env::set_var(wavvon_hub_env::AUTH_RATE_BURST, bad);
+            assert_eq!(
+                Config::auth().burst,
+                Config::AUTH.burst,
+                "{bad:?} should have kept the default burst"
+            );
+        }
+
+        std::env::remove_var(wavvon_hub_env::AUTH_RATE_BURST);
+        std::env::remove_var(wavvon_hub_env::AUTH_RATE_PER_SEC);
     }
 }

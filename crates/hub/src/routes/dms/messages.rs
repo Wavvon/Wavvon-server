@@ -9,8 +9,12 @@ use crate::auth::middleware::{AuthUser, PeerHub};
 use crate::routes::dm_models::*;
 use crate::state::{AppState, DmEvent};
 
-use super::keys::{group_envelope_signing_bytes, verify_envelope_sender};
-use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
+use super::keys::{
+    bind_cert_master, group_envelope_signing_bytes, verify_envelope_sender, verify_tiered_signature,
+};
+use super::models::{
+    ensure_user_stub, first_bot_among, load_members, parse_dm_attachments, DmMessageRow,
+};
 
 pub async fn send_dm(
     State(state): State<Arc<AppState>>,
@@ -23,6 +27,19 @@ pub async fn send_dm(
         return Err((
             StatusCode::FORBIDDEN,
             "Not a member of this conversation".to_string(),
+        ));
+    }
+
+    // The conversation routes keep bots out of a DM in the first place; this
+    // is the same rule at the point of speech, for a bot that was seated
+    // before the rule existed or through a route that grows later.
+    if first_bot_among(&state.db, std::slice::from_ref(&user.public_key))
+        .await?
+        .is_some()
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Bots cannot take part in direct messages".to_string(),
         ));
     }
 
@@ -156,14 +173,7 @@ pub async fn send_dm(
         // unchanged); a signer_cert verifies against the cert's subkey and
         // returns the cert's master for the binding check below.
         let cert_master = verify_envelope_sender(env, &user.public_key)?;
-        if let Some(master) = &cert_master {
-            if Some(master.as_str()) != user.master_pubkey.as_deref() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "signer_cert master does not match the authenticated session".to_string(),
-                ));
-            }
-        }
+        bind_cert_master(cert_master, &user)?;
         // The envelope always claims the canonical pubkey as sender —
         // whether signed directly (no cert) or via a paired device's
         // subkey (cert present) — never the authenticated session's own
@@ -191,18 +201,24 @@ pub async fn send_dm(
             &env.ciphertext_hex,
             &env.nonce_hex,
         );
-        let sig_bytes = hex::decode(&env.signature_hex).map_err(|e| {
-            (
+        // Tiered, for the same reason the 1:1 envelope above is: a paired
+        // device holds its subkey and a cert, never the canonical signing key.
+        let cert_master = verify_tiered_signature(
+            &msg,
+            &env.signature_hex,
+            env.signer_cert.as_ref(),
+            &user.public_key,
+            "group envelope",
+        )?;
+        bind_cert_master(cert_master, &user)?;
+
+        if env.sender_pubkey != user.public_key {
+            return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Bad group envelope signature hex: {e}"),
-            )
-        })?;
-        wavvon_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid group envelope signature: {e}"),
-            )
-        })?;
+                "group_encrypted_envelope.sender_pubkey must match the authenticated identity"
+                    .to_string(),
+            ));
+        }
     }
 
     let attachments_json = if req.attachments.is_empty() {
@@ -601,6 +617,21 @@ pub async fn receive_federated_dm(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_some() {
         return Ok(StatusCode::OK);
+    }
+
+    // The bot rule, as far as it can reach across a hub boundary: `is_bot` is
+    // a local flag and nothing in the wire format carries it, so this can only
+    // recognise a bot **this** hub knows — the same identity invited here and
+    // there. A bot unknown locally is indistinguishable from a person, and the
+    // hub that holds its row is the one that refuses it at the send.
+    if first_bot_among(&state.db, std::slice::from_ref(&req.sender))
+        .await?
+        .is_some()
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Bots cannot take part in direct messages".to_string(),
+        ));
     }
 
     // Block check for federated inbound DM: if any local recipient has blocked the sender,

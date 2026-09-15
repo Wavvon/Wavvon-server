@@ -142,6 +142,21 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          would allow limiter bypass.",
     ),
     (
+        wavvon_hub_env::AUTH_RATE_BURST,
+        "10",
+        "Per-IP burst for the auth handshake. Raise it when your users share an address \
+         (an office, a school, CGNAT): the limiter keys on IP and one login spends TWO \
+         tokens (/auth/challenge then /auth/verify), so the default is a handful of people \
+         opening the app at once, and a rate-limited arrival looks to them like a hub that \
+         will not have them.",
+    ),
+    (
+        wavvon_hub_env::AUTH_RATE_PER_SEC,
+        "1",
+        "Tokens refilled per second for the auth handshake — the sustained rate, where the \
+         burst above is the allowance for a crowd arriving together.",
+    ),
+    (
         "WAVVON_WEB_CLIENT_DIR",
         "(unset)",
         "Path to a directory of pre-built web-client assets. When set, the hub serves the \

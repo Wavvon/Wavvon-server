@@ -1931,3 +1931,101 @@ async fn an_accepting_hub_mirrors_a_dm_to_the_other_home_hubs() {
         .unwrap();
     assert_eq!(onward, 0, "the mirror row should be gone once delivered");
 }
+
+/// A queued DM whose stored envelope cannot be rebuilt used to be delivered
+/// anyway — as an encrypted message carrying nothing, which at the far end is
+/// what a tampered one looks like, recorded here as a success. Refusing is
+/// only half the fix: refusing by propagating the error aborts the whole
+/// batch, so one unreadable row would park every other queued DM behind it.
+#[tokio::test]
+async fn unreadable_outbox_row_bounces_without_stalling_the_queue() {
+    let server = common::setup().await;
+    let state = server.state();
+    let db = &state.db;
+
+    let conv_id = "conv-unreadable";
+    sqlx::query("INSERT INTO conversations (id, conv_type, created_at) VALUES ($1, 'dm', 0)")
+        .bind(conv_id)
+        .execute(db)
+        .await
+        .unwrap();
+    for member in ["aa", "bb"] {
+        sqlx::query(
+            "INSERT INTO users (public_key, first_seen_at, last_seen_at) VALUES ($1, 0, 0)",
+        )
+        .bind(member)
+        .execute(db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO conversation_members (conversation_id, public_key, joined_at) VALUES ($1, $2, 0)",
+        )
+        .bind(conv_id)
+        .bind(member)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    // The row that cannot be rebuilt: flagged encrypted, envelope unparsable.
+    sqlx::query(
+        "INSERT INTO dm_messages (id, conversation_id, sender, created_at, is_encrypted, ciphertext_json)
+         VALUES ('msg-broken', $1, 'aa', 0, TRUE, '{ not json')",
+    )
+    .bind(conv_id)
+    .execute(db)
+    .await
+    .unwrap();
+
+    // And an ordinary one queued behind it.
+    sqlx::query(
+        "INSERT INTO dm_messages (id, conversation_id, sender, content, created_at)
+         VALUES ('msg-fine', $1, 'aa', 'hello', 0)",
+    )
+    .bind(conv_id)
+    .execute(db)
+    .await
+    .unwrap();
+
+    // Nothing listens there, so delivery fails and the row is retried — which
+    // is exactly the evidence wanted: it proves the row was reached at all.
+    for id in ["msg-broken", "msg-fine"] {
+        sqlx::query(
+            "INSERT INTO dm_outbox (message_id, recipient_hub_url, next_attempt_at)
+             VALUES ($1, 'http://127.0.0.1:1/hub', 0)",
+        )
+        .bind(id)
+        .execute(db)
+        .await
+        .unwrap();
+    }
+
+    wavvon_hub::dm_worker::tick(state)
+        .await
+        .expect("one unreadable row must not fail the whole pass");
+
+    let (bounced_at, last_error): (Option<i64>, Option<String>) = sqlx::query_as(
+        "SELECT bounced_at, last_error FROM dm_outbox WHERE message_id = 'msg-broken'",
+    )
+    .fetch_one(db)
+    .await
+    .unwrap();
+    assert!(
+        bounced_at.is_some(),
+        "the unreadable row should be bounced, not delivered hollow"
+    );
+    assert!(
+        last_error
+            .unwrap_or_default()
+            .contains("EncryptedDmEnvelope"),
+        "the bounce should say what could not be read"
+    );
+
+    let (attempts, bounced): (i64, Option<i64>) =
+        sqlx::query_as("SELECT attempts, bounced_at FROM dm_outbox WHERE message_id = 'msg-fine'")
+            .fetch_one(db)
+            .await
+            .unwrap();
+    assert_eq!(attempts, 1, "the healthy row should still have been tried");
+    assert!(bounced.is_none(), "and it should still be retryable");
+}
