@@ -44,6 +44,13 @@ permission_catalog! {
     /// Resolved channel-scoped against the *destination* channel via
     /// `channel_permissions`.
     MOVE_MEMBERS => "move_members",
+    /// Create and destroy voice zones (`ws/handlers/voice.rs`). A real gate
+    /// that was written as a bare string literal and left out of this list, so
+    /// the overwrite validator rejected it and no client could show it
+    /// (permissions.md §0). Catalogued here so it can be granted like any
+    /// other; permissions.md §3 folds it into `channels.manage` when the
+    /// catalogue is rebuilt, since a voice zone is channel configuration.
+    MANAGE_VOICE => "manage_voice",
 }
 
 /// Rejects any permission string the server does not recognize.
@@ -386,6 +393,18 @@ mod tests {
         for p in [MANAGE_ROLES, ADMIN, MOVE_MEMBERS, SEND_MESSAGES] {
             assert!(ALL_PERMISSIONS.contains(&p), "{p} missing from catalog");
         }
+    }
+
+    #[test]
+    fn every_enforced_permission_is_grantable() {
+        // A permission the server checks but does not list is a gate nobody
+        // can open: no client can offer it, and since validate_permissions
+        // landed, the API refuses it outright. manage_voice was exactly that
+        // (permissions.md §0) until it was catalogued here. Both call sites
+        // now use the constant, so a new gate cannot reintroduce the split
+        // without adding its own entry above.
+        assert!(ALL_PERMISSIONS.contains(&MANAGE_VOICE));
+        assert!(validate_permissions([MANAGE_VOICE]).is_ok());
     }
 
     #[test]
