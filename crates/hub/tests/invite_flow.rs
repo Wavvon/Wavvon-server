@@ -258,7 +258,7 @@ async fn admin_granting_invite_is_forced_single_use() {
 
     let role_id = create_role(&server, &token, "Sub-Admin", 100).await;
     // Grant it the admin permission directly (below the owner's priority).
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -339,7 +339,7 @@ async fn join_with_invite_priority_guard_blocks_grant_above_inviters_current_pri
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["channels.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -414,7 +414,7 @@ async fn join_with_invite_role_grant_respects_single_use_admin_invite() {
     let owner_token = common::authenticate(&server, &owner).await;
 
     let role_id = create_role(&server, &owner_token, "Sub-Admin", 100).await;
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -627,7 +627,7 @@ async fn non_admin_member_with_invite_permission_can_grant_role_below_own_priori
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["channels.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -686,7 +686,7 @@ async fn non_admin_member_with_invite_permission_cannot_grant_role_at_or_above_o
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["channels.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -958,7 +958,7 @@ async fn default_invite_role_skipped_when_role_gains_admin_after_being_configure
 
     // The role gains `admin` directly at the DB layer after being configured
     // as the default — simulates an admin editing role permissions later.
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -998,7 +998,7 @@ async fn setting_admin_permission_role_as_default_invite_role_is_rejected() {
     let owner_token = common::authenticate(&server, &owner).await;
 
     let role_id = create_role(&server, &owner_token, "Sub-Admin", 100).await;
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -1157,7 +1157,7 @@ async fn invite_cannot_grant_a_role_carrying_a_permission_the_creator_lacks() {
         .authorization_bearer(&owner_token)
         .json(&json!({
             "name": "Delegate",
-            "permissions": ["manage_roles", "manage_channels"],
+            "permissions": ["roles.manage", "channels.manage"],
             "priority": 50,
         }))
         .await;
@@ -1179,7 +1179,7 @@ async fn invite_cannot_grant_a_role_carrying_a_permission_the_creator_lacks() {
     let resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Enforcer", "permissions": ["ban_members"], "priority": 20 }))
+        .json(&json!({ "name": "Enforcer", "permissions": ["moderation.ban.permanent"], "priority": 20 }))
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
     let enforcer: RoleResponse = resp.json();
@@ -1195,7 +1195,7 @@ async fn invite_cannot_grant_a_role_carrying_a_permission_the_creator_lacks() {
         .json(&json!({ "grant_role_id": enforcer.id }))
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
-    assert!(resp.text().contains("ban_members"));
+    assert!(resp.text().contains("moderation.ban.permanent"));
 
     // The owner holds admin, so the same invite is fine from them.
     server

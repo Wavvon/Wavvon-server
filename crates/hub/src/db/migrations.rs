@@ -8,6 +8,9 @@
 // unchanged and the resulting schema is byte-identical to the pre-fold one —
 // verified by diffing `pg_dump --schema-only` before and after, not by
 // reading. No table, column, type, default or REFERENCES clause changed
+use crate::permissions::{
+    ALL_PERMISSIONS, EVENTS_CREATE, FORUM_POSTS_CREATE, MESSAGES_READ, MESSAGES_SEND, VOICE_JOIN,
+};
 // meaning.
 //
 // Exactly one ALTER survives, and it has to: `invites.grant_role_id`
@@ -431,25 +434,22 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Seed built-in permissions
+    // Seed built-in permissions, in the rebuilt catalogue's ids.
+    //
+    // `builtin-owner` loses its `admin` row and gains nothing in its place
+    // (permissions.md §6): its power comes from `is_owner`, which is
+    // membership of the role itself. The rows it used to carry beside `admin`
+    // were redundant with the wildcard and are gone with it.
+    //
+    // `builtin-everyone` keeps the baseline every member needs, including
+    // `voice.join` — that one row is the whole "nothing changes until someone
+    // denies it" property of an independent voice gate.
     for (role, perm) in [
-        ("builtin-everyone", "send_messages"),
-        ("builtin-everyone", "read_messages"),
-        ("builtin-everyone", "create_posts"),
-        ("builtin-everyone", "start_game"),
-        ("builtin-everyone", "create_events"),
-        // The whole "nothing changes until someone denies it" property of an
-        // independent voice gate rests on this one row (permissions.md §6).
-        // Without it, every existing hub loses voice for everybody on the
-        // first boot after the upgrade. Reached by existing installs because
-        // this block re-runs on every migrate under ON CONFLICT DO NOTHING.
-        ("builtin-everyone", "voice.join"),
-        ("builtin-owner", "admin"),
-        ("builtin-owner", "manage_posts"),
-        ("builtin-owner", "manage_games"),
-        ("builtin-owner", "manage_voice"),
-        ("builtin-owner", "use_video"),
-        ("builtin-owner", "manage_messages"),
+        ("builtin-everyone", MESSAGES_SEND),
+        ("builtin-everyone", MESSAGES_READ),
+        ("builtin-everyone", FORUM_POSTS_CREATE),
+        ("builtin-everyone", EVENTS_CREATE),
+        ("builtin-everyone", VOICE_JOIN),
     ] {
         sqlx::query(
             "INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2) ON CONFLICT (role_id, permission) DO NOTHING",
@@ -508,11 +508,48 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         "INSERT INTO channel_permission_overwrites (channel_id, role_id, permission, allow, created_at)
          SELECT channel_id, role_id, 'voice.join', FALSE, created_at
          FROM channel_permission_overwrites
-         WHERE permission = 'read_messages' AND allow = FALSE
+         WHERE permission = 'messages.read' AND allow = FALSE
          ON CONFLICT DO NOTHING",
     )
     .execute(pool)
     .await?;
+
+    // ── the catalogue rebuild ───────────────────────────────────────────
+    //
+    // The catalogue is rebuilt rather than mapped (permissions.md §6): there is
+    // no old-to-new table and no dual-reading period, so every row written in
+    // the previous spelling has to go. Anything left behind would be a
+    // permission that renders in the roles UI, matches no check, and cannot be
+    // removed by anyone who does not already know it is there.
+    //
+    // Alpha, and no promised upgrade path yet, which is what makes a delete
+    // acceptable here rather than a migration: an operator's role *structure*
+    // survives, its permission rows do not, and the hub says so on first boot.
+    // The built-ins above are re-seeded on the same pass, so a hub is never
+    // left with nobody able to read a channel.
+    //
+    // Idempotent by construction: after the first run there is nothing left
+    // that is not in the catalogue, so it matches no rows.
+    let ids: Vec<String> = ALL_PERMISSIONS.iter().map(|s| (*s).to_string()).collect();
+    let dropped_roles = sqlx::query("DELETE FROM role_permissions WHERE permission <> ALL($1)")
+        .bind(&ids)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    let dropped_overwrites =
+        sqlx::query("DELETE FROM channel_permission_overwrites WHERE permission <> ALL($1)")
+            .bind(&ids)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    if dropped_roles > 0 || dropped_overwrites > 0 {
+        tracing::warn!(
+            "permission catalogue rebuilt: dropped {dropped_roles} role and \
+             {dropped_overwrites} channel-overwrite rows written in the old \
+             spelling. Roles and channels are untouched; re-grant what your \
+             custom roles carried from the new catalogue."
+        );
+    }
 
     // =======================================================================
     // Moderation

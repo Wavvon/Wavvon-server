@@ -218,7 +218,7 @@ async fn denied_member_cannot_list_or_get_hidden_channel_events() {
     resp.assert_status(axum::http::StatusCode::CREATED);
     let event_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
 
-    deny_everyone(&server, &owner_token, &channel_id, "read_messages").await;
+    deny_everyone(&server, &owner_token, &channel_id, "messages.read").await;
 
     // list_events: the event must be filtered out for the denied member.
     let resp = server
@@ -271,7 +271,7 @@ async fn create_event_rejected_on_channel_denied_create_events() {
     let member_token = common::authenticate(&server, &member).await;
 
     let channel_id = create_channel(&server, &owner_token).await;
-    deny_everyone(&server, &owner_token, &channel_id, "create_events").await;
+    deny_everyone(&server, &owner_token, &channel_id, "events.create").await;
 
     let resp = server
         .post("/events")

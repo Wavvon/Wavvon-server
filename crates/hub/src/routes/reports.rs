@@ -6,7 +6,7 @@ use axum::Json;
 use serde::Deserialize;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, MODERATION_REPORTS_READ, MODERATION_REPORTS_REVIEW};
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -67,7 +67,7 @@ pub async fn list_reports(
     Query(q): Query<ReportsQuery>,
 ) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MODERATION_REPORTS_READ)?;
 
     let status = q.status.unwrap_or_else(|| "pending".into());
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
@@ -116,7 +116,7 @@ pub async fn review_report(
     Json(req): Json<ReportAction>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MODERATION_REPORTS_REVIEW)?;
 
     let row = sqlx::query("SELECT message_id, reporter_pubkey FROM message_reports WHERE id = $1")
         .bind(&report_id)

@@ -111,7 +111,7 @@ pub async fn create_webhook(
     Json(req): Json<CreateWebhookRequest>,
 ) -> Result<(StatusCode, Json<CreateWebhookResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     // Verify channel exists.
     let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
@@ -196,7 +196,7 @@ pub async fn list_webhooks(
     user: AuthUser,
 ) -> Result<Json<Vec<WebhookInfoResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -244,7 +244,7 @@ pub async fn regenerate_webhook(
     Path(webhook_id): Path<String>,
 ) -> Result<Json<CreateWebhookResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     let secret_token = new_secret_token();
     let token_hash = sha256_hex(secret_token.as_bytes());
@@ -279,7 +279,7 @@ pub async fn delete_webhook(
     Path(webhook_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     let rows = sqlx::query("UPDATE webhooks SET active = FALSE WHERE id = $1")
         .bind(&webhook_id)

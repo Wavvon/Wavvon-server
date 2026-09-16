@@ -13,7 +13,9 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{
+    self, BANLIST_OVERRIDES, BANLIST_READ, BANLIST_SETTINGS, BANLIST_SOURCES_MANAGE,
+};
 use crate::routes::hub::upsert_setting;
 use crate::state::AppState;
 
@@ -65,7 +67,7 @@ pub async fn list_sources(
     user: AuthUser,
 ) -> Result<Json<Vec<BanSourceResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_READ)?;
 
     let rows = sqlx::query_as::<_, BanSourceRow>(
         "SELECT url, policy, added_at, issuer_pubkey FROM federated_ban_sources ORDER BY added_at",
@@ -94,7 +96,7 @@ pub async fn add_source(
     Json(req): Json<AddSourceRequest>,
 ) -> Result<(StatusCode, Json<BanSourceResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_SOURCES_MANAGE)?;
 
     validate_policy(&req.policy)?;
 
@@ -139,7 +141,7 @@ pub async fn delete_source(
     Json(req): Json<DeleteSourceRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_SOURCES_MANAGE)?;
 
     // Look up the issuer_pubkey so we can remove the matching federated_bans rows.
     let issuer: Option<String> =
@@ -175,7 +177,7 @@ pub async fn update_source(
     Json(req): Json<UpdateSourceRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_SOURCES_MANAGE)?;
 
     validate_policy(&req.policy)?;
 
@@ -237,7 +239,7 @@ pub async fn list_entries(
     Query(filter): Query<EntryFilter>,
 ) -> Result<Json<Vec<FederatedBanEntryResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_READ)?;
 
     let rows = if let Some(src) = filter.source.as_deref() {
         sqlx::query_as::<_, FederatedBanRow>(
@@ -313,7 +315,7 @@ pub async fn add_override(
     Json(req): Json<AddOverrideRequest>,
 ) -> Result<(StatusCode, Json<BanOverrideResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_OVERRIDES)?;
 
     if req.override_type != "whitelist" && req.override_type != "blacklist" {
         return Err((
@@ -358,7 +360,7 @@ pub async fn delete_override(
     Path(pubkey): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_OVERRIDES)?;
 
     sqlx::query("DELETE FROM federated_ban_overrides WHERE target_pubkey = $1")
         .bind(&pubkey)
@@ -375,7 +377,7 @@ pub async fn list_overrides(
     user: AuthUser,
 ) -> Result<Json<Vec<BanOverrideResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_READ)?;
 
     let rows = sqlx::query_as::<_, BanOverrideRow>(
         "SELECT target_pubkey, override_type, reason, created_at
@@ -419,7 +421,7 @@ pub async fn patch_banlist_settings(
     Json(req): Json<PatchBanlistSettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_SETTINGS)?;
 
     upsert_setting(
         &state.db,
@@ -437,7 +439,7 @@ pub async fn get_banlist_settings(
     user: AuthUser,
 ) -> Result<Json<BanlistSettingsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BANLIST_SETTINGS)?;
 
     let publish_banlist: bool = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'publish_banlist'",
@@ -529,7 +531,7 @@ pub async fn user_history(
     Path(pubkey): Path<String>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::BAN_MEMBERS)?;
+    perms.require(permissions::MODERATION_BAN_PERMANENT)?;
 
     let master: Option<String> =
         sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")

@@ -159,7 +159,7 @@ async fn template_applies_channels_roles_settings_and_welcome_message() {
             {
                 "name": "Member",
                 "priority": 5,
-                "permissions": ["send_messages", "read_messages", "create_posts"]
+                "permissions": ["messages.send", "messages.read", "forum.posts.create"]
             }
         ],
         "welcome_message": "Hello and welcome!",

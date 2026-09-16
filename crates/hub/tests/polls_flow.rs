@@ -327,7 +327,7 @@ async fn list_polls_rejected_for_member_denied_read_messages() {
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
 
-    deny_everyone(&server, &owner_token, &channel_id, "read_messages").await;
+    deny_everyone(&server, &owner_token, &channel_id, "messages.read").await;
 
     server
         .get(&format!("/channels/{channel_id}/polls"))

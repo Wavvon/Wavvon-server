@@ -105,7 +105,7 @@ async fn list_pins_rejected_for_member_denied_read_messages() {
         .await
         .assert_status(axum::http::StatusCode::NO_CONTENT);
 
-    deny_everyone(&server, &owner_token, &channel_id, "read_messages").await;
+    deny_everyone(&server, &owner_token, &channel_id, "messages.read").await;
 
     server
         .get(&format!("/channels/{channel_id}/pins"))
@@ -143,7 +143,7 @@ async fn pin_and_unpin_use_channel_scoped_manage_messages() {
     let resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Moderator", "permissions": ["manage_messages"], "priority": 10 }))
+        .json(&json!({ "name": "Moderator", "permissions": ["messages.manage"], "priority": 10 }))
         .await;
     resp.assert_status(axum::http::StatusCode::CREATED);
     let role_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
@@ -167,7 +167,7 @@ async fn pin_and_unpin_use_channel_scoped_manage_messages() {
     server
         .put(&format!("/channels/{channel_id}/permissions/{role_id}"))
         .authorization_bearer(&owner_token)
-        .json(&json!({ "allow": [], "deny": ["manage_messages"] }))
+        .json(&json!({ "allow": [], "deny": ["messages.manage"] }))
         .await
         .assert_status_ok();
 

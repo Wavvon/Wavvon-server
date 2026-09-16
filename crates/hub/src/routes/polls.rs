@@ -184,7 +184,7 @@ pub async fn create_poll(
     Json(req): Json<CreatePollRequest>,
 ) -> Result<(StatusCode, Json<PollResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::SEND_MESSAGES)?;
+    perms.require(permissions::MESSAGES_SEND)?;
 
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
@@ -258,7 +258,7 @@ pub async fn create_poll(
 /// Returns every poll on the channel, newest first, in the flattened shape
 /// the web client's `getPolls()` expects (vote totals and the caller's own
 /// vote already merged into each option). Gated behind the same effective
-/// READ_MESSAGES permission as message history and pinned messages (§3.5).
+/// MESSAGES_READ permission as message history and pinned messages (§3.5).
 pub async fn list_polls(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -275,7 +275,7 @@ pub async fn list_polls(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::READ_MESSAGES)?;
+    perms.require(permissions::MESSAGES_READ)?;
 
     let polls: Vec<PollResponse> = sqlx::query_as(
         "SELECT id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at
@@ -460,7 +460,7 @@ pub async fn delete_poll(
 
     if creator != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(permissions::ADMIN)?;
+        perms.require(permissions::MESSAGES_MANAGE)?;
     }
 
     sqlx::query("DELETE FROM polls WHERE id = $1")

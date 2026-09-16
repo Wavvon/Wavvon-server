@@ -6,7 +6,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, HUB_APPEARANCE};
 use crate::state::AppState;
 
 /// Reserved tag words that imply third-party attestation.
@@ -59,7 +59,7 @@ pub async fn get_tags(
     user: AuthUser,
 ) -> Result<Json<TagsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_APPEARANCE)?;
 
     let tags = load_tags(&state).await?;
     let nsfw = load_nsfw(&state).await;
@@ -73,7 +73,7 @@ pub async fn patch_tags(
     Json(req): Json<PatchTagsRequest>,
 ) -> Result<Json<TagsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_APPEARANCE)?;
 
     if req.tags.len() > MAX_TAGS {
         return Err((

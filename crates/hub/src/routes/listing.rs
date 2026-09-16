@@ -6,7 +6,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, DIRECTORY_PUBLISH};
 use crate::routes::hub::{read_branding, upsert_setting};
 use crate::state::AppState;
 
@@ -69,7 +69,7 @@ pub async fn get_listing(
     }))
 }
 
-/// PATCH /admin/settings/listing — requires ADMIN.
+/// PATCH /admin/settings/listing — requires `directory.publish`.
 ///
 /// Body: `{ "listed": true | false }`
 /// Upserts the `hub_listed` key in `hub_settings`.
@@ -79,7 +79,7 @@ pub async fn patch_listing(
     Json(req): Json<PatchListingRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(DIRECTORY_PUBLISH)?;
 
     upsert_setting(
         &state.db,

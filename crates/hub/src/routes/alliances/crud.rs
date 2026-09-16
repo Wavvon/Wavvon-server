@@ -6,7 +6,7 @@ use axum::Json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, ALLIANCES_MANAGE};
 use crate::routes::alliance_models::*;
 use crate::state::AppState;
 
@@ -18,7 +18,7 @@ pub async fn create_alliance(
     Json(req): Json<CreateAllianceRequest>,
 ) -> Result<(StatusCode, Json<AllianceResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
@@ -163,7 +163,7 @@ pub async fn leave_alliance(
     Path(alliance_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     let hub_key = state.hub_identity.public_key_hex();
 

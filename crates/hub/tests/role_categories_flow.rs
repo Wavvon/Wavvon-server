@@ -90,7 +90,7 @@ async fn role_created_with_color_icon_category_reads_back() {
         .authorization_bearer(&token)
         .json(&json!({
             "name": "Moderator",
-            "permissions": ["manage_messages"],
+            "permissions": ["messages.manage"],
             "priority": 50,
             "color": "#FF00AA",
             "icon": "🛡️",
@@ -131,7 +131,7 @@ async fn user_profile_endpoint_carries_role_category_color_and_icon() {
         .authorization_bearer(&token)
         .json(&json!({
             "name": "Moderator",
-            "permissions": ["manage_messages"],
+            "permissions": ["messages.manage"],
             "priority": 50,
             "color": "#FF00AA",
             "icon": "🛡️",
@@ -186,7 +186,7 @@ async fn deleting_category_sets_role_category_id_null() {
         .authorization_bearer(&token)
         .json(&json!({
             "name": "Moderator",
-            "permissions": ["manage_messages"],
+            "permissions": ["messages.manage"],
             "priority": 50,
             "category_id": category.id,
         }))

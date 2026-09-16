@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, CERTS_ISSUE, CERTS_REVOKE, CERTS_SETTINGS};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -77,7 +77,7 @@ pub async fn admin_issue(
     Path(subject_pubkey): Path<String>,
 ) -> Result<(StatusCode, Json<Certification>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(CERTS_ISSUE)?;
 
     let cert = issue_cert_for(&state, &subject_pubkey).await?;
     Ok((StatusCode::CREATED, Json(cert)))
@@ -103,7 +103,7 @@ pub async fn admin_grant_badge(
     Json(req): Json<GrantBadgeRequest>,
 ) -> Result<(StatusCode, Json<Certification>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(CERTS_ISSUE)?;
 
     let label = req.label.trim();
     if label.is_empty() || label.len() > 64 {
@@ -131,7 +131,7 @@ pub async fn admin_revoke(
     Path(subject_pubkey): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(CERTS_REVOKE)?;
 
     revoke_cert_for(&state, &subject_pubkey).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -143,7 +143,7 @@ pub async fn admin_list(
     user: AuthUser,
 ) -> Result<Json<Vec<IssuanceRow>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(CERTS_REVOKE)?;
 
     let rows = sqlx::query_as::<_, IssuanceDbRow>(
         "SELECT id, subject_pubkey, pow_level, member_since, issued_at, expires_at,
@@ -304,7 +304,7 @@ pub async fn get_cert_settings(
     user: AuthUser,
 ) -> Result<Json<CertSettingsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(CERTS_SETTINGS)?;
 
     let cert_mode: String =
         sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'cert_mode'")
@@ -388,7 +388,7 @@ pub async fn patch_cert_settings(
     Json(body): Json<CertSettingsPatch>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(CERTS_SETTINGS)?;
 
     // Validate cert_mode if provided
     if let Some(ref mode) = body.cert_mode {

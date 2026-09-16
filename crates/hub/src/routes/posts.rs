@@ -312,7 +312,7 @@ pub async fn list_posts(
 
     let can_moderate = {
         let p = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-        p.has(permissions::MANAGE_POSTS)
+        p.has(permissions::FORUM_POSTS_MANAGE)
     };
 
     let limit = params.limit.unwrap_or(50).min(100);
@@ -421,7 +421,7 @@ pub async fn create_post(
     require_forum_channel(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::CREATE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_CREATE)?;
 
     let title = req.title.trim().to_string();
     let body = req.body.trim().to_string();
@@ -482,7 +482,7 @@ pub async fn create_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let row = require_post(&state.db, &channel_id, &id).await?;
-    let can_moderate = perms.has(permissions::MANAGE_POSTS);
+    let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
     let reactions = load_post_reactions(&state.db, &id, &user.public_key).await;
     let tags = load_post_tags(&state.db, &id).await;
     let summary = post_to_summary(&row, can_moderate, reactions, tags);
@@ -517,7 +517,7 @@ pub async fn get_post(
     require_forum_channel(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    let can_moderate = perms.has(permissions::MANAGE_POSTS);
+    let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     let reactions = load_post_reactions(&state.db, &post_id, &user.public_key).await;
@@ -616,7 +616,7 @@ pub async fn edit_post(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    let can_moderate = perms.has(permissions::MANAGE_POSTS);
+    let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
     if row.author_pubkey != user.public_key && !can_moderate {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
@@ -723,7 +723,7 @@ pub async fn delete_post(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    if row.author_pubkey != user.public_key && !perms.has(permissions::MANAGE_POSTS) {
+    if row.author_pubkey != user.public_key && !perms.has(permissions::FORUM_POSTS_MANAGE) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
 
@@ -758,18 +758,18 @@ pub async fn create_reply(
 ) -> Result<(StatusCode, Json<crate::routes::post_models::ReplyView>), (StatusCode, String)> {
     require_forum_channel(&state.db, &channel_id).await?;
 
-    // Channel-scoped: this same `perms` also gates the MANAGE_POSTS lock
-    // check below, and MANAGE_POSTS must be channel-scoped, so resolve
+    // Channel-scoped: this same `perms` also gates the FORUM_POSTS_MANAGE lock
+    // check below, and FORUM_POSTS_MANAGE must be channel-scoped, so resolve
     // once through channel_permissions rather than splitting the two
     // checks across two resolvers.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::SEND_MESSAGES)?;
+    perms.require(permissions::MESSAGES_SEND)?;
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     if row.deleted_at.is_some() {
         return Err((StatusCode::GONE, "post_deleted".to_string()));
     }
-    if row.is_locked && !perms.has(permissions::MANAGE_POSTS) {
+    if row.is_locked && !perms.has(permissions::FORUM_POSTS_MANAGE) {
         return Err((StatusCode::FORBIDDEN, "post_locked".to_string()));
     }
 
@@ -822,7 +822,7 @@ pub async fn create_reply(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let reply_row = require_reply(&state.db, &post_id, &id).await?;
-    let can_moderate = perms.has(permissions::MANAGE_POSTS);
+    let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
     let reactions = load_reply_reactions(&state.db, &id, &user.public_key).await;
     let view = reply_to_view(&reply_row, can_moderate, reactions);
 
@@ -857,7 +857,7 @@ pub async fn edit_reply(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    let can_moderate = perms.has(permissions::MANAGE_POSTS);
+    let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
     if reply.author_pubkey != user.public_key && !can_moderate {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
@@ -910,7 +910,7 @@ pub async fn delete_reply(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    if reply.author_pubkey != user.public_key && !perms.has(permissions::MANAGE_POSTS) {
+    if reply.author_pubkey != user.public_key && !perms.has(permissions::FORUM_POSTS_MANAGE) {
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
 
@@ -953,7 +953,7 @@ pub async fn pin_post(
     require_forum_channel(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_MANAGE)?;
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     if row.deleted_at.is_some() {
@@ -989,7 +989,7 @@ pub async fn unpin_post(
     require_forum_channel(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_MANAGE)?;
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     if row.deleted_at.is_some() {
@@ -1025,7 +1025,7 @@ pub async fn lock_post(
     require_forum_channel(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_MANAGE)?;
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     if row.deleted_at.is_some() {
@@ -1061,7 +1061,7 @@ pub async fn unlock_post(
     require_forum_channel(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_MANAGE)?;
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     if row.deleted_at.is_some() {
@@ -1378,7 +1378,7 @@ pub async fn create_tag(
     require_forum_channel(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_MANAGE)?;
 
     let label = req.label.trim().to_string();
     if label.is_empty() || label.chars().count() > 50 {
@@ -1438,7 +1438,7 @@ pub async fn edit_tag(
 
     let perms =
         permissions::channel_permissions(&state.db, &user.public_key, &row.channel_id).await?;
-    perms.require(permissions::MANAGE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_MANAGE)?;
 
     let new_label = match &req.label {
         Some(l) => {
@@ -1498,7 +1498,7 @@ pub async fn delete_tag(
     };
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_POSTS)?;
+    perms.require(permissions::FORUM_POSTS_MANAGE)?;
 
     // FK cascade (`post_tags.tag_id ... ON DELETE CASCADE`) removes every
     // assignment of this tag -- no app-side sweep needed (forum.md §10.1).

@@ -163,7 +163,7 @@ pub async fn create_channel(
 ) -> Result<(StatusCode, Json<ChannelResponse>), (StatusCode, String)> {
     // Creating a channel under a parent category is "acting on" that
     // existing channel, so it's gated by the parent's cascaded
-    // MANAGE_CHANNELS. Root-level creation has no channel to cascade
+    // CHANNELS_MANAGE. Root-level creation has no channel to cascade
     // through, so it stays on the hub-wide check.
     let perms = match &req.parent_id {
         Some(parent_id) => {
@@ -171,7 +171,7 @@ pub async fn create_channel(
         }
         None => permissions::user_permissions(&state.db, &user.public_key).await?,
     };
-    perms.require(permissions::MANAGE_CHANNELS)?;
+    perms.require(permissions::CHANNELS_MANAGE)?;
 
     // Validate parent if specified
     if let Some(parent_id) = &req.parent_id {
@@ -382,7 +382,7 @@ pub async fn update_channel(
     let changing_forum_require_tag = req.forum_require_tag.is_some();
 
     // Owner powers, v1: rename only (temp-voice-channels.md §3). A temp
-    // channel's owner may change its name without MANAGE_CHANNELS, but any
+    // channel's owner may change its name without CHANNELS_MANAGE, but any
     // other structural field in the same request still requires it.
     let owner_rename_only = is_temporary
         && owner_pubkey.as_deref() == Some(user.public_key.as_str())
@@ -394,13 +394,13 @@ pub async fn update_channel(
         && req.nsfw.is_none();
 
     if changing_structure && !owner_rename_only {
-        perms.require(permissions::MANAGE_CHANNELS)?;
+        perms.require(permissions::CHANNELS_MANAGE)?;
     }
     if changing_appearance {
-        perms.require(permissions::MANAGE_CHANNEL_ICONS)?;
+        perms.require(permissions::CHANNELS_APPEARANCE)?;
     }
     if changing_talk_power || changing_retention {
-        perms.require(permissions::ADMIN)?;
+        perms.require(permissions::CHANNELS_MANAGE)?;
     }
     if changing_forum_require_tag {
         if existing_type != "forum" {
@@ -409,7 +409,7 @@ pub async fn update_channel(
                 "forum_require_tag is only valid for forum channels".to_string(),
             ));
         }
-        perms.require(permissions::MANAGE_POSTS)?;
+        perms.require(permissions::FORUM_POSTS_MANAGE)?;
     }
 
     if let Some(Some(parent_id)) = &req.parent_id {
@@ -649,7 +649,7 @@ pub async fn list_channels(
     let readable = permissions::channels_with_permission(
         &state.db,
         &user.public_key,
-        permissions::READ_MESSAGES,
+        permissions::MESSAGES_READ,
     )
     .await?;
     let joinable =
@@ -698,7 +698,7 @@ pub async fn reorder_channels(
     Json(req): Json<ReorderRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::MANAGE_CHANNELS)?;
+    perms.require(permissions::CHANNELS_MANAGE)?;
 
     // Assign sequential display_order values
     for (index, channel_id) in req.channel_ids.iter().enumerate() {
@@ -727,7 +727,7 @@ pub async fn delete_channel(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Acting on a specific existing channel -- cascade through it.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_CHANNELS)?;
+    perms.require(permissions::CHANNELS_MANAGE)?;
 
     // Check if channel exists
     let exists: Option<bool> = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")

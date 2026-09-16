@@ -37,7 +37,7 @@ pub struct CreateEventRequest {
     pub slots: Vec<CreateSlotRequest>,
     /// Hub-level event (events.md §5): visible to every member regardless of
     /// whether they can read the anchor `channel_id`. Create-time only --
-    /// requires hub-level `CREATE_EVENTS` in addition to the channel-scoped
+    /// requires hub-level `EVENTS_CREATE` in addition to the channel-scoped
     /// gate on the anchor (see `create_event`).
     #[serde(default)]
     pub hub_wide: bool,
@@ -173,7 +173,7 @@ pub struct EventMoveAssignmentResponse {
     pub assigned_by: String,
     pub created_at: i64,
     /// Computed, not stored: true when `user_pubkey` lacks effective
-    /// `READ_MESSAGES` on `target_channel_id`, meaning a move applied to
+    /// `MESSAGES_READ` on `target_channel_id`, meaning a move applied to
     /// them would land them in voice-only presence rather than normal
     /// channel access (events.md §7.4). The client can't see another
     /// member's channel permissions, so the hub resolves this per row.
@@ -487,7 +487,7 @@ async fn slot_claimants(
 }
 
 /// Authorization for slot management routes: the event's creator, or a
-/// holder of `CREATE_EVENTS` resolved through the event's channel-scoped
+/// holder of `EVENTS_CREATE` resolved through the event's channel-scoped
 /// permission cascade (`channel_permissions`) -- matches the channel-aware
 /// gate `create_event` uses, rather than the hub-wide `ADMIN` check
 /// `update_event`/`delete_event` use today. Returns the event's channel id.
@@ -509,7 +509,7 @@ async fn require_slot_management_access(
     if creator != user.public_key {
         let perms =
             permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-        perms.require(permissions::CREATE_EVENTS)?;
+        perms.require(permissions::EVENTS_CREATE)?;
     }
 
     Ok(channel_id)
@@ -535,21 +535,21 @@ pub async fn create_event(
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
-    // Channel-scoped gate (§3.5): CREATE_EVENTS must be checked against the
+    // Channel-scoped gate (§3.5): EVENTS_CREATE must be checked against the
     // ancestor-chain overwrite cascade for the target channel, not the
     // hub-wide baseline -- otherwise a user denied on this channel could
     // still create events targeting it.
     let perms =
         permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id).await?;
-    perms.require(permissions::CREATE_EVENTS)?;
+    perms.require(permissions::EVENTS_CREATE)?;
 
     // events.md §5: a hub-wide event additionally requires hub-level
-    // CREATE_EVENTS (the plain, non-channel-scoped baseline) -- a member who
-    // only holds CREATE_EVENTS via a channel overwrite in one sub-tree must
+    // EVENTS_CREATE (the plain, non-channel-scoped baseline) -- a member who
+    // only holds EVENTS_CREATE via a channel overwrite in one sub-tree must
     // not be able to post an announcement visible to the whole hub.
     if req.hub_wide {
         let hub_perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        hub_perms.require(permissions::CREATE_EVENTS)?;
+        hub_perms.require(permissions::EVENTS_CREATE)?;
     }
 
     if req.title.trim().is_empty() {
@@ -654,7 +654,7 @@ pub async fn list_events(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Read-gating (§3.5): drop any event whose channel the caller lacks
-    // effective READ_MESSAGES on, so title/description/location/channel_id
+    // effective MESSAGES_READ on, so title/description/location/channel_id
     // for hidden channels never reach the client (matches `channels.rs`
     // list_channels' batch-filter approach). events.md §5: a `hub_wide`
     // event skips this filter entirely -- every member sees it regardless
@@ -662,7 +662,7 @@ pub async fn list_events(
     let readable = permissions::channels_with_permission(
         &state.db,
         &user.public_key,
-        permissions::READ_MESSAGES,
+        permissions::MESSAGES_READ,
     )
     .await?;
 
@@ -709,7 +709,7 @@ pub async fn get_event(
         let perms =
             permissions::channel_permissions(&state.db, &user.public_key, &event.channel_id)
                 .await?;
-        if !perms.has(permissions::READ_MESSAGES) {
+        if !perms.has(permissions::MESSAGES_READ) {
             return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
         }
     }
@@ -741,7 +741,7 @@ pub async fn update_event(
 
     if creator != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(permissions::ADMIN)?;
+        perms.require(permissions::EVENTS_MANAGE)?;
     }
 
     // events.md §5: `hub_wide` is create-time only -- reject an attempted
@@ -840,7 +840,7 @@ pub async fn delete_event(
 
     if creator != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(permissions::ADMIN)?;
+        perms.require(permissions::EVENTS_MANAGE)?;
     }
 
     // events.md §7.5: squad rooms are linked to this event by a plain
@@ -1043,16 +1043,16 @@ pub async fn list_rsvps(
 /// GET /events/:id/assignments
 ///
 /// Staging-panel data surface (events.md §7.5). Gated on: (event creator OR
-/// channel-scoped `CREATE_EVENTS` -- `require_slot_management_access`, the
-/// same rule slot management uses) AND channel-scoped `MOVE_MEMBERS`.
+/// channel-scoped `EVENTS_CREATE` -- `require_slot_management_access`, the
+/// same rule slot management uses) AND channel-scoped `VOICE_MOVE_MEMBERS`.
 ///
 /// Both permission checks are resolved against the event's own **anchor**
 /// channel, not a move's destination: unlike a single `voice_move` (which
-/// resolves `MOVE_MEMBERS` against that one move's destination, §7.1),
+/// resolves `VOICE_MOVE_MEMBERS` against that one move's destination, §7.1),
 /// this endpoint has no single destination to scope against -- it surfaces
 /// every assignment for the whole event, potentially targeting many
 /// different channels. The anchor channel is the natural analogue, matching
-/// how `CREATE_EVENTS` is already resolved here for slot management.
+/// how `EVENTS_CREATE` is already resolved here for slot management.
 ///
 /// 404s (not 403s) when the event doesn't exist or the caller can't read
 /// its anchor channel, matching `get_event`'s "an id alone can't confirm a
@@ -1072,17 +1072,17 @@ pub async fn list_event_assignments(
     let channel_id = channel_id.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    if !perms.has(permissions::READ_MESSAGES) {
+    if !perms.has(permissions::MESSAGES_READ) {
         return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
     }
 
-    // Organizer gate (creator or channel-scoped CREATE_EVENTS) -- reuses the
+    // Organizer gate (creator or channel-scoped EVENTS_CREATE) -- reuses the
     // same helper slot management uses. Re-derives the channel id, which we
     // already have, but keeps this endpoint's authorization identical to
     // slot management's rather than hand-rolling a second copy.
     require_slot_management_access(&state, &user, &event_id).await?;
-    // Mover gate: channel-scoped MOVE_MEMBERS against the anchor channel.
-    perms.require(permissions::MOVE_MEMBERS)?;
+    // Mover gate: channel-scoped VOICE_MOVE_MEMBERS against the anchor channel.
+    perms.require(permissions::VOICE_MOVE_MEMBERS)?;
 
     let rows: Vec<EventMoveAssignmentRow> = sqlx::query_as(
         "SELECT user_pubkey, target_channel_id, assigned_by, created_at
@@ -1106,7 +1106,7 @@ pub async fn list_event_assignments(
             permissions::channel_permissions(&state.db, &row.user_pubkey, &row.target_channel_id)
                 .await?;
         out.push(EventMoveAssignmentResponse {
-            voice_only: !target_perms.has(permissions::READ_MESSAGES),
+            voice_only: !target_perms.has(permissions::MESSAGES_READ),
             user_pubkey: row.user_pubkey,
             target_channel_id: row.target_channel_id,
             assigned_by: row.assigned_by,
@@ -1127,8 +1127,8 @@ pub async fn list_event_assignments(
 /// at event end (§7.5's updated lifetime rule).
 ///
 /// Gated identically to `GET /events/:id/assignments`: (event creator OR
-/// channel-scoped `CREATE_EVENTS` on the anchor -- `require_slot_management_access`)
-/// AND channel-scoped `MOVE_MEMBERS` on the anchor.
+/// channel-scoped `EVENTS_CREATE` on the anchor -- `require_slot_management_access`)
+/// AND channel-scoped `VOICE_MOVE_MEMBERS` on the anchor.
 pub async fn create_squad_rooms(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1137,7 +1137,7 @@ pub async fn create_squad_rooms(
 ) -> Result<(StatusCode, Json<Vec<ChannelResponse>>), (StatusCode, String)> {
     let channel_id = require_slot_management_access(&state, &user, &event_id).await?;
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MOVE_MEMBERS)?;
+    perms.require(permissions::VOICE_MOVE_MEMBERS)?;
 
     if !(1..=20).contains(&req.count) {
         return Err((

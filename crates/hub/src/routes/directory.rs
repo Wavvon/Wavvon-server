@@ -6,7 +6,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, DIRECTORY_PUBLISH};
 use crate::state::AppState;
 
 /// Build the canonical nonce: current UTC time rounded down to the minute,
@@ -116,7 +116,7 @@ pub async fn sign_for_directory(
     Json(req): Json<DirectorySignRequest>,
 ) -> Result<Json<DirectorySignResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(DIRECTORY_PUBLISH)?;
 
     let nonce = current_nonce();
     let canonical_payload =

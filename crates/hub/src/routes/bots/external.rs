@@ -32,12 +32,7 @@ pub async fn ext_invite_bot(
     Json(req): Json<InviteBotRequest>,
 ) -> Result<Json<InviteBotResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    if !perms.has(permissions::MANAGE_ROLES) && !perms.has(permissions::ADMIN) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Missing permission: manage_roles".to_string(),
-        ));
-    }
+    perms.require(permissions::BOTS_ADMIT)?;
 
     // Validate the pubkey looks like a 64-hex-char Ed25519 pubkey.
     if req.pubkey.len() != 64 || !req.pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -212,7 +207,7 @@ pub async fn ext_remove_bot(
     Path(pubkey): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::BOTS_ADMIT)?;
 
     sqlx::query("UPDATE users SET is_bot_removed = TRUE WHERE public_key = $1 AND is_bot = TRUE")
         .bind(&pubkey)
@@ -290,7 +285,7 @@ pub async fn admin_list_external_bots(
     user: AuthUser,
 ) -> Result<Json<Vec<ExternalBotAdminInfo>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::BOTS_ADMIT)?;
 
     #[derive(sqlx::FromRow)]
     struct Row {

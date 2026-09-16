@@ -517,7 +517,7 @@ async fn slot_management_rejected_without_channel_create_events() {
             "/channels/{channel_id}/permissions/builtin-everyone"
         ))
         .add_header("Authorization", format!("Bearer {owner_token}"))
-        .json(&json!({ "allow": [], "deny": ["create_events"] }))
+        .json(&json!({ "allow": [], "deny": ["events.create"] }))
         .await;
     resp.assert_status_ok();
 

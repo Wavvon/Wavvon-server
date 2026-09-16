@@ -116,7 +116,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     }
 
     // Voice admission gate (permissions.md §3, Voice). This used to ask for
-    // READ_MESSAGES, which made voice admission *be* read admission: the only
+    // MESSAGES_READ, which made voice admission *be* read admission: the only
     // way to keep someone out of a call was to hide the channel, and that took
     // the text with it. VOICE_JOIN is the separate question, and it is
     // independent in both directions -- a channel you may read but not join,
@@ -776,7 +776,7 @@ async fn send_voice_move_error(ws_tx: &mut WsTx, message: impl Into<String>) -> 
 ///   `event_move_assignments` row instead of rejected (§7.3); with no
 ///   `event_id` the Phase 1 rejection still applies (no event context to
 ///   apply it against later).
-/// - Target **lacks `READ_MESSAGES`** on the destination + `event_id`
+/// - Target **lacks `MESSAGES_READ`** on the destination + `event_id`
 ///   present → a voice-only presence grant is created (§7.4) and the move
 ///   proceeds instead of being rejected; with no `event_id` the Phase 1
 ///   rejection still applies (a generic mod-tool move must not reveal a
@@ -796,12 +796,12 @@ pub(in crate::routes::ws) async fn handle_voice_move(
         _ => return DispatchResult::Continue,
     };
 
-    // Authorize the mover: MOVE_MEMBERS resolved channel-scoped against the
+    // Authorize the mover: VOICE_MOVE_MEMBERS resolved channel-scoped against the
     // destination channel.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &target_channel_id)
         .await
     {
-        Ok(perms) if perms.has(crate::permissions::MOVE_MEMBERS) => {}
+        Ok(perms) if perms.has(crate::permissions::VOICE_MOVE_MEMBERS) => {}
         Ok(_) => {
             return send_voice_move_error(
                 ws_tx,
@@ -997,7 +997,7 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
     let can_create = {
         let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
         perms
-            .map(|p| p.has(crate::permissions::MANAGE_VOICE))
+            .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
             .unwrap_or(false)
     };
     if !can_create {
@@ -1093,7 +1093,7 @@ pub(in crate::routes::ws) async fn handle_voice_zone_destroy(
     let can_destroy = can_destroy || {
         let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
         perms
-            .map(|p| p.has(crate::permissions::MANAGE_VOICE))
+            .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
             .unwrap_or(false)
     };
     if !can_destroy {

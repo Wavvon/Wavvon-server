@@ -373,7 +373,7 @@ async fn build_fixture(grant_mover_move_members: bool) -> Fixture {
     let dest = create_channel(&base, &owner_token, "voice-dest").await;
 
     if grant_mover_move_members {
-        let mover_role = create_role(&base, &owner_token, "Marshal", &["move_members"]).await;
+        let mover_role = create_role(&base, &owner_token, "Marshal", &["voice.move_members"]).await;
         assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
     }
 
@@ -500,7 +500,7 @@ async fn rejects_target_not_in_voice() {
 
     let dest = create_channel(&base, &owner_token, "voice-dest-2").await;
 
-    let mover_role = create_role(&base, &owner_token, "Marshal2", &["move_members"]).await;
+    let mover_role = create_role(&base, &owner_token, "Marshal2", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     // Target authenticates (and has a WS connection open to observe
@@ -555,7 +555,7 @@ async fn moves_a_target_who_cannot_join_the_destination_and_reveals_no_text() {
         &fx.owner_token,
         &fx.dest.id,
         "builtin-everyone",
-        &["read_messages", "voice.join"],
+        &["messages.read", "voice.join"],
     )
     .await;
 
@@ -628,7 +628,8 @@ async fn queued_assignment_upserted_and_overwritten_on_reissue() {
     let squad_a = create_channel(&base, &owner_token, "squad-a").await;
     let squad_b = create_channel(&base, &owner_token, "squad-b").await;
 
-    let mover_role = create_role(&base, &owner_token, "MarshalQueue", &["move_members"]).await;
+    let mover_role =
+        create_role(&base, &owner_token, "MarshalQueue", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     let event = create_event(&base, &owner_token, &squad_a.id, "Raid Night").await;
@@ -705,7 +706,8 @@ async fn queued_assignment_applies_on_join_auto_false_and_persists_across_rejoin
     let lobby = create_channel(&base, &owner_token, "lobby-voice").await;
     let squad = create_channel(&base, &owner_token, "squad-voice").await;
 
-    let mover_role = create_role(&base, &owner_token, "MarshalApply", &["move_members"]).await;
+    let mover_role =
+        create_role(&base, &owner_token, "MarshalApply", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     let event = create_event(&base, &owner_token, &squad.id, "Raid Night").await;
@@ -792,7 +794,7 @@ async fn voice_only_grant_allows_join_but_not_message_history_and_evaporates_on_
         &fx.owner_token,
         &fx.dest.id,
         "builtin-everyone",
-        &["read_messages", "voice.join"],
+        &["messages.read", "voice.join"],
     )
     .await;
 
@@ -881,7 +883,7 @@ async fn get_assignments_happy_path_and_gated_for_non_organizer() {
     let outsider_token = authenticate_http(&base, &outsider).await;
 
     let dest = create_channel(&base, &owner_token, "assignments-dest").await;
-    let mover_role = create_role(&base, &owner_token, "MarshalGet", &["move_members"]).await;
+    let mover_role = create_role(&base, &owner_token, "MarshalGet", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     let event = create_event(&base, &owner_token, &dest.id, "Raid Night").await;
@@ -925,7 +927,7 @@ async fn get_assignments_happy_path_and_gated_for_non_organizer() {
         &owner_token,
         &dest.id,
         "builtin-everyone",
-        &["read_messages"],
+        &["messages.read"],
     )
     .await;
 

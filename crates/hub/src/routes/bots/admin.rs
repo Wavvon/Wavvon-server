@@ -33,7 +33,7 @@ pub async fn admin_set_bot_capabilities(
     Json(req): Json<SetCapabilitiesRequest>,
 ) -> Result<Json<CapabilitiesResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::BOTS_CAPABILITIES)?;
 
     let known_bot: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE)",
@@ -135,7 +135,7 @@ pub async fn admin_get_bot_capabilities(
     Path(pubkey): Path<String>,
 ) -> Result<Json<CapabilitiesReadResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::BOTS_CAPABILITIES)?;
 
     let known_bot: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE)",
@@ -200,7 +200,7 @@ pub async fn admin_set_bot_channel_scope(
     Json(req): Json<SetChannelScopeRequest>,
 ) -> Result<Json<ChannelScopeResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::BOTS_CAPABILITIES)?;
 
     let known_bot: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE)",
@@ -261,7 +261,7 @@ pub async fn admin_get_bot_channel_scope(
     Path(pubkey): Path<String>,
 ) -> Result<Json<ChannelScopeResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::BOTS_CAPABILITIES)?;
 
     let known_bot: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_bot = TRUE)",
@@ -300,7 +300,7 @@ pub async fn admin_audit_log(
     Query(params): Query<AuditLogQuery>,
 ) -> Result<Json<AuditLogResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::BOTS_AUDIT_READ)?;
 
     let limit = params.limit.unwrap_or(50).clamp(1, 200);
     // We fetch limit+1 to detect whether there's a next page.

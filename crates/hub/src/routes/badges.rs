@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, BADGES_MANAGE};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -54,7 +54,7 @@ pub async fn list_pending(
     user: AuthUser,
 ) -> Result<Json<Vec<PendingBadgeResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let rows = sqlx::query_as::<_, BadgeOfferRow>(
         "SELECT id, from_hub_pubkey, from_hub_url, label, note, payload, signature, created_at
@@ -96,7 +96,7 @@ pub async fn accept_pending(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let row = sqlx::query_as::<_, BadgeOfferRow>(
         "SELECT id, from_hub_pubkey, from_hub_url, label, note, payload, signature, created_at
@@ -177,7 +177,7 @@ pub async fn decline_pending(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let affected = sqlx::query("DELETE FROM badge_offers WHERE id = $1")
         .bind(&id)
@@ -216,7 +216,7 @@ pub async fn list_badges(
     user: AuthUser,
 ) -> Result<Json<Vec<HeldBadgeResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let rows = sqlx::query_as::<_, HubBadgeRow>(
         "SELECT id, issuer_pubkey, issuer_url, label, payload, signature, accepted_at
@@ -256,7 +256,7 @@ pub async fn delete_badge(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let affected = sqlx::query("DELETE FROM hub_badges WHERE id = $1")
         .bind(&id)
@@ -306,7 +306,7 @@ pub async fn issue_badge(
     Json(req): Json<IssueBadgeRequest>,
 ) -> Result<(StatusCode, Json<IssuedBadgeResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let recipient_url = req.recipient_hub_url.trim_end_matches('/').to_string();
 
@@ -414,7 +414,7 @@ pub async fn list_issued(
     user: AuthUser,
 ) -> Result<Json<Vec<IssuedBadgeResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let rows = sqlx::query_as::<_, IssuedBadgeRow>(
         "SELECT id, recipient_hub_url, recipient_hub_pubkey, label, payload, signature, issued_at, expires_at
@@ -560,7 +560,7 @@ pub async fn revoke_issued_badge(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(BADGES_MANAGE)?;
 
     let now = unix_now_secs();
 

@@ -5,7 +5,9 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, BAN_MEMBERS, KICK_MEMBERS, MUTE_MEMBERS, TIMEOUT_MEMBERS};
+use crate::permissions::{
+    self, MODERATION_BAN_PERMANENT, MODERATION_KICK, MODERATION_MUTE, MODERATION_TIMEOUT,
+};
 use crate::routes::moderation_models::*;
 use crate::routes::paging::PageQuery;
 use crate::state::AppState;
@@ -50,7 +52,7 @@ pub async fn ban_user(
         &state,
         &user.public_key,
         &req.target_public_key,
-        BAN_MEMBERS,
+        MODERATION_BAN_PERMANENT,
     )
     .await?;
 
@@ -115,7 +117,7 @@ pub async fn unban_user(
     Path(target_key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(BAN_MEMBERS)?;
+    perms.require(MODERATION_BAN_PERMANENT)?;
 
     sqlx::query("DELETE FROM bans WHERE target_public_key = $1")
         .bind(&target_key)
@@ -132,7 +134,7 @@ pub async fn list_bans(
     Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<BanResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(BAN_MEMBERS)?;
+    perms.require(MODERATION_BAN_PERMANENT)?;
 
     let rows = sqlx::query_as::<_, BanRow>(
         "SELECT target_public_key, banned_by, reason, created_at FROM bans
@@ -170,7 +172,7 @@ pub async fn mute_user(
         &state,
         &user.public_key,
         &req.target_public_key,
-        MUTE_MEMBERS,
+        MODERATION_MUTE,
     )
     .await?;
 
@@ -208,7 +210,7 @@ pub async fn unmute_user(
     Path(target_key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     sqlx::query("DELETE FROM mutes WHERE target_public_key = $1")
         .bind(&target_key)
@@ -225,7 +227,7 @@ pub async fn list_mutes(
     Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<MuteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     let rows = sqlx::query_as::<_, MuteRow>(
         "SELECT target_public_key, muted_by, reason, expires_at, created_at FROM mutes
@@ -264,7 +266,7 @@ pub async fn timeout_user(
         &state,
         &user.public_key,
         &req.target_public_key,
-        TIMEOUT_MEMBERS,
+        MODERATION_TIMEOUT,
     )
     .await?;
 
@@ -313,7 +315,7 @@ pub async fn kick_user(
         &state,
         &user.public_key,
         &req.target_public_key,
-        KICK_MEMBERS,
+        MODERATION_KICK,
     )
     .await?;
 

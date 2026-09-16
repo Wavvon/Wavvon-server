@@ -107,7 +107,7 @@ pub async fn dispatch_slash(
         let perms = crate::permissions::user_permissions(&state.db, invoker_pubkey)
             .await
             .ok()?;
-        if !perms.has(crate::permissions::MANAGE_MESSAGES) {
+        if !perms.has(crate::permissions::MESSAGES_MANAGE) {
             return Some("You don't have permission to use this command.".to_string());
         }
     }

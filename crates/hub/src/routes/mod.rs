@@ -33,6 +33,7 @@ pub mod moderation;
 pub mod moderation_models;
 pub mod paging;
 pub mod pairing;
+pub mod permission_catalogue;
 pub mod pins;
 pub mod polls;
 pub mod post_models;

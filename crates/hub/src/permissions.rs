@@ -3,67 +3,173 @@ use std::collections::{HashMap, HashSet};
 use axum::http::StatusCode;
 use sqlx::PgPool;
 
-/// Declares the permission catalog once: each entry becomes a `pub const` and
-/// an element of [`ALL_PERMISSIONS`], so the two can never disagree.
+/// Where a permission may be granted.
 ///
-/// The list used to be written out a second time by hand, which meant a new
-/// permission that was not also added there was accepted by every route and
-/// validated by none. Adding one here is now the only step.
-macro_rules! permission_catalog {
-    ($( $(#[$meta:meta])* $name:ident => $value:literal ),* $(,)?) => {
+/// The channel column is a subset by design (permissions.md §3): an entry is
+/// `HubAndChannel` only when the thing it governs lives in a channel. There is
+/// no channel-scoped hub administration — "manage the hub, but only in
+/// #general" is not a sentence.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Scope {
+    /// Hub-wide only. A channel overwrite naming it is refused.
+    Hub,
+    /// Hub-wide, and as a channel overwrite through the ancestor cascade.
+    HubAndChannel,
+}
+
+impl Scope {
+    pub fn allows_channel(self) -> bool {
+        matches!(self, Scope::HubAndChannel)
+    }
+}
+
+/// One catalogue entry: the id clients render and the hub checks, and where it
+/// may be granted.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+pub struct Permission {
+    pub id: &'static str,
+    pub scope: Scope,
+}
+
+/// Declares the catalogue once: each entry becomes a `pub const` carrying the
+/// id, plus a row in [`CATALOGUE`] carrying its scope.
+///
+/// The list used to be written out a second time by hand, which meant a
+/// permission added without touching it was accepted by every route and
+/// validated by none. One list now, and the scope travels with the id so the
+/// overwrite validator and the catalogue endpoint cannot disagree about which
+/// permissions have a channel dimension — that decision used to live in a
+/// TypeScript comment (permissions.md §1.5).
+macro_rules! permission_catalogue {
+    ($( $(#[$meta:meta])* $name:ident => $value:literal, $scope:ident ),* $(,)?) => {
         $( $(#[$meta])* pub const $name: &str = $value; )*
 
-        /// Every permission string recognized by the server, and the catalog
-        /// each caller-supplied string is validated against — see
-        /// [`validate_permissions`].
+        /// Every permission the server recognizes, with its scope.
+        pub const CATALOGUE: &[Permission] = &[
+            $(Permission { id: $value, scope: Scope::$scope }),*
+        ];
+
+        /// Ids only, for the checks that just need membership.
         pub const ALL_PERMISSIONS: &[&str] = &[$($value),*];
     };
 }
 
-permission_catalog! {
-    SEND_MESSAGES => "send_messages",
-    READ_MESSAGES => "read_messages",
-    MANAGE_CHANNELS => "manage_channels",
-    MANAGE_MESSAGES => "manage_messages",
-    MANAGE_ROLES => "manage_roles",
-    KICK_MEMBERS => "kick_members",
-    BAN_MEMBERS => "ban_members",
-    MUTE_MEMBERS => "mute_members",
-    TIMEOUT_MEMBERS => "timeout_members",
-    MANAGE_GAMES => "manage_games",
-    MANAGE_HUB_ICONS => "manage_hub_icons",
-    MANAGE_CHANNEL_ICONS => "manage_channel_icons",
-    ADMIN => "admin",
-    CREATE_POSTS => "create_posts",
-    MANAGE_POSTS => "manage_posts",
-    START_GAME => "start_game",
-    CREATE_EVENTS => "create_events",
-    USE_SOUNDBOARD => "use_soundboard",
-    MANAGE_SOUNDBOARD => "manage_soundboard",
-    /// Move a voice participant into another channel (events.md §7.1).
-    /// Resolved channel-scoped against the *destination* channel via
-    /// `channel_permissions`.
-    MOVE_MEMBERS => "move_members",
-    /// Enter voice on a channel, and start a screen share there. The one
-    /// catalogue entry with **no predecessor** (permissions.md §3, Voice):
-    /// voice is not a kind of channel — every ordinary channel can be talked
-    /// in — so "who may speak here" had never been expressible except through
-    /// "who may read here".
-    ///
-    /// Deliberately **independent of `read_messages`**, and both directions
-    /// are meant to be used: a channel everyone reads but only one role may
-    /// join, and a lobby anyone may talk in that carries no readable text.
-    ///
-    /// Dotted, unlike its snake_case neighbours, because it is the first entry
-    /// written in the naming scheme of §1.4 that the rest migrates to.
-    VOICE_JOIN => "voice.join",
-    /// Create and destroy voice zones (`ws/handlers/voice.rs`). A real gate
-    /// that was written as a bare string literal and left out of this list, so
-    /// the overwrite validator rejected it and no client could show it
-    /// (permissions.md §0). Catalogued here so it can be granted like any
-    /// other; permissions.md §3 folds it into `channels.manage` when the
-    /// catalogue is rebuilt, since a voice zone is channel configuration.
-    MANAGE_VOICE => "manage_voice",
+permission_catalogue! {
+    // ── Messages ────────────────────────────────────────────────────────
+    /// Reading a channel, and the visibility filter behind every list and the
+    /// WS auto-subscribe. The auto-subscribe asks for this one **only** —
+    /// widening it to match the channel list is a data leak (§3, Voice).
+    MESSAGES_READ => "messages.read", HubAndChannel,
+    MESSAGES_SEND => "messages.send", HubAndChannel,
+    MESSAGES_MANAGE => "messages.manage", HubAndChannel,
+
+    // ── Forum ───────────────────────────────────────────────────────────
+    FORUM_POSTS_CREATE => "forum.posts.create", HubAndChannel,
+    FORUM_POSTS_MANAGE => "forum.posts.manage", HubAndChannel,
+
+    // ── Channels ────────────────────────────────────────────────────────
+    /// Create, rename, move, delete, re-parent — plus voice zones and talk
+    /// power, both of which are channel configuration rather than an activity.
+    CHANNELS_MANAGE => "channels.manage", HubAndChannel,
+    CHANNELS_APPEARANCE => "channels.appearance", HubAndChannel,
+    CHANNELS_PERMISSIONS => "channels.permissions", HubAndChannel,
+
+    // ── Voice ───────────────────────────────────────────────────────────
+    /// Entering voice on a channel, and screen share. Independent of
+    /// `messages.read` in both directions: a channel everyone reads where only
+    /// one role may join, and a lobby anyone may talk in with no readable
+    /// text. Neither was expressible before it.
+    VOICE_JOIN => "voice.join", HubAndChannel,
+    VOICE_SOUNDBOARD_USE => "voice.soundboard.use", HubAndChannel,
+    VOICE_SOUNDBOARD_MANAGE => "voice.soundboard.manage", Hub,
+    /// Resolved against the **destination** channel, not the source.
+    VOICE_MOVE_MEMBERS => "voice.move_members", HubAndChannel,
+
+    // ── Moderation ──────────────────────────────────────────────────────
+    MODERATION_KICK => "moderation.kick", Hub,
+    MODERATION_MUTE => "moderation.mute", HubAndChannel,
+    MODERATION_TIMEOUT => "moderation.timeout", Hub,
+    /// Split from the permanent ban by irreversibility: an hour is a cooling
+    /// period, forever is a decision.
+    MODERATION_BAN_TEMPORARY => "moderation.ban.temporary", HubAndChannel,
+    MODERATION_BAN_PERMANENT => "moderation.ban.permanent", HubAndChannel,
+    MODERATION_REPORTS_READ => "moderation.reports.read", Hub,
+    MODERATION_REPORTS_REVIEW => "moderation.reports.review", Hub,
+    MODERATION_SETTINGS => "moderation.settings", Hub,
+
+    // ── Federated ban lists ─────────────────────────────────────────────
+    BANLIST_READ => "banlist.read", Hub,
+    /// Split out on its own: adding a source imports a stranger's bans, so the
+    /// subject is not this hub's members and the authority is not this hub.
+    BANLIST_SOURCES_MANAGE => "banlist.sources.manage", Hub,
+    BANLIST_OVERRIDES => "banlist.overrides", Hub,
+    BANLIST_SETTINGS => "banlist.settings", Hub,
+
+    // ── Roles and members ───────────────────────────────────────────────
+    /// The most dangerous permission on the hub once the wildcard is gone, and
+    /// the reason the escalation ceiling in `require_can_grant` is a
+    /// precondition rather than hardening.
+    ROLES_MANAGE => "roles.manage", Hub,
+    MEMBERS_READ => "members.read", Hub,
+
+    // ── Hub ─────────────────────────────────────────────────────────────
+    HUB_SETTINGS => "hub.settings", Hub,
+    HUB_APPEARANCE => "hub.appearance", Hub,
+    HUB_ADMISSION => "hub.admission", Hub,
+    /// Nothing about an invite is a channel; it asked for `manage_channels`
+    /// only by accident (permissions.md §3, Hub).
+    INVITES_MANAGE => "invites.manage", Hub,
+
+    // ── Events ──────────────────────────────────────────────────────────
+    EVENTS_CREATE => "events.create", HubAndChannel,
+    EVENTS_MANAGE => "events.manage", HubAndChannel,
+
+    // ── Trust ───────────────────────────────────────────────────────────
+    CERTS_ISSUE => "certs.issue", Hub,
+    /// Separate from issuing: a revocation invalidates trust that already left
+    /// the hub.
+    CERTS_REVOKE => "certs.revoke", Hub,
+    CERTS_SETTINGS => "certs.settings", Hub,
+    BADGES_MANAGE => "badges.manage", Hub,
+
+    // ── Federation and presence ─────────────────────────────────────────
+    /// Hub-scoped alliance acts only. Inviting another hub, sharing a channel
+    /// and the per-share policies live on the `alliance_managers` grant list,
+    /// because they belong to one relationship rather than to the hub.
+    ALLIANCES_MANAGE => "alliances.manage", Hub,
+    ALLIANCES_PEERS => "alliances.peers", Hub,
+    /// Makes the hub publicly discoverable, and nothing un-indexes it.
+    DIRECTORY_PUBLISH => "directory.publish", Hub,
+
+    // ── Integrations ────────────────────────────────────────────────────
+    WEBHOOKS_INCOMING_MANAGE => "webhooks.incoming.manage", Hub,
+    WEBHOOKS_OUTGOING_MANAGE => "webhooks.outgoing.manage", Hub,
+    /// Provisional: if the `is_bot` review concludes a bot is an ordinary user
+    /// admitted by a pubkey-bound invite, this collapses into
+    /// `invites.manage` and only `bots.capabilities` survives.
+    BOTS_ADMIT => "bots.admit", Hub,
+    BOTS_CAPABILITIES => "bots.capabilities", Hub,
+    BOTS_AUDIT_READ => "bots.audit.read", Hub,
+
+    // ── Surveys ─────────────────────────────────────────────────────────
+    SURVEYS_MANAGE => "surveys.manage", Hub,
+    /// Split from defining the survey: the responses are personal data, and
+    /// running one is a different job from reading who said what.
+    SURVEYS_RESPONSES_READ => "surveys.responses.read", Hub,
+}
+
+/// The role ownership *is*: `is_owner` is membership of it and nothing else.
+///
+/// Seeded by the migrations, granted by the first-boot owner invite and by
+/// ownership transfer, and refused deletion or emptying by `roles.rs` — which
+/// is why §1.1 could move "can do everything" onto it without inventing a new
+/// place for ownership to live.
+pub const BUILTIN_OWNER_ROLE_ID: &str = "builtin-owner";
+
+/// The scope of `id`, or `None` if the server does not know it.
+pub fn scope_of(id: &str) -> Option<Scope> {
+    CATALOGUE.iter().find(|p| p.id == id).map(|p| p.scope)
 }
 
 /// Rejects any permission string the server does not recognize.
@@ -89,6 +195,32 @@ pub fn validate_permissions<'a>(
     Ok(())
 }
 
+/// As [`validate_permissions`], plus the scope: a hub-only permission set as a
+/// channel overwrite is refused rather than stored.
+///
+/// The catalogue advertises each id's scope and the overwrite UI filters on it,
+/// but a client is not a guard. Without this the hub would accept a row saying
+/// "manage roles, but only in #general" — which grants nothing, matches no
+/// check, and looks in the UI exactly like a grant that worked. That is the
+/// same shape as the unvalidated strings §0 describes, one level up.
+pub fn validate_channel_overwrite<'a>(
+    permissions: impl IntoIterator<Item = &'a str>,
+) -> Result<(), (StatusCode, String)> {
+    for p in permissions {
+        match scope_of(p) {
+            None => return Err((StatusCode::BAD_REQUEST, format!("unknown permission: {p}"))),
+            Some(s) if !s.allows_channel() => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("{p} is hub-wide only and cannot be a channel overwrite"),
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(sqlx::FromRow)]
 pub struct RoleRow {
     pub id: String,
@@ -101,11 +233,33 @@ pub struct UserPermissions {
     pub roles: Vec<RoleRow>,
     pub effective: HashSet<String>,
     pub max_priority: i64,
+    /// "Can do everything regardless", as a property of the caller rather than
+    /// a row in `role_permissions` (permissions.md §1.1). Computed from
+    /// membership of `builtin-owner`, which is already where ownership lives:
+    /// transfer manipulates that role, recovery protects it, and `roles.rs`
+    /// refuses to delete or empty it.
+    pub is_owner: bool,
 }
 
 impl UserPermissions {
     pub fn has(&self, permission: &str) -> bool {
-        self.effective.contains(ADMIN) || self.effective.contains(permission)
+        self.is_owner || self.effective.contains(permission)
+    }
+
+    /// For the two acts the catalogue deliberately has no entry for
+    /// (permissions.md §2): approving an identity recovery, and ownership
+    /// transfer. Both hand one person control of another person's account, and
+    /// there is no delegation of that worth the failure mode — so they are not
+    /// a permission anyone can be given, they are the owner or nothing.
+    pub fn require_owner(&self, act: &str) -> Result<(), (StatusCode, String)> {
+        if self.is_owner {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                format!("Only the hub owner may {act}"),
+            ))
+        }
     }
 
     pub fn require(&self, permission: &str) -> Result<(), (StatusCode, String)> {
@@ -182,11 +336,14 @@ pub async fn user_permissions(
     let role_ids: Vec<&str> = roles.iter().map(|r| r.id.as_str()).collect();
     let effective = fetch_permissions(db, &role_ids).await?;
     let max_priority = roles.iter().map(|r| r.priority).max().unwrap_or(0);
+    // Ownership is the built-in role, not a permission row (§1.1).
+    let is_owner = roles.iter().any(|r| r.id == BUILTIN_OWNER_ROLE_ID);
 
     Ok(UserPermissions {
         roles,
         effective,
         max_priority,
+        is_owner,
     })
 }
 
@@ -344,9 +501,9 @@ pub fn fold_overwrites(
             if allow.contains(perm) {
                 continue; // allow wins within the same level
             }
-            if *perm == ADMIN {
-                continue; // admin is immune to channel deny
-            }
+            // Owner immunity used to need a special case here, because it
+            // was a row in the set being folded. It is a property now, read
+            // above the fold in `has()`, so a deny is just a deny.
             effective.remove(*perm);
         }
         for perm in &allow {
@@ -380,6 +537,8 @@ pub async fn channel_permissions(
         roles: baseline.roles,
         effective,
         max_priority: baseline.max_priority,
+        // A channel overwrite cannot revoke ownership.
+        is_owner: baseline.is_owner,
     })
 }
 
@@ -401,10 +560,9 @@ pub async fn channels_with_permission(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Admin immunity: an admin's baseline already grants every permission,
-    // and no channel deny can strip `admin` from effective, so skip the
-    // per-channel fold entirely.
-    if baseline.has(ADMIN) {
+    // The owner holds everything everywhere and no deny reaches them, so the
+    // per-channel fold cannot change the answer.
+    if baseline.is_owner {
         return Ok(all.into_iter().map(|(id, _)| id).collect());
     }
 
@@ -426,7 +584,7 @@ pub async fn channels_with_permission(
         .filter(|id| {
             let chain = ancestor_chain_from_map(&parent_of, id);
             let effective = fold_overwrites(&baseline.effective, &chain, &overwrite_rows);
-            effective.contains(ADMIN) || effective.contains(permission)
+            effective.contains(permission)
         })
         .collect())
 }
@@ -436,56 +594,204 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_no_duplicates() {
+    fn catalogue_has_no_duplicates() {
         let mut seen = HashSet::new();
-        for p in ALL_PERMISSIONS {
-            assert!(seen.insert(*p), "duplicate permission in catalog: {p}");
+        for p in CATALOGUE {
+            assert!(
+                seen.insert(p.id),
+                "duplicate permission in catalogue: {}",
+                p.id
+            );
         }
     }
 
     #[test]
-    fn every_constant_is_in_the_catalog() {
-        // The macro guarantees this structurally; the test documents the
-        // guarantee and fails loudly if the catalog ever stops being generated.
-        for p in [MANAGE_ROLES, ADMIN, MOVE_MEMBERS, SEND_MESSAGES] {
-            assert!(ALL_PERMISSIONS.contains(&p), "{p} missing from catalog");
+    fn ids_and_scopes_come_from_one_list() {
+        // The macro guarantees it structurally; this fails loudly if the two
+        // ever stop being generated together, which is the drift that produced
+        // four disagreeing copies before (permissions.md §0).
+        assert_eq!(CATALOGUE.len(), ALL_PERMISSIONS.len());
+        for p in CATALOGUE {
+            assert!(
+                ALL_PERMISSIONS.contains(&p.id),
+                "{} missing from the id list",
+                p.id
+            );
         }
     }
 
     #[test]
-    fn every_enforced_permission_is_grantable() {
-        // A permission the server checks but does not list is a gate nobody
-        // can open: no client can offer it, and since validate_permissions
-        // landed, the API refuses it outright. manage_voice was exactly that
-        // (permissions.md §0) until it was catalogued here. Both call sites
-        // now use the constant, so a new gate cannot reintroduce the split
-        // without adding its own entry above.
-        assert!(ALL_PERMISSIONS.contains(&MANAGE_VOICE));
-        assert!(validate_permissions([MANAGE_VOICE]).is_ok());
+    fn every_id_is_dotted_and_lowercase() {
+        // One spelling, so a client's literal either matches or the permission
+        // was never in the catalogue at all.
+        for p in CATALOGUE {
+            assert!(p.id.contains('.'), "{} is not dotted", p.id);
+            assert!(
+                p.id.split('.').all(|seg| !seg.is_empty()
+                    && seg.chars().all(|c| c.is_ascii_lowercase() || c == '_')),
+                "{} must be lowercase dotted segments",
+                p.id,
+            );
+        }
+    }
+
+    #[test]
+    fn hub_administration_is_never_channel_scoped() {
+        // The channel column is a subset by design (§3). "Manage the hub, but
+        // only in #general" is not a sentence, and an overwrite that pretended
+        // otherwise would grant nothing while looking like it granted
+        // something.
+        for id in [
+            "roles.manage",
+            "hub.settings",
+            "hub.admission",
+            "invites.manage",
+            "banlist.settings",
+            "certs.issue",
+            "directory.publish",
+            "surveys.responses.read",
+            "bots.capabilities",
+        ] {
+            assert_eq!(
+                scope_of(id),
+                Some(Scope::Hub),
+                "{id} must not be grantable per channel",
+            );
+        }
+    }
+
+    #[test]
+    fn what_lives_in_a_channel_is_channel_scoped() {
+        for id in [
+            "messages.read",
+            "messages.send",
+            "voice.join",
+            "channels.manage",
+            "events.create",
+            "moderation.mute",
+        ] {
+            assert_eq!(
+                scope_of(id),
+                Some(Scope::HubAndChannel),
+                "{id} should carry C"
+            );
+        }
+    }
+
+    #[test]
+    fn the_deleted_wildcard_is_not_in_the_catalogue() {
+        // `admin` is owner-as-property now (§1.1). If it ever comes back as a
+        // string, every named permission below it becomes optional again.
+        assert_eq!(scope_of("admin"), None);
+        assert!(validate_permissions(["admin"]).is_err());
+        // And the four strings §4 deletes for gating nothing.
+        for dead in ["manage_bots", "use_video", "manage_games", "start_game"] {
+            assert_eq!(scope_of(dead), None, "{dead} should be gone");
+        }
+    }
+
+    #[test]
+    fn a_hub_only_permission_cannot_be_a_channel_overwrite() {
+        // The scope the catalogue advertises has to be the scope the hub
+        // enforces, or they are two lists again.
+        assert!(validate_channel_overwrite([MESSAGES_READ, VOICE_JOIN]).is_ok());
+        let err = validate_channel_overwrite([ROLES_MANAGE]).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("hub-wide only"), "message was: {}", err.1);
+        // Still refuses an unknown id, same as the plain validator.
+        assert!(validate_channel_overwrite(["read_messages"]).is_err());
     }
 
     #[test]
     fn known_permissions_are_accepted() {
-        assert!(validate_permissions([MANAGE_ROLES, SEND_MESSAGES]).is_ok());
+        assert!(validate_permissions([ROLES_MANAGE, MESSAGES_SEND]).is_ok());
         assert!(validate_permissions([]).is_ok());
     }
 
     #[test]
     fn unknown_permission_is_rejected_with_400() {
-        let err = validate_permissions([MANAGE_ROLES, "manage_rolez"]).unwrap_err();
+        let err = validate_permissions([ROLES_MANAGE, "roles.manege"]).unwrap_err();
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
-        assert!(err.1.contains("manage_rolez"), "message was: {}", err.1);
+        assert!(err.1.contains("roles.manege"), "message was: {}", err.1);
+    }
+
+    #[test]
+    fn an_old_id_is_not_quietly_accepted() {
+        // The catalogue is rebuilt, not mapped: there is no dual-reading
+        // period (§6), so yesterday's spelling has to fail rather than half
+        // work.
+        for old in [
+            "read_messages",
+            "manage_roles",
+            "ban_members",
+            "manage_voice",
+        ] {
+            assert!(
+                validate_permissions([old]).is_err(),
+                "{old} should be unknown now"
+            );
+        }
     }
 
     #[test]
     fn permission_strings_are_not_confused_by_case_or_whitespace() {
-        // Postgres stores whatever we bind, and `has()` compares exactly, so a
+        // Postgres stores whatever we bind and `has()` compares exactly, so a
         // string that only looks right grants nothing. Reject it at the door.
-        for bad in ["Admin", "admin ", " admin", "ADMIN"] {
+        for bad in [
+            "Messages.Read",
+            "messages.read ",
+            " messages.read",
+            "MESSAGES.READ",
+        ] {
             assert!(
                 validate_permissions([bad]).is_err(),
                 "{bad:?} should be rejected"
             );
         }
+    }
+
+    fn perms(is_owner: bool, held: &[&str]) -> UserPermissions {
+        UserPermissions {
+            roles: Vec::new(),
+            effective: held.iter().map(|s| (*s).to_string()).collect(),
+            max_priority: 0,
+            is_owner,
+        }
+    }
+
+    #[test]
+    fn the_owner_holds_everything_without_holding_anything() {
+        let owner = perms(true, &[]);
+        for p in CATALOGUE {
+            assert!(owner.has(p.id), "the owner should pass {}", p.id);
+        }
+        assert!(owner.require_owner("transfer ownership").is_ok());
+    }
+
+    #[test]
+    fn a_member_holds_only_what_it_was_given() {
+        let member = perms(false, &[MESSAGES_READ]);
+        assert!(member.has(MESSAGES_READ));
+        assert!(!member.has(ROLES_MANAGE));
+        assert!(member.require_owner("approve a recovery").is_err());
+    }
+
+    #[test]
+    fn the_ceiling_stops_a_delegate_and_not_the_owner() {
+        // §1.6: the guard has to read owner-as-property in the same change
+        // that deletes the wildcard, or the owner silently loses the ability
+        // to grant anything `builtin-owner` was not separately given.
+        let delegate = perms(false, &[ROLES_MANAGE]);
+        assert_eq!(
+            delegate.first_not_held([ROLES_MANAGE, MODERATION_BAN_PERMANENT]),
+            Some(MODERATION_BAN_PERMANENT),
+        );
+        assert!(delegate
+            .require_can_grant([MODERATION_BAN_PERMANENT])
+            .is_err());
+
+        let owner = perms(true, &[]);
+        assert_eq!(owner.first_not_held([MODERATION_BAN_PERMANENT]), None);
+        assert!(owner.require_can_grant([MODERATION_BAN_PERMANENT]).is_ok());
     }
 }

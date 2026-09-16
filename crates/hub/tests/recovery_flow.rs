@@ -598,7 +598,7 @@ async fn approve_transfers_non_owner_roles_and_never_owner() {
     let resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "moderator", "priority": 10, "permissions": ["kick_members"] }))
+        .json(&json!({ "name": "moderator", "priority": 10, "permissions": ["moderation.kick"] }))
         .await;
     let role_id = resp.json::<serde_json::Value>()["id"]
         .as_str()

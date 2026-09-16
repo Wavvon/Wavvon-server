@@ -39,7 +39,7 @@ pub async fn pin_message(
     // channel-level deny overwrite is respected the same way it is for
     // reads.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_MESSAGES)?;
+    perms.require(permissions::MESSAGES_MANAGE)?;
 
     // Verify message belongs to this channel.
     let msg_channel: Option<String> =
@@ -94,7 +94,7 @@ pub async fn unpin_message(
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_MESSAGES)?;
+    perms.require(permissions::MESSAGES_MANAGE)?;
 
     sqlx::query("DELETE FROM channel_pins WHERE channel_id = $1 AND message_id = $2")
         .bind(&channel_id)
@@ -133,9 +133,9 @@ pub async fn list_pins(
     }
 
     // Read-gating (§3.5): pinned message bodies are private-channel content
-    // -- require effective READ_MESSAGES the same way message history does.
+    // -- require effective MESSAGES_READ the same way message history does.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::READ_MESSAGES)?;
+    perms.require(permissions::MESSAGES_READ)?;
 
     #[derive(sqlx::FromRow)]
     struct PinRow {
