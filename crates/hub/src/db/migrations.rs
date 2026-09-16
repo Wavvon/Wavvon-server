@@ -560,6 +560,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             target_public_key TEXT PRIMARY KEY REFERENCES users(public_key),
             banned_by         TEXT NOT NULL,
             reason            TEXT,
+            -- NULL is a permanent ban, the same shape `mutes` already uses to
+            -- tell a timeout from a permanent mute. Every read of this table
+            -- has to carry the filter; a reader that forgets it enforces a ban
+            -- that expired, which is worse than one that never applied.
+            expires_at        BIGINT,
             created_at        BIGINT NOT NULL
         )",
     )
@@ -1812,6 +1817,10 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // This one cannot be folded into `CREATE TABLE invites`: it REFERENCES
     // `roles`, which this file creates *after* `invites`. Folding it would
     // make the create fail on a fresh database. Left as an ALTER on purpose.
+    let _ = sqlx::query("ALTER TABLE bans ADD COLUMN expires_at BIGINT")
+        .execute(pool)
+        .await;
+
     let _ = sqlx::query("ALTER TABLE invites ADD COLUMN grant_role_id TEXT REFERENCES roles(id)")
         .execute(pool)
         .await;

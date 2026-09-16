@@ -689,6 +689,114 @@ try {
       checkEq(unknown.status, 400, "an id outside the catalogue is a 400, not a false");
     });
 
+    // ── temporary bans, on their own hub ────────────────────────────────
+    //
+    // Their own, because `/auth/challenge` is rate-limited per address and the
+    // scenarios above have already spent this hub's budget on six identities.
+    // That limiter is a real protection; a stage that leans on it failing is
+    // testing the wrong thing, and one that turns it off stops resembling a
+    // hub an operator runs.
+    {
+      const banOwner = identity();
+      const bh = await hub("hub-bans", banOwner);
+      const bov = await authenticate(bh.url, banOwner);
+      checkEq(bov.status, 200, `ban-hub owner auth: ${JSON.stringify(bov.body)}`);
+      const banOwnerToken = bov.body.token;
+      const asBanOwner = { Authorization: `Bearer ${banOwnerToken}` };
+      const bpost = (path, token, body) => json(`${bh.url}${path}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: JSON.stringify(body),
+      });
+
+      const banInvite = await bpost("/invites", banOwnerToken, {});
+      check(
+        banInvite.status === 200 || banInvite.status === 201,
+        `ban-hub invite: ${banInvite.status}`,
+      );
+
+      await scenario("a temporary ban is a different permission from a permanent one", async () => {
+        // Split by irreversibility (permissions.md §2): an hour is a
+        // cooling-off period, forever ends a membership. A moderator trusted
+        // with the first is not thereby trusted with the second, which is why
+        // the catalogue has two entries rather than one.
+        const cooler = identity();
+        const cv = await authenticate(bh.url, cooler, { invite_code: banInvite.body.code });
+        checkEq(cv.status, 200, `cooler auth: ${JSON.stringify(cv.body)}`);
+
+        const coolerRole = await bpost("/roles", banOwnerToken, {
+          name: "Cooler", priority: 60,
+          permissions: ["moderation.ban.temporary", "members.read"],
+        });
+        checkEq(coolerRole.status, 201, `cooler role: ${JSON.stringify(coolerRole.body)}`);
+        const granted = await json(
+          `${bh.url}/users/${cooler.pubkey}/roles/${coolerRole.body.id}`,
+          { method: "PUT", headers: asBanOwner },
+        );
+        checkEq(granted.status, 200, `grant cooler: ${JSON.stringify(granted.body)}`);
+
+        const victim = identity();
+        const vv = await authenticate(bh.url, victim, { invite_code: banInvite.body.code });
+        checkEq(vv.status, 200, `victim auth: ${JSON.stringify(vv.body)}`);
+
+        const forever = await bpost("/moderation/bans", cv.body.token, {
+          target_public_key: victim.pubkey, reason: "forever",
+        });
+        checkEq(
+          forever.status, 403,
+          `a permanent ban must be refused to this role: ${JSON.stringify(forever.body)}`,
+        );
+
+        // Zero is refused too: it would read as permanent everywhere
+        // downstream, which is the opposite of what was asked for.
+        const zero = await bpost("/moderation/bans", cv.body.token, {
+          target_public_key: victim.pubkey, duration_seconds: 0,
+        });
+        checkEq(zero.status, 400, `zero duration: ${JSON.stringify(zero.body)}`);
+
+        const timed = await bpost("/moderation/bans", cv.body.token, {
+          target_public_key: victim.pubkey, reason: "cool off", duration_seconds: 3,
+        });
+        checkEq(timed.status, 201, `temporary ban: ${JSON.stringify(timed.body)}`);
+        check(timed.body.expires_at, "the response must carry the expiry it set");
+      });
+
+      await scenario("a ban that has run out stops being enforced everywhere", async () => {
+        // The half an in-process test cannot see: the row stays as the record
+        // of what was decided, so every reader filters on the expiry rather
+        // than trusting the row exists. One that forgets keeps enforcing a
+        // decision the hub has already dropped.
+        const lapsed = identity();
+        const lv = await authenticate(bh.url, lapsed, { invite_code: banInvite.body.code });
+        checkEq(lv.status, 200, `lapsed auth: ${JSON.stringify(lv.body)}`);
+        const lapsedToken = lv.body.token;
+
+        const banned = await bpost("/moderation/bans", banOwnerToken, {
+          target_public_key: lapsed.pubkey, reason: "brief", duration_seconds: 3,
+        });
+        checkEq(banned.status, 201, `brief ban: ${JSON.stringify(banned.body)}`);
+
+        const during = await json(`${bh.url}/me`, {
+          headers: { Authorization: `Bearer ${lapsedToken}` },
+        });
+        check(during.status >= 400, `a live ban must close the session, got ${during.status}`);
+
+        await new Promise((r) => setTimeout(r, 3500));
+
+        const after = await authenticate(bh.url, lapsed, { invite_code: banInvite.body.code });
+        checkEq(
+          after.status, 200,
+          `an expired ban must stop refusing admission: ${JSON.stringify(after.body)}`,
+        );
+
+        const list = await json(`${bh.url}/moderation/bans`, { headers: asBanOwner });
+        checkEq(list.status, 200, "list bans");
+        const row = list.body.find((b) => b.target_public_key === lapsed.pubkey);
+        check(row, "the expired ban must still be readable as history");
+        check(row.expires_at, "and still carry its expiry");
+      });
+    }
+
     await scenario("a talk-only channel never delivers its messages over the socket", async () => {
       // The half that fails silently. The channel list asks read OR
       // voice.join; auto-subscribe must ask read only, and widening it to
