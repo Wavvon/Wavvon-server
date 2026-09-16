@@ -103,7 +103,6 @@ pub async fn ban_user(
         let actor = user.public_key.clone();
         let target = req.target_public_key.clone();
         let reason = req.reason.clone();
-        let expires_at = expires_at;
         tokio::spawn(async move {
             crate::bots::events::publish_hub_event(
                 &state_c,
