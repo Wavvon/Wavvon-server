@@ -95,13 +95,18 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
 
     tracing::info!("Cert worker: sweeping {} candidates", candidates.len());
 
-    // Load banned pubkeys in one query to avoid per-user ban checks.
-    let banned: std::collections::HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT target_public_key FROM bans")
-            .fetch_all(&state.db)
-            .await?
-            .into_iter()
-            .collect();
+    // Load banned pubkeys in one query to avoid per-user ban checks. Expired
+    // rows are left in the table as the record of what was decided, so every
+    // reader filters rather than trusting the row's existence.
+    let now = crate::auth::handlers::unix_timestamp();
+    let banned: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT target_public_key FROM bans WHERE expires_at IS NULL OR expires_at > $1",
+    )
+    .bind(now)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .collect();
 
     let mut issued = 0usize;
     for pubkey in candidates {

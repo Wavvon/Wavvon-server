@@ -353,8 +353,11 @@ pub async fn verify_grant(
     // The row only exists for someone who was once a member here, which is
     // exactly the case that matters: banning a local user must not leave them a
     // side door in as a visitor from an allied hub.
-    let banned: Option<i32> = sqlx::query_scalar("SELECT 1 FROM bans WHERE target_public_key = $1")
+    let banned: Option<i32> = sqlx::query_scalar(
+        "SELECT 1 FROM bans WHERE target_public_key = $1 AND (expires_at IS NULL OR expires_at > $2)",
+    )
         .bind(&p.subject_pubkey)
+        .bind(crate::auth::handlers::unix_timestamp())
         .fetch_optional(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?;

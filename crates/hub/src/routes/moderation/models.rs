@@ -12,6 +12,7 @@ pub(super) struct BanRow {
     pub target_public_key: String,
     pub banned_by: String,
     pub reason: Option<String>,
+    pub expires_at: Option<i64>,
     pub created_at: i64,
 }
 
