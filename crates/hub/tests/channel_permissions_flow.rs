@@ -377,7 +377,10 @@ async fn setup_manager(
         server,
         &owner_token,
         "Manager",
-        &["roles.manage", "messages.send"],
+        // Editing one channel's overwrites is `channels.permissions`, not
+        // hub-wide `roles.manage` — the split is the point of having both
+        // (permissions.md §3, Channels).
+        &["channels.permissions", "messages.send"],
         10,
     )
     .await;

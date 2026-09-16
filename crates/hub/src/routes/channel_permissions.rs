@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ROLES_MANAGE};
+use crate::permissions::{self, CHANNELS_PERMISSIONS};
 use crate::state::AppState;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -177,7 +177,7 @@ pub async fn get_channel_permissions(
     Path(channel_id): Path<String>,
 ) -> Result<Json<ChannelPermissionsResponse>, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(ROLES_MANAGE)?;
+    perms.require(CHANNELS_PERMISSIONS)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
 
@@ -206,7 +206,7 @@ pub async fn put_channel_permissions(
     Json(req): Json<OverwriteSet>,
 ) -> Result<Json<RolePermissionsView>, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(ROLES_MANAGE)?;
+    perms.require(CHANNELS_PERMISSIONS)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
     let (role_name, role_priority) = require_role(&state.db, &role_id).await?;
@@ -342,7 +342,7 @@ pub async fn delete_channel_permissions(
     Path((channel_id, role_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(ROLES_MANAGE)?;
+    perms.require(CHANNELS_PERMISSIONS)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
     let (_, role_priority) = require_role(&state.db, &role_id).await?;
