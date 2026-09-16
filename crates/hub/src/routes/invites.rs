@@ -71,6 +71,22 @@ pub async fn create_invite(
             ));
         }
 
+        // An invite that grants a role is deferred role assignment, so it
+        // needs the same escalation ceiling (permissions.md §1.6). Without it
+        // this is the widest door of the four: creating an invite needs
+        // `manage_channels`, not `manage_roles`, so whoever can invite people
+        // could mint a role-granting code and redeem it as a second identity.
+        // The admin-takeover clamp below is not a substitute — it only looks
+        // for `admin`, and the point of the catalogue is that `admin` goes
+        // away while ~40 named permissions remain.
+        let carried: Vec<String> =
+            sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
+                .bind(role_id)
+                .fetch_all(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        perms.require_can_grant(carried.iter().map(String::as_str))?;
+
         // An admin-holding role is a takeover token: cap it to a single use
         // and a short expiry, unless the creator already asked for
         // something even shorter/more restrictive.

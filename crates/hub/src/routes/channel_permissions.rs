@@ -240,13 +240,11 @@ pub async fn put_channel_permissions(
     // Self-grant guard: a caller can only allow permissions they themselves
     // effectively hold on this channel -- prevents delegating powers the
     // caller doesn't have. Denies are unrestricted (removing power is safe).
-    for p in &req.allow {
-        if !perms.has(p) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                format!("Cannot grant permission '{p}' you do not hold on this channel"),
-            ));
-        }
+    if let Some(p) = perms.first_not_held(req.allow.iter().map(String::as_str)) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Cannot grant permission '{p}' you do not hold on this channel"),
+        ));
     }
 
     let before: Vec<(String, bool)> = sqlx::query_as(

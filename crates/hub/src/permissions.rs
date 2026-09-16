@@ -105,6 +105,50 @@ impl UserPermissions {
             ))
         }
     }
+
+    /// The first permission in `requested` this caller does not hold, if any —
+    /// the escalation ceiling of permissions.md §1.6, which says a caller may
+    /// only hand out permissions they hold themselves.
+    ///
+    /// Callers format their own 403, because the scope belongs in the message:
+    /// the channel-overwrite path says "on this channel" and the hub-wide path
+    /// does not.
+    ///
+    /// `has()` short-circuits on `admin`, so an admin or owner clears every
+    /// entry for free. That is the exemption §1.6 describes as `is_owner`,
+    /// arriving for free while `admin` still exists — when the wildcard is
+    /// deleted this must start consulting owner-as-property instead, or the
+    /// owner will be unable to grant anything they were not separately given.
+    pub fn first_not_held<'a>(
+        &self,
+        requested: impl IntoIterator<Item = &'a str>,
+    ) -> Option<&'a str> {
+        requested.into_iter().find(|p| !self.has(p))
+    }
+
+    /// [`first_not_held`](Self::first_not_held) as a 403, for the hub-wide
+    /// callers that all want the same message.
+    ///
+    /// Without this, `manage_roles` is a wildcard. Every guard on these paths
+    /// bounds *rank*, and the escalation does not need rank: a role beneath
+    /// your own priority can carry permissions above it, and handing it to
+    /// yourself is one more call.
+    ///
+    /// The check is on write, not a standing invariant — revoking someone's
+    /// permission does not strip roles they already minted carrying it
+    /// (permissions.md §1.6), so demoting a delegate is two steps.
+    pub fn require_can_grant<'a>(
+        &self,
+        requested: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), (StatusCode, String)> {
+        match self.first_not_held(requested) {
+            Some(p) => Err((
+                StatusCode::FORBIDDEN,
+                format!("Cannot grant permission '{p}' you do not hold"),
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 pub async fn user_permissions(

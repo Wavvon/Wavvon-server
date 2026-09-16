@@ -260,3 +260,134 @@ async fn update_role_rejects_an_unknown_permission_before_applying_anything() {
     assert_eq!(after.name, "Moderator", "rejected update must not rename");
     assert_eq!(after.permissions, vec!["manage_messages".to_string()]);
 }
+
+/// Owner mints a `manage_roles` + `manage_channels` role at priority 50 and
+/// gives it to a second identity. That identity is the delegate every test
+/// below escalates from: it can manage roles, and it holds nothing else
+/// beyond what `everyone` carries (send/read messages, posts, games, events).
+async fn manager_delegate(server: &axum_test::TestServer, owner_token: &str) -> (Identity, String) {
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(owner_token)
+        .json(&json!({
+            "name": "Delegate",
+            "permissions": ["manage_roles", "manage_channels"],
+            "priority": 50,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let role: RoleResponse = resp.json();
+
+    let delegate = Identity::generate();
+    let token = common::authenticate(server, &delegate).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            delegate.public_key_hex(),
+            role.id
+        ))
+        .authorization_bearer(owner_token)
+        .await
+        .assert_status_ok();
+
+    (delegate, token)
+}
+
+#[tokio::test]
+async fn delegate_cannot_mint_a_role_carrying_a_permission_they_lack() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let (_delegate, token) = manager_delegate(&server, &owner_token).await;
+
+    // Priority 49 is below their own 50, so the priority guard passes. The
+    // escalation is the permission, not the rank.
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "name": "Enforcer",
+            "permissions": ["ban_members"],
+            "priority": 49,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert!(resp.text().contains("ban_members"));
+
+    // What they do hold still works — the guard is a ceiling, not a freeze.
+    server
+        .post("/roles")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "name": "Greeter",
+            "permissions": ["send_messages", "manage_channels"],
+            "priority": 49,
+        }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+}
+
+#[tokio::test]
+async fn delegate_cannot_add_a_permission_they_lack_to_an_existing_role() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let (_delegate, token) = manager_delegate(&server, &owner_token).await;
+
+    let created = server
+        .post("/roles")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Greeter", "permissions": ["send_messages"], "priority": 49 }))
+        .await;
+    created.assert_status(axum::http::StatusCode::CREATED);
+    let role: RoleResponse = created.json();
+
+    let resp = server
+        .patch(&format!("/roles/{}", role.id))
+        .authorization_bearer(&token)
+        .json(&json!({ "permissions": ["send_messages", "ban_members"] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn delegate_cannot_assign_a_role_carrying_a_permission_they_lack() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let (delegate, token) = manager_delegate(&server, &owner_token).await;
+
+    // The owner mints it, so minting is not the escalation here — assigning
+    // is. Priority 20 is below the delegate's 50, so the priority guard on
+    // assign_role passes and only the new check stands between them and
+    // ban_members.
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Enforcer", "permissions": ["ban_members"], "priority": 20 }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let enforcer: RoleResponse = resp.json();
+
+    let resp = server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            delegate.public_key_hex(),
+            enforcer.id
+        ))
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    // The owner holds admin, so the same assignment is fine from them —
+    // has() short-circuits on admin and the ceiling never bites.
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            delegate.public_key_hex(),
+            enforcer.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+}
