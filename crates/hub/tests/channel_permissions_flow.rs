@@ -87,7 +87,12 @@ async fn deny_read_messages_hides_channel_and_blocks_history() {
         &secret.id,
         "builtin-everyone",
         &[],
-        &["read_messages"],
+        // Hiding a channel is **two** denials now that voice admission is its
+        // own question (permissions.md §3, Voice). Denying read alone leaves
+        // it listed and joinable, because voice.join is seeded on
+        // builtin-everyone -- which is the documented price of the split, not
+        // a leak: the channel renders voice-only and carries no text.
+        &["read_messages", "voice.join"],
     )
     .await;
 
@@ -150,7 +155,8 @@ async fn parent_deny_cascades_to_child_and_child_allow_overrides() {
         &category.id,
         "builtin-everyone",
         &[],
-        &["read_messages"],
+        // Both halves, same reason as above.
+        &["read_messages", "voice.join"],
     )
     .await;
 

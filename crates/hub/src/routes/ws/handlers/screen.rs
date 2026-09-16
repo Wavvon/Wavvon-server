@@ -201,10 +201,13 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
             return DispatchResult::Continue;
         }
 
-        // Gate 3: channel-scoped READ_MESSAGES, same rule as voice join.
+        // Gate 3: channel-scoped VOICE_JOIN, same rule as voice join -- a
+        // screen share is something you do once present in the call, so it
+        // follows admission to the call and not admission to the text
+        // (permissions.md §3, Voice).
         match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await
         {
-            Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
+            Ok(perms) if perms.has(crate::permissions::VOICE_JOIN) => {}
             _ => {
                 let err = WsServerMessage::Error {
                     context: "screen_share_start".to_string(),

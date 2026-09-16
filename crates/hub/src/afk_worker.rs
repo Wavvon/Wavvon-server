@@ -82,17 +82,22 @@ pub async fn run_sweep(state: &AppState) {
     for (source_channel_id, pubkey) in candidates {
         // Same gate as the manual, event-less move: never move someone into
         // a channel they can't read — it would reveal a hidden channel.
-        let can_read = match crate::permissions::channel_permissions(
+        // The exception that keeps a check, and keeps it on VOICE_JOIN
+        // (permissions.md §3, Voice): every other move has a `move_members`
+        // holder whose authority stands in for the target's own admission,
+        // but the hub moves an idle member on its own, so there is nobody to
+        // stand in. No grant is minted here for the same reason.
+        let can_join = match crate::permissions::channel_permissions(
             &state.db,
             &pubkey,
             &afk_channel_id,
         )
         .await
         {
-            Ok(perms) => perms.has(crate::permissions::READ_MESSAGES),
+            Ok(perms) => perms.has(crate::permissions::VOICE_JOIN),
             Err(_) => false,
         };
-        if !can_read {
+        if !can_join {
             continue;
         }
 
