@@ -3,54 +3,78 @@ use std::collections::{HashMap, HashSet};
 use axum::http::StatusCode;
 use sqlx::PgPool;
 
-pub const SEND_MESSAGES: &str = "send_messages";
-pub const READ_MESSAGES: &str = "read_messages";
-pub const MANAGE_CHANNELS: &str = "manage_channels";
-pub const MANAGE_MESSAGES: &str = "manage_messages";
-pub const MANAGE_ROLES: &str = "manage_roles";
-pub const KICK_MEMBERS: &str = "kick_members";
-pub const BAN_MEMBERS: &str = "ban_members";
-pub const MUTE_MEMBERS: &str = "mute_members";
-pub const TIMEOUT_MEMBERS: &str = "timeout_members";
-pub const MANAGE_GAMES: &str = "manage_games";
-pub const MANAGE_HUB_ICONS: &str = "manage_hub_icons";
-pub const MANAGE_CHANNEL_ICONS: &str = "manage_channel_icons";
-pub const ADMIN: &str = "admin";
-pub const CREATE_POSTS: &str = "create_posts";
-pub const MANAGE_POSTS: &str = "manage_posts";
-pub const START_GAME: &str = "start_game";
-pub const CREATE_EVENTS: &str = "create_events";
-pub const USE_SOUNDBOARD: &str = "use_soundboard";
-pub const MANAGE_SOUNDBOARD: &str = "manage_soundboard";
-/// Move a voice participant into another channel (events.md §7.1). Resolved
-/// channel-scoped against the *destination* channel via `channel_permissions`.
-pub const MOVE_MEMBERS: &str = "move_members";
+/// Declares the permission catalog once: each entry becomes a `pub const` and
+/// an element of [`ALL_PERMISSIONS`], so the two can never disagree.
+///
+/// The list used to be written out a second time by hand, which meant a new
+/// permission that was not also added there was accepted by every route and
+/// validated by none. Adding one here is now the only step.
+macro_rules! permission_catalog {
+    ($( $(#[$meta:meta])* $name:ident => $value:literal ),* $(,)?) => {
+        $( $(#[$meta])* pub const $name: &str = $value; )*
 
-/// Every permission string recognized by the server. Used to validate
-/// admin-supplied permission strings for channel overwrites (see
-/// `hub/src/routes/channel_permissions.rs`).
-pub const ALL_PERMISSIONS: &[&str] = &[
-    SEND_MESSAGES,
-    READ_MESSAGES,
-    MANAGE_CHANNELS,
-    MANAGE_MESSAGES,
-    MANAGE_ROLES,
-    KICK_MEMBERS,
-    BAN_MEMBERS,
-    MUTE_MEMBERS,
-    TIMEOUT_MEMBERS,
-    MANAGE_GAMES,
-    MANAGE_HUB_ICONS,
-    MANAGE_CHANNEL_ICONS,
-    ADMIN,
-    CREATE_POSTS,
-    MANAGE_POSTS,
-    START_GAME,
-    CREATE_EVENTS,
-    USE_SOUNDBOARD,
-    MANAGE_SOUNDBOARD,
-    MOVE_MEMBERS,
-];
+        /// Every permission string recognized by the server, and the catalog
+        /// each caller-supplied string is validated against — see
+        /// [`validate_permissions`].
+        pub const ALL_PERMISSIONS: &[&str] = &[$($value),*];
+    };
+}
+
+permission_catalog! {
+    SEND_MESSAGES => "send_messages",
+    READ_MESSAGES => "read_messages",
+    MANAGE_CHANNELS => "manage_channels",
+    MANAGE_MESSAGES => "manage_messages",
+    MANAGE_ROLES => "manage_roles",
+    KICK_MEMBERS => "kick_members",
+    BAN_MEMBERS => "ban_members",
+    MUTE_MEMBERS => "mute_members",
+    TIMEOUT_MEMBERS => "timeout_members",
+    MANAGE_GAMES => "manage_games",
+    MANAGE_HUB_ICONS => "manage_hub_icons",
+    MANAGE_CHANNEL_ICONS => "manage_channel_icons",
+    ADMIN => "admin",
+    CREATE_POSTS => "create_posts",
+    MANAGE_POSTS => "manage_posts",
+    START_GAME => "start_game",
+    CREATE_EVENTS => "create_events",
+    USE_SOUNDBOARD => "use_soundboard",
+    MANAGE_SOUNDBOARD => "manage_soundboard",
+    /// Move a voice participant into another channel (events.md §7.1).
+    /// Resolved channel-scoped against the *destination* channel via
+    /// `channel_permissions`.
+    MOVE_MEMBERS => "move_members",
+    /// Create and destroy voice zones (`ws/handlers/voice.rs`). A real gate
+    /// that was written as a bare string literal and left out of this list, so
+    /// the overwrite validator rejected it and no client could show it
+    /// (permissions.md §0). Catalogued here so it can be granted like any
+    /// other; permissions.md §3 folds it into `channels.manage` when the
+    /// catalogue is rebuilt, since a voice zone is channel configuration.
+    MANAGE_VOICE => "manage_voice",
+}
+
+/// Rejects any permission string the server does not recognize.
+///
+/// Every route that persists a caller-supplied permission goes through here:
+/// role create/update (`routes/roles.rs`) and channel overwrites
+/// (`routes/channel_permissions.rs`). Without it an arbitrary string lands in
+/// `role_permissions` or `channel_permission_overwrites` and sits there
+/// forever, granting nothing and matching no check — a typo that looks like a
+/// permission in the roles UI.
+///
+/// Call it before writing anything: `update_role` applies name and priority in
+/// separate statements, so validating late would leave a half-applied update
+/// behind a 400.
+pub fn validate_permissions<'a>(
+    permissions: impl IntoIterator<Item = &'a str>,
+) -> Result<(), (StatusCode, String)> {
+    for p in permissions {
+        if !ALL_PERMISSIONS.contains(&p) {
+            return Err((StatusCode::BAD_REQUEST, format!("unknown permission: {p}")));
+        }
+    }
+    Ok(())
+}
 
 #[derive(sqlx::FromRow)]
 pub struct RoleRow {
@@ -348,4 +372,63 @@ pub async fn channels_with_permission(
             effective.contains(ADMIN) || effective.contains(permission)
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_has_no_duplicates() {
+        let mut seen = HashSet::new();
+        for p in ALL_PERMISSIONS {
+            assert!(seen.insert(*p), "duplicate permission in catalog: {p}");
+        }
+    }
+
+    #[test]
+    fn every_constant_is_in_the_catalog() {
+        // The macro guarantees this structurally; the test documents the
+        // guarantee and fails loudly if the catalog ever stops being generated.
+        for p in [MANAGE_ROLES, ADMIN, MOVE_MEMBERS, SEND_MESSAGES] {
+            assert!(ALL_PERMISSIONS.contains(&p), "{p} missing from catalog");
+        }
+    }
+
+    #[test]
+    fn every_enforced_permission_is_grantable() {
+        // A permission the server checks but does not list is a gate nobody
+        // can open: no client can offer it, and since validate_permissions
+        // landed, the API refuses it outright. manage_voice was exactly that
+        // (permissions.md §0) until it was catalogued here. Both call sites
+        // now use the constant, so a new gate cannot reintroduce the split
+        // without adding its own entry above.
+        assert!(ALL_PERMISSIONS.contains(&MANAGE_VOICE));
+        assert!(validate_permissions([MANAGE_VOICE]).is_ok());
+    }
+
+    #[test]
+    fn known_permissions_are_accepted() {
+        assert!(validate_permissions([MANAGE_ROLES, SEND_MESSAGES]).is_ok());
+        assert!(validate_permissions([]).is_ok());
+    }
+
+    #[test]
+    fn unknown_permission_is_rejected_with_400() {
+        let err = validate_permissions([MANAGE_ROLES, "manage_rolez"]).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("manage_rolez"), "message was: {}", err.1);
+    }
+
+    #[test]
+    fn permission_strings_are_not_confused_by_case_or_whitespace() {
+        // Postgres stores whatever we bind, and `has()` compares exactly, so a
+        // string that only looks right grants nothing. Reject it at the door.
+        for bad in ["Admin", "admin ", " admin", "ADMIN"] {
+            assert!(
+                validate_permissions([bad]).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
+    }
 }

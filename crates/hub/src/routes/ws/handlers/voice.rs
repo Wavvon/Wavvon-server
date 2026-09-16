@@ -987,7 +987,7 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
     let can_create = {
         let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
         perms
-            .map(|p| p.has("manage_voice") || p.has("admin"))
+            .map(|p| p.has(crate::permissions::MANAGE_VOICE))
             .unwrap_or(false)
     };
     if !can_create {
@@ -1083,7 +1083,7 @@ pub(in crate::routes::ws) async fn handle_voice_zone_destroy(
     let can_destroy = can_destroy || {
         let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
         perms
-            .map(|p| p.has("manage_voice") || p.has("admin"))
+            .map(|p| p.has(crate::permissions::MANAGE_VOICE))
             .unwrap_or(false)
     };
     if !can_destroy {
