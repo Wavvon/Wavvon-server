@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN, ALL_PERMISSIONS, MANAGE_ROLES};
+use crate::permissions::{self, ADMIN, MANAGE_ROLES};
 use crate::state::AppState;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -218,11 +218,7 @@ pub async fn put_channel_permissions(
         ));
     }
 
-    for p in req.allow.iter().chain(req.deny.iter()) {
-        if !ALL_PERMISSIONS.contains(&p.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, format!("unknown permission: {p}")));
-        }
-    }
+    permissions::validate_permissions(req.allow.iter().chain(req.deny.iter()).map(String::as_str))?;
     for p in &req.allow {
         if req.deny.contains(p) {
             return Err((

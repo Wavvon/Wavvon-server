@@ -191,3 +191,72 @@ async fn cannot_remove_last_owner() {
         .await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn create_role_rejects_an_unknown_permission_string() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "name": "Typo",
+            "permissions": ["manage_channels", "manage_rolez"],
+            "priority": 50,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    assert!(resp.text().contains("manage_rolez"));
+
+    // Nothing was written: the role itself must not exist either, or a
+    // rejected request would still leave a half-built role behind.
+    let list = server.get("/roles").authorization_bearer(&token).await;
+    let roles: Vec<RoleResponse> = list.json();
+    assert!(
+        !roles.iter().any(|r| r.name == "Typo"),
+        "rejected create must not persist the role"
+    );
+}
+
+#[tokio::test]
+async fn update_role_rejects_an_unknown_permission_before_applying_anything() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    let created = server
+        .post("/roles")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "name": "Moderator",
+            "permissions": ["manage_messages"],
+            "priority": 50,
+        }))
+        .await;
+    created.assert_status(axum::http::StatusCode::CREATED);
+    let role: RoleResponse = created.json();
+
+    // Rename and re-permission in one call, with one bad string in the set.
+    let resp = server
+        .patch(&format!("/roles/{}", role.id))
+        .authorization_bearer(&token)
+        .json(&json!({
+            "name": "Renamed",
+            "permissions": ["manage_messages", "not_a_permission"],
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    // The rename lives in its own UPDATE statement ahead of the permission
+    // rewrite, so validating late would commit the new name behind a 400.
+    let list = server.get("/roles").authorization_bearer(&token).await;
+    let roles: Vec<RoleResponse> = list.json();
+    let after = roles
+        .iter()
+        .find(|r| r.id == role.id)
+        .expect("role still exists");
+    assert_eq!(after.name, "Moderator", "rejected update must not rename");
+    assert_eq!(after.permissions, vec!["manage_messages".to_string()]);
+}
