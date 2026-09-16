@@ -36,6 +36,9 @@ cargo test --workspace -- --test-threads=4   # bounded: the default saturates Po
                                              # max_connections and flakes with PoolTimedOut
 cargo test -p wavvon-hub                 # single crate
 cargo build --release
+
+node e2e/run.mjs                         # end-to-end against the real binary
+node e2e/run.mjs permissions             # one stage; see e2e/README.md
 ```
 
 Hub CLI (binary at `target/release/wavvon-hub`) — `--help` is the source of
@@ -58,6 +61,26 @@ The farm has an equivalent `migrate` subcommand. All binaries are configured
 via `WAVVON_*` environment variables or a config file — see the
 [hub operator guide](https://github.com/Wavvon/Wavvon-docs/blob/main/docs/hub-operator-guide.md).
 To get a hub running locally, use the **`run-hub`** skill in `.claude/skills/`.
+
+---
+
+## End-to-end, and why `cargo test` is not enough
+
+`crates/hub/tests` builds its own `AppState` and starts no process, so it
+cannot see migrations, bootstrap, config or the CLI. **`e2e/` runs the real
+binary**, and every bug of that shape has been caught there — the first being
+an invite gate that left two default hubs unable to federate at all, invisible
+to the integration suite because it never wrote the setting.
+
+Reach for it whenever a change touches admission defaults, the permission
+model, federation, the bundled database, or anything an operator meets before
+a route does. `e2e/README.md` has the stages and the two rules that keep them
+honest: drive routes rather than the database, and run a new stage against the
+**unfixed** build before trusting it green.
+
+Flows needing a second checkout — the discovery site, a real browser from the
+clients repo — are not here; they live in the monorepo that holds both.
+Several hubs is not one of those: two hubs are two processes of one binary.
 
 ---
 
