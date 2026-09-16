@@ -339,7 +339,7 @@ async fn join_with_invite_priority_guard_blocks_grant_above_inviters_current_pri
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["channels.manage"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["invites.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -627,7 +627,7 @@ async fn non_admin_member_with_invite_permission_can_grant_role_below_own_priori
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["channels.manage"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["invites.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -686,7 +686,7 @@ async fn non_admin_member_with_invite_permission_cannot_grant_role_at_or_above_o
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["channels.manage"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["invites.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -1157,7 +1157,9 @@ async fn invite_cannot_grant_a_role_carrying_a_permission_the_creator_lacks() {
         .authorization_bearer(&owner_token)
         .json(&json!({
             "name": "Delegate",
-            "permissions": ["roles.manage", "channels.manage"],
+            // Minting a role-granting invite needs invites.manage; roles.manage
+            // is what the ceiling then bounds.
+            "permissions": ["roles.manage", "invites.manage"],
             "priority": 50,
         }))
         .await;

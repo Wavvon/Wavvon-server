@@ -702,6 +702,72 @@ mod tests {
         assert!(validate_channel_overwrite(["read_messages"]).is_err());
     }
 
+    /// Every catalogue entry is consulted by something.
+    ///
+    /// A permission nothing reads is a checkbox that grants nothing — the
+    /// exact defect §0 catalogues four of, and the one this rebuild exists to
+    /// end. It came back twice during the rebuild itself, both times because a
+    /// bulk rename flattened a mapping that was one-to-two:
+    /// `manage_channels` became `channels.manage` everywhere, including on
+    /// the invite routes where the catalogue says `invites.manage`; and
+    /// `manage_roles` became `roles.manage` everywhere, including on the
+    /// channel-overwrite routes where it should be `channels.permissions`.
+    ///
+    /// Scanning the source at test time rather than trusting review, because
+    /// review is what missed it.
+    #[test]
+    fn no_permission_is_a_checkbox_that_grants_nothing() {
+        use std::path::Path;
+
+        // Entries with no reader *yet*, each with the reason it is early.
+        // Empty is the healthy state; a name here is a promise, not a parking
+        // space.
+        const NOT_WIRED_YET: &[(&str, &str)] = &[];
+
+        fn read_all(dir: &Path, out: &mut String) {
+            for entry in std::fs::read_dir(dir).expect("read_dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    read_all(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && path.file_name().is_some_and(|f| f != "permissions.rs")
+                {
+                    out.push_str(&std::fs::read_to_string(&path).expect("read"));
+                    out.push('\n');
+                }
+            }
+        }
+
+        let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut blob = String::new();
+        read_all(&src_dir, &mut blob);
+
+        let mut orphans = Vec::new();
+        for p in CATALOGUE {
+            if NOT_WIRED_YET.iter().any(|(id, _)| *id == p.id) {
+                continue;
+            }
+            // Either the constant or the literal id — a few checks are written
+            // as strings for want of an import.
+            let quoted = format!("\"{}\"", p.id);
+            if !blob.contains(&quoted) && !blob.contains(&const_name(p.id)) {
+                orphans.push(p.id);
+            }
+        }
+
+        assert!(
+            orphans.is_empty(),
+            "these permissions are in the catalogue and read by nothing: {orphans:?}. \
+             Either wire them where the catalogue says they belong, or add them to \
+             NOT_WIRED_YET with the reason.",
+        );
+    }
+
+    /// `messages.read` -> `MESSAGES_READ`, the macro's own convention.
+    fn const_name(id: &str) -> String {
+        id.to_uppercase().replace('.', "_")
+    }
+
     #[test]
     fn known_permissions_are_accepted() {
         assert!(validate_permissions([ROLES_MANAGE, MESSAGES_SEND]).is_ok());

@@ -7,7 +7,7 @@ use axum::Json;
 use rand::RngCore;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, CHANNELS_MANAGE};
+use crate::permissions::{self, INVITES_MANAGE};
 use crate::routes::invite_models::{CreateInviteRequest, InviteResponse};
 use crate::routes::paging::PageQuery;
 use crate::state::AppState;
@@ -60,7 +60,7 @@ pub async fn create_invite(
     Json(req): Json<CreateInviteRequest>,
 ) -> Result<(StatusCode, Json<InviteResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(CHANNELS_MANAGE)?;
+    perms.require(INVITES_MANAGE)?;
 
     let now = crate::auth::handlers::unix_timestamp();
     let mut max_uses = req.max_uses;
@@ -150,7 +150,7 @@ pub async fn list_invites(
     Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<InviteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(CHANNELS_MANAGE)?;
+    perms.require(INVITES_MANAGE)?;
 
     let rows = sqlx::query_as::<_, InviteRow>(
         "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites
@@ -186,7 +186,7 @@ pub async fn revoke_invite(
     Path(code): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(CHANNELS_MANAGE)?;
+    perms.require(INVITES_MANAGE)?;
 
     sqlx::query("DELETE FROM invites WHERE code = $1")
         .bind(&code)
