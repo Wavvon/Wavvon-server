@@ -115,16 +115,20 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         return DispatchResult::Continue;
     }
 
-    // Channel visibility gate (§3.4/§3.5): a channel the caller can't
-    // effectively READ_MESSAGES isn't visible to them at all, so voice join
-    // is rejected the same way message history and the channel list are --
-    // UNLESS a voice-only presence grant (events.md §7.4) covers this exact
-    // (pubkey, channel) pair, in which case the organizer's consented move
-    // is the authorization and the join proceeds without READ_MESSAGES.
-    // This is the single enforcement point that bypasses read-gating; the
-    // grant is never consulted anywhere else.
+    // Voice admission gate (permissions.md §3, Voice). This used to ask for
+    // READ_MESSAGES, which made voice admission *be* read admission: the only
+    // way to keep someone out of a call was to hide the channel, and that took
+    // the text with it. VOICE_JOIN is the separate question, and it is
+    // independent in both directions -- a channel you may read but not join,
+    // and a lobby you may join but not read.
+    //
+    // The exception is unchanged in shape: a voice-only presence grant
+    // (events.md §7.4) covering this exact (pubkey, channel) pair means
+    // somebody with the authority to move people put this one here, and that
+    // move is the authorization. Still the single enforcement point that
+    // bypasses the gate; the grant is never consulted anywhere else.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
-        Ok(perms) if !perms.has(crate::permissions::READ_MESSAGES) => {
+        Ok(perms) if !perms.has(crate::permissions::VOICE_JOIN) => {
             let has_grant = state
                 .staging_voice_grants
                 .read()
@@ -882,32 +886,38 @@ pub(in crate::routes::ws) async fn handle_voice_move(
         }
     };
 
-    // Does the target already hold effective READ_MESSAGES on the
-    // destination?
-    let target_can_read = match crate::permissions::channel_permissions(
+    // Does the target already hold effective VOICE_JOIN on the destination?
+    // Not asked in order to refuse -- the mover holding `move_members` on the
+    // destination *is* the authorization (permissions.md §3, Voice). Asking
+    // the target's own admission defeats the feature: the case a move exists
+    // for is pulling in someone who does not hold the role yet.
+    let target_can_join = match crate::permissions::channel_permissions(
         &state.db,
         &target_pubkey,
         &target_channel_id,
     )
     .await
     {
-        Ok(perms) => perms.has(crate::permissions::READ_MESSAGES),
+        Ok(perms) => perms.has(crate::permissions::VOICE_JOIN),
         Err(_) => {
             return send_voice_move_error(ws_tx, "Unable to verify target's channel access.").await;
         }
     };
 
-    if !target_can_read {
-        if event_id.is_none() {
-            // No event context => Phase 1's rejection still applies: a
-            // generic mod-tool move must not reveal a hidden channel.
-            return send_voice_move_error(ws_tx, "Target cannot read the destination channel.")
-                .await;
-        }
-        // §7.4: the organizer's consented, event-scoped move is the
-        // authorization for voice-only presence. Insert the grant BEFORE
-        // the push below so the target's imminent join passes the
-        // voice-join read gate.
+    if !target_can_join {
+        // The voice-only presence grant **widens** here rather than shrinking
+        // (permissions.md §3, Voice). It used to be minted only on the event
+        // path, while a generic mod-tool move refused outright to avoid
+        // revealing a hidden channel. With voice admission its own question,
+        // that refusal was answering the wrong one: the target is not being
+        // shown the channel, they are being put in the call, and a grant
+        // carries exactly that and nothing else -- it is consulted at the
+        // voice-join gate and nowhere else, so no text follows it.
+        //
+        // So it is now the single mechanism for "I am here because someone
+        // with the authority put me here", minted on any move where the
+        // target lacks VOICE_JOIN. Inserted BEFORE the push below so the
+        // target's imminent join passes the gate.
         state
             .staging_voice_grants
             .write()

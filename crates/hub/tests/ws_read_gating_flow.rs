@@ -364,3 +364,171 @@ async fn ping_nonce_is_opaque_to_the_hub() {
         .expect("a pong should arrive");
     assert_eq!(frame["nonce"], -7);
 }
+
+/// Lists the channels the token's owner can see.
+async fn list_channels(base: &str, token: &str) -> Vec<ChannelResponse> {
+    reqwest::Client::new()
+        .get(format!("{base}/channels"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// The split that must not be got wrong (permissions.md §3, Voice).
+///
+/// A channel denied `read_messages` but still carrying `voice.join` is a
+/// channel you may talk in and not read. It has to reach the channel list or
+/// the permission is inert and nothing renders — and it must never be
+/// auto-subscribed, or the messages ride the socket to someone with no right
+/// to them.
+///
+/// Both halves are asserted here on purpose: widening the WS side to match
+/// the list side is the plausible mistake, and it is silent, because nobody
+/// inspects the events they should not have received.
+#[tokio::test]
+async fn a_talk_only_channel_is_listed_but_never_auto_subscribed() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let member = Identity::generate();
+    let member_token = authenticate_http(&base, &member).await;
+
+    let channel = create_channel(&base, &owner_token, "talk-only").await;
+    deny_everyone(&base, &owner_token, &channel.id, "read_messages").await;
+
+    // Listed: `voice.join` is seeded on builtin-everyone and nothing denied
+    // it here, so the channel is still reachable for joining.
+    let listed = list_channels(&base, &member_token).await;
+    assert!(
+        listed.iter().any(|c| c.id == channel.id),
+        "a channel the member may join must still be listed"
+    );
+
+    // Not subscribed: the member's socket must stay silent when a message
+    // lands in it.
+    let (_tx, mut rx) = connect_ws(&base, &member_token).await;
+    send_message(&base, &owner_token, &channel.id, "members only").await;
+
+    let leaked = next_meaningful_frame(&mut rx, std::time::Duration::from_millis(600)).await;
+    assert!(
+        leaked.is_none(),
+        "talk-only channel leaked a frame over the socket: {leaked:?}"
+    );
+}
+
+/// The opposite direction of the same independence: deny `voice.join` and
+/// leave `read_messages`, and the channel is a normal readable channel that
+/// happens to be closed for voice. It must still be listed — on the read
+/// condition this time — and its messages must still arrive.
+#[tokio::test]
+async fn denying_voice_join_leaves_the_text_channel_working() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let member = Identity::generate();
+    let member_token = authenticate_http(&base, &member).await;
+
+    let channel = create_channel(&base, &owner_token, "no-voice").await;
+    deny_everyone(&base, &owner_token, &channel.id, "voice.join").await;
+
+    let listed = list_channels(&base, &member_token).await;
+    assert!(
+        listed.iter().any(|c| c.id == channel.id),
+        "denying voice must not hide the text"
+    );
+
+    let (_tx, mut rx) = connect_ws(&base, &member_token).await;
+    send_message(&base, &owner_token, &channel.id, "still readable").await;
+
+    let frame = next_meaningful_frame(&mut rx, std::time::Duration::from_secs(15))
+        .await
+        .expect("a readable channel must still deliver its messages");
+    assert_eq!(frame["type"], "message");
+    assert_eq!(frame["channel_id"], channel.id);
+}
+
+/// Reads frames until one of `want` arrives, or the timeout elapses. Returns
+/// the frame's type so a caller can assert which of two outcomes happened.
+async fn next_frame_of(
+    rx: &mut WsStream,
+    want: &[&str],
+    timeout: std::time::Duration,
+) -> Option<Value> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        let frame = next_meaningful_frame(rx, remaining).await?;
+        if want.contains(&frame["type"].as_str().unwrap_or_default()) {
+            return Some(frame);
+        }
+    }
+}
+
+/// The gate itself. Voice admission used to *be* read admission, so the only
+/// way to keep someone out of a call was to hide the channel — which took the
+/// text with it. These are the two cases that were not expressible before.
+#[tokio::test]
+async fn voice_admission_is_independent_of_read_in_both_directions() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    // A lobby anyone may talk in that carries no readable text.
+    let lobby = create_channel(&base, &owner_token, "lobby").await;
+    deny_everyone(&base, &owner_token, &lobby.id, "read_messages").await;
+
+    let talker = Identity::generate();
+    let talker_token = authenticate_http(&base, &talker).await;
+    let (mut tx, mut rx) = connect_ws(&base, &talker_token).await;
+    send_text(
+        &mut tx,
+        json!({ "type": "voice_join", "channel_id": lobby.id, "udp_port": 0 }),
+    )
+    .await;
+    let frame = next_frame_of(
+        &mut rx,
+        &["voice_joined", "error"],
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .expect("the hub answered neither way");
+    assert_eq!(
+        frame["type"], "voice_joined",
+        "no read must not mean no voice: {frame:?}"
+    );
+
+    // A channel everyone reads and posts in, where only a role may join.
+    let raid = create_channel(&base, &owner_token, "raid").await;
+    deny_everyone(&base, &owner_token, &raid.id, "voice.join").await;
+
+    let reader = Identity::generate();
+    let reader_token = authenticate_http(&base, &reader).await;
+    let (mut tx2, mut rx2) = connect_ws(&base, &reader_token).await;
+    send_text(
+        &mut tx2,
+        json!({ "type": "voice_join", "channel_id": raid.id, "udp_port": 0 }),
+    )
+    .await;
+    let frame = next_frame_of(
+        &mut rx2,
+        &["voice_joined", "error"],
+        std::time::Duration::from_secs(15),
+    )
+    .await
+    .expect("the hub answered neither way");
+    assert_eq!(
+        frame["type"], "error",
+        "denying voice.join must keep them out of the call: {frame:?}"
+    );
+    assert_eq!(frame["context"], "voice_join");
+}

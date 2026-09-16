@@ -138,6 +138,13 @@ pub(super) async fn handle_socket(
     // Read-gating (§3.5): a channel the caller can't effectively read is
     // never auto-subscribed, so no chat/typing/etc. events for it are ever
     // delivered over this connection.
+    //
+    // READ_MESSAGES **only**, deliberately. The channel list in
+    // `routes/channels.rs` asks read OR VOICE_JOIN, because a channel you may
+    // only talk in still has to render; this one must not widen to match it,
+    // or that channel's messages, edits, typing and reactions arrive over the
+    // socket for someone with no right to read them (permissions.md §3, "the
+    // split that must not be got wrong").
     let readable_channels: std::collections::HashSet<String> =
         crate::permissions::channels_with_permission(
             &state.db,

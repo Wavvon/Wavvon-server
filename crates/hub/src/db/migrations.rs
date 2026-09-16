@@ -438,6 +438,12 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         ("builtin-everyone", "create_posts"),
         ("builtin-everyone", "start_game"),
         ("builtin-everyone", "create_events"),
+        // The whole "nothing changes until someone denies it" property of an
+        // independent voice gate rests on this one row (permissions.md §6).
+        // Without it, every existing hub loses voice for everybody on the
+        // first boot after the upgrade. Reached by existing installs because
+        // this block re-runs on every migrate under ON CONFLICT DO NOTHING.
+        ("builtin-everyone", "voice.join"),
         ("builtin-owner", "admin"),
         ("builtin-owner", "manage_posts"),
         ("builtin-owner", "manage_games"),
@@ -475,6 +481,35 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_cpo_channel
          ON channel_permission_overwrites(channel_id)",
+    )
+    .execute(pool)
+    .await?;
+
+    // Backfill: wherever a channel denies `read_messages`, deny `voice.join`
+    // the same way.
+    //
+    // Before voice admission was its own question, hiding a channel *was*
+    // closing it to voice — one deny did both. Splitting them without this
+    // would quietly reopen every already-hidden channel on the first boot
+    // after the upgrade: the deny row survives, `voice.join` is newly seeded
+    // as allowed hub-wide, and the channel comes back listed and joinable.
+    // permissions.md §6 argues the split is safe because the rebuild drops and
+    // reseeds this table, but the rebuild is a later change than this one, so
+    // that argument does not cover the gap between them.
+    //
+    // ON CONFLICT DO NOTHING makes re-running harmless in the case that
+    // matters (an operator who has since set `voice.join` to allow keeps
+    // their allow). It does not cover an operator who sets it back to
+    // *inherit* on a channel that still denies read — the row is gone, so a
+    // later migrate re-adds the deny. Narrow, and it needs a schema-version
+    // marker to fix properly (the `db/version.rs` shape this file's header
+    // already names); not worth one before 1.0.
+    sqlx::query(
+        "INSERT INTO channel_permission_overwrites (channel_id, role_id, permission, allow, created_at)
+         SELECT channel_id, role_id, 'voice.join', FALSE, created_at
+         FROM channel_permission_overwrites
+         WHERE permission = 'read_messages' AND allow = FALSE
+         ON CONFLICT DO NOTHING",
     )
     .execute(pool)
     .await?;

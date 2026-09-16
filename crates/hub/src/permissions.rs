@@ -44,6 +44,19 @@ permission_catalog! {
     /// Resolved channel-scoped against the *destination* channel via
     /// `channel_permissions`.
     MOVE_MEMBERS => "move_members",
+    /// Enter voice on a channel, and start a screen share there. The one
+    /// catalogue entry with **no predecessor** (permissions.md §3, Voice):
+    /// voice is not a kind of channel — every ordinary channel can be talked
+    /// in — so "who may speak here" had never been expressible except through
+    /// "who may read here".
+    ///
+    /// Deliberately **independent of `read_messages`**, and both directions
+    /// are meant to be used: a channel everyone reads but only one role may
+    /// join, and a lobby anyone may talk in that carries no readable text.
+    ///
+    /// Dotted, unlike its snake_case neighbours, because it is the first entry
+    /// written in the naming scheme of §1.4 that the rest migrates to.
+    VOICE_JOIN => "voice.join",
     /// Create and destroy voice zones (`ws/handlers/voice.rs`). A real gate
     /// that was written as a bare string literal and left out of this list, so
     /// the overwrite validator rejected it and no client could show it

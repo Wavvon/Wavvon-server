@@ -632,20 +632,33 @@ pub async fn list_channels(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Read-gating (§3.5): drop any channel where the caller lacks effective
-    // READ_MESSAGES once the ancestor-chain overwrite cascade is applied.
-    // Hidden channels never reach the client -- no client-side
-    // secret-keeping needed.
+    // Visibility gating (§3.5): drop any channel the caller can neither read
+    // nor join, once the ancestor-chain overwrite cascade is applied. Hidden
+    // channels never reach the client -- no client-side secret-keeping
+    // needed.
+    //
+    // **read OR voice-join, and only here** (permissions.md §3, "the split
+    // that must not be got wrong"). A channel you may only talk in has to
+    // reach the client or the permission is inert and nothing renders. The
+    // WS auto-subscribe in `ws/connection.rs` asks the opposite question --
+    // read *only* -- because a channel arriving on the voice-join condition
+    // alone must never be subscribed, or its messages, edits, typing and
+    // reactions ride the socket into a client that may not read them. Those
+    // two call sites had one meaning before this; conflating them again is a
+    // data leak rather than a UI bug.
     let readable = permissions::channels_with_permission(
         &state.db,
         &user.public_key,
         permissions::READ_MESSAGES,
     )
     .await?;
+    let joinable =
+        permissions::channels_with_permission(&state.db, &user.public_key, permissions::VOICE_JOIN)
+            .await?;
 
     let channels = rows
         .into_iter()
-        .filter(|r| readable.contains(&r.id))
+        .filter(|r| readable.contains(&r.id) || joinable.contains(&r.id))
         .map(|r| ChannelResponse {
             id: r.id,
             name: r.name,

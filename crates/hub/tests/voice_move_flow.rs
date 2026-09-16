@@ -538,20 +538,29 @@ async fn rejects_target_not_in_voice() {
 /// presence grant only kicks in with an event context; see
 /// `voice_only_grant_allows_join_but_not_message_history` below.
 #[tokio::test]
-async fn rejects_target_without_read_access_to_destination() {
+async fn moves_a_target_who_cannot_join_the_destination_and_reveals_no_text() {
+    // This used to assert a refusal, and the refusal is gone on purpose
+    // (permissions.md §3, Voice). The mover holding `move_members` on the
+    // destination *is* the authorization; asking the target's own admission
+    // defeats the feature, because pulling in someone who does not hold the
+    // role yet is the case a move exists for.
+    //
+    // What must still hold is the reason the old refusal existed: the move
+    // puts the target in the call and reveals no text.
     let mut fx = build_fixture(true).await;
 
-    // Deny read_messages for @everyone on the destination — the target
-    // holds only builtin-everyone, so this removes their read access there.
+    // Closed both ways: no reading, and no joining under their own power.
     deny_overwrite(
         &fx.base,
         &fx.owner_token,
         &fx.dest.id,
         "builtin-everyone",
-        &["read_messages"],
+        &["read_messages", "voice.join"],
     )
     .await;
 
+    // No event context — a plain mod-tool move, which is exactly the case
+    // that used to be rejected outright.
     send_ws(
         &mut fx.mover_ws.0,
         json!({
@@ -562,10 +571,34 @@ async fn rejects_target_without_read_access_to_destination() {
     )
     .await;
 
-    let err = wait_for(&mut fx.mover_ws.1, "error").await;
-    assert_eq!(err["context"], "voice_move");
+    let push = wait_for(&mut fx.target_ws.1, "voice_move").await;
+    assert_eq!(push["target_channel_id"], fx.dest.id);
 
-    assert_not_received(&mut fx.target_ws.1, "voice_move").await;
+    // The voice-only presence grant carries them through the join gate.
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_leave", "channel_id": fx.source.id }),
+    )
+    .await;
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_join", "channel_id": fx.dest.id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for(&mut fx.target_ws.1, "voice_joined").await;
+
+    // And carries nothing else: the text stays closed.
+    let resp = reqwest::Client::new()
+        .get(format!("{}/channels/{}/messages", fx.base, fx.dest.id))
+        .bearer_auth(&fx.target_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "a moved participant must not gain message history"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -750,14 +783,16 @@ async fn queued_assignment_applies_on_join_auto_false_and_persists_across_rejoin
 async fn voice_only_grant_allows_join_but_not_message_history_and_evaporates_on_leave() {
     let mut fx = build_fixture(true).await;
 
-    // Deny read_messages for @everyone on the destination -- the target
-    // holds only builtin-everyone, so this removes their read access there.
+    // Deny both for @everyone on the destination -- the target holds only
+    // builtin-everyone. `voice.join` is what closes voice now that admission
+    // is its own question; `read_messages` is what keeps the history shut,
+    // which is the half this test is really about.
     deny_overwrite(
         &fx.base,
         &fx.owner_token,
         &fx.dest.id,
         "builtin-everyone",
-        &["read_messages"],
+        &["read_messages", "voice.join"],
     )
     .await;
 

@@ -77,6 +77,15 @@ pub const CAPABILITIES: &[&str] = &[
     // "this hub does not report it" from "loss is zero" would show a
     // reassuring 0.0% against every older hub.
     "voice.loss",
+    // Voice admission is its own permission, `voice.join`, independent of
+    // `read_messages` in both directions (permissions.md §3, Voice). Two
+    // things a client may only do once it sees this string: offer `voice.join`
+    // as a channel overwrite — an older hub's validator rejects the id as
+    // unknown — and stop treating a read deny as though it also closed voice,
+    // because on this hub it does not. Named for the shape the alliance work
+    // uses (`alliance.permissions`), not for the permission id, which is a
+    // different namespace that happens to read the same.
+    "voice.permissions",
     // Voice over WebTransport/QUIC with E2E sender keys (voice-transport-v2).
     // The raw-UDP and `/voice/ws` relays it replaced are gone, so a client
     // that does not see this string has no voice path to this hub at all.
