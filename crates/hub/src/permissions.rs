@@ -195,6 +195,32 @@ pub fn validate_permissions<'a>(
     Ok(())
 }
 
+/// As [`validate_permissions`], plus the scope: a hub-only permission set as a
+/// channel overwrite is refused rather than stored.
+///
+/// The catalogue advertises each id's scope and the overwrite UI filters on it,
+/// but a client is not a guard. Without this the hub would accept a row saying
+/// "manage roles, but only in #general" — which grants nothing, matches no
+/// check, and looks in the UI exactly like a grant that worked. That is the
+/// same shape as the unvalidated strings §0 describes, one level up.
+pub fn validate_channel_overwrite<'a>(
+    permissions: impl IntoIterator<Item = &'a str>,
+) -> Result<(), (StatusCode, String)> {
+    for p in permissions {
+        match scope_of(p) {
+            None => return Err((StatusCode::BAD_REQUEST, format!("unknown permission: {p}"))),
+            Some(s) if !s.allows_channel() => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("{p} is hub-wide only and cannot be a channel overwrite"),
+                ))
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
 #[derive(sqlx::FromRow)]
 pub struct RoleRow {
     pub id: String,
@@ -662,6 +688,18 @@ mod tests {
         for dead in ["manage_bots", "use_video", "manage_games", "start_game"] {
             assert_eq!(scope_of(dead), None, "{dead} should be gone");
         }
+    }
+
+    #[test]
+    fn a_hub_only_permission_cannot_be_a_channel_overwrite() {
+        // The scope the catalogue advertises has to be the scope the hub
+        // enforces, or they are two lists again.
+        assert!(validate_channel_overwrite([MESSAGES_READ, VOICE_JOIN]).is_ok());
+        let err = validate_channel_overwrite([ROLES_MANAGE]).unwrap_err();
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("hub-wide only"), "message was: {}", err.1);
+        // Still refuses an unknown id, same as the plain validator.
+        assert!(validate_channel_overwrite(["read_messages"]).is_err());
     }
 
     #[test]

@@ -220,7 +220,9 @@ pub async fn put_channel_permissions(
         ));
     }
 
-    permissions::validate_permissions(req.allow.iter().chain(req.deny.iter()).map(String::as_str))?;
+    permissions::validate_channel_overwrite(
+        req.allow.iter().chain(req.deny.iter()).map(String::as_str),
+    )?;
     for p in &req.allow {
         if req.deny.contains(p) {
             return Err((
