@@ -6,7 +6,8 @@ use axum::Json;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{
-    self, MODERATION_BAN_PERMANENT, MODERATION_KICK, MODERATION_MUTE, MODERATION_TIMEOUT,
+    self, MODERATION_BAN_PERMANENT, MODERATION_BAN_TEMPORARY, MODERATION_KICK, MODERATION_MUTE,
+    MODERATION_TIMEOUT,
 };
 use crate::routes::moderation_models::*;
 use crate::routes::paging::PageQuery;
@@ -48,23 +49,38 @@ pub async fn ban_user(
     user: AuthUser,
     Json(req): Json<BanRequest>,
 ) -> Result<(StatusCode, Json<BanResponse>), (StatusCode, String)> {
-    require_can_moderate(
-        &state,
-        &user.public_key,
-        &req.target_public_key,
-        MODERATION_BAN_PERMANENT,
-    )
-    .await?;
+    // Which permission this needs is decided by the request, not the route:
+    // the split is by irreversibility, and a caller who may cool someone off
+    // for an hour is not thereby allowed to end their membership for good.
+    let needed = match req.duration_seconds {
+        Some(_) => MODERATION_BAN_TEMPORARY,
+        None => MODERATION_BAN_PERMANENT,
+    };
+    require_can_moderate(&state, &user.public_key, &req.target_public_key, needed).await?;
 
     let now = crate::auth::handlers::unix_timestamp();
+    let expires_at = match req.duration_seconds {
+        // A zero-length ban is a request the caller did not mean: it would
+        // read as permanent everywhere downstream, which is the opposite of
+        // what they asked for.
+        Some(0) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "duration_seconds must be greater than zero".to_string(),
+            ))
+        }
+        Some(secs) => Some(now + secs as i64),
+        None => None,
+    };
 
     sqlx::query(
-        "INSERT INTO bans (target_public_key, banned_by, reason, created_at) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
+        "INSERT INTO bans (target_public_key, banned_by, reason, expires_at, created_at) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
     .bind(&user.public_key)
     .bind(&req.reason)
+    .bind(expires_at)
     .bind(now)
     .execute(&state.db)
     .await
@@ -94,7 +110,7 @@ pub async fn ban_user(
                 Some(&actor),
                 Some(&target),
                 None,
-                serde_json::json!({ "reason": reason }),
+                serde_json::json!({ "reason": reason, "expires_at": expires_at }),
             )
             .await;
         });
@@ -106,6 +122,7 @@ pub async fn ban_user(
             target_public_key: req.target_public_key,
             banned_by: user.public_key,
             reason: req.reason,
+            expires_at,
             created_at: now,
         }),
     ))
@@ -137,7 +154,7 @@ pub async fn list_bans(
     perms.require(MODERATION_BAN_PERMANENT)?;
 
     let rows = sqlx::query_as::<_, BanRow>(
-        "SELECT target_public_key, banned_by, reason, created_at FROM bans
+        "SELECT target_public_key, banned_by, reason, expires_at, created_at FROM bans
          WHERE ($1::text IS NULL OR (created_at, target_public_key) <
                 ((SELECT created_at FROM bans WHERE target_public_key = $1), $1))
          ORDER BY created_at DESC, target_public_key DESC
@@ -155,6 +172,7 @@ pub async fn list_bans(
                 target_public_key: r.target_public_key,
                 banned_by: r.banned_by,
                 reason: r.reason,
+                expires_at: r.expires_at,
                 created_at: r.created_at,
             })
             .collect(),

@@ -1,12 +1,21 @@
 use axum::http::StatusCode;
 
 /// Returns true when the user has an active hub-level ban.
+///
+/// Permanent (`expires_at IS NULL`) or not yet expired — the same test
+/// `is_muted` already applies, and the reason a temporary ban needed no second
+/// table. A ban that has run out is left in place rather than deleted: it is
+/// the record of what was decided, and the retention worker owns removal.
 pub async fn is_banned(db: &sqlx::PgPool, public_key: &str) -> Result<bool, (StatusCode, String)> {
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM bans WHERE target_public_key = $1")
-        .bind(public_key)
-        .fetch_one(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let now = crate::auth::handlers::unix_timestamp();
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM bans WHERE target_public_key = $1 AND (expires_at IS NULL OR expires_at > $2)",
+    )
+    .bind(public_key)
+    .bind(now)
+    .fetch_one(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(count > 0)
 }
@@ -185,8 +194,14 @@ pub async fn get_federation_banlist(
         .as_secs();
 
     let bans: Vec<(String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT target_public_key, reason, created_at FROM bans ORDER BY created_at DESC LIMIT 1000",
+        // A subscriber imports a snapshot, so exporting an expired ban would
+        // hand another hub a decision this one has already stopped enforcing —
+        // and nothing would take it back.
+        "SELECT target_public_key, reason, created_at FROM bans
+         WHERE expires_at IS NULL OR expires_at > $1
+         ORDER BY created_at DESC LIMIT 1000",
     )
+    .bind(now as i64)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();

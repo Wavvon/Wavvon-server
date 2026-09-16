@@ -482,10 +482,12 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 "SELECT
                      u.approval_status,
                      (SELECT COUNT(*) FROM user_roles      WHERE user_public_key  = $1) AS role_count,
-                     (SELECT COUNT(*) FROM bans            WHERE target_public_key = $1) AS ban_count
+                     (SELECT COUNT(*) FROM bans            WHERE target_public_key = $1
+                          AND (expires_at IS NULL OR expires_at > $2)) AS ban_count
                  FROM users u WHERE u.public_key = $1",
             )
             .bind(&public_key)
+            .bind(now)
             .fetch_one(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
