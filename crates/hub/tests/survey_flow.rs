@@ -365,7 +365,7 @@ async fn survey_role_mapping_crud() {
     let owner = Identity::generate();
     let owner_token = common::authenticate(&server, &owner).await;
 
-    let role = create_role(&server, &owner_token, "Gamer", &["send_messages"]).await;
+    let role = create_role(&server, &owner_token, "Gamer", &["messages.send"]).await;
 
     let survey_id = "survey-mapping-crud";
     let survey = json!({
@@ -447,7 +447,7 @@ async fn survey_completion_auto_assigns_mapped_role() {
     let owner = Identity::generate();
     let owner_token = common::authenticate(&server, &owner).await;
 
-    let role = create_role(&server, &owner_token, "PC Player", &["send_messages"]).await;
+    let role = create_role(&server, &owner_token, "PC Player", &["messages.send"]).await;
 
     let survey_id = "survey-auto-assign";
     let survey = json!({
@@ -501,12 +501,15 @@ async fn survey_completion_auto_assigns_mapped_role() {
 }
 
 #[tokio::test]
-async fn survey_mapping_to_admin_permission_role_rejected() {
+async fn survey_mapping_cannot_hand_out_ownership() {
     let server = common::setup().await;
     let owner = Identity::generate();
     let owner_token = common::authenticate(&server, &owner).await;
 
-    let admin_role = create_role(&server, &owner_token, "Shadow Admin", &["admin"]).await;
+    // A survey is self-service: whoever answers it grants themselves the
+    // mapped roles with nobody in the loop, so it is a role-grant path and
+    // takes the same ceiling as the other four (permissions.md §1.6). Even the
+    // owner cannot map one to ownership itself.
 
     let survey = json!({
         "id": "survey-admin-mapping",
@@ -519,7 +522,7 @@ async fn survey_mapping_to_admin_permission_role_rejected() {
                 "required": true,
                 "display_order": 1,
                 "choices": [
-                    { "id": "c1", "label": "PC", "display_order": 1, "role_ids": [admin_role.id] },
+                    { "id": "c1", "label": "PC", "display_order": 1, "role_ids": ["builtin-owner"] },
                 ]
             }
         ]
@@ -587,7 +590,7 @@ async fn survey_free_text_path_does_not_auto_assign_roles() {
     let owner = Identity::generate();
     let owner_token = common::authenticate(&server, &owner).await;
 
-    let role = create_role(&server, &owner_token, "PC Player", &["send_messages"]).await;
+    let role = create_role(&server, &owner_token, "PC Player", &["messages.send"]).await;
 
     let survey_id = "survey-mixed-text";
     let survey = json!({

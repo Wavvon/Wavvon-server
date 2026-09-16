@@ -7,7 +7,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, HUB_ADMISSION, HUB_SETTINGS, MEMBERS_READ, MODERATION_SETTINGS};
 use crate::routes::paging::PageQuery;
 use crate::routes::role_models::RoleResponse;
 use crate::state::AppState;
@@ -20,7 +20,7 @@ pub async fn update_hub(
     Json(req): Json<UpdateHubRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     if let Some(name) = req.name.as_deref() {
         let trimmed = name.trim();
@@ -96,7 +96,7 @@ pub async fn update_hub(
                     "default_invite_role_id does not reference an existing role".to_string(),
                 ));
             }
-            if crate::routes::invites::role_grants_admin(&state.db, role_id).await? {
+            if crate::routes::invites::role_is_a_takeover_token(&state.db, role_id).await? {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "default_invite_role_id cannot carry the admin permission — a default that \
@@ -240,7 +240,7 @@ pub async fn list_pending(
     Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<PendingUser>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_ADMISSION)?;
 
     // Oldest first — the queue is worked from the front, so the cursor moves
     // forward rather than back like the newest-first lists.
@@ -276,7 +276,7 @@ pub async fn approve_user(
     axum::extract::Path(target_key): axum::extract::Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_ADMISSION)?;
 
     sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
         .bind(&target_key)
@@ -293,7 +293,7 @@ pub async fn get_pow_settings(
     user: AuthUser,
 ) -> Result<Json<PowSettingsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     let min_pow_level: u8 = read_setting(&state.db, "min_pow_level")
         .await
@@ -310,7 +310,7 @@ pub async fn patch_pow_settings(
     Json(req): Json<PowSettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     upsert_setting(&state.db, "min_pow_level", &req.min_pow_level.to_string()).await?;
     Ok(StatusCode::OK)
@@ -332,7 +332,7 @@ pub async fn get_channel_depth(
     user: AuthUser,
 ) -> Result<Json<ChannelDepthResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     let max_channel_depth: u32 = read_setting(&state.db, "max_channel_depth")
         .await
@@ -349,7 +349,7 @@ pub async fn patch_channel_depth(
     Json(req): Json<ChannelDepthRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     upsert_setting(
         &state.db,
@@ -376,7 +376,7 @@ pub async fn get_hub_settings(
     user: AuthUser,
 ) -> Result<Json<HubSettings>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     let require_approval: bool = read_setting(&state.db, "require_approval")
         .await
@@ -634,7 +634,7 @@ pub async fn get_moderation_settings(
     user: AuthUser,
 ) -> Result<Json<ModerationSettingsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MODERATION_SETTINGS)?;
 
     let webhook_url = read_setting(&state.db, "moderation_webhook_url").await;
     let webhook_secret_set = read_setting(&state.db, "moderation_webhook_secret")
@@ -678,7 +678,7 @@ pub async fn patch_moderation_settings(
     Json(req): Json<ModerationSettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MODERATION_SETTINGS)?;
 
     if let Some(url) = req.webhook_url.as_deref() {
         upsert_setting(&state.db, "moderation_webhook_url", url).await?;
@@ -744,7 +744,7 @@ pub async fn list_members(
     user: AuthUser,
 ) -> Result<Json<Vec<MemberAdminInfo>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MEMBERS_READ)?;
 
     let users = sqlx::query_as::<_, UserAdminRow>(
         "SELECT public_key, display_name, first_seen_at, last_seen_at, is_bot, birthday

@@ -496,7 +496,7 @@ async fn played_broadcasts_soundboard_played_to_channel() {
     let member_token = authenticate_http(&base, &member).await;
 
     let ch = create_channel(&base, &owner_token, "played-broadcast").await;
-    let role_id = create_role(&base, &owner_token, "Speaker", &["use_soundboard"]).await;
+    let role_id = create_role(&base, &owner_token, "Speaker", &["voice.soundboard.use"]).await;
     assign_role(&base, &owner_token, &member.public_key_hex(), &role_id).await;
 
     let resp = upload_clip(&base, &owner_token, "Airhorn", None, build_ogg_opus(1_000)).await;
@@ -558,7 +558,7 @@ async fn played_denied_by_channel_scoped_use_soundboard_deny() {
     let member_token = authenticate_http(&base, &member).await;
 
     let ch = create_channel(&base, &owner_token, "played-denied").await;
-    let role_id = create_role(&base, &owner_token, "Speaker2", &["use_soundboard"]).await;
+    let role_id = create_role(&base, &owner_token, "Speaker2", &["voice.soundboard.use"]).await;
     assign_role(&base, &owner_token, &member.public_key_hex(), &role_id).await;
 
     let resp = upload_clip(&base, &owner_token, "Trombone", None, build_ogg_opus(1_000)).await;
@@ -567,7 +567,14 @@ async fn played_denied_by_channel_scoped_use_soundboard_deny() {
 
     // Deny use_soundboard for this role specifically on this channel --
     // the hub-wide grant from the role still applies elsewhere.
-    deny_channel_permission(&base, &owner_token, &ch.id, &role_id, "use_soundboard").await;
+    deny_channel_permission(
+        &base,
+        &owner_token,
+        &ch.id,
+        &role_id,
+        "voice.soundboard.use",
+    )
+    .await;
 
     let played = reqwest::Client::new()
         .post(format!("{base}/soundboard/{clip_id}/played"))

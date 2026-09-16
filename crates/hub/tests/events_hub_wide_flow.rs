@@ -61,7 +61,7 @@ async fn allow_everyone(
 async fn strip_hub_wide_create_events(server: &common::TestHarness) {
     let db = &server.state().db;
     sqlx::query(
-        "DELETE FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = 'create_events'",
+        "DELETE FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = 'events.create'",
     )
     .execute(db)
     .await
@@ -87,7 +87,7 @@ async fn hub_wide_create_rejected_without_hub_level_create_events() {
     strip_hub_wide_create_events(&server).await;
     // Restore channel-scoped CREATE_EVENTS for @everyone on this one channel
     // -- narrower than the hub-wide baseline they just lost.
-    allow_everyone(&server, &owner_token, &channel_id, "create_events").await;
+    allow_everyone(&server, &owner_token, &channel_id, "events.create").await;
 
     // hub_wide: true is rejected -- channel-scoped CREATE_EVENTS alone isn't
     // enough for a hub-wide announcement.
@@ -192,7 +192,7 @@ async fn hub_wide_event_visible_despite_unreadable_anchor() {
     resp.assert_status(axum::http::StatusCode::CREATED);
     let plain_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
 
-    deny_everyone(&server, &owner_token, &channel_id, "read_messages").await;
+    deny_everyone(&server, &owner_token, &channel_id, "messages.read").await;
 
     // list_events: hub-wide event survives the filter, plain one doesn't.
     let resp = server

@@ -89,7 +89,7 @@ async fn propagated_card_lands_in_anchor_and_descendant_with_read_gating_intact(
         &anchor_id,
         "builtin-everyone",
         &[],
-        &["read_messages"],
+        &["messages.read"],
     )
     .await;
     set_overwrite(
@@ -97,7 +97,7 @@ async fn propagated_card_lands_in_anchor_and_descendant_with_read_gating_intact(
         &owner_token,
         &squad_id,
         "builtin-everyone",
-        &["read_messages"],
+        &["messages.read"],
         &[],
     )
     .await;

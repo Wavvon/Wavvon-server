@@ -7,7 +7,7 @@ use axum::Json;
 use rand::RngCore;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, MANAGE_CHANNELS};
+use crate::permissions::{self, CHANNELS_MANAGE};
 use crate::routes::invite_models::{CreateInviteRequest, InviteResponse};
 use crate::routes::paging::PageQuery;
 use crate::state::AppState;
@@ -16,7 +16,7 @@ use crate::state::AppState;
 /// `builtin-owner`) when the creator didn't already ask for something
 /// shorter. A role-granting invite is a takeover token — it shouldn't sit
 /// around unused indefinitely (task #34).
-const ADMIN_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
+const TAKEOVER_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
 
 /// True if holding `role_id` alone grants the `admin` permission.
 /// `builtin-owner` is seeded with an explicit `admin` row (see
@@ -25,14 +25,30 @@ const ADMIN_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
 /// `pub(crate)` so `routes::hub::update_hub` can reuse it to reject an
 /// admin-holding role as `default_invite_role_id` (hub-level invite role
 /// policy).
-pub(crate) async fn role_grants_admin(
+/// Does this role amount to a takeover if handed out on a bearer code?
+///
+/// It used to ask whether the role carried `admin`, and with the wildcard gone
+/// that has nothing to look for. What it was really protecting against is a
+/// code that lets whoever holds it rewrite the hub's permissions, and that is
+/// now `roles.manage`: mint a role carrying anything you hold, assign it.
+/// Ownership itself counts for the obvious reason.
+///
+/// The subset ceiling already stops a delegate minting *above* themselves
+/// (permissions.md §1.6). This is the second half: bounding how long and how
+/// widely such a code can travel, because an invite is a bearer token and the
+/// ceiling says nothing about who ends up holding it.
+pub(crate) async fn role_is_a_takeover_token(
     db: &sqlx::PgPool,
     role_id: &str,
 ) -> Result<bool, (StatusCode, String)> {
+    if role_id == crate::permissions::BUILTIN_OWNER_ROLE_ID {
+        return Ok(true);
+    }
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission = 'admin')",
+        "SELECT EXISTS(SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission = $2)",
     )
     .bind(role_id)
+    .bind(crate::permissions::ROLES_MANAGE)
     .fetch_one(db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
@@ -44,7 +60,7 @@ pub async fn create_invite(
     Json(req): Json<CreateInviteRequest>,
 ) -> Result<(StatusCode, Json<InviteResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_CHANNELS)?;
+    perms.require(CHANNELS_MANAGE)?;
 
     let now = crate::auth::handlers::unix_timestamp();
     let mut max_uses = req.max_uses;
@@ -87,12 +103,11 @@ pub async fn create_invite(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         perms.require_can_grant(carried.iter().map(String::as_str))?;
 
-        // An admin-holding role is a takeover token: cap it to a single use
-        // and a short expiry, unless the creator already asked for
-        // something even shorter/more restrictive.
-        if role_grants_admin(&state.db, role_id).await? {
+        // Cap a takeover-shaped grant to a single use and a short expiry,
+        // unless the creator already asked for something stricter.
+        if role_is_a_takeover_token(&state.db, role_id).await? {
             max_uses = Some(max_uses.map_or(1, |m| m.min(1)));
-            let forced_expiry = now + ADMIN_GRANT_DEFAULT_EXPIRY_SECS;
+            let forced_expiry = now + TAKEOVER_GRANT_DEFAULT_EXPIRY_SECS;
             expires_at = Some(match expires_at {
                 Some(existing) if existing < forced_expiry => existing,
                 _ => forced_expiry,
@@ -135,7 +150,7 @@ pub async fn list_invites(
     Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<InviteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_CHANNELS)?;
+    perms.require(CHANNELS_MANAGE)?;
 
     let rows = sqlx::query_as::<_, InviteRow>(
         "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites
@@ -171,7 +186,7 @@ pub async fn revoke_invite(
     Path(code): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_CHANNELS)?;
+    perms.require(CHANNELS_MANAGE)?;
 
     sqlx::query("DELETE FROM invites WHERE code = $1")
         .bind(&code)
@@ -321,7 +336,7 @@ pub async fn apply_invite_role_grant(
             if !exists {
                 return Ok(()); // the default role was deleted since it was configured
             }
-            if role_grants_admin(db, &default_role_id).await? {
+            if role_is_a_takeover_token(db, &default_role_id).await? {
                 // Defense in depth: the role gained `admin` since it was set
                 // as the default — refuse to silently hand out admin.
                 return Ok(());
@@ -404,7 +419,7 @@ pub async fn maybe_mint_first_boot_owner_invite(
     }
 
     let code = generate_invite_code();
-    let expires_at = now + ADMIN_GRANT_DEFAULT_EXPIRY_SECS;
+    let expires_at = now + TAKEOVER_GRANT_DEFAULT_EXPIRY_SECS;
     sqlx::query(
         "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at, grant_role_id)
          VALUES ($1, 'system', 1, 0, $2, $3, 'builtin-owner')",

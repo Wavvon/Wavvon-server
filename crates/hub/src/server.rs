@@ -472,6 +472,14 @@ pub fn create_router_full(
             get(routes::roles::list_roles).post(routes::roles::create_role),
         )
         .route(
+            "/permissions",
+            get(routes::permission_catalogue::get_catalogue),
+        )
+        .route(
+            "/users/{public_key}/permissions/why",
+            get(routes::permission_catalogue::why),
+        )
+        .route(
             "/roles/{role_id}",
             axum::routing::patch(routes::roles::update_role).delete(routes::roles::delete_role),
         )

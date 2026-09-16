@@ -7,7 +7,7 @@ use axum::Json;
 use serde::Serialize;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, HUB_SETTINGS};
 use crate::search::IndexedMessage;
 use crate::state::AppState;
 
@@ -28,9 +28,10 @@ pub async fn admin_reindex(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<(StatusCode, Json<ReindexResponse>), (StatusCode, String)> {
-    // ADMIN permission required — mirrors every other /admin/* endpoint.
+    // Reindexing is a hub setting, not a search feature: it is the operator
+    // deciding to spend the box on rebuilding the index.
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     // Guard against concurrent reindex runs with a compare-exchange.
     if state

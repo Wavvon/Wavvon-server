@@ -6,7 +6,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, HUB_SETTINGS};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ pub async fn update_lobby_settings(
     Json(req): Json<UpdateLobbySettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     upsert_setting(
         &state.db,

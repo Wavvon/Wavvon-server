@@ -58,6 +58,14 @@ pub const CAPABILITIES: &[&str] = &[
     // Device pairing: subkey certs presented at `/auth/verify`, and the
     // ECIES-wrapped canonical DH material a paired device needs for DMs.
     "pairing.subkey",
+    // The permission catalogue is served by the hub and no longer copied into
+    // each client: GET /permissions lists every id with its scope, and
+    // GET /users/{pubkey}/permissions/why explains one answer. A client that
+    // cannot see this string is talking to a hub whose permission ids are the
+    // old snake_case set, so it must keep rendering its own built-in list —
+    // the two spellings share no ids, and there is no dual-reading period
+    // (permissions.md §6).
+    "permissions.catalogue",
     // Recovery contacts: signed `wavvon/recovery-request/v1` and
     // `wavvon/recovery-attestation/v1` envelopes and the endpoints behind
     // them.

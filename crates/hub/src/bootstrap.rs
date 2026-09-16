@@ -509,9 +509,9 @@ pub mod presets {
             ],
             "roles": [
                 { "name": "Member", "priority": 5,
-                  "permissions": ["read_messages", "send_messages", "create_posts", "start_game"] },
+                  "permissions": ["messages.read", "messages.send", "forum.posts.create"] },
                 { "name": "Moderator", "priority": 50,
-                  "permissions": ["manage_messages", "mute_members", "kick_members", "manage_channels"] }
+                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "channels.manage"] }
             ],
             "settings": {
                 // Re-added (was pulled in a4e57f9 as a stopgap: the lobby
@@ -551,9 +551,9 @@ pub mod presets {
             ],
             "roles": [
                 { "name": "Member", "priority": 5,
-                  "permissions": ["read_messages", "send_messages", "create_posts", "create_events"] },
+                  "permissions": ["messages.read", "messages.send", "forum.posts.create", "events.create"] },
                 { "name": "Moderator", "priority": 50,
-                  "permissions": ["manage_messages", "mute_members", "kick_members", "timeout_members", "manage_channels"] }
+                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "moderation.timeout", "channels.manage"] }
             ],
             "settings": {
                 "require_approval": false
@@ -708,7 +708,7 @@ mod bootstrap_tests {
                  "channel_type": "text", "category": "Lobby"}
             ],
             "roles": [
-                {"name": "Gamer", "priority": 10, "permissions": ["send_messages", "read_messages"]}
+                {"name": "Gamer", "priority": 10, "permissions": ["messages.send", "messages.read"]}
             ],
             "welcome_message": "Welcome to the hub!",
             "suggested_bots": ["bot-a", "bot-b"]

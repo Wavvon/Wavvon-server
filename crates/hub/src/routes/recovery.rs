@@ -538,7 +538,7 @@ pub async fn admin_list_pending(
     user: AuthUser,
 ) -> Result<Json<Vec<PendingRequestAdmin>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require_owner("review identity recovery requests")?;
 
     let rows = sqlx::query_as::<_, RotationRow>(
         "SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.status, r.created_at, r.nonce,
@@ -579,7 +579,7 @@ pub async fn admin_approve(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require_owner("approve an identity recovery")?;
 
     let row = fetch_rotation_request(&state, &id).await?;
     if row.status != "ready_for_review" && row.status != "pending" {
@@ -662,7 +662,7 @@ pub async fn admin_deny(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require_owner("deny an identity recovery")?;
 
     let row = fetch_rotation_request(&state, &id).await?;
     if row.status != "ready_for_review" && row.status != "pending" {

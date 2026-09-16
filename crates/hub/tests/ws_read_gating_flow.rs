@@ -237,7 +237,7 @@ async fn subscribe_to_denied_channel_is_rejected_and_no_events_leak() {
     let member_token = authenticate_http(&base, &member_id).await;
 
     let secret = create_channel(&base, &owner_token, "secret").await;
-    deny_everyone(&base, &owner_token, &secret.id, "read_messages").await;
+    deny_everyone(&base, &owner_token, &secret.id, "messages.read").await;
 
     let (mut member_tx, mut member_rx) = connect_ws(&base, &member_token).await;
 
@@ -399,7 +399,7 @@ async fn a_talk_only_channel_is_listed_but_never_auto_subscribed() {
     let member_token = authenticate_http(&base, &member).await;
 
     let channel = create_channel(&base, &owner_token, "talk-only").await;
-    deny_everyone(&base, &owner_token, &channel.id, "read_messages").await;
+    deny_everyone(&base, &owner_token, &channel.id, "messages.read").await;
 
     // Listed: `voice.join` is seeded on builtin-everyone and nothing denied
     // it here, so the channel is still reachable for joining.
@@ -485,7 +485,7 @@ async fn voice_admission_is_independent_of_read_in_both_directions() {
 
     // A lobby anyone may talk in that carries no readable text.
     let lobby = create_channel(&base, &owner_token, "lobby").await;
-    deny_everyone(&base, &owner_token, &lobby.id, "read_messages").await;
+    deny_everyone(&base, &owner_token, &lobby.id, "messages.read").await;
 
     let talker = Identity::generate();
     let talker_token = authenticate_http(&base, &talker).await;

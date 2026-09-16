@@ -400,7 +400,7 @@ pub struct AppState {
 
     /// Voice-only presence grants (events.md §7.4): pubkey → set of
     /// channel_ids the pubkey may join voice on despite lacking effective
-    /// `READ_MESSAGES` there.
+    /// `MESSAGES_READ` there.
     ///
     /// Ephemeral, in-memory only — never persisted, never survives a
     /// restart. Created just before the hub pushes a `voice_move` whose

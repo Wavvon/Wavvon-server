@@ -53,7 +53,7 @@ pub async fn send_message(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::SEND_MESSAGES)?;
+    perms.require(permissions::MESSAGES_SEND)?;
 
     if crate::routes::moderation::is_muted(&state.db, &user.public_key).await? {
         return Err((StatusCode::FORBIDDEN, "You are muted".to_string()));
@@ -580,7 +580,7 @@ pub async fn delete_message(
     // Author can always delete their own. Others need manage_messages.
     if sender != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(permissions::MANAGE_MESSAGES)?;
+        perms.require(permissions::MESSAGES_MANAGE)?;
     }
 
     sqlx::query("DELETE FROM messages WHERE id = $1")
@@ -684,7 +684,7 @@ pub async fn get_messages(
     // Read-gating (§3.5): message history is rejected outright for a
     // channel the caller can't effectively read.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::READ_MESSAGES)?;
+    perms.require(permissions::MESSAGES_READ)?;
 
     let limit = params.limit.unwrap_or(50).min(100);
     let search = params
@@ -1009,7 +1009,7 @@ pub async fn add_reaction(
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::SEND_MESSAGES)?;
+    perms.require(permissions::MESSAGES_SEND)?;
 
     let emoji = req.emoji.trim();
     if emoji.is_empty() || emoji.chars().count() > 16 {

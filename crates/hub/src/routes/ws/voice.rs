@@ -246,7 +246,7 @@ pub(super) async fn re_resolve_whisper_sessions(state: &AppState) {
 /// Called from the voice-join path (`routes/ws/handlers/voice.rs`) right
 /// after a join succeeds. Pushes a `voice_move`
 /// exactly like a live move — creating a voice-only presence grant (§7.4)
-/// first if the target lacks `READ_MESSAGES` on the assigned channel. The
+/// first if the target lacks `MESSAGES_READ` on the assigned channel. The
 /// assignment row is intentionally left in place (not consumed): a
 /// drop-and-rejoin during the event re-applies it (doc ruling).
 ///
@@ -298,11 +298,11 @@ pub async fn apply_pending_voice_move_assignment(
     };
 
     // §7.4: create a voice-only presence grant before the push if the
-    // target lacks effective READ_MESSAGES on the assigned channel.
+    // target lacks effective MESSAGES_READ on the assigned channel.
     if let Ok(perms) =
         crate::permissions::channel_permissions(&state.db, pubkey, &target_channel_id).await
     {
-        if !perms.has(crate::permissions::READ_MESSAGES) {
+        if !perms.has(crate::permissions::MESSAGES_READ) {
             state
                 .staging_voice_grants
                 .write()

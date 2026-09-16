@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::models;
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, ALLIANCES_MANAGE};
 use crate::routes::alliance_models::*;
 use crate::routes::post_models::{
     CreatePostRequest, CreateReplyRequest, PostDetail, PostListParams, PostListResponse,
@@ -109,7 +109,7 @@ pub async fn share_channel(
 ) -> Result<StatusCode, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     // Verify alliance exists
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM alliances WHERE id = $1")
@@ -189,7 +189,7 @@ pub async fn unshare_channel(
 ) -> Result<StatusCode, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     sqlx::query("DELETE FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2")
         .bind(&alliance_id)
@@ -361,7 +361,7 @@ pub async fn post_alliance_channel_message(
 > {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(crate::permissions::SEND_MESSAGES)?;
+    perms.require(crate::permissions::MESSAGES_SEND)?;
 
     let hub_key = state.hub_identity.public_key_hex();
 

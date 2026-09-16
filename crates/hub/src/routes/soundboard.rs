@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, MANAGE_SOUNDBOARD, USE_SOUNDBOARD};
+use crate::permissions::{self, VOICE_SOUNDBOARD_MANAGE, VOICE_SOUNDBOARD_USE};
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
 use crate::state::AppState;
 
@@ -114,7 +114,7 @@ pub async fn upload_clip(
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<ClipInfo>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_SOUNDBOARD)?;
+    perms.require(VOICE_SOUNDBOARD_MANAGE)?;
 
     let clip_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM soundboard_clips")
         .fetch_one(&state.db)
@@ -264,7 +264,7 @@ pub async fn delete_clip(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_SOUNDBOARD)?;
+    perms.require(VOICE_SOUNDBOARD_MANAGE)?;
 
     let existing: Option<String> =
         sqlx::query_scalar("SELECT id FROM soundboard_clips WHERE id = $1")
@@ -325,7 +325,7 @@ pub async fn mark_played(
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms =
         permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id).await?;
-    perms.require(USE_SOUNDBOARD)?;
+    perms.require(VOICE_SOUNDBOARD_USE)?;
 
     let clip_name: Option<String> =
         sqlx::query_scalar("SELECT name FROM soundboard_clips WHERE id = $1")

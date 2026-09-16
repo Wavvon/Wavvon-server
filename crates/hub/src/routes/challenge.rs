@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, MODERATION_SETTINGS};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -356,7 +356,7 @@ pub async fn update_challenge_settings(
     Json(req): Json<UpdateChallengeSettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MODERATION_SETTINGS)?;
 
     let valid_modes = ["off", "click", "puzzle", "both"];
     if !valid_modes.contains(&req.challenge_mode.as_str()) {

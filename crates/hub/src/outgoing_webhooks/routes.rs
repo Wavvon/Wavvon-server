@@ -1,5 +1,5 @@
 //! The 9 `/admin/outgoing-webhooks` routes (doc §9). All gated by
-//! `permissions::ADMIN`, matching the `create_webhook`/`delete_webhook`
+//! `permissions::WEBHOOKS_OUTGOING_MANAGE`, matching the `create_webhook`/`delete_webhook`
 //! pattern in `routes::webhooks` (incoming webhooks).
 
 use std::net::{IpAddr, ToSocketAddrs};
@@ -130,7 +130,7 @@ pub async fn create_webhook(
     Json(req): Json<CreateOutgoingWebhookRequest>,
 ) -> Result<(StatusCode, Json<CreateOutgoingWebhookResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     validate_webhook_url(&req.url)?;
 
@@ -173,7 +173,7 @@ pub async fn list_webhooks(
     user: AuthUser,
 ) -> Result<Json<Vec<OutgoingWebhookSummary>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -229,7 +229,7 @@ pub async fn update_webhook(
     Json(req): Json<UpdateOutgoingWebhookRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")
@@ -282,7 +282,7 @@ pub async fn delete_webhook(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let rows = super::worker::delete_webhook_cascade(&state.db, &id)
         .await
@@ -305,7 +305,7 @@ pub async fn list_subscriptions(
     Path(id): Path<String>,
 ) -> Result<Json<ListSubscriptionsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")
@@ -374,7 +374,7 @@ pub async fn replace_subscriptions(
     Json(req): Json<ReplaceSubscriptionsRequest>,
 ) -> Result<Json<ReplaceSubscriptionsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")
@@ -455,7 +455,7 @@ pub async fn rotate_secret(
     Path(id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let (secret, signing_key) = generate_secret_and_key();
 
@@ -484,7 +484,7 @@ pub async fn enable_webhook(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let rows =
         sqlx::query("UPDATE outgoing_webhooks SET active = TRUE, failure_count = 0 WHERE id = $1")
@@ -512,7 +512,7 @@ pub async fn list_deliveries(
     Query(q): Query<ListDeliveriesQuery>,
 ) -> Result<Json<Vec<DeliveryRecord>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")

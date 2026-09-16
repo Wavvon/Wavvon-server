@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::models::MemberRow;
 use crate::auth::middleware::{AuthUser, PeerHub};
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, ALLIANCES_MANAGE};
 use crate::routes::alliance_models::*;
 use crate::state::AppState;
 
@@ -20,7 +20,7 @@ pub async fn create_invite(
     Path(alliance_id): Path<String>,
 ) -> Result<Json<AllianceInviteResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     let alliance = sqlx::query_as::<_, AllianceRow>(
         "SELECT id, name, created_by, created_at FROM alliances WHERE id = $1",
@@ -52,7 +52,7 @@ pub async fn join_alliance_local(
     Json(req): Json<JoinAllianceLocalRequest>,
 ) -> Result<Json<AllianceDetailResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     let inviter_url = req.inviter_hub_url.trim_end_matches('/').to_string();
     let detail = do_join_alliance(
@@ -286,7 +286,7 @@ pub async fn push_invite_handler(
     Json(req): Json<crate::routes::alliance_models::PushInviteRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     // Verify alliance exists
     let alliance = sqlx::query_as::<_, AllianceRow>(
@@ -382,14 +382,14 @@ pub async fn receive_federation_alliance_invite(
 }
 
 /// `GET /alliances/pending-invites`
-/// List all pending push invites received by this hub (ADMIN only).
+/// List all pending push invites received by this hub (requires `alliances.manage`).
 pub async fn list_pending_invites(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<crate::routes::alliance_models::PendingAllianceInviteRow>>, (StatusCode, String)>
 {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     let rows = sqlx::query_as::<_, PendingInviteRow>(
         "SELECT id, alliance_id, alliance_name, from_hub_url, from_hub_name, from_hub_public_key, invite_token, created_at, message
@@ -430,7 +430,7 @@ pub async fn accept_pending_invite(
     Json(req): Json<crate::routes::alliance_models::AcceptPendingInviteRequest>,
 ) -> Result<Json<AllianceDetailResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     let invite = sqlx::query_as::<_, PendingInviteRow>(
         "SELECT id, alliance_id, alliance_name, from_hub_url, from_hub_name, from_hub_public_key, invite_token, created_at, message
@@ -471,7 +471,7 @@ pub async fn decline_pending_invite(
     Path(invite_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(ALLIANCES_MANAGE)?;
 
     sqlx::query("DELETE FROM pending_alliance_invites WHERE id = $1")
         .bind(&invite_id)
