@@ -1143,3 +1143,65 @@ async fn join_link_falls_back_to_json_when_no_web_client_is_served() {
     let json: serde_json::Value = resp.json();
     assert_eq!(json["code"], code);
 }
+
+#[tokio::test]
+async fn invite_cannot_grant_a_role_carrying_a_permission_the_creator_lacks() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    // The delegate can create invites (manage_channels) and manage roles, but
+    // holds no moderation power of its own.
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "name": "Delegate",
+            "permissions": ["manage_roles", "manage_channels"],
+            "priority": 50,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let delegate_role: RoleResponse = resp.json();
+
+    let delegate = Identity::generate();
+    let delegate_token = common::authenticate(&server, &delegate).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            delegate.public_key_hex(),
+            delegate_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Enforcer", "permissions": ["ban_members"], "priority": 20 }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let enforcer: RoleResponse = resp.json();
+
+    // Priority 20 is below the delegate's 50, so the existing priority guard
+    // lets this through. An invite that grants a role is deferred role
+    // assignment, and this is the widest door of the four: it needs only
+    // manage_channels, so without the ceiling whoever can invite people could
+    // redeem this as a second identity and come back holding ban_members.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&delegate_token)
+        .json(&json!({ "grant_role_id": enforcer.id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert!(resp.text().contains("ban_members"));
+
+    // The owner holds admin, so the same invite is fine from them.
+    server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "grant_role_id": enforcer.id }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+}
