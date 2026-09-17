@@ -64,6 +64,7 @@ async fn start_hub() -> (String, common::TestDbGuard) {
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
         voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),

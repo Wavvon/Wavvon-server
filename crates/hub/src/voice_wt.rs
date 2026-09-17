@@ -306,6 +306,14 @@ async fn relay_datagram(state: &AppState, channel_id: &str, sender_pk: &str, pay
         return;
     }
 
+    // Below the channel's `min_talk_power` with no talk grant: present and
+    // listening, but not transmitting (permissions.md, "Talk power is not
+    // this"). Decided once on join and parked in memory, because this runs per
+    // datagram and cannot ask the database anything.
+    if state.voice_talk_blocked.read().await.contains(sender_pk) {
+        return;
+    }
+
     // Outbound loss, measured here because only here can it be measured: the
     // sender cannot know which of its own datagrams never arrived. `ctr` is in
     // the cleartext header, so this reads a counter and still never touches the

@@ -599,6 +599,10 @@ pub fn create_router_full(
             get(routes::moderation::list_raise_hands),
         )
         .route(
+            "/channels/{channel_id}/talk-grants/{pubkey}",
+            post(routes::moderation::grant_talk),
+        )
+        .route(
             "/alliances",
             get(routes::alliances::list_alliances).post(routes::alliances::create_alliance),
         )

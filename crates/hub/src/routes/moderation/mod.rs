@@ -9,12 +9,12 @@ pub use bans::{
 };
 pub use channel_mod::{
     channel_ban, channel_unban, channel_voice_mute, channel_voice_unmute, get_talk_power,
-    list_channel_bans, list_channel_voice_mutes, list_raise_hands, list_voice_mutes, lower_hand,
-    raise_hand, set_talk_power, voice_mute, voice_unmute,
+    grant_talk, list_channel_bans, list_channel_voice_mutes, list_raise_hands, list_voice_mutes,
+    lower_hand, raise_hand, set_talk_power, voice_mute, voice_unmute,
 };
 // Enforcement helpers — re-exported at the `crate::routes::moderation` path so
 // messages.rs, dms.rs, and auth middleware can call them without path changes.
 pub use helpers::{
-    get_federation_banlist, has_raised_hand, is_banned, is_channel_banned, is_channel_voice_muted,
+    get_federation_banlist, is_banned, is_channel_banned, is_channel_voice_muted,
     is_denied_by_federated_policy, is_federated_banned, is_muted, is_voice_muted,
 };

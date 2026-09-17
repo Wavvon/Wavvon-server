@@ -1129,6 +1129,10 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     // Revoke the voice relay slot.
     state.voice_relay_active.write().await.remove(public_key);
     state.voice_outbound_loss.write().await.remove(public_key);
+    // And the talk-power verdict with it, grant included: the floor is
+    // permission to speak *now*, not a standing property of the member, so it
+    // dies with the session that was given it rather than being revoked.
+    state.voice_talk_blocked.write().await.remove(public_key);
 
     // events.md §7.4: a voice-only presence grant for this exact
     // (pubkey, channel) pair evaporates on leave -- never persisted, never

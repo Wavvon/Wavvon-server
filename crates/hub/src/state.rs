@@ -411,6 +411,23 @@ pub struct AppState {
     /// event read-gating all stay strict per the decisions.md entry.
     pub staging_voice_grants: RwLock<HashMap<String, HashSet<String>>>,
 
+    /// Pubkeys present in voice who may **not** transmit there: below the
+    /// channel's `min_talk_power` and holding no talk grant
+    /// (permissions.md, "Talk power is not this").
+    ///
+    /// The answer is computed once, on join, because the only place it can be
+    /// enforced is `relay_datagram` — the hot path, where a query per
+    /// datagram is not an option. Storing the refusal rather than the
+    /// permission keeps the common case (nobody is blocked) an empty set and
+    /// one `HashSet` read beside the one already there.
+    ///
+    /// A talk grant is the removal of a pubkey from this set and nothing
+    /// else, which is what makes it last exactly one voice session: the
+    /// shared teardown in `connection.rs` clears the entry on leave and on
+    /// disconnect, the same block the voice-only presence grant evaporates
+    /// in. Nothing about it is persisted, so no grant outlives a restart.
+    pub voice_talk_blocked: RwLock<HashSet<String>>,
+
     /// Pending WebTransport session-binds waiting for the client to open its
     /// `voice_wt_url?token=<hex>` session (voice-transport-v2.md).
     ///

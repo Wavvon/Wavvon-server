@@ -80,6 +80,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
         voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
@@ -343,6 +344,111 @@ async fn datagram_relays_with_sender_prefix_and_no_self_echo() {
     assert!(
         self_echo.is_err(),
         "sender must not receive its own datagram echoed back"
+    );
+}
+
+/// A member below the channel's `min_talk_power` is heard only once someone
+/// grants them the floor.
+///
+/// Read at the relay, because that is the only place the guarantee lives: the
+/// threshold used to refuse the *join*, which is a different promise and one
+/// a WebSocket assertion can make. Transmitting is decided per datagram, so a
+/// test that stops at `voice_joined` would pass whether the audio reached the
+/// room or not — exactly the shape that hid two complete voice failures on
+/// 2026-09-10.
+///
+/// The second half matters as much as the first: a threshold nobody can ever
+/// be let through is a broken channel rather than a moderated one.
+#[tokio::test]
+async fn below_the_threshold_is_heard_only_after_a_grant() {
+    let (base, _state, _guard) = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let member = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let member_token = authenticate_http(&base, &member).await;
+    let ch = create_channel(&base, &owner_token, "wt-talk-power-ch").await;
+
+    // Only a role carrying talk_power 100 may transmit here. The member holds
+    // @everyone, which carries none.
+    let set_tp = client
+        .post(format!("{base}/channels/{}/talk-power", ch.id))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "min_talk_power": 100 }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        set_tp.status().is_success(),
+        "talk power should be settable"
+    );
+
+    let (mut tx_o, mut rx_o) = connect_ws(&base, &owner_token).await;
+    let (vt_o, url_o, hash_o) = join_voice(&mut tx_o, &mut rx_o, &ch.id).await;
+
+    // The join is not gated — that is the whole point of the fix.
+    let (mut tx_m, mut rx_m) = connect_ws(&base, &member_token).await;
+    let (vt_m, url_m, hash_m) = join_voice(&mut tx_m, &mut rx_m, &ch.id).await;
+
+    let conn_o = wt_connect(&url_o, &vt_o, &hash_o).await;
+    let conn_m = wt_connect(&url_m, &vt_m, &hash_m).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let payload: &[u8] = b"opus-frame-from-a-silenced-member";
+    conn_m.send_datagram(payload).expect("the client may send");
+
+    let heard = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        conn_o.receive_datagram(),
+    )
+    .await;
+    assert!(
+        heard.is_err(),
+        "below the threshold, the relay must drop what the member sends"
+    );
+
+    // Raising a hand asks; it does not answer.
+    client
+        .post(format!("{base}/channels/{}/raise-hand", ch.id))
+        .bearer_auth(&member_token)
+        .send()
+        .await
+        .unwrap();
+    conn_m.send_datagram(payload).expect("the client may send");
+    let still_silent = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        conn_o.receive_datagram(),
+    )
+    .await;
+    assert!(
+        still_silent.is_err(),
+        "a raised hand is a request, not the floor"
+    );
+
+    // The owner answers it.
+    let granted = client
+        .post(format!(
+            "{base}/channels/{}/talk-grants/{}",
+            ch.id,
+            member.public_key_hex()
+        ))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(granted.status(), 204);
+
+    conn_m.send_datagram(payload).expect("the client may send");
+    let received =
+        tokio::time::timeout(std::time::Duration::from_secs(5), conn_o.receive_datagram())
+            .await
+            .expect("after the grant the room hears them")
+            .expect("datagram read ok");
+    assert_eq!(
+        &received[3..],
+        payload,
+        "and the hub still forwards the payload verbatim"
     );
 }
 

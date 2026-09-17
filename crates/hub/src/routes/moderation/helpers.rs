@@ -83,18 +83,6 @@ pub async fn is_channel_voice_muted(
     Ok(count > 0)
 }
 
-pub async fn has_raised_hand(db: &sqlx::PgPool, channel_id: &str, pubkey: &str) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM raise_hand_requests WHERE channel_id = $1 AND pubkey = $2",
-    )
-    .bind(channel_id)
-    .bind(pubkey)
-    .fetch_one(db)
-    .await
-    .unwrap_or(0)
-        > 0
-}
-
 /// The single source of truth for the federated-ban admission policy, given
 /// the already-resolved check key (master pubkey, or canonical for users with
 /// no paired master):

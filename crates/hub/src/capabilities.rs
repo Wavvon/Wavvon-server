@@ -94,6 +94,14 @@ pub const CAPABILITIES: &[&str] = &[
     // uses (`alliance.permissions`), not for the permission id, which is a
     // different namespace that happens to read the same.
     "voice.permissions",
+    // `min_talk_power` gates transmitting, not joining, and the floor is
+    // granted by a moderator rather than taken with `raise-hand`. Two things
+    // a client may only do once it sees this string: read `may_speak` on
+    // `voice_joined` — an older hub never sends it, and defaulting a missing
+    // field to "muted" would silence every member on every hub that predates
+    // this — and offer the grant route, which an older hub answers 404. On an
+    // older hub a raised hand is still how the threshold is cleared.
+    "voice.talk",
     // Voice over WebTransport/QUIC with E2E sender keys (voice-transport-v2).
     // The raw-UDP and `/voice/ws` relays it replaced are gone, so a client
     // that does not see this string has no voice path to this hub at all.

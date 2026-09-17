@@ -321,6 +321,12 @@ pub async fn list_channel_voice_mutes(
 
 // --- Raise-hand ---
 
+/// POST /channels/{channel_id}/raise-hand
+///
+/// A **request** for the floor, and only that. It used to clear the channel's
+/// `min_talk_power` on its own, so any member granted themselves the floor
+/// with one call and the refusal helpfully named the call to make. Answering
+/// it is `grant_talk`, which needs `moderation.mute`.
 pub async fn raise_hand(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -350,6 +356,52 @@ pub async fn raise_hand(
             requested_at: now,
         }),
     ))
+}
+
+/// POST /channels/{channel_id}/talk-grants/{pubkey}
+///
+/// Hands a member the floor in a channel whose `min_talk_power` they do not
+/// meet — TeamSpeak's "talker granted", the way round it was always meant to
+/// be: the member asks with `raise_hand`, someone holding `moderation.mute`
+/// answers. Granting is that permission's other direction, which is why no
+/// `voice.speak` exists to hold (permissions.md, "Talk power is not this").
+///
+/// The grant lasts one voice session. It is the removal of an in-memory entry
+/// and nothing else, so leaving, disconnecting or restarting the hub takes it
+/// back — there is no row to revoke and none to forget.
+pub async fn grant_talk(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, pubkey)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_can_moderate(&state, &user.public_key, &pubkey, MODERATION_MUTE).await?;
+
+    // The floor is permission to speak *now*: granted to someone who is not in
+    // the room it would have nowhere to live and nothing to mean.
+    let present = {
+        let vc = state.voice_channels.read().await;
+        vc.get(&channel_id)
+            .is_some_and(|participants| participants.contains_key(&pubkey))
+    };
+    if !present {
+        return Err((
+            StatusCode::CONFLICT,
+            "That member is not in this voice channel.".to_string(),
+        ));
+    }
+
+    state.voice_talk_blocked.write().await.remove(&pubkey);
+
+    // The request has been answered; left queued it would sit on every
+    // moderator's list for the rest of the channel's life.
+    sqlx::query("DELETE FROM raise_hand_requests WHERE channel_id = $1 AND pubkey = $2")
+        .bind(&channel_id)
+        .bind(&pubkey)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn lower_hand(
