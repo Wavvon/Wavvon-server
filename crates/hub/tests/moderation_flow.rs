@@ -307,6 +307,7 @@ async fn spawn_real_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
@@ -382,6 +383,50 @@ async fn http_authenticate(hub_url: &str, identity: &Identity) -> String {
 
 /// Send a voice_join over WS, return the first server frame as JSON.
 async fn ws_voice_join_and_recv(hub_url: &str, token: &str, channel_id: &str) -> serde_json::Value {
+    ws_voice_join_while_open(hub_url, token, channel_id, || async {})
+        .await
+        .0
+}
+
+/// The same join, with the socket held open while `body` runs. Voice session
+/// state — the talk-power verdict among it — lives only as long as the
+/// connection, and the shared teardown clears it the moment the stream drops,
+/// so a test that wants to look at it has to look from inside.
+async fn ws_voice_join_while_open<F, Fut, T>(
+    hub_url: &str,
+    token: &str,
+    channel_id: &str,
+    body: F,
+) -> (serde_json::Value, T)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let frame = ws_voice_join_inner(hub_url, token, channel_id).await;
+    let out = body().await;
+    (frame.0, out)
+}
+
+/// Returns the join answer and the live socket halves; the caller drops them.
+#[allow(clippy::type_complexity)]
+async fn ws_voice_join_inner(
+    hub_url: &str,
+    token: &str,
+    channel_id: &str,
+) -> (
+    serde_json::Value,
+    futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        WsMessage,
+    >,
+    futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+) {
     let ws_url = hub_url
         .replace("http://", "ws://")
         .replace("https://", "wss://");
@@ -416,7 +461,7 @@ async fn ws_voice_join_and_recv(hub_url: &str, token: &str, channel_id: &str) ->
         );
         let v = next_json(&mut rx).await;
         if matches!(v["type"].as_str(), Some("voice_joined") | Some("error")) {
-            return v;
+            return (v, tx, rx);
         }
     }
 }
@@ -494,7 +539,7 @@ async fn voice_mute_blocks_voice_join() {
 }
 
 #[tokio::test]
-async fn talk_power_blocks_low_priority_user() {
+async fn talk_power_lets_a_low_power_member_listen_but_not_speak() {
     let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
@@ -535,15 +580,37 @@ async fn talk_power_blocks_low_priority_user() {
             .unwrap();
     assert_eq!(stored, 100);
 
-    // Random user tries to join — should be refused
-    let frame = ws_voice_join_and_recv(&hub_url, &rand_token, &channel.id).await;
-    assert_eq!(frame["type"], "error");
-    assert_eq!(frame["context"], "voice_join");
-    assert!(frame["message"].as_str().unwrap().contains("priority"));
+    // Below the threshold the member still gets in — the gate is on speaking,
+    // not on entering (#34). Refusing the join meant the quiet half of a
+    // moderated channel could not even hear it.
+    let rand_pk = randuser.public_key_hex();
+    let st = state.clone();
+    let (frame, blocked) = ws_voice_join_while_open(&hub_url, &rand_token, &channel.id, || {
+        let st = st.clone();
+        let pk = rand_pk.clone();
+        async move { st.voice_talk_blocked.read().await.contains(&pk) }
+    })
+    .await;
+    assert_eq!(
+        frame["type"], "voice_joined",
+        "the join itself is not gated"
+    );
+    assert!(blocked, "but the relay must drop what they send");
 
-    // Owner can still join (priority is 999999)
-    let frame = ws_voice_join_and_recv(&hub_url, &owner_token, &channel.id).await;
+    // The owner is not blocked: they pass as the property they are, rather
+    // than because priority stood in for talk power. `builtin-owner` carries
+    // no talk_power row at all, so reading that column alone would have
+    // silenced the owner in their own channel.
+    let owner_pk = owner.public_key_hex();
+    let st = state.clone();
+    let (frame, blocked) = ws_voice_join_while_open(&hub_url, &owner_token, &channel.id, || {
+        let st = st.clone();
+        let pk = owner_pk.clone();
+        async move { st.voice_talk_blocked.read().await.contains(&pk) }
+    })
+    .await;
     assert_eq!(frame["type"], "voice_joined");
+    assert!(!blocked, "the owner is never off air in their own channel");
 }
 
 // ---------------------------------------------------------------------------
@@ -849,7 +916,7 @@ async fn raise_hand_and_lower_hand_flow() {
 }
 
 #[tokio::test]
-async fn raise_hand_allows_voice_join_below_threshold() {
+async fn the_floor_is_granted_never_taken() {
     let (hub_url, state, _guard) = spawn_real_hub().await;
     let client = reqwest::Client::new();
 
@@ -886,12 +953,12 @@ async fn raise_hand_allows_voice_join_below_threshold() {
         .unwrap();
     assert_eq!(stored, 100);
 
-    // user2 (priority 0) is blocked without hand raised
-    let frame = ws_voice_join_and_recv(&hub_url, &user2_token, &channel.id).await;
-    assert_eq!(frame["type"], "error");
-    assert!(frame["message"].as_str().unwrap().contains("priority"));
+    let user2_pk = user2.public_key_hex();
 
-    // user2 raises hand
+    // Raising a hand is a request and nothing more (#35). It used to clear
+    // the threshold on its own, with no permission check anywhere on the
+    // route, so every member granted themselves the floor — and the refusal
+    // named the call to make.
     client
         .post(format!("{hub_url}/channels/{}/raise-hand", channel.id))
         .bearer_auth(&user2_token)
@@ -899,9 +966,70 @@ async fn raise_hand_allows_voice_join_below_threshold() {
         .await
         .unwrap();
 
-    // user2 can now join voice
-    let frame = ws_voice_join_and_recv(&hub_url, &user2_token, &channel.id).await;
+    let st = state.clone();
+    let pk = user2_pk.clone();
+    let (frame, blocked) = ws_voice_join_while_open(&hub_url, &user2_token, &channel.id, || {
+        let st = st.clone();
+        async move { st.voice_talk_blocked.read().await.contains(&pk) }
+    })
+    .await;
     assert_eq!(frame["type"], "voice_joined");
+    assert!(blocked, "asking for the floor is not being given it");
+
+    // Nor can they hand it to themselves through the grant route: that one
+    // wants moderation.mute, which is the same permission that silences.
+    let st = state.clone();
+    let pk = user2_pk.clone();
+    let client2 = client.clone();
+    let cid = channel.id.clone();
+    let tok = user2_token.clone();
+    let owner_tok = owner_token.clone();
+    let hub = hub_url.clone();
+    let (_frame, (self_grant, granted, after)) =
+        ws_voice_join_while_open(&hub_url, &user2_token, &channel.id, || {
+            let st = st.clone();
+            async move {
+                let self_grant = client2
+                    .post(format!("{hub}/channels/{cid}/talk-grants/{pk}"))
+                    .bearer_auth(&tok)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status();
+
+                let granted = client2
+                    .post(format!("{hub}/channels/{cid}/talk-grants/{pk}"))
+                    .bearer_auth(&owner_tok)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status();
+
+                let after = st.voice_talk_blocked.read().await.contains(&pk);
+                (self_grant, granted, after)
+            }
+        })
+        .await;
+
+    assert_eq!(self_grant, 403, "the floor is granted, never taken");
+    assert_eq!(granted, 204);
+    assert!(!after, "the moderator grant puts them on air");
+
+    // And the answered request leaves the queue rather than sitting on every
+    // moderator list for the rest of the channel life.
+    let pending: Vec<serde_json::Value> = client
+        .get(format!("{hub_url}/channels/{}/raise-hands", channel.id))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        pending.is_empty(),
+        "an answered request is not still pending"
+    );
 }
 
 /// A user whose master key appears in `federated_bans` must not be able to

@@ -278,7 +278,26 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         min_talk_power
     };
 
-    if min_talk_power > 0 {
+    // Talk power gates **speaking**, not entering (permissions.md, "Talk power
+    // is not this"). A member below the threshold joins and listens; their
+    // datagrams are dropped at the relay until a moderator hands them the
+    // floor. Refusing the join instead meant the quiet half of a moderated
+    // channel could not even hear it, and `chat_models.rs` had documented the
+    // other verb all along.
+    //
+    // Role priority no longer stands in: `talk_power.max(priority)` let one
+    // number answer for two jobs, so raising someone's rank silently handed
+    // them the floor in every threshold channel on the hub. The owner still
+    // passes, but as the property they already are rather than as a large
+    // number that happened to clear every threshold — `builtin-owner` is
+    // seeded with no `talk_power` at all, so reading the column alone would
+    // have silenced them in their own channel.
+    let may_speak = if min_talk_power > 0 {
+        let is_owner = crate::permissions::user_permissions(&state.db, &cs.public_key)
+            .await
+            .map(|p| p.is_owner)
+            .unwrap_or(false);
+
         let user_talk_power: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(r.talk_power), 0)
              FROM roles r
@@ -292,32 +311,10 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .flatten()
         .unwrap_or(0);
 
-        let user_priority = crate::permissions::user_permissions(&state.db, &cs.public_key)
-            .await
-            .as_ref()
-            .map(|p| p.max_priority)
-            .unwrap_or(0);
-
-        let effective_power = user_talk_power.max(user_priority);
-
-        let hand_raised =
-            crate::routes::moderation::has_raised_hand(&state.db, &channel_id, &cs.public_key)
-                .await;
-
-        if effective_power < min_talk_power && !hand_raised {
-            let err = WsServerMessage::Error {
-                context: "voice_join".to_string(),
-                message: format!(
-                    "This channel requires talk priority {}; you have {}. Raise your hand to request access.",
-                    min_talk_power, effective_power
-                ),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
-        }
-    }
+        is_owner || user_talk_power >= min_talk_power
+    } else {
+        true
+    };
 
     // One voice session per identity. `voice_channels` and every pubkey-keyed
     // side table (sender ids, whisper defs, relay slot, last-active stamp) assume
@@ -394,6 +391,17 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .write()
         .await
         .insert(cs.public_key.clone());
+    // The talk-power answer, computed above, parked where the relay can read
+    // it without touching the database. A grant is the removal of this entry,
+    // and the shared teardown drops it, so the floor lasts one session.
+    {
+        let mut blocked = state.voice_talk_blocked.write().await;
+        if may_speak {
+            blocked.remove(&cs.public_key);
+        } else {
+            blocked.insert(cs.public_key.clone());
+        }
+    }
     // A fresh join starts a fresh loss measurement: carrying a counter span
     // across sessions would report an old call's bad patch as this one's.
     state
@@ -434,6 +442,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         voice_token,
         voice_wt_url,
         voice_cert_hash,
+        may_speak,
     };
     let json = serde_json::to_string(&reply).unwrap();
     let _ = ws_tx.send(Message::Text(json.into())).await;

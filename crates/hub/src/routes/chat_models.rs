@@ -727,6 +727,15 @@ pub enum WsServerMessage {
         /// `WebTransportOptions.serverCertificateHashes` (self-signed tier).
         /// `None` when a CA-issued cert is in use.
         voice_cert_hash: Option<String>,
+        /// False when the channel's `min_talk_power` is above what the joiner
+        /// carries and nobody has granted them the floor: they are in the room
+        /// and hearing it, and the relay drops what they send.
+        ///
+        /// Sent because the alternative is a silent failure — the member talks
+        /// and nothing happens, with nothing anywhere saying why. Behind the
+        /// `voice.talk` capability: an older hub omits the field, and a
+        /// client must not read that absence as "muted".
+        may_speak: bool,
     },
     #[serde(rename = "voice_participant_joined")]
     VoiceParticipantJoined {
