@@ -1825,6 +1825,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Queued voice-move assignments fire when the event starts (events.md
+    // §7.3), and this column is what makes that happen once: NULL = the
+    // start-time sweep hasn't run for this event, set by the reminder worker
+    // in the same pass that pushes the moves. Without it a worker that ticks
+    // every 60s would re-push the same move for the whole event.
+    let _ = sqlx::query("ALTER TABLE hub_events ADD COLUMN moves_applied_at BIGINT")
+        .execute(pool)
+        .await;
+
     // Mirror-forward between a recipient's home hubs (home-hub.md "DM
     // delivery", step 2). A queued copy has to be *remembered* as a copy: the
     // retry worker rebuilds the envelope from dm_messages, and rebuilding it

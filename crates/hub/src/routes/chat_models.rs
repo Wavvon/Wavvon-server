@@ -70,6 +70,14 @@ pub struct ChannelResponse {
     /// `nsfw` flag surfaced on `/info`).
     #[serde(default)]
     pub nsfw: bool,
+    /// The caller's own `voice.move_members` here, resolved channel-scoped
+    /// (events.md §7.1). A move-destination picker that offers every channel
+    /// pushes the refusal to the moment the move is issued — or, for a queued
+    /// assignment, to whenever it fires. Advertised as the
+    /// `channels.move.targets` capability; an older hub omits the field, so a
+    /// client must not read its absence as "no destinations".
+    #[serde(default)]
+    pub can_move_members: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]

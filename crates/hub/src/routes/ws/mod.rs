@@ -19,6 +19,7 @@ pub use connection::leave_voice_for_test;
 pub use voice::apply_pending_voice_move_assignment;
 pub use voice::get_voice_participants;
 pub use voice::get_voice_roster;
+pub use voice::push_event_move;
 pub use voice::voice_identity;
 
 pub async fn ws_handler(

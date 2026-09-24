@@ -12,12 +12,12 @@
 //! at most one duplicate card, no different from the risk any single-writer
 //! worker in this codebase already carries).
 //!
-//! Same tick also prunes expired queued voice-move assignments (events.md
-//! §7.3): extending this worker's existing 60s sweep rather than adding a
-//! dedicated `staging_worker` keeps a single-purpose-but-small worker count
-//! (the doc offers a dedicated worker as the alternative if this one
-//! shouldn't grow -- it's one extra DELETE per tick, judged small enough to
-//! fold in here).
+//! Same tick also applies queued voice-move assignments at the event's start
+//! and prunes them at its end (events.md §7.3): extending this worker's
+//! existing 60s sweep rather than adding a dedicated `staging_worker` keeps a
+//! single-purpose-but-small worker count (the doc offers a dedicated worker as
+//! the alternative if this one shouldn't grow -- it's one extra DELETE per
+//! tick, judged small enough to fold in here).
 //!
 //! Also extended (events.md §7.5, updated lifetime) to prune auto-spawned
 //! squad rooms belonging to an ended event: an *empty* room is deleted
@@ -101,7 +101,83 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
     .execute(&state.db)
     .await?;
 
+    apply_due_event_moves(state, now).await?;
+
     prune_ended_event_squad_rooms(state, now).await?;
+
+    Ok(())
+}
+
+/// How late a start is still worth acting on. A hub that was down over the
+/// event's start comes back to an assignment whose moment has passed, and
+/// dragging somebody into a raid channel an hour after the raid began is
+/// worse than leaving them where they are. Inside the window the move still
+/// fires; outside it the event is simply marked applied.
+const START_GRACE_SECS: i64 = 3600;
+
+/// events.md §7.3: apply an event's queued move assignments when it starts.
+///
+/// They only ever fired on the target's *next* voice join, so an event whose
+/// members had been sitting in the lobby since before the hour moved nobody —
+/// they had to leave and rejoin to be taken anywhere. `moves_applied_at`
+/// makes this pass run once per event; the join trigger stays, since it is
+/// what catches everyone who arrives after the start.
+async fn apply_due_event_moves(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
+    let started: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id, starts_at FROM hub_events
+         WHERE moves_applied_at IS NULL
+           AND starts_at <= $1
+           AND (ends_at IS NULL OR ends_at > $1)",
+    )
+    .bind(now)
+    .fetch_all(&state.db)
+    .await?;
+
+    for (event_id, starts_at) in started {
+        if now - starts_at <= START_GRACE_SECS {
+            let assignments: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT user_pubkey, target_channel_id, assigned_by
+                 FROM event_move_assignments WHERE event_id = $1",
+            )
+            .bind(&event_id)
+            .fetch_all(&state.db)
+            .await?;
+
+            for (pubkey, target_channel_id, assigned_by) in assignments {
+                // Someone who isn't in voice at all is left to the join
+                // trigger — there is nothing to move them out of, and the
+                // assignment row stays for exactly that.
+                let source_channel_id = {
+                    let vc = state.voice_channels.read().await;
+                    vc.iter()
+                        .find(|(_, participants)| participants.contains_key(&pubkey))
+                        .map(|(channel_id, _)| channel_id.clone())
+                };
+                let Some(source_channel_id) = source_channel_id else {
+                    continue;
+                };
+                if source_channel_id == target_channel_id {
+                    continue;
+                }
+
+                crate::routes::ws::push_event_move(
+                    state,
+                    &pubkey,
+                    &event_id,
+                    &target_channel_id,
+                    &source_channel_id,
+                    &assigned_by,
+                )
+                .await;
+            }
+        }
+
+        sqlx::query("UPDATE hub_events SET moves_applied_at = $1 WHERE id = $2")
+            .bind(now)
+            .bind(&event_id)
+            .execute(&state.db)
+            .await?;
+    }
 
     Ok(())
 }
