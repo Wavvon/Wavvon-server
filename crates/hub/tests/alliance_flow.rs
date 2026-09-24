@@ -1637,3 +1637,286 @@ async fn an_invite_only_hub_still_accepts_a_federating_peer() {
         "an invite_only hub must still let a peer hub federate; got {body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Per-alliance delegation (decisions.md, "Alliance permissions: one hub
+// permission plus a per-alliance grant list")
+// ---------------------------------------------------------------------------
+
+async fn create_role_with(
+    client: &reqwest::Client,
+    hub_url: &str,
+    token: &str,
+    name: &str,
+    permissions: &[&str],
+) -> String {
+    let role: serde_json::Value = client
+        .post(format!("{hub_url}/roles"))
+        .bearer_auth(token)
+        .json(&json!({ "name": name, "permissions": permissions, "priority": 5 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    role["id"].as_str().unwrap().to_string()
+}
+
+async fn assign_role_to(
+    client: &reqwest::Client,
+    hub_url: &str,
+    token: &str,
+    pubkey: &str,
+    role_id: &str,
+) {
+    let resp = client
+        .put(format!("{hub_url}/users/{pubkey}/roles/{role_id}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "assign role: {}", resp.status());
+}
+
+async fn create_alliance_named(
+    client: &reqwest::Client,
+    hub_url: &str,
+    token: &str,
+    name: &str,
+) -> AllianceResponse {
+    client
+        .post(format!("{hub_url}/alliances"))
+        .bearer_auth(token)
+        .json(&json!({ "name": name }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// Delegating one federation link no longer means handing over the hub — and
+/// it delegates *one* link: the same role has no say over the alliance it was
+/// not granted on.
+#[tokio::test]
+async fn an_alliance_manager_acts_on_that_alliance_only() {
+    let (hub_url, _state, _guard) = start_hub("hub-delegate").await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_user(&hub_url, &owner).await;
+
+    let delegate = Identity::generate();
+    let delegate_token = authenticate_user(&hub_url, &delegate).await;
+    let delegate_key = delegate.public_key_hex();
+
+    let raiders = create_alliance_named(&client, &hub_url, &owner_token, "Raiders").await;
+    let neighbours = create_alliance_named(&client, &hub_url, &owner_token, "Neighbours").await;
+
+    // Nothing about alliances in the role itself.
+    let role = create_role_with(&client, &hub_url, &owner_token, "Raid Diplomat", &[]).await;
+    assign_role_to(&client, &hub_url, &owner_token, &delegate_key, &role).await;
+
+    let invite = |token: String, alliance_id: String| {
+        let client = client.clone();
+        let hub_url = hub_url.clone();
+        async move {
+            client
+                .post(format!("{hub_url}/alliances/{alliance_id}/invite"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    assert_eq!(
+        invite(delegate_token.clone(), raiders.id.clone()).await,
+        403,
+        "no delegation yet"
+    );
+
+    let resp = client
+        .put(format!(
+            "{hub_url}/alliances/{}/managers/{role}",
+            raiders.id
+        ))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        204,
+        "granting the list is roles.manage's call"
+    );
+
+    assert_eq!(
+        invite(delegate_token.clone(), raiders.id.clone()).await,
+        200,
+        "the delegated alliance is theirs to invite into"
+    );
+    assert_eq!(
+        invite(delegate_token.clone(), neighbours.id.clone()).await,
+        403,
+        "the other alliance is not — that is the whole point of a per-alliance list"
+    );
+
+    let listed: Vec<serde_json::Value> = client
+        .get(format!("{hub_url}/alliances/{}/managers", raiders.id))
+        .bearer_auth(&delegate_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["role_id"], role);
+    assert_eq!(listed[0]["role_name"], "Raid Diplomat");
+
+    // Revoked, and the door closes again.
+    let resp = client
+        .delete(format!(
+            "{hub_url}/alliances/{}/managers/{role}",
+            raiders.id
+        ))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_eq!(invite(delegate_token, raiders.id).await, 403);
+}
+
+/// The trap from the design: sharing a channel is also a channel act, so
+/// managing the alliance is not enough on its own. Without this, whoever
+/// handles one federation link could expose a private channel they cannot
+/// read.
+#[tokio::test]
+async fn sharing_needs_the_channel_permission_too() {
+    let (hub_url, _state, _guard) = start_hub("hub-share-gate").await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_user(&hub_url, &owner).await;
+
+    let delegate = Identity::generate();
+    let delegate_token = authenticate_user(&hub_url, &delegate).await;
+    let delegate_key = delegate.public_key_hex();
+
+    let alliance = create_alliance_named(&client, &hub_url, &owner_token, "Pact").await;
+    let staff = create_channel(&client, &hub_url, &owner_token, json!({ "name": "staff" })).await;
+
+    // A diplomat with no channel authority at all.
+    let role = create_role_with(&client, &hub_url, &owner_token, "Diplomat", &[]).await;
+    assign_role_to(&client, &hub_url, &owner_token, &delegate_key, &role).await;
+    let resp = client
+        .put(format!(
+            "{hub_url}/alliances/{}/managers/{role}",
+            alliance.id
+        ))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let share = |token: String| {
+        let client = client.clone();
+        let hub_url = hub_url.clone();
+        let alliance_id = alliance.id.clone();
+        let channel_id = staff.id.clone();
+        async move {
+            client
+                .post(format!("{hub_url}/alliances/{alliance_id}/channels"))
+                .bearer_auth(token)
+                .json(&json!({ "channel_id": channel_id }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    assert_eq!(
+        share(delegate_token.clone()).await,
+        403,
+        "managing the alliance must not be enough to expose a channel"
+    );
+
+    // Same person, once they may manage the channel as well.
+    let channels_role = create_role_with(
+        &client,
+        &hub_url,
+        &owner_token,
+        "Channel Keeper",
+        &["channels.manage"],
+    )
+    .await;
+    assign_role_to(
+        &client,
+        &hub_url,
+        &owner_token,
+        &delegate_key,
+        &channels_role,
+    )
+    .await;
+
+    assert_eq!(
+        share(delegate_token).await,
+        200,
+        "both halves, now it shares"
+    );
+}
+
+/// A delegate cannot widen their own delegation: editing the grant list is
+/// `roles.manage`, not managing the alliance.
+#[tokio::test]
+async fn an_alliance_manager_cannot_grant_the_list() {
+    let (hub_url, _state, _guard) = start_hub("hub-no-widening").await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_user(&hub_url, &owner).await;
+
+    let delegate = Identity::generate();
+    let delegate_token = authenticate_user(&hub_url, &delegate).await;
+    let delegate_key = delegate.public_key_hex();
+
+    let alliance = create_alliance_named(&client, &hub_url, &owner_token, "Pact").await;
+    let role = create_role_with(&client, &hub_url, &owner_token, "Diplomat", &[]).await;
+    let other = create_role_with(&client, &hub_url, &owner_token, "Everyone Else", &[]).await;
+    assign_role_to(&client, &hub_url, &owner_token, &delegate_key, &role).await;
+
+    let resp = client
+        .put(format!(
+            "{hub_url}/alliances/{}/managers/{role}",
+            alliance.id
+        ))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let resp = client
+        .put(format!(
+            "{hub_url}/alliances/{}/managers/{other}",
+            alliance.id
+        ))
+        .bearer_auth(&delegate_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "a delegate handing the alliance to another role is exactly what roles.manage gates"
+    );
+}

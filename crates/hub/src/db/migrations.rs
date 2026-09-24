@@ -774,6 +774,25 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Who, besides `alliances.manage`, may act on one alliance: inviting
+    // another hub into it, sharing and unsharing a channel, the per-share
+    // policies (decisions.md, "Alliance permissions: one hub permission plus a
+    // per-alliance grant list"). A plain list rather than an allow/deny/inherit
+    // axis: alliances are a handful and flat, so there is nothing for a cascade
+    // to cascade through and "deny" has no baseline to subtract from. Local
+    // roles only — nothing here crosses a hub boundary.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS alliance_managers (
+            alliance_id TEXT   NOT NULL REFERENCES alliances(id) ON DELETE CASCADE,
+            role_id     TEXT   NOT NULL REFERENCES roles(id)     ON DELETE CASCADE,
+            granted_by  TEXT   NOT NULL,
+            granted_at  BIGINT NOT NULL,
+            PRIMARY KEY (alliance_id, role_id)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS pending_alliance_invites (
             id                   TEXT PRIMARY KEY,

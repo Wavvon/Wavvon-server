@@ -19,8 +19,10 @@ pub async fn create_invite(
     user: AuthUser,
     Path(alliance_id): Path<String>,
 ) -> Result<Json<AllianceInviteResponse>, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ALLIANCES_MANAGE)?;
+    // Inviting another hub is about this one relationship, so the grant list
+    // answers for it as well as the hub-wide permission (decisions.md,
+    // "Alliance permissions").
+    super::require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
 
     let alliance = sqlx::query_as::<_, AllianceRow>(
         "SELECT id, name, created_by, created_at FROM alliances WHERE id = $1",
@@ -285,8 +287,8 @@ pub async fn push_invite_handler(
     Path(alliance_id): Path<String>,
     Json(req): Json<crate::routes::alliance_models::PushInviteRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ALLIANCES_MANAGE)?;
+    // The direct push is the same act as minting the invite, one hop shorter.
+    super::require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
 
     // Verify alliance exists
     let alliance = sqlx::query_as::<_, AllianceRow>(

@@ -643,6 +643,15 @@ pub fn create_router_full(
             axum::routing::delete(routes::alliances::leave_alliance),
         )
         .route(
+            "/alliances/{alliance_id}/managers",
+            get(routes::alliances::list_alliance_managers),
+        )
+        .route(
+            "/alliances/{alliance_id}/managers/{role_id}",
+            axum::routing::put(routes::alliances::grant_alliance_manager)
+                .delete(routes::alliances::revoke_alliance_manager),
+        )
+        .route(
             "/alliances/{alliance_id}/channels",
             get(routes::alliances::list_shared_channels).post(routes::alliances::share_channel),
         )
