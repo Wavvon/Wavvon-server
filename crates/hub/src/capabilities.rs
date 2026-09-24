@@ -26,6 +26,13 @@
 /// Seeded with the cases where a newer client would otherwise call an
 /// endpoint an older hub does not have, or silently get a worse answer.
 pub const CAPABILITIES: &[&str] = &[
+    // Alliance management is delegable: `alliances.manage` carries the
+    // hub-scoped acts, and `alliance_managers` — a per-alliance grant list over
+    // local roles — carries the ones that belong to one relationship (inviting
+    // another hub, sharing a channel, the per-share policies). Gated so a
+    // client does not offer a delegation an older hub, where all ten endpoints
+    // want the hub-wide permission, would answer 403 to.
+    "alliance.permissions",
     // One bot model: bots are invited by Ed25519 pubkey and authenticate on
     // the normal session path. A client that does not see this string is
     // talking to a hub that still has `POST /admin/bots`, so its admin panel

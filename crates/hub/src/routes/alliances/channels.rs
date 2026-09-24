@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use super::models;
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ALLIANCES_MANAGE};
+use crate::permissions;
 use crate::routes::alliance_models::*;
 use crate::routes::post_models::{
     CreatePostRequest, CreateReplyRequest, PostDetail, PostListParams, PostListResponse,
@@ -108,8 +108,14 @@ pub async fn share_channel(
     Json(req): Json<ShareChannelRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ALLIANCES_MANAGE)?;
+    // Both halves, and the second one is the point (decisions.md, "Alliance
+    // permissions"): sharing a channel is also a channel act, so managing one
+    // federation link must not let someone expose a private channel they
+    // cannot even read.
+    super::require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
+    permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id)
+        .await?
+        .require(permissions::CHANNELS_MANAGE)?;
 
     // Verify alliance exists
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM alliances WHERE id = $1")
@@ -188,8 +194,13 @@ pub async fn unshare_channel(
     Path((alliance_id, channel_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ALLIANCES_MANAGE)?;
+    // Same pair as sharing: unsharing is the same channel act in reverse, and
+    // an asymmetric check would let a delegate undo a decision they could not
+    // have made.
+    super::require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
+    permissions::channel_permissions(&state.db, &user.public_key, &channel_id)
+        .await?
+        .require(permissions::CHANNELS_MANAGE)?;
 
     sqlx::query("DELETE FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2")
         .bind(&alliance_id)
