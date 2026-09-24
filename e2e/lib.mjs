@@ -178,8 +178,14 @@ export async function json(url, init) {
   return { status: res.status, body };
 }
 
+/** The hub binary every stage starts.
+ *
+ *  `E2E_HUB_BIN` points it elsewhere, which is how a new stage is run against
+ *  the **unfixed** build before it is trusted green (`e2e/README.md`): build
+ *  the commit before the fix into its own `--target-dir` and point this at it.
+ *  Without that, a stage that passes proves only that it passes. */
 export function hubBinary() {
-  return join(ROOT, "target/debug/wavvon-hub.exe");
+  return process.env.E2E_HUB_BIN ?? join(ROOT, "target/debug/wavvon-hub.exe");
 }
 
 // ── identities ──────────────────────────────────────────────────────────────

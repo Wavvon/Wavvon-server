@@ -14,7 +14,8 @@
 // own `e2e-topology/`, which imports this file's `lib.mjs`.
 //
 // Usage:  node e2e/run.mjs [stage...]
-//         stages: hubs alliance voice certs permissions pgupgrade alliancesplit alliancestress alliancechurn alliancedrift farm crossfarm
+//         stages: hubs alliance voice certs permissions pgupgrade alliancesplit
+//                 alliancedelegate alliancestress alliancechurn alliancedrift farm crossfarm
 //                 (default: all)
 //         E2E_VERBOSE=1 to stream every process's output.
 
@@ -1312,6 +1313,171 @@ try {
   // convenient one — a partial view rather than an error, a refusal rather
   // than a guess — and none of them can be posed to a suite that builds its
   // own state.
+  // ── alliance delegation ─────────────────────────────────────────────────
+  //
+  // Who, other than the hub's own `alliances.manage` holders, may act on one
+  // alliance (decisions.md, "Alliance permissions: one hub permission plus a
+  // per-alliance grant list"). Every check here is a refusal that has to
+  // survive a real hub rather than a constructed `AppState`: the roles are
+  // assigned over the real routes, the member arrives through a real invite on
+  // an invite-only hub, and the grant list is read back from a real database.
+  if (want.has("alliancedelegate")) {
+    const owner = identity();
+    const h = await hub("hub-delegate", owner);
+    const ownerToken = (await authenticate(h.url, owner)).body.token;
+    const asOwner = { Authorization: `Bearer ${ownerToken}` };
+
+    const post = (path, token, body) => json(`${h.url}${path}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const put = (path, token) => json(`${h.url}${path}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const del = (path, token) => json(`${h.url}${path}`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    const raiders = await post("/alliances", ownerToken, { name: "Raiders Pact" });
+    checkEq(raiders.status, 201, `create the first alliance: ${JSON.stringify(raiders.body)}`);
+    const neighbours = await post("/alliances", ownerToken, { name: "Neighbours Pact" });
+    checkEq(neighbours.status, 201, `create the second: ${JSON.stringify(neighbours.body)}`);
+
+    const staff = await post("/channels", ownerToken, { name: "staff" });
+    checkEq(staff.status, 201, `create #staff: ${JSON.stringify(staff.body)}`);
+
+    // A diplomat carrying nothing: not `alliances.manage`, not
+    // `channels.manage`. Everything it ends up able to do comes from the grant
+    // list alone, which is the claim being tested.
+    const diplomatRole = await post("/roles", ownerToken, {
+      name: "Diplomat", priority: 30, permissions: [],
+    });
+    checkEq(diplomatRole.status, 201, `diplomat role: ${JSON.stringify(diplomatRole.body)}`);
+    const keeperRole = await post("/roles", ownerToken, {
+      name: "Channel Keeper", priority: 20, permissions: ["channels.manage"],
+    });
+    checkEq(keeperRole.status, 201, `keeper role: ${JSON.stringify(keeperRole.body)}`);
+
+    // A real member of a real invite-only hub, not a row written behind the
+    // routes' back.
+    const invite = await post("/invites", ownerToken, {});
+    check(invite.status === 200 || invite.status === 201, `member invite: ${invite.status}`);
+    const diplomat = identity();
+    const dv = await authenticate(h.url, diplomat, { invite_code: invite.body.code });
+    checkEq(dv.status, 200, `diplomat auth: ${JSON.stringify(dv.body)}`);
+    const diplomatToken = dv.body.token;
+    checkEq(
+      (await put(`/users/${diplomat.pubkey}/roles/${diplomatRole.body.id}`, ownerToken)).status,
+      200,
+      "grant the diplomat role",
+    );
+
+    const inviteInto = (allianceId, token) =>
+      post(`/alliances/${allianceId}/invite`, token);
+    const shareStaff = (allianceId, token) =>
+      post(`/alliances/${allianceId}/channels`, token, { channel_id: staff.body.id });
+
+    await scenario("a member with no delegation cannot act on an alliance", async () => {
+      const inv = await inviteInto(raiders.body.id, diplomatToken);
+      checkEq(inv.status, 403, `minting an alliance invite: ${JSON.stringify(inv.body)}`);
+
+      const shared = await shareStaff(raiders.body.id, diplomatToken);
+      checkEq(shared.status, 403, `sharing a channel: ${JSON.stringify(shared.body)}`);
+
+      const managers = await json(`${h.url}/alliances/${raiders.body.id}/managers`, {
+        headers: { Authorization: `Bearer ${diplomatToken}` },
+      });
+      checkEq(managers.status, 403, `reading the grant list: ${JSON.stringify(managers.body)}`);
+    });
+
+    await scenario("the hub advertises alliance.permissions", async () => {
+      const info = await json(`${h.url}/info`);
+      check(
+        info.body.capabilities.includes("alliance.permissions"),
+        `a client cannot offer the delegation without it, got ${info.body.capabilities}`,
+      );
+    });
+
+    await scenario("granting one alliance delegates that alliance and no other", async () => {
+      const granted = await put(
+        `/alliances/${raiders.body.id}/managers/${diplomatRole.body.id}`,
+        ownerToken,
+      );
+      checkEq(granted.status, 204, `grant the list: ${JSON.stringify(granted.body)}`);
+
+      const mine = await inviteInto(raiders.body.id, diplomatToken);
+      checkEq(mine.status, 200, `the delegated alliance: ${JSON.stringify(mine.body)}`);
+
+      const theirs = await inviteInto(neighbours.body.id, diplomatToken);
+      checkEq(
+        theirs.status, 403,
+        `the other alliance must stay closed — that is the whole point of a per-alliance list: ${JSON.stringify(theirs.body)}`,
+      );
+
+      const managers = await json(`${h.url}/alliances/${raiders.body.id}/managers`, {
+        headers: { Authorization: `Bearer ${diplomatToken}` },
+      });
+      checkEq(managers.status, 200, `reading the list now: ${JSON.stringify(managers.body)}`);
+      checkEq(managers.body.length, 1, `one delegated role: ${JSON.stringify(managers.body)}`);
+      checkEq(managers.body[0].role_id, diplomatRole.body.id, "the role that was granted");
+      checkEq(managers.body[0].role_name, "Diplomat", "named, so a screen need not resolve it");
+    });
+
+    await scenario("sharing a channel still needs the channel's own permission", async () => {
+      const without = await shareStaff(raiders.body.id, diplomatToken);
+      checkEq(
+        without.status, 403,
+        `managing the alliance must not be enough to expose a channel: ${JSON.stringify(without.body)}`,
+      );
+
+      checkEq(
+        (await put(`/users/${diplomat.pubkey}/roles/${keeperRole.body.id}`, ownerToken)).status,
+        200,
+        "grant channels.manage as well",
+      );
+
+      const withBoth = await shareStaff(raiders.body.id, diplomatToken);
+      checkEq(withBoth.status, 200, `both halves: ${JSON.stringify(withBoth.body)}`);
+
+      const unshared = await del(
+        `/alliances/${raiders.body.id}/channels/${staff.body.id}`,
+        diplomatToken,
+      );
+      checkEq(unshared.status, 204, `unsharing takes the same pair: ${JSON.stringify(unshared.body)}`);
+    });
+
+    await scenario("a delegate cannot widen its own delegation", async () => {
+      const widen = await put(
+        `/alliances/${raiders.body.id}/managers/${keeperRole.body.id}`,
+        diplomatToken,
+      );
+      checkEq(
+        widen.status, 403,
+        `handing the alliance to another role is roles.manage's call: ${JSON.stringify(widen.body)}`,
+      );
+    });
+
+    await scenario("revoking the grant closes the door again", async () => {
+      const revoked = await del(
+        `/alliances/${raiders.body.id}/managers/${diplomatRole.body.id}`,
+        ownerToken,
+      );
+      checkEq(revoked.status, 204, `revoke: ${JSON.stringify(revoked.body)}`);
+
+      const after = await inviteInto(raiders.body.id, diplomatToken);
+      checkEq(after.status, 403, `the delegation is gone: ${JSON.stringify(after.body)}`);
+
+      // `channels.manage` is untouched by the revoke, so this is the alliance
+      // half failing on its own rather than both halves going at once.
+      const share = await shareStaff(raiders.body.id, diplomatToken);
+      checkEq(share.status, 403, `and sharing with it: ${JSON.stringify(share.body)}`);
+    });
+
+  }
+
   if (want.has("alliancestress")) {
     const ownerX = identity();
     const ownerY = identity();
