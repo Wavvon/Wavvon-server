@@ -8,7 +8,7 @@ use rand::RngCore;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, INVITES_MANAGE};
-use crate::routes::invite_models::{CreateInviteRequest, InviteResponse};
+use crate::routes::invite_models::{invite_status, CreateInviteRequest, InviteResponse};
 use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
@@ -133,6 +133,7 @@ pub async fn create_invite(
     Ok((
         StatusCode::CREATED,
         Json(InviteResponse {
+            status: invite_status(0, max_uses, expires_at, now).to_string(),
             code,
             created_by: user.public_key,
             max_uses,
@@ -144,23 +145,56 @@ pub async fn create_invite(
     ))
 }
 
+/// `GET /invites` query: the shared paging keys plus one filter.
+///
+/// The paging keys are spelled out rather than `#[serde(flatten)]`-ed in from
+/// `PageQuery`, because `Query` deserializes with `serde_urlencoded`, which
+/// hands a flattened struct every value as a string and then fails to parse
+/// `limit` as an integer. The failure only shows when `limit` or `cursor` is
+/// actually present, so a flattened version looks fine until someone pages.
+#[derive(serde::Deserialize)]
+pub struct ListInvitesQuery {
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+    /// Include the invites that can no longer admit anyone. Off by default:
+    /// the list is the answer to "which way in is open right now", and an
+    /// invite that burned its one use in July answers nothing while pushing a
+    /// live one off the page.
+    #[serde(default)]
+    pub include_inactive: bool,
+}
+
 pub async fn list_invites(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
-    Query(page): Query<PageQuery>,
+    Query(query): Query<ListInvitesQuery>,
 ) -> Result<Json<Vec<InviteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(INVITES_MANAGE)?;
 
+    let page = PageQuery {
+        limit: query.limit,
+        cursor: query.cursor.clone(),
+    };
+    let now = crate::auth::handlers::unix_timestamp();
+
+    // The filter is in SQL rather than over the fetched rows because it has to
+    // happen before `LIMIT`: dropping dead rows afterwards would hand back a
+    // short page, and a client paging to exhaustion would read that as the end
+    // of the list.
     let rows = sqlx::query_as::<_, InviteRow>(
         "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites
          WHERE ($1::text IS NULL OR (created_at, code) <
                 ((SELECT created_at FROM invites WHERE code = $1), $1))
+           AND ($3 OR ((max_uses IS NULL OR uses < max_uses)
+                       AND (expires_at IS NULL OR expires_at > $4)))
          ORDER BY created_at DESC, code DESC
          LIMIT $2",
     )
     .bind(page.cursor())
     .bind(page.limit())
+    .bind(query.include_inactive)
+    .bind(now)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -168,6 +202,7 @@ pub async fn list_invites(
     Ok(Json(
         rows.into_iter()
             .map(|r| InviteResponse {
+                status: invite_status(r.uses, r.max_uses, r.expires_at, now).to_string(),
                 code: r.code,
                 created_by: r.created_by,
                 max_uses: r.max_uses,
