@@ -796,3 +796,126 @@ async fn bot_voice_join_rest_endpoint_is_gone() {
         resp.status_code()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Who `POST /bots` may be pointed at (issue #29)
+// ---------------------------------------------------------------------------
+
+/// Authenticate normally — no `is_bot` — the way a person's client does.
+async fn authenticate_as_a_person(
+    server: &axum_test::TestServer,
+    identity: &Identity,
+) -> axum_test::TestResponse {
+    let pub_key = identity.public_key_hex();
+    let challenge: serde_json::Value = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await
+        .json();
+    let challenge_bytes = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
+    let signature = identity.sign(&challenge_bytes);
+
+    server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge["challenge"],
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .await
+}
+
+/// Inviting a key that already belongs to a member is refused, rather than
+/// answered 200 with a token that can never be redeemed: `accept-invite`
+/// looks for `is_bot = TRUE`, and a member's row is not one.
+#[tokio::test]
+async fn inviting_an_existing_member_as_a_bot_is_refused() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let member = Identity::generate();
+    common::authenticate(&server, &member).await;
+
+    let resp = server
+        .post("/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "pubkey": member.public_key_hex() }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CONFLICT);
+
+    // And the member's row is untouched: still a person, no invite token
+    // stamped onto it.
+    let is_bot: bool = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+        .bind(member.public_key_hex())
+        .fetch_one(&server.state().db)
+        .await
+        .unwrap();
+    assert!(
+        !is_bot,
+        "a member must not become a bot by being invited as one"
+    );
+
+    let token: Option<String> =
+        sqlx::query_scalar("SELECT bot_invite_token FROM users WHERE public_key = $1")
+            .bind(member.public_key_hex())
+            .fetch_one(&server.state().db)
+            .await
+            .unwrap();
+    assert!(token.is_none(), "no unusable token written onto a member");
+}
+
+/// The open question in issue #29, answered rather than assumed: a stranger's
+/// key — a person who simply has not joined yet — invited as a bot gets a
+/// `bot_pending` row with `is_bot = TRUE`, and **authenticating normally does
+/// not clear it**. They are admitted as an ordinary member and every later
+/// read still treats them as a bot, DM exclusion included.
+///
+/// This test records today's behaviour so the review has the answer in one
+/// place; it is not an endorsement of it.
+#[tokio::test]
+async fn a_stranger_invited_as_a_bot_stays_flagged_after_joining_as_a_person() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let stranger = Identity::generate();
+    server
+        .post("/bots")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "pubkey": stranger.public_key_hex() }))
+        .await
+        .assert_status_success();
+
+    // They authenticate as a person, asserting nothing about bots.
+    let resp = authenticate_as_a_person(&server, &stranger).await;
+    resp.assert_status_ok();
+
+    let (is_bot, approval): (bool, String) =
+        sqlx::query_as("SELECT is_bot, approval_status FROM users WHERE public_key = $1")
+            .bind(stranger.public_key_hex())
+            .fetch_one(&server.state().db)
+            .await
+            .unwrap();
+    assert!(
+        is_bot,
+        "today the flag survives a normal join — the hub cannot tell a process from a person"
+    );
+    assert_eq!(
+        approval, "bot_pending",
+        "and they are left in the bots' waiting room rather than admitted"
+    );
+
+    // And `bot_pending` costs them nothing at the door: the session works and
+    // reads succeed, so the practical effect of the whole thing is a person
+    // wearing a bot's flag — excluded from DMs by the guard that reads it.
+    let token = resp.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    server
+        .get("/channels")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+}
