@@ -304,96 +304,6 @@ async fn cannot_create_empty_conversation() {
 
 // --- Cross-hub federated DM tests ---
 
-async fn start_real_hub(name: &str) -> (String, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
-
-    let state = Arc::new(AppState {
-        hub_name: name.to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        db_read: None,
-        store,
-        pending_challenges: RwLock::new(HashMap::new()),
-        cert_portfolio_cache: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_last_active: RwLock::new(HashMap::new()),
-        whisper_target_pubkeys: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_wt_url: None,
-        canonical_url: Arc::new(RwLock::new(None)),
-        voice_cert_hash: RwLock::new(None),
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashMap::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        voice_talk_blocked: Default::default(),
-        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
-        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
-        webauthn: {
-            let origin = url::Url::parse("http://localhost:3000").unwrap();
-            std::sync::Arc::new(
-                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
-                    .unwrap()
-                    .rp_name("test-hub")
-                    .build()
-                    .unwrap(),
-            )
-        },
-        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        device_token_ttl_secs: 30 * 86400,
-        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
-            wavvon_hub::state::WebhookCircuit::default(),
-        )),
-        lan_mode: false,
-        lan_tls_mode: None,
-        lan_fingerprint: None,
-    });
-    let app = server::create_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let url = format!("http://127.0.0.1:{port}");
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-    (url, guard)
-}
-
 async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
     let client = reqwest::Client::new();
     let pub_key = identity.public_key_hex();
@@ -444,13 +354,32 @@ fn make_plaintext_sig(
     hex::encode(sender.sign(&bytes).to_bytes())
 }
 
-/// Poll the recipient hub until the federated DM lands. Cross-hub delivery
-/// is asynchronous (outbox worker / spawned federation request), and a fixed
-/// sleep flakes on slow CI runners — before delivery the recipient hub may
-/// even 403 because it doesn't know the conversation yet. Panics with the
-/// last status/body if nothing arrives within 15s.
+/// Deliver whatever the sending hub still has queued, now.
+///
+/// `send_dm` writes the outbox row, then fires the first attempt in a spawned
+/// task; when that attempt fails it pushes the row ten seconds out for a retry
+/// worker no test harness starts. So a test that only polls the recipient is
+/// waiting on one invisible attempt, and a runner loaded enough to lose it
+/// fails the test with a 403 the code had nothing to do with. Clearing the
+/// backoff and running a pass by hand makes the delivery the test's to drive.
+async fn flush_dm_outbox(state: &AppState) {
+    sqlx::query("UPDATE dm_outbox SET next_attempt_at = 0, attempts = 0, bounced_at = NULL")
+        .execute(&state.db)
+        .await
+        .expect("reset the outbox backoff");
+    wavvon_hub::dm_worker::tick(state)
+        .await
+        .expect("drive one outbox pass");
+}
+
+/// Poll the recipient hub until the federated DM lands, driving `sender`'s
+/// outbox between attempts rather than waiting on the spawned delivery alone.
+/// Before delivery the recipient hub may even 403, because it doesn't know the
+/// conversation yet. Panics with the last status/body if nothing arrives
+/// within 15s.
 async fn wait_for_federated_dms(
     client: &reqwest::Client,
+    sender: &AppState,
     hub_url: &str,
     token: &str,
     conversation_id: &str,
@@ -478,12 +407,14 @@ async fn wait_for_federated_dms(
         if std::time::Instant::now() >= deadline {
             panic!("federated DM never arrived on {hub_url}: last response: {status} {body}");
         }
+        flush_dm_outbox(sender).await;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
-/// Return the AppState together with the URL so tests can drive the worker manually.
-async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
+/// A real hub on a real port, with its `AppState` so a test can drive the
+/// outbox worker instead of waiting on the spawned delivery.
+async fn start_real_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
     let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
@@ -575,8 +506,8 @@ async fn start_real_hub_with_state(name: &str) -> (String, Arc<AppState>, common
 
 #[tokio::test]
 async fn dm_delivered_across_hubs() {
-    let (hub_a, _hub_a_guard) = start_real_hub("hub-a").await;
-    let (hub_b, _hub_b_guard) = start_real_hub("hub-b").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub("hub-a").await;
+    let (hub_b, _hub_b_state, _hub_b_guard) = start_real_hub("hub-b").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -618,7 +549,8 @@ async fn dm_delivered_across_hubs() {
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
     // Bob reads the thread from Hub B — message should have been federated there.
-    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
+    let messages =
+        wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().expect("expected an array");
     assert_eq!(arr.len(), 1, "Bob should see the federated DM");
     assert_eq!(arr[0]["content"], content);
@@ -630,7 +562,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     use wavvon_hub::dm_worker;
 
     // Hub A is up from the start.
-    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub_with_state("hub-a").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub("hub-a").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -909,8 +841,8 @@ async fn list_dm_messages_returns_delivery_failed_false_for_local_conversation()
 /// each URL in hubs_json instead of conversation_members.hub_url.
 #[tokio::test]
 async fn send_dm_uses_home_hub_designation_when_present() {
-    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub_with_state("hub-a-desig").await;
-    let (hub_b, _hub_b_guard) = start_real_hub("hub-b-desig").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub("hub-a-desig").await;
+    let (hub_b, _hub_b_state, _hub_b_guard) = start_real_hub("hub-b-desig").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -978,7 +910,8 @@ async fn send_dm_uses_home_hub_designation_when_present() {
 
     // Bob reads from Hub B — message should have arrived via the designation.
     let bob_token = authenticate_http(&hub_b, &bob).await;
-    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
+    let messages =
+        wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().unwrap();
     assert_eq!(
         arr.len(),
@@ -996,8 +929,8 @@ async fn send_dm_uses_home_hub_designation_when_present() {
 /// Nothing surfaced: the DM was stored locally and the sender saw success.
 #[tokio::test]
 async fn send_dm_uses_designation_when_master_is_known_only_from_a_cert() {
-    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub_with_state("hub-a-certlink").await;
-    let (hub_b, _hub_b_guard) = start_real_hub("hub-b-certlink").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub("hub-a-certlink").await;
+    let (hub_b, _hub_b_state, _hub_b_guard) = start_real_hub("hub-b-certlink").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -1067,7 +1000,8 @@ async fn send_dm_uses_designation_when_master_is_known_only_from_a_cert() {
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
     let bob_token = authenticate_http(&hub_b, &bob).await;
-    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
+    let messages =
+        wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().unwrap();
     assert_eq!(
         arr.len(),
@@ -1081,8 +1015,8 @@ async fn send_dm_uses_designation_when_master_is_known_only_from_a_cert() {
 /// hub_url from conversation_members (existing behaviour, no regression).
 #[tokio::test]
 async fn send_dm_falls_back_to_hub_url_when_no_designation() {
-    let (hub_a, _hub_a_guard) = start_real_hub("hub-a-fallback").await;
-    let (hub_b, _hub_b_guard) = start_real_hub("hub-b-fallback").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub("hub-a-fallback").await;
+    let (hub_b, _hub_b_state, _hub_b_guard) = start_real_hub("hub-b-fallback").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -1116,7 +1050,8 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
     assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
 
     let bob_token = authenticate_http(&hub_b, &bob).await;
-    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
+    let messages =
+        wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().unwrap();
     assert_eq!(
         arr.len(),
@@ -1515,7 +1450,7 @@ async fn sender_key_upsert_replaces_old_entry() {
 /// doesn't belong to a key in the `peers` table.
 #[tokio::test]
 async fn federated_dm_rejects_normal_user() {
-    let (hub, _guard) = start_real_hub("hub-h4-reject").await;
+    let (hub, _state, _guard) = start_real_hub("hub-h4-reject").await;
     let client = reqwest::Client::new();
 
     // Register a normal user on this hub.
@@ -1558,7 +1493,7 @@ async fn federated_dm_rejects_normal_user() {
 /// invalid signature, because only the victim can sign with the victim's key.
 #[tokio::test]
 async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
-    let (hub, _guard) = start_real_hub("hub-h4-bypass").await;
+    let (hub, _state, _guard) = start_real_hub("hub-h4-bypass").await;
     let client = reqwest::Client::new();
 
     // Attacker generates their own keypair and authenticates with is_hub=true
@@ -1664,7 +1599,7 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
 /// path of the signature check.
 #[tokio::test]
 async fn federated_dm_accepts_correctly_signed_plaintext() {
-    let (hub, _guard) = start_real_hub("hub-h4-signed").await;
+    let (hub, _state, _guard) = start_real_hub("hub-h4-signed").await;
     let client = reqwest::Client::new();
 
     // Register the "sending hub" via is_hub=true.
@@ -1740,8 +1675,8 @@ async fn federated_dm_accepts_registered_peer_hub() {
     // This test reuses the cross-hub DM flow which exercises the full
     // federation path.  If the PeerHub extractor incorrectly rejects a
     // registered peer, the message will not appear on Hub B.
-    let (hub_a, _hub_a_guard) = start_real_hub("hub-h4-a").await;
-    let (hub_b, _hub_b_guard) = start_real_hub("hub-h4-b").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub("hub-h4-a").await;
+    let (hub_b, _hub_b_state, _hub_b_guard) = start_real_hub("hub-h4-b").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -1779,7 +1714,8 @@ async fn federated_dm_accepts_registered_peer_hub() {
 
     // Bob reads from Hub B — message must be there.
     let bob_token = authenticate_http(&hub_b, &bob).await;
-    let messages = wait_for_federated_dms(&client, &hub_b, &bob_token, &conv.id, 1).await;
+    let messages =
+        wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 1).await;
     let arr = messages.as_array().unwrap();
     assert_eq!(
         arr.len(),
@@ -1837,11 +1773,9 @@ fn home_hub_list(master: &Identity, hubs: &[String]) -> serde_json::Value {
 /// authoritative" that only held for reads.
 #[tokio::test]
 async fn an_accepting_hub_mirrors_a_dm_to_the_other_home_hubs() {
-    use wavvon_hub::dm_worker;
-
-    let (hub_a, _hub_a_guard) = start_real_hub("hub-a").await;
-    let (hub_b, hub_b_state, _hub_b_guard) = start_real_hub_with_state("hub-b").await;
-    let (hub_c, _hub_c_guard) = start_real_hub("hub-c").await;
+    let (hub_a, hub_a_state, _hub_a_guard) = start_real_hub("hub-a").await;
+    let (hub_b, hub_b_state, _hub_b_guard) = start_real_hub("hub-b").await;
+    let (hub_c, _hub_c_state, _hub_c_guard) = start_real_hub("hub-c").await;
     let client = reqwest::Client::new();
 
     let alice = Identity::generate();
@@ -1912,13 +1846,12 @@ async fn an_accepting_hub_mirrors_a_dm_to_the_other_home_hubs() {
 
     // It lands on B, the address Alice's hub had.
     let bob_token_b = authenticate_http(&hub_b, &bob).await;
-    wait_for_federated_dms(&client, &hub_b, &bob_token_b, &conv.id, 1).await;
+    wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token_b, &conv.id, 1).await;
 
-    // B queues the copy for C; the outbox worker is what delivers it, so drive
-    // one pass rather than waiting out its poll interval.
-    dm_worker::tick(&hub_b_state).await.unwrap();
+    // B queues the copy for C; the wait below drives B's outbox to deliver it.
 
-    let messages = wait_for_federated_dms(&client, &hub_c, &bob_token_c, &conv.id, 1).await;
+    let messages =
+        wait_for_federated_dms(&client, &hub_b_state, &hub_c, &bob_token_c, &conv.id, 1).await;
     let arr = messages.as_array().expect("expected an array");
     assert_eq!(
         arr.len(),
