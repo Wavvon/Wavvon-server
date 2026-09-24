@@ -44,7 +44,27 @@ pub async fn ext_invite_bot(
 
     let now = crate::auth::handlers::unix_timestamp();
 
-    // Create the pending users row (idempotent so re-inviting is safe).
+    // Somebody is already here under that key. `ON CONFLICT DO NOTHING` keeps
+    // their row from being converted into a bot's — nobody can be turned into
+    // a bot by being invited as one — but the `UPDATE` below has no such
+    // guard, so before this it stamped a bot invite token onto a member's row
+    // and answered 200 with a token `accept-invite` can never honour: that
+    // path looks for `is_bot = TRUE`, and this row is not one. A no-op that
+    // reported success. Say so instead.
+    let existing_is_bot: Option<bool> =
+        sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
+            .bind(&req.pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if existing_is_bot == Some(false) {
+        return Err((
+            StatusCode::CONFLICT,
+            "That key already belongs to a member of this hub".to_string(),
+        ));
+    }
+
+    // Create the pending users row (idempotent so re-inviting a bot is safe).
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_bot)
          VALUES ($1, $2, $3, 'bot_pending', TRUE) ON CONFLICT (public_key) DO NOTHING",
