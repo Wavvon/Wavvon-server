@@ -298,7 +298,16 @@ pub async fn create_channel(
         }
     })?;
 
+    // A channel this fresh carries no overwrites, so this is the creator own
+    // hub-wide answer — but it is computed, not assumed, so the field means the
+    // same thing here as in the list.
+    let can_move_members = permissions::channel_permissions(&state.db, &user.public_key, &id)
+        .await
+        .map(|p| p.has(permissions::VOICE_MOVE_MEMBERS))
+        .unwrap_or(false);
+
     let resp = ChannelResponse {
+        can_move_members,
         id: id.clone(),
         name: req.name.clone(),
         created_by: user.public_key.clone(),
@@ -655,11 +664,20 @@ pub async fn list_channels(
     let joinable =
         permissions::channels_with_permission(&state.db, &user.public_key, permissions::VOICE_JOIN)
             .await?;
+    // events.md §7.1: which channels the caller may move members *into*, so a
+    // destination picker can offer only those.
+    let movable = permissions::channels_with_permission(
+        &state.db,
+        &user.public_key,
+        permissions::VOICE_MOVE_MEMBERS,
+    )
+    .await?;
 
     let channels = rows
         .into_iter()
         .filter(|r| readable.contains(&r.id) || joinable.contains(&r.id))
         .map(|r| ChannelResponse {
+            can_move_members: movable.contains(&r.id),
             id: r.id,
             name: r.name,
             created_by: r.created_by,

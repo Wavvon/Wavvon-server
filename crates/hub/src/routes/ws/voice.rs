@@ -260,8 +260,8 @@ pub async fn apply_pending_voice_move_assignment(
 ) {
     let now = crate::auth::handlers::unix_timestamp();
 
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT ema.event_id, ema.target_channel_id
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT ema.event_id, ema.target_channel_id, ema.assigned_by
          FROM event_move_assignments ema
          INNER JOIN hub_events he ON he.id = ema.event_id
          WHERE ema.user_pubkey = $1
@@ -278,9 +278,52 @@ pub async fn apply_pending_voice_move_assignment(
     .ok()
     .flatten();
 
-    let Some((event_id, target_channel_id)) = row else {
+    let Some((event_id, target_channel_id, assigned_by)) = row else {
         return;
     };
+
+    push_event_move(
+        state,
+        pubkey,
+        &event_id,
+        &target_channel_id,
+        joined_channel_id,
+        &assigned_by,
+    )
+    .await;
+}
+
+/// Push one queued assignment as a `voice_move`, from whichever trigger
+/// reached it: the target's voice join, or the event's start
+/// (`reminder_worker`). Shared so both triggers apply the same rules.
+///
+/// `assigned_by`'s authority is re-checked here, not only when the assignment
+/// was written: an organizer demoted between the two must not still be moving
+/// people, and a queued move can outlive the role that authorised it by hours.
+pub async fn push_event_move(
+    state: &AppState,
+    pubkey: &str,
+    event_id: &str,
+    target_channel_id: &str,
+    source_channel_id: &str,
+    assigned_by: &str,
+) {
+    let target_channel_id = target_channel_id.to_string();
+    let event_id = event_id.to_string();
+
+    match crate::permissions::channel_permissions(&state.db, assigned_by, &target_channel_id).await
+    {
+        Ok(perms) if perms.has(crate::permissions::VOICE_MOVE_MEMBERS) => {}
+        _ => {
+            tracing::info!(
+                "Queued voice move skipped: {} no longer holds move_members on channel {} (event {})",
+                &assigned_by[..16.min(assigned_by.len())],
+                &target_channel_id[..8.min(target_channel_id.len())],
+                event_id
+            );
+            return;
+        }
+    }
 
     let target_channel_name: Option<String> =
         sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND is_category = false")
@@ -331,7 +374,7 @@ pub async fn apply_pending_voice_move_assignment(
     let push = crate::routes::chat_models::WsServerMessage::VoiceMove {
         target_channel_id: target_channel_id.clone(),
         target_channel_name,
-        source_channel_id: Some(joined_channel_id.to_string()),
+        source_channel_id: Some(source_channel_id.to_string()),
         event_id: Some(event_id.clone()),
         auto,
     };

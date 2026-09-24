@@ -1203,7 +1203,16 @@ pub async fn create_squad_rooms(
 
             match result {
                 Ok(_) => {
+                    // Resolved against the room itself: it inherits the anchor
+                    // channel chain, so this is not the hub-wide answer.
+                    let can_move_members =
+                        crate::permissions::channel_permissions(&state.db, &user.public_key, &id)
+                            .await
+                            .map(|p| p.has(crate::permissions::VOICE_MOVE_MEMBERS))
+                            .unwrap_or(false);
+
                     created.push(ChannelResponse {
+                        can_move_members,
                         id,
                         name: name.clone(),
                         created_by: user.public_key.clone(),
