@@ -43,6 +43,7 @@ POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17
 | `permissions` | The permission model end to end: validation, the escalation ceiling on all four grant paths, the read/voice split, and the catalogue the hub serves. |
 | `pgupgrade` | The major upgrade walked the way the hub's own refusal tells an operator to walk it. |
 | `alliancesplit` | Three hubs: a partner in one alliance must not see the other. |
+| `alliancedelegate` | Who may act on *one* alliance: the per-alliance grant list, the channel permission sharing also needs, and the widening a delegate must not manage. |
 | `alliancestress`, `alliancechurn`, `alliancedrift` | Alliances under load, membership churn, and state drift between hubs. |
 | `farm`, `crossfarm` | A farm hosting its own hubs, and an alliance across two farms. |
 
@@ -71,5 +72,14 @@ Two rules worth keeping:
   no route at all.
 - **Run a new stage against the unfixed build first.** A stage that is green
   either way tests nothing. Build the previous commit into a second
-  `--target-dir`, point `E2E_OLD_HUB_BIN` at it or swap the binary, and watch
-  it fail before you trust it passing.
+  `--target-dir` — a `git worktree` at that commit keeps your tree alone — and
+  point **`E2E_HUB_BIN`** at the binary it produced:
+
+  ```bash
+  git worktree add ../wavvon-before <commit-before-the-fix>
+  (cd ../wavvon-before && cargo build -p wavvon-hub --target-dir <abs>/target-before)
+  E2E_HUB_BIN=<abs>/target-before/debug/wavvon-hub.exe node e2e/run.mjs <stage>
+  ```
+
+  Watch it fail there before you trust it passing here. (`E2E_OLD_HUB_BIN` is a
+  different knob: the *previous PostgreSQL major* the `pgupgrade` stage needs.)
