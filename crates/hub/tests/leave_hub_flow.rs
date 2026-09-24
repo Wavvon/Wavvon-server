@@ -1,11 +1,11 @@
+//! `DELETE /me` — a member removing themselves (decisions.md, "Leaving a hub
+//! clears the profile and the membership, and keeps the pubkey as an anchor").
+
 use serde_json::json;
 use wavvon_identity::Identity;
 
 #[path = "common.rs"]
 mod common;
-
-/// `DELETE /me` — a member removing themselves (decisions.md, "Leaving a hub
-/// clears the profile and the membership, and keeps the pubkey as an anchor").
 
 async fn join(server: &common::TestHarness, who: &Identity) -> String {
     common::authenticate(server, who).await
