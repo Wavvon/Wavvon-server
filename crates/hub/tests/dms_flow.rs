@@ -1187,7 +1187,7 @@ fn make_push_sender_key_request(
 
     // Build canonical signing bytes (mirrors sender_key_dist_signing_bytes in dms.rs)
     let mut sorted: Vec<(&Identity, &str, &str)> = recipients.to_vec();
-    sorted.sort_by(|a, b| a.0.public_key_hex().cmp(&b.0.public_key_hex()));
+    sorted.sort_by_key(|a| a.0.public_key_hex());
 
     let mut signing_msg = b"wavvon/group-key-dist/v1\0".to_vec();
     for s in [conv_id, &version.to_string()] {
