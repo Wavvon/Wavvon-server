@@ -74,7 +74,7 @@ pub struct ChannelResponse {
     /// (events.md §7.1). A move-destination picker that offers every channel
     /// pushes the refusal to the moment the move is issued — or, for a queued
     /// assignment, to whenever it fires. Advertised as the
-    /// `channels.move_targets` capability; an older hub omits the field, so a
+    /// `channels.move.targets` capability; an older hub omits the field, so a
     /// client must not read its absence as "no destinations".
     #[serde(default)]
     pub can_move_members: bool,

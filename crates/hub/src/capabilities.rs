@@ -36,7 +36,7 @@ pub const CAPABILITIES: &[&str] = &[
     // client that does not see this string has no way to know which
     // destinations it may offer, so its move picker keeps listing them all and
     // the refusal arrives when the move is issued.
-    "channels.move_targets",
+    "channels.move.targets",
     // `DELETE /me` — a member can remove themselves from the hub: profile and
     // roles cleared, the pubkey kept as the anchor moderation and message
     // history point at. Gated because a client must not offer "leave this
