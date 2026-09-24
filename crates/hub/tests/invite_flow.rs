@@ -1207,3 +1207,82 @@ async fn invite_cannot_grant_a_role_carrying_a_permission_the_creator_lacks() {
         .await
         .assert_status(axum::http::StatusCode::CREATED);
 }
+
+/// The list answers "which way in is open", so it hides the invites that can
+/// no longer admit anyone — and says why for the ones it shows, instead of
+/// leaving an operator to work it out from `uses`, `max_uses` and a Unix
+/// timestamp.
+#[tokio::test]
+async fn list_hides_dead_invites_and_marks_the_rest() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    let mint = |body: serde_json::Value| {
+        let server = &server;
+        let token = token.clone();
+        async move {
+            let resp = server
+                .post("/invites")
+                .authorization_bearer(&token)
+                .json(&body)
+                .await;
+            resp.assert_status(axum::http::StatusCode::CREATED);
+            resp.json::<InviteResponse>()
+        }
+    };
+
+    let live = mint(json!({ "max_uses": 5 })).await;
+    assert_eq!(live.status, "live", "a fresh invite is live");
+
+    let used_up = mint(json!({ "max_uses": 1 })).await;
+    let expired = mint(json!({ "expires_in_seconds": 60 })).await;
+
+    // Burn one and age the other past its expiry.
+    sqlx::query("UPDATE invites SET uses = max_uses WHERE code = $1")
+        .bind(&used_up.code)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE invites SET expires_at = expires_at - 3600 WHERE code = $1")
+        .bind(&expired.code)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+
+    let resp = server.get("/invites").authorization_bearer(&token).await;
+    let listed: Vec<InviteResponse> = resp.json();
+    let codes: Vec<&str> = listed.iter().map(|i| i.code.as_str()).collect();
+    assert_eq!(
+        codes,
+        vec![live.code.as_str()],
+        "only the invite that can still admit someone"
+    );
+    assert_eq!(listed[0].status, "live");
+
+    let resp = server
+        .get("/invites?include_inactive=true")
+        .authorization_bearer(&token)
+        .await;
+    let all: Vec<InviteResponse> = resp.json();
+    assert_eq!(all.len(), 3, "the toggle brings the history back");
+
+    let status_of = |code: &str| {
+        all.iter()
+            .find(|i| i.code == code)
+            .unwrap_or_else(|| panic!("{code} missing"))
+            .status
+            .clone()
+    };
+    // The paging keys still reach `PageQuery` through the flattened struct —
+    // a silently ignored `limit` would page the same first page forever.
+    let resp = server
+        .get("/invites?include_inactive=true&limit=1")
+        .authorization_bearer(&token)
+        .await;
+    assert_eq!(resp.json::<Vec<InviteResponse>>().len(), 1);
+
+    assert_eq!(status_of(&used_up.code), "used_up");
+    assert_eq!(status_of(&expired.code), "expired");
+    assert_eq!(status_of(&live.code), "live");
+}

@@ -238,6 +238,15 @@ cursor. No envelope, no offset paging, no second shape. A paginated endpoint als
 needs a client that *pages* — raising a cap without one just moves the silent
 truncation to a bigger number.
 
+Adding a query parameter beside the paging keys? **Spell `limit` and `cursor`
+out in the new struct; never `#[serde(flatten)]` in `PageQuery`.** `Query`
+deserializes with `serde_urlencoded`, which hands a flattened struct every
+value as a string and then fails to parse `limit` as an integer — and only
+when `limit` or `cursor` is actually present, so the flattened version passes
+every test that does not page. Filtering also belongs in the SQL, before
+`LIMIT`: dropping rows from a fetched page hands back a short one, and a
+client paging to exhaustion reads that as the end of the list.
+
 **Adding a hub feature a client branches on? Add its capability string.**
 `GET /info` carries `capabilities`, and clients decide what to render by testing
 membership — never by comparing `version`. One sorted list in

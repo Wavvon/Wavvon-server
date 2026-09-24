@@ -43,6 +43,13 @@ pub const CAPABILITIES: &[&str] = &[
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // `GET /invites` hides the invites that can no longer admit anyone and
+    // carries `status` (`live`, `expired`, `used_up`) on the ones it shows;
+    // `?include_inactive=true` asks for the history. A client that cannot see
+    // this string is talking to a hub that returns every row ever minted and
+    // no status, so it must keep working the answer out from `uses`,
+    // `max_uses` and `expires_at` itself.
+    "invites.status",
     // `/info` carries `max_attachment_bytes` and hub admin can change it. A
     // client that does not see this string is talking to a hub whose cap is a
     // compile-time 3 MB, so it must keep using its own constant rather than
