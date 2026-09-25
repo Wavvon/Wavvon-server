@@ -86,10 +86,10 @@ pub struct ScreenStreamMeta {
     pub has_audio: bool,
     pub sharer_pubkey: String,
     /// Whether the sharer is a bot (`can_inject_video` gate,
-    /// bot-capability-layer.md §3/§6 Phase 2). Used to scope the per-hub
+    /// apps.md §3/§6 Phase 2). Used to scope the per-hub
     /// concurrent bot-video-stream budget to bot streams only -- human
     /// screen shares never count against it.
-    pub is_bot: bool,
+    pub via_http: bool,
     /// Unique WS session id of the connection that started this stream.
     /// Used to discriminate cleanup: on disconnect only streams from the
     /// disconnecting session are removed, leaving streams from other
@@ -315,7 +315,7 @@ pub struct AppState {
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.
     pub screen_share_tx: broadcast::Sender<ScreenChunkEvent>,
-    /// Active bot WS sessions: bot_pubkey → { session_id → mpsc sender }.
+    /// Active bot WS sessions: app_pubkey → { session_id → mpsc sender }.
     ///
     /// A bot pubkey can have multiple concurrent WS sessions (e.g. reconnect
     /// overlap, multi-process bot deployments).  Each session is identified by
@@ -325,7 +325,7 @@ pub struct AppState {
     ///
     /// Token-expiry sweep removes all sessions for a pubkey at once (a token
     /// revocation is pubkey-wide).
-    pub bot_sessions: RwLock<HashMap<String, HashMap<String, mpsc::Sender<String>>>>,
+    pub app_sessions: RwLock<HashMap<String, HashMap<String, mpsc::Sender<String>>>>,
 
     /// Active voice zones: (channel_id, zone_id) → VoiceZone.
     /// Ephemeral — cleared on hub restart.
@@ -443,7 +443,7 @@ pub struct AppState {
     /// Keyed `pubkey -> session_id -> sender`, registered on WS connect and
     /// deregistered on that session's own disconnect.
     ///
-    /// Nested, and not one sender per pubkey, for the reason `bot_sessions`
+    /// Nested, and not one sender per pubkey, for the reason `app_sessions`
     /// is nested: one pubkey has several sockets more often than not — a
     /// second tab, a paired device, or the overlap while a reconnect stands
     /// up its socket before the old one finishes tearing down. A flat map
@@ -484,25 +484,23 @@ pub struct AppState {
     /// `Some`, the auto-grant is skipped entirely.
     pub owner_pubkey: Option<String>,
 
-    /// Mirror of `Settings::bots_allow_camera`.
-    /// When true, bot mini-apps that declare `requires_camera` receive camera
+    /// Mirror of `Settings::apps_allow_camera`.
+    /// When true, a mini-app that declares `requires_camera` receives camera
     /// access in the client webview/iframe sandbox.
-    pub bots_allow_camera: bool,
+    pub apps_allow_camera: bool,
 
-    /// Mirror of `Settings::bots_allow_video` (bot-capability-layer.md §1/§4/§6
-    /// Phase 2). Operator kill-switch for `can_inject_video`: a grant alone is
-    /// never sufficient, this flag must also be on. Defaults to false.
-    pub bots_allow_video: bool,
-    /// Mirror of `Settings::bot_video_stream_budget` (bot-capability-layer.md
-    /// §4 "media budget"). Max number of concurrent bot-initiated video
-    /// streams across the whole hub; frames aren't buffered/queued past this,
-    /// `screen_share_start` is simply rejected once the cap is hit.
+    /// Mirror of `Settings::http_video_stream_budget`. Max concurrent video
+    /// streams started over `POST /screenshare/start` across the whole hub;
+    /// frames aren't buffered past this, the start is simply rejected.
     ///
-    /// ponytail: coarse hub-wide counter, not per-channel/per-bot. Docs leave
-    /// the exact shape open ("the precise number is a hub config knob") --
-    /// upgrade to a finer-grained (per-channel or per-bot) budget if a single
-    /// hub-wide cap proves too coarse in practice.
-    pub bot_video_stream_budget: usize,
+    /// It counts the HTTP route rather than a kind of account, because that
+    /// is the honest discriminator: a person clicking Share holds a socket,
+    /// an unattended pusher usually does not. A program that does hold one
+    /// is bounded by the same channel permission as everyone else.
+    ///
+    /// ponytail: coarse hub-wide counter, not per-channel. Upgrade to a
+    /// finer-grained budget if one cap proves too blunt.
+    pub http_video_stream_budget: usize,
 
     /// WebAuthn relying-party instance. Shared across all requests.
     pub webauthn: Arc<Webauthn>,

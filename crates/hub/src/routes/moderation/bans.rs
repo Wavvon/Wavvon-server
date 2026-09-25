@@ -104,7 +104,7 @@ pub async fn ban_user(
         let target = req.target_public_key.clone();
         let reason = req.reason.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.banned",
                 Some(&actor),
@@ -357,7 +357,7 @@ pub async fn kick_user(
         let actor = user.public_key.clone();
         let target = req.target_public_key.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.kicked",
                 Some(&actor),

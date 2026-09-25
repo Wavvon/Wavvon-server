@@ -153,10 +153,10 @@ pub struct SendMessageRequest {
     /// Optional parent message id to thread under.
     #[serde(default)]
     pub reply_to: Option<String>,
-    /// Game-modal launch card (bot-capability-layer.md §2). Bot authors
+    /// Game-modal launch card (apps.md §2). Bot authors
     /// only -- `routes/messages.rs` rejects it for any other sender.
     #[serde(default)]
-    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
+    pub game: Option<crate::routes::app_models::GameLaunchCard>,
 }
 
 /// Minimal preview of a parent message. We embed it in replies so the
@@ -204,17 +204,17 @@ pub struct MessageResponse {
     /// 0 for replies themselves; only root messages accumulate a non-zero count.
     #[serde(default)]
     pub reply_count: i64,
-    /// Bot-authored rich embeds (bots.md §11), persisted on `messages.embeds`.
+    /// Bot-authored rich embeds (apps.md), persisted on `messages.embeds`.
     /// None for any message that never had embeds (which is most of them) --
     /// DM and federation reads use their own response types and never
     /// populate this.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embeds: Option<Vec<crate::routes::bot_models::Embed>>,
-    /// Game-modal launch card (bot-capability-layer.md §2, §6 Phase 1 item
+    pub embeds: Option<Vec<crate::routes::app_models::Embed>>,
+    /// Game-modal launch card (apps.md §2, §6 Phase 1 item
     /// 3), persisted on `messages.game`. None for any message that never
     /// had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub game: Option<crate::routes::bot_models::GameLaunchCard>,
+    pub game: Option<crate::routes::app_models::GameLaunchCard>,
 }
 
 #[derive(Deserialize)]
@@ -225,13 +225,13 @@ pub struct ReactionRequest {
 #[derive(Serialize, Deserialize)]
 pub struct EditMessageRequest {
     pub content: String,
-    /// Result embed on a game-modal launch card (bot-capability-layer.md §7
+    /// Result embed on a game-modal launch card (apps.md §7
     /// step 5: "PATCHes the message with a result embed"). Bot authors
     /// only -- `routes/messages.rs::edit_message` rejects it for any other
     /// sender, same rule as `SendMessageRequest.game`. Absent = leave
     /// embeds untouched.
     #[serde(default)]
-    pub embeds: Option<Vec<crate::routes::bot_models::Embed>>,
+    pub embeds: Option<Vec<crate::routes::app_models::Embed>>,
 }
 
 #[derive(Clone, Debug)]
@@ -324,7 +324,7 @@ pub enum ChatEvent {
     /// still being subscribed to any particular channel.
     VoiceMove { to_pubkey: String },
     /// Bot mini-app announce/dismiss event. Routed to channel subscribers.
-    BotApp { channel_id: String },
+    AppModal { channel_id: String },
     /// Soundboard clip-played attribution event (soundboard.md §1). Routed
     /// to channel subscribers -- the same audience as the voice roster the
     /// chip renders into.
@@ -378,7 +378,7 @@ impl ChatEvent {
             | ChatEvent::MessagePinned { channel_id }
             | ChatEvent::MessageUnpinned { channel_id }
             | ChatEvent::WhisperSignal { channel_id, .. }
-            | ChatEvent::BotApp { channel_id }
+            | ChatEvent::AppModal { channel_id }
             | ChatEvent::Soundboard { channel_id } => channel_id,
             // StreamSubscriptionEnded is targeted by pubkey, not by channel subscription.
             // Return an empty string so the WS dispatcher's channel filter never matches it
@@ -645,37 +645,37 @@ pub enum WsClientMessage {
 
     // ---- Bot mini-apps: client → hub ----
     /// Bot announces a mini-app session in a channel. Hub fans to all
-    /// channel subscribers as BotAppLaunch. Only valid from bot connections.
-    #[serde(rename = "bot_app_announce")]
-    BotAppAnnounce {
+    /// channel subscribers as AppLaunch. Only valid from a registered app.
+    #[serde(rename = "app_announce")]
+    AppAnnounce {
         title: String,
         description: String,
         channel_id: String,
     },
 
     /// User requests to join an announced mini-app session.
-    #[serde(rename = "bot_app_join")]
-    BotAppJoin { bot_id: String, channel_id: String },
+    #[serde(rename = "app_join")]
+    BotAppJoin { app_id: String, channel_id: String },
 
     /// Bot closes the mini-app session. Hub fans to all channel subscribers.
     /// Only valid from bot connections.
-    #[serde(rename = "bot_app_dismiss")]
-    BotAppDismiss { channel_id: String },
+    #[serde(rename = "app_dismiss")]
+    AppDismiss { channel_id: String },
 
-    /// Generic mini-app <-> bot relay (bot-mini-apps.md "the mini-app
+    /// Generic mini-app <-> bot relay (mini-apps.md "the mini-app
     /// connects to the hub's existing /ws endpoint ... and exchanges
     /// messages with the bot ... through the normal WS relay"). `payload` is
     /// an opaque JSON-encoded string -- the hub never inspects it, same
     /// convention as `screen_share_ice`'s `candidate` field.
     ///
     /// From a mini-app session (non-bot connection): hub forwards to every
-    /// active WS session for `bot_id`, tagged with the sender's pubkey.
+    /// active WS session for `app_id`, tagged with the sender's pubkey.
     /// From the bot itself: `to_pubkey` selects which joined player's
     /// mini-app session receives it; absent `to_pubkey` is a no-op (there is
     /// no channel-wide mini-app broadcast surface).
     #[serde(rename = "mini_app_message")]
     MiniAppMessage {
-        bot_id: String,
+        app_id: String,
         channel_id: String,
         payload: String,
         #[serde(default)]
@@ -1106,30 +1106,30 @@ pub enum WsServerMessage {
 
     // ---- Bot mini-apps: hub → client ----
     /// Hub fans a bot's announce to all subscribers of that channel.
-    #[serde(rename = "bot_app_launch")]
-    BotAppLaunch {
-        bot_id: String,
+    #[serde(rename = "app_launch")]
+    AppLaunch {
+        app_id: String,
         title: String,
         description: String,
         channel_id: String,
     },
 
     /// Hub sends this only to the joining client after minting a scoped token.
-    #[serde(rename = "bot_app_open")]
+    #[serde(rename = "app_open")]
     BotAppOpen {
-        bot_id: String,
+        app_id: String,
         channel_id: String,
         mini_app_url: String,
         session_token: String,
         /// True when the bot declared `requires_camera` AND the hub operator
-        /// has set `bots_allow_camera = true`. Clients gate the webview camera
+        /// has set `apps_allow_camera = true`. Clients gate the webview camera
         /// permission on this flag.
         requires_camera: bool,
     },
 
     /// Hub fans a bot's dismiss to all subscribers — clients close open webviews.
-    #[serde(rename = "bot_app_close")]
-    BotAppClose { bot_id: String, channel_id: String },
+    #[serde(rename = "app_close")]
+    AppClose { app_id: String, channel_id: String },
 
     /// Generic mini-app <-> bot relay, hub -> client leg. See
     /// `WsClientMessage::MiniAppMessage`. `from_pubkey` is set when relaying
@@ -1137,7 +1137,7 @@ pub enum WsServerMessage {
     /// specific player (the recipient already knows who the bot is).
     #[serde(rename = "mini_app_message")]
     MiniAppMessage {
-        bot_id: String,
+        app_id: String,
         channel_id: String,
         payload: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1170,8 +1170,6 @@ pub struct TrackMeta {
 pub struct VoiceParticipantInfo {
     pub public_key: String,
     pub display_name: Option<String>,
-    #[serde(default)]
-    pub is_bot: bool,
     /// Numeric relay id for this participant in the channel — the id
     /// carried in every downlink datagram header. Clients seed their
     /// sender_id→pubkey map from `voice_joined.participants`, so this

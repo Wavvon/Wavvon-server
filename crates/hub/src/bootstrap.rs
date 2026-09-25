@@ -515,7 +515,7 @@ pub mod presets {
             ],
             "settings": {
                 // Re-added (was pulled in a4e57f9 as a stopgap: the lobby
-                // soft-landing — lobby-bot-survey.md Feature 1 — hard-403'd
+                // soft-landing — lobby-survey.md Feature 1 — hard-403'd
                 // every sub-level join instead of admitting them, which
                 // locked the OWNER out of their own first join). /auth/verify
                 // now admits a sub-level joiner into scope="lobby" instead of

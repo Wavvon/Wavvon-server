@@ -31,7 +31,7 @@ use super::worker::new_webhook_id;
 const HKDF_SALT: &[u8] = b"wavvon-webhook-signing";
 
 // ---------------------------------------------------------------------------
-// URL validation — same rule as bot `webhook_url` (doc §1, §7): https only,
+// URL validation — same rule as an app `webhook_url` (doc §1, §7): https only,
 // reject private/loopback ranges. `routes::preview` owns the canonical
 // private-IP-range check; we reuse it here rather than duplicating the list.
 // ---------------------------------------------------------------------------
@@ -386,11 +386,10 @@ pub async fn replace_subscriptions(
         return Err((StatusCode::NOT_FOUND, "Webhook not found".to_string()));
     }
 
-    // Same privacy gate as bot subscriptions (doc §2): message.* events
+    // Same privacy gate as app subscriptions (doc §2): message.* events
     // require an explicit channels list.
     for sub in &req.subscriptions {
-        let is_message_event =
-            sub.event.starts_with("message.") && sub.event != "message.mention_bot";
+        let is_message_event = sub.event.starts_with("message.") && sub.event != "message.mention";
         if is_message_event && sub.channels.as_ref().is_none_or(|v| v.is_empty()) {
             return Err((
                 StatusCode::BAD_REQUEST,

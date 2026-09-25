@@ -20,12 +20,12 @@ pub struct AuthUser {
     pub master_pubkey: Option<String>,
     /// Session scope:
     /// - `"member"` — full access, subject to normal role/permission checks.
-    ///   Default for token paths that predate scoping (bot tokens, farm
+    ///   Default for token paths that predate scoping (farm
     ///   tokens, webauthn/device-token logins).
-    /// - `"lobby"` (lobby-bot-survey.md Feature 1) — confined to
+    /// - `"lobby"` (lobby-survey.md Feature 1) — confined to
     ///   `LOBBY_ALLOWED_PATHS` below, regardless of any roles held.
-    /// - `"mini_app"` (bot-mini-apps.md "Scoped session token") — minted by
-    ///   `bot_app_join`; confined to `MINI_APP_ALLOWED_PATHS` (empty — REST
+    /// - `"mini_app"` (mini-apps.md "Scoped session token") — minted by
+    ///   `app_join`; confined to `MINI_APP_ALLOWED_PATHS` (empty — REST
     ///   is fully off-limits, `/ws` is the only surface this scope reaches).
     /// - `"alliance_voice"` (alliances.md "Voice in alliance channels") —
     ///   minted at `/auth/verify` against an allied hub's signed grant, for a
@@ -88,7 +88,7 @@ impl FromRequestParts<Arc<AppState>> for PeerHub {
 /// They can see their own status at /me and nothing else.
 const PENDING_ALLOWED_PATHS: &[&str] = &["/me"];
 
-/// Paths a `scope: "lobby"` session may reach (lobby-bot-survey.md Feature
+/// Paths a `scope: "lobby"` session may reach (lobby-survey.md Feature
 /// 1). Everything else 403s — "anything not explicitly allowed for lobby
 /// scope is denied" is the documented default-deny posture, enforced here
 /// once for every route rather than per-handler. A lobby user can check
@@ -104,11 +104,11 @@ const LOBBY_ALLOWED_PATHS: &[&str] = &[
     "/survey/submit",
 ];
 
-/// REST paths a `scope: "mini_app"` session may reach (bot-mini-apps.md
+/// REST paths a `scope: "mini_app"` session may reach (mini-apps.md
 /// "Scoped session token": "Cannot call admin or federation endpoints").
 ///
 /// Deliberately empty: every documented mini-app interaction (launch card
-/// click, in-game messages, the bot relay) rides `/ws`, which this scope is
+/// click, in-game messages, the app relay) rides `/ws`, which this scope is
 /// explicitly allowed to reach (see `validate_ws_token`) and which confines
 /// auto-subscription to the bound channel (see `connection::handle_socket`).
 /// A mini-app session has no legitimate REST use today — including
@@ -343,10 +343,10 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             "Invalid Authorization format".to_string(),
         ))?;
 
-        // Session scope (lobby-bot-survey.md Feature 1). Defaults to
+        // Session scope (lobby-survey.md Feature 1). Defaults to
         // "member" for every path except the legacy hub-token session
         // lookup below, which reads the actual value persisted on the
-        // session row at `/auth/verify` time. Farm-token and bot-token
+        // session row at `/auth/verify` time. Farm-token
         // sessions are never lobby-confined.
         let mut scope = "member".to_string();
 
@@ -405,9 +405,9 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             } else {
                 // Sessions and visits are the only token stores. There used to
                 // be a `bot_tokens` fallback here, dead in both directions: no
-                // code path ever inserted a row, and bots authenticate
-                // through the normal session flow (decisions.md, "Every bot
-                // is an external bot"). A table that grants authentication
+                // code path ever inserted a row, and a program authenticates
+                // through the normal session flow (decisions.md, "A bot is a
+                // client like any other"). A table that grants authentication
                 // and that nothing populates is auth surface with no
                 // purpose.
                 return Err((
@@ -515,7 +515,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             }
         }
 
-        // Lobby confinement (lobby-bot-survey.md Feature 1): a lobby-scoped
+        // Lobby confinement (lobby-survey.md Feature 1): a lobby-scoped
         // session may only reach the small allowlist above — every other
         // route 403s, regardless of any roles the underlying user holds.
         // Checked last so it composes with (rather than replaces) the
@@ -527,8 +527,8 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             }
         }
 
-        // Mini-app confinement (bot-mini-apps.md "Scoped session token"): a
-        // `bot_app_join`-minted session is bound to one channel over `/ws`
+        // Mini-app confinement (mini-apps.md "Scoped session token"): a
+        // `app_join`-minted session is bound to one channel over `/ws`
         // and must not reach admin, federation, or any other REST route —
         // see `MINI_APP_ALLOWED_PATHS`'s doc comment for why that's empty.
         if scope == "mini_app" {
@@ -553,7 +553,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
         // Single indexed (primary-key) lookup for the master binding used by
         // cert-chained DM attribution. Cheap enough to do unconditionally
         // rather than threading an extra flag through every token path
-        // above (farm token, session, bot token).
+        // above (farm token, session).
         let master_pubkey: Option<String> =
             sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
                 .bind(&public_key)

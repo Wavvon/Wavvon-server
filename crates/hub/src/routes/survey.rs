@@ -390,7 +390,7 @@ pub async fn submit_survey(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
     }
 
-    // Free-text always routes to manual review (see lobby-bot-survey.md
+    // Free-text always routes to manual review (see lobby-survey.md
     // Feature 3 decisions: "the hub cannot mechanically decide if a
     // free-text answer earns roles"). Auto-assignment of mapped roles only
     // happens when every *answered* question in this submission is

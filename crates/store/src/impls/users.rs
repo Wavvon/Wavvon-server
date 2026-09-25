@@ -16,10 +16,6 @@ fn row_to_user(r: sqlx::postgres::PgRow) -> UserRow {
         approval_status: r.get("approval_status"),
         avatar: r.get("avatar"),
         master_pubkey: r.get("master_pubkey"),
-        is_bot: r.get("is_bot"),
-        is_bot_removed: r.get("is_bot_removed"),
-        bot_invite_token: r.get("bot_invite_token"),
-        bot_invite_expires: r.get("bot_invite_expires"),
         is_webhook: r.get("is_webhook"),
         lobby_status: r.get("lobby_status"),
         lobby_entered_at: r.get("lobby_entered_at"),
@@ -47,8 +43,7 @@ impl UserStore for PostgresStore {
     async fn get_user(&self, pubkey: &str) -> Result<Option<UserRow>, StoreError> {
         let row = sqlx::query(
             "SELECT public_key, display_name, first_seen_at, last_seen_at, approval_status,
-                    avatar, master_pubkey, is_bot, is_bot_removed, bot_invite_token,
-                    bot_invite_expires, is_webhook, lobby_status, lobby_entered_at, pow_level
+                    avatar, master_pubkey, is_webhook, lobby_status, lobby_entered_at, pow_level
              FROM users WHERE public_key = $1",
         )
         .bind(pubkey)
@@ -81,8 +76,7 @@ impl UserStore for PostgresStore {
     async fn list_members(&self, limit: i64, offset: i64) -> Result<Vec<UserRow>, StoreError> {
         let rows = sqlx::query(
             "SELECT public_key, display_name, first_seen_at, last_seen_at, approval_status,
-                    avatar, master_pubkey, is_bot, is_bot_removed, bot_invite_token,
-                    bot_invite_expires, is_webhook, lobby_status, lobby_entered_at, pow_level
+                    avatar, master_pubkey, is_webhook, lobby_status, lobby_entered_at, pow_level
              FROM users ORDER BY first_seen_at DESC LIMIT $1 OFFSET $2",
         )
         .bind(limit)
@@ -95,7 +89,7 @@ impl UserStore for PostgresStore {
 
     async fn member_count(&self) -> Result<i64, StoreError> {
         sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM users WHERE is_bot = FALSE AND approval_status = 'approved'",
+            "SELECT COUNT(*) FROM users WHERE approval_status = 'approved'",
         )
         .fetch_one(self.pool())
         .await
@@ -151,16 +145,6 @@ impl UserStore for PostgresStore {
     async fn set_avatar(&self, pubkey: &str, avatar: Option<&str>) -> Result<(), StoreError> {
         sqlx::query("UPDATE users SET avatar = $1 WHERE public_key = $2")
             .bind(avatar)
-            .bind(pubkey)
-            .execute(self.pool())
-            .await
-            .map_err(map_err)?;
-        Ok(())
-    }
-
-    async fn set_is_bot(&self, pubkey: &str, is_bot: bool) -> Result<(), StoreError> {
-        sqlx::query("UPDATE users SET is_bot = $1 WHERE public_key = $2")
-            .bind(is_bot)
             .bind(pubkey)
             .execute(self.pool())
             .await

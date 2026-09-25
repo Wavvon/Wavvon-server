@@ -145,12 +145,13 @@ permission_catalogue! {
     // ── Integrations ────────────────────────────────────────────────────
     WEBHOOKS_INCOMING_MANAGE => "webhooks.incoming.manage", Hub,
     WEBHOOKS_OUTGOING_MANAGE => "webhooks.outgoing.manage", Hub,
-    /// Provisional: if the `is_bot` review concludes a bot is an ordinary user
-    /// admitted by a pubkey-bound invite, this collapses into
-    /// `invites.manage` and only `bots.capabilities` survives.
-    BOTS_ADMIT => "bots.admit", Hub,
-    BOTS_CAPABILITIES => "bots.capabilities", Hub,
-    BOTS_AUDIT_READ => "bots.audit.read", Hub,
+    /// Registering an app: a profile, slash commands, event subscriptions,
+    /// and the message shapes an app authors (embeds, game launch cards).
+    /// Not a kind of account — a client is a client — but the hub still has
+    /// to know which members speak for a program, because an embed nobody
+    /// vouched for is a forgery with a nice border.
+    APPS_REGISTER => "apps.register", Hub,
+    AUDIT_READ => "audit.read", Hub,
 
     // ── Surveys ─────────────────────────────────────────────────────────
     SURVEYS_MANAGE => "surveys.manage", Hub,
@@ -650,7 +651,7 @@ mod tests {
             "certs.issue",
             "directory.publish",
             "surveys.responses.read",
-            "bots.capabilities",
+            "apps.register",
         ] {
             assert_eq!(
                 scope_of(id),
@@ -685,7 +686,13 @@ mod tests {
         assert_eq!(scope_of("admin"), None);
         assert!(validate_permissions(["admin"]).is_err());
         // And the four strings §4 deletes for gating nothing.
-        for dead in ["manage_bots", "use_video", "manage_games", "start_game"] {
+        for dead in [
+            "manage_bots",
+            "use_video",
+            "manage_games",
+            "start_game",
+            "bots.admit",
+        ] {
             assert_eq!(scope_of(dead), None, "{dead} should be gone");
         }
     }

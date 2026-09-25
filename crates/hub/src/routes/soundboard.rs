@@ -231,7 +231,7 @@ pub async fn upload_clip(
         let clip_id = id.clone();
         let clip_name = name.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "soundboard.clip_uploaded",
                 Some(&actor),
@@ -291,7 +291,7 @@ pub async fn delete_clip(
         let actor = user.public_key.clone();
         let clip_id = id.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "soundboard.clip_deleted",
                 Some(&actor),

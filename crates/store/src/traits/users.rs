@@ -43,9 +43,6 @@ pub trait UserStore: Send + Sync {
     /// Update avatar URL.
     async fn set_avatar(&self, pubkey: &str, avatar: Option<&str>) -> Result<(), StoreError>;
 
-    /// Set is_bot flag.
-    async fn set_is_bot(&self, pubkey: &str, is_bot: bool) -> Result<(), StoreError>;
-
     /// Set bot_invite_token and bot_invite_expires.
     async fn set_bot_invite_token(
         &self,

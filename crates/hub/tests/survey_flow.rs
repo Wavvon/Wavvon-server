@@ -338,7 +338,7 @@ async fn non_admin_cannot_access_admin_survey_routes() {
 
 // ---------------------------------------------------------------------------
 // Role mapping — CRUD, completion auto-assign, admin-permission rejection,
-// free-text-does-not-auto-assign (docs/docs/lobby-bot-survey.md Feature 3).
+// free-text-does-not-auto-assign (docs/docs/lobby-survey.md Feature 3).
 // ---------------------------------------------------------------------------
 
 async fn create_role(

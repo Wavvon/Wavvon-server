@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
-use crate::routes::bot_models::{Embed, GameLaunchCard};
+use crate::routes::app_models::{Embed, GameLaunchCard};
 use crate::routes::chat_models::{
     Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
     ReactionSummary, ReplyContext, SendMessageRequest,
@@ -115,21 +115,15 @@ pub async fn send_message(
         )
     };
 
-    // Game-modal launch card (bot-capability-layer.md §2): bot authors only,
+    // Game-modal launch card (apps.md §2): bot authors only,
     // same rule as embeds/components elsewhere in the bot wire surface
-    // (bots.md §11, §15 "rejected on messages authored by non-bots").
+    // (apps.md§15 "rejected on messages authored by non-bots").
     let game_json = if req.game.is_some() {
-        let is_bot: Option<bool> =
-            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
-                .bind(&user.public_key)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-                .flatten();
-        if is_bot != Some(true) {
+        let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
+        if !perms.has(crate::permissions::APPS_REGISTER) {
             return Err((
                 StatusCode::FORBIDDEN,
-                "game launch card is bot-authored only".to_string(),
+                "game launch cards require apps.register".to_string(),
             ));
         }
         Some(
@@ -167,11 +161,11 @@ pub async fn send_message(
     }
 
     // Slash command dispatch (external bot system): if the message starts with
-    // '/' and a registered bot handles the command, the bot responds via its
+    // '/' and a registered app handles the command, the app responds via its
     // webhook. We do NOT store the original slash message by default — the bot
     // decides what to post. Only store the message if no bot matched.
     if req.content.starts_with('/') {
-        let ephemeral_err = crate::bots::dispatch::dispatch_slash(
+        let ephemeral_err = crate::apps::dispatch::dispatch_slash(
             &state,
             &channel_id,
             &user.public_key,
@@ -182,7 +176,7 @@ pub async fn send_message(
         match ephemeral_err {
             Some(err_text) => {
                 // Command matched but errored — insert ephemeral error and return.
-                crate::bots::dispatch::insert_ephemeral_error(
+                crate::apps::dispatch::insert_ephemeral_error(
                     &state,
                     &channel_id,
                     &user.public_key,
@@ -443,7 +437,7 @@ pub async fn send_message(
         let ch = channel_id.clone();
         let msg_c = message.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "message.created",
                 Some(&msg_c.sender),
@@ -493,20 +487,14 @@ pub async fn edit_message(
         ));
     }
 
-    // Result embed on edit (bot-capability-layer.md §7 step 5): bot authors
+    // Result embed on edit (apps.md §7 step 5): bot authors
     // only, same rule as `SendMessageRequest.game` in `send_message` above.
     let embeds_json = if req.embeds.is_some() {
-        let is_bot: Option<bool> =
-            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
-                .bind(&user.public_key)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-                .flatten();
-        if is_bot != Some(true) {
+        let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
+        if !perms.has(crate::permissions::APPS_REGISTER) {
             return Err((
                 StatusCode::FORBIDDEN,
-                "embeds are bot-authored only".to_string(),
+                "embeds require apps.register".to_string(),
             ));
         }
         Some(

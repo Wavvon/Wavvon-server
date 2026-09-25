@@ -1,18 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
 use crate::state::{ActiveShare, AppState, ScreenStreamMeta};
 
-use super::models::bot_session;
 use crate::auth::middleware::AuthUser;
 
 #[derive(Deserialize)]
@@ -39,29 +34,18 @@ pub struct ScreenshareStartResponse {
     pub channel_id: String,
 }
 
-/// POST /bots/{id}/screenshare/start
+/// POST /screenshare/start
 ///
-/// Registers a new video stream for a bot in the given channel. The bot must
-/// authenticate as itself via `Authorization: Bearer <bot_token>` and the
-/// `{id}` path parameter must match its own public key.
-///
-/// Returns a `stream_id` that the bot should use when pushing
-/// `ScreenShareChunk` frames over its WS connection.
-pub async fn bot_screenshare_start(
-    Path(bot_id): Path<String>,
+/// Registers a video stream for the calling identity in the given channel,
+/// for a client that pushes frames without going through the WS start
+/// handshake in `ws::handlers::screen`. Returns the `stream_id` to send
+/// `ScreenShareChunk` frames under.
+pub async fn screenshare_start(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Json(req): Json<ScreenshareStartRequest>,
 ) -> Result<Json<ScreenshareStartResponse>, (StatusCode, String)> {
-    let bot = bot_session(&state.db, &user).await?;
-
-    // Caller must be the bot identified by the path parameter.
-    if bot.public_key != bot_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Only the bot itself may call this".into(),
-        ));
-    }
+    let sharer = user.public_key.clone();
 
     // Verify channel exists and is not a category.
     let channel_exists: Option<String> =
@@ -75,13 +59,44 @@ pub async fn bot_screenshare_start(
         return Err((StatusCode::NOT_FOUND, "Channel not found".into()));
     }
 
+    // Same channel gate the WS path applies, because it is the same act.
+    let perms = crate::permissions::channel_permissions(&state.db, &sharer, &req.channel_id)
+        .await
+        .map_err(|_| (StatusCode::FORBIDDEN, "You cannot share here".to_string()))?;
+    if !perms.has(crate::permissions::VOICE_JOIN) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "You cannot share into this channel".into(),
+        ));
+    }
+
+    // Hub-wide cap on streams started this way. A person clicking Share holds
+    // a socket and goes through the WS path; this one is for the unattended
+    // pushers, and it is the one worth bounding.
+    {
+        let active_http_streams = state
+            .screen_shares
+            .read()
+            .await
+            .values()
+            .flat_map(|active| active.streams.values())
+            .filter(|meta| meta.via_http)
+            .count();
+        if active_http_streams >= state.http_video_stream_budget {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "Hub-wide video stream budget exceeded".into(),
+            ));
+        }
+    }
+
     let stream_id = Uuid::new_v4().to_string();
 
     // Register the stream in screen_shares.
     {
         let mut shares = state.screen_shares.write().await;
         let active = shares
-            .entry((req.channel_id.clone(), bot_id.clone()))
+            .entry((req.channel_id.clone(), sharer.clone()))
             .or_insert_with(|| ActiveShare {
                 streams: HashMap::new(),
                 viewers: HashSet::new(),
@@ -93,9 +108,9 @@ pub async fn bot_screenshare_start(
                 kind: req.kind.clone(),
                 mime: req.mime.clone(),
                 has_audio: req.has_audio,
-                sharer_pubkey: bot_id.clone(),
-                is_bot: true,
-                session_id: "bot-rest".to_string(),
+                sharer_pubkey: sharer.clone(),
+                via_http: true,
+                session_id: "http".to_string(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),
             },
@@ -106,7 +121,7 @@ pub async fn bot_screenshare_start(
     let ev = ChatEvent::ScreenShareStarted {
         channel_id: req.channel_id.clone(),
         stream_id: stream_id.clone(),
-        sharer_pubkey: bot_id.clone(),
+        sharer_pubkey: sharer.clone(),
         kind: req.kind.clone(),
         mime: req.mime.clone(),
         has_audio: req.has_audio,
@@ -114,7 +129,7 @@ pub async fn bot_screenshare_start(
     let ws_msg = WsServerMessage::ScreenShareStarted {
         channel_id: req.channel_id.clone(),
         stream_id: stream_id.clone(),
-        sharer_pubkey: bot_id.clone(),
+        sharer_pubkey: sharer.clone(),
         kind: req.kind.clone(),
         mime: req.mime.clone(),
         has_audio: req.has_audio,
@@ -134,31 +149,22 @@ pub struct ScreenshareStopRequest {
     pub stream_id: String,
 }
 
-/// DELETE /bots/{id}/screenshare/stop
+/// DELETE /screenshare/stop
 ///
 /// Deregisters a previously started video stream. Broadcasts `ScreenShareStopped`
 /// to all WS subscribers and returns 204 No Content. Idempotent — calling it
 /// when the stream is already gone is a no-op (still 204).
-pub async fn bot_screenshare_stop(
-    Path(bot_id): Path<String>,
+pub async fn screenshare_stop(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Json(req): Json<ScreenshareStopRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let bot = bot_session(&state.db, &user).await?;
-
-    // Caller must be the bot identified by the path parameter.
-    if bot.public_key != bot_id {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Only the bot itself may call this".into(),
-        ));
-    }
+    let sharer = user.public_key.clone();
 
     // Remove the stream from screen_shares, mirroring handle_screen_share_stop.
     let cross_subscribers: Vec<String> = {
         let mut shares = state.screen_shares.write().await;
-        let key = (req.channel_id.clone(), bot_id.clone());
+        let key = (req.channel_id.clone(), sharer.clone());
         let mut subs = Vec::new();
         if let Some(active) = shares.get_mut(&key) {
             subs = active.cross_channel_subscribers.iter().cloned().collect();
@@ -175,12 +181,12 @@ pub async fn bot_screenshare_stop(
         let ev = ChatEvent::ScreenShareStopped {
             channel_id: req.channel_id.clone(),
             stream_id: req.stream_id.clone(),
-            sharer_pubkey: bot_id.clone(),
+            sharer_pubkey: sharer.clone(),
         };
         let ws_msg = WsServerMessage::ScreenShareStopped {
             channel_id: req.channel_id.clone(),
             stream_id: req.stream_id.clone(),
-            sharer_pubkey: bot_id.clone(),
+            sharer_pubkey: sharer.clone(),
         };
         let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
         let _ = state.chat_tx.send((ev, json));

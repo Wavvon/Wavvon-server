@@ -1,5 +1,5 @@
 //! Hub event fan-out: writes audit log rows and pushes `hub_event` envelopes
-//! to subscribed bot WS sessions.
+//! to subscribed app WS sessions.
 //!
 //! Call `publish_hub_event` from any server-side broadcast point (ws.rs,
 //! messages.rs, channels.rs, moderation.rs) after the underlying action
@@ -14,11 +14,11 @@ use crate::state::AppState;
 /// Publish a hub event.
 ///
 /// - Writes a row to `hub_audit_log`.
-/// - Queries `bot_subscriptions` for all bots interested in `event_type` (and
+/// - Queries `app_subscriptions` for every app interested in `event_type` (and
 ///   optionally `channel_id`).
-/// - For each subscribed bot with an active WS session, checks `bot_channel_scope`
-///   and for `message.*` events checks `can_read_message_content`.
-/// - Pushes a `hub_event` JSON envelope over the bot's WS sender.
+/// - For each subscribed app with an active WS session, checks that it can
+///   read the channel the event happened in.
+/// - Pushes a `hub_event` JSON envelope over the app's WS sender.
 ///
 /// Errors are logged and swallowed — event delivery is best-effort.
 pub async fn publish_hub_event(
@@ -70,17 +70,17 @@ pub async fn publish_hub_event(
     .await;
 
     // Fetch the hub_url once.
-    let hub_url = crate::bots::dispatch::hub_url_public(state).await;
+    let hub_url = crate::apps::dispatch::hub_url_public(state).await;
 
-    // Query all bots subscribed to this event_type, hub-wide or for this channel.
+    // Query every app subscribed to this event_type, hub-wide or for this channel.
     // A subscription row with channel_id = '' means hub-wide (no channel filter).
     #[derive(sqlx::FromRow)]
     struct SubRow {
-        bot_pubkey: String,
+        app_pubkey: String,
     }
 
     let subs: Vec<SubRow> = sqlx::query_as::<_, SubRow>(
-        "SELECT DISTINCT bot_pubkey FROM bot_subscriptions
+        "SELECT DISTINCT app_pubkey FROM app_subscriptions
          WHERE event_type = $1
            AND (channel_id = '' OR channel_id = $2)",
     )
@@ -94,48 +94,37 @@ pub async fn publish_hub_event(
         return;
     }
 
-    let sessions = state.bot_sessions.read().await;
+    let sessions = state.app_sessions.read().await;
 
     for sub in &subs {
-        // A bot pubkey may have multiple concurrent WS sessions; skip if none
+        // One pubkey may hold several concurrent WS sessions; skip if none
         // are active.
-        let Some(per_bot) = sessions.get(&sub.bot_pubkey) else {
+        let Some(per_app) = sessions.get(&sub.app_pubkey) else {
             continue;
         };
-        if per_bot.is_empty() {
+        if per_app.is_empty() {
             continue;
         }
 
-        // Check bot_channel_scope: if the bot has any scope rows, the event's
-        // channel_id must be in scope (or event has no channel).
+        // Containment is the subscriber's own read access to the channel
+        // the event happened in — the same answer `GET /messages` gives
+        // them. The two mechanisms this replaces (a per-pubkey channel scope
+        // list, and a capability that delivered message events with the
+        // content stripped) were both the permission model rewritten by
+        // hand for one kind of caller.
         if let Some(ch_id) = channel_id {
-            let in_scope: bool = sqlx::query_scalar::<_, i64>(
-                "SELECT
-                   CASE
-                     WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = $1)
-                     THEN 1
-                     ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = $2 AND channel_id = $3)
-                   END",
-            )
-            .bind(&sub.bot_pubkey)
-            .bind(&sub.bot_pubkey)
-            .bind(ch_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(1)
-                != 0;
+            let allowed =
+                crate::permissions::channel_permissions(&state.db, &sub.app_pubkey, ch_id)
+                    .await
+                    .map(|perms| perms.has(crate::permissions::MESSAGES_READ))
+                    .unwrap_or(false);
 
-            if !in_scope {
+            if !allowed {
                 continue;
             }
         }
 
-        // For message.* events: respect can_read_message_content.
-        let envelope_payload = if event_type.starts_with("message.") {
-            maybe_redact_message_content(state, &sub.bot_pubkey, payload.clone()).await
-        } else {
-            payload.clone()
-        };
+        let envelope_payload = payload.clone();
 
         let envelope = serde_json::json!({
             "type": "hub_event",
@@ -147,23 +136,23 @@ pub async fn publish_hub_event(
         });
 
         let json = envelope.to_string();
-        // Deliver to all active sessions for this bot pubkey. Non-blocking
+        // Deliver to every active session for this pubkey. Non-blocking
         // send; a full channel drops the event for that session only.
-        for tx in per_bot.values() {
+        for tx in per_app.values() {
             let _ = tx.try_send(json.clone());
         }
     }
 }
 
-/// Replay audit log rows for a bot starting from `since_seq + 1`, filtered
-/// to the bot's subscriptions and channel scope.
+/// Replay audit log rows for an app starting from `since_seq + 1`, filtered
+/// to the app's subscriptions.
 ///
 /// Returns `(rows_sent, earliest_seq_in_window, earliest_at_in_window)`.
 /// If `since_seq` is outside the 72-hour window, returns the earliest
 /// available row information so the caller can send `replay_unavailable`.
-pub async fn replay_events_for_bot(
+pub async fn replay_events_for_app(
     state: &Arc<AppState>,
-    bot_pubkey: &str,
+    app_pubkey: &str,
     since_seq: i64,
     tx: &tokio::sync::mpsc::Sender<String>,
 ) -> ReplayResult {
@@ -194,11 +183,11 @@ pub async fn replay_events_for_bot(
         };
     }
 
-    // Collect the bot's subscribed event_types.
+    // Collect the app's subscribed event types.
     let sub_events: Vec<String> = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT event_type FROM bot_subscriptions WHERE bot_pubkey = $1",
+        "SELECT DISTINCT event_type FROM app_subscriptions WHERE app_pubkey = $1",
     )
-    .bind(bot_pubkey)
+    .bind(app_pubkey)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
@@ -233,7 +222,7 @@ pub async fn replay_events_for_bot(
     .await
     .unwrap_or_default();
 
-    let hub_url = crate::bots::dispatch::hub_url_public(state).await;
+    let hub_url = crate::apps::dispatch::hub_url_public(state).await;
     let mut replayed = 0usize;
     let batch_size = 100usize;
     let mut batch_count = 0usize;
@@ -244,36 +233,21 @@ pub async fn replay_events_for_bot(
             continue;
         }
 
-        // Channel scope check.
+        // Same read check as the live path: a replay must not hand back
+        // what the live stream would have withheld.
         if let Some(ref ch_id) = row.channel_id {
-            let in_scope: bool = sqlx::query_scalar::<_, i64>(
-                "SELECT CASE
-                   WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = $1)
-                   THEN 1
-                   ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = $2 AND channel_id = $3)
-                 END",
-            )
-            .bind(bot_pubkey)
-            .bind(bot_pubkey)
-            .bind(ch_id)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(1)
-                != 0;
+            let allowed = crate::permissions::channel_permissions(&state.db, app_pubkey, ch_id)
+                .await
+                .map(|perms| perms.has(crate::permissions::MESSAGES_READ))
+                .unwrap_or(false);
 
-            if !in_scope {
+            if !allowed {
                 continue;
             }
         }
 
-        let payload: serde_json::Value =
+        let envelope_payload: serde_json::Value =
             serde_json::from_str(&row.payload_json).unwrap_or(serde_json::Value::Null);
-
-        let envelope_payload = if row.event_type.starts_with("message.") {
-            maybe_redact_message_content(state, bot_pubkey, payload).await
-        } else {
-            payload
-        };
 
         let envelope = serde_json::json!({
             "type": "hub_event",
@@ -289,7 +263,7 @@ pub async fn replay_events_for_bot(
         });
 
         if tx.send(envelope.to_string()).await.is_err() {
-            // Bot disconnected mid-replay.
+            // App disconnected mid-replay.
             break;
         }
 
@@ -328,46 +302,4 @@ async fn next_seq(state: &AppState) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar::<_, i64>("SELECT seq FROM hub_audit_seq WHERE id = 1")
         .fetch_one(&state.db)
         .await
-}
-
-/// If the bot does NOT have `can_read_message_content` in its capabilities,
-/// strip `content`/`attachments` from the payload and add `content_preview`
-/// (first 100 chars of content).
-async fn maybe_redact_message_content(
-    state: &AppState,
-    bot_pubkey: &str,
-    mut payload: serde_json::Value,
-) -> serde_json::Value {
-    let caps_json: Option<String> =
-        sqlx::query_scalar("SELECT capabilities FROM bot_profiles WHERE pubkey = $1")
-            .bind(bot_pubkey)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten();
-
-    let caps: Vec<String> = caps_json
-        .as_deref()
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
-
-    let can_read = caps.iter().any(|c| c == "can_read_message_content");
-
-    if !can_read {
-        if let Some(obj) = payload.as_object_mut() {
-            let preview: Option<String> = obj
-                .get("content")
-                .and_then(|v| v.as_str())
-                .map(|s| s.chars().take(100).collect());
-
-            obj.remove("content");
-            obj.remove("attachments");
-
-            if let Some(p) = preview {
-                obj.insert("content_preview".to_string(), serde_json::Value::String(p));
-            }
-        }
-    }
-
-    payload
 }

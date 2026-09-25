@@ -7,9 +7,11 @@ use std::time::Instant;
 pub(super) struct ConnState {
     /// The identity (public key) for this connection.
     pub public_key: String,
-    /// Whether this connection belongs to a bot.
-    pub is_bot: bool,
-    /// Whether this connection is a mini-app-scoped session (bot-mini-apps.md
+    /// Whether this identity has an app registration (`app_profiles`), which
+    /// is what the event stream, the resume replay and the mini-app relay key
+    /// off. A property with a row behind it, not a kind of account.
+    pub is_app: bool,
+    /// Whether this connection is a mini-app-scoped session (mini-apps.md
     /// "Scoped session token") — bound to one channel, no voice access
     /// (voice-transport-v2.md: same block the deleted `/voice/ws` enforced).
     pub is_mini_app: bool,
@@ -39,16 +41,16 @@ pub(super) struct ConnState {
     pub component_rate_limit: HashMap<(String, String), Instant>,
     /// DM conversation IDs this connection is a member of (loaded once at connect).
     pub my_conversations: HashSet<String>,
-    /// Live events buffered while a bot replay is in progress.
+    /// Live events buffered while a replay is in progress.
     pub replay_buffer: Vec<String>,
-    /// True while a bot `Resume` replay is executing.
+    /// True while a `Resume` replay is executing.
     pub is_replaying: bool,
 }
 
 impl ConnState {
     pub fn new(
         public_key: String,
-        is_bot: bool,
+        is_app: bool,
         is_mini_app: bool,
         alliance_voice_channel: Option<String>,
         session_id: String,
@@ -57,7 +59,7 @@ impl ConnState {
     ) -> Self {
         Self {
             public_key,
-            is_bot,
+            is_app,
             is_mini_app,
             alliance_voice_channel,
             session_id,

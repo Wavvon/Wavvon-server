@@ -186,7 +186,7 @@ pub async fn new_challenge(
     };
 
     sqlx::query(
-        "INSERT INTO bot_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO admission_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&id)
     .bind(&q.pubkey)
@@ -216,7 +216,7 @@ pub async fn verify_challenge(
     // Look up challenge
     #[allow(clippy::type_complexity)]
     let row: Option<(String, String, Option<String>, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT kind, pubkey, expected_answer, expires_at, consumed_at FROM bot_challenges WHERE id = $1",
+        "SELECT kind, pubkey, expected_answer, expires_at, consumed_at FROM admission_challenges WHERE id = $1",
     )
     .bind(&req.id)
     .fetch_optional(&state.db)
@@ -246,7 +246,7 @@ pub async fn verify_challenge(
     match kind.as_str() {
         "click" => {
             // Mark consumed
-            sqlx::query("UPDATE bot_challenges SET consumed_at = $1 WHERE id = $2")
+            sqlx::query("UPDATE admission_challenges SET consumed_at = $1 WHERE id = $2")
                 .bind(now)
                 .bind(&req.id)
                 .execute(&state.db)
@@ -261,7 +261,7 @@ pub async fn verify_challenge(
                 let hashed = sha256_hex(&answer);
 
                 sqlx::query(
-                    "INSERT INTO bot_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES ($1, $2, 'puzzle', $3, $4, $5)",
+                    "INSERT INTO admission_challenges (id, pubkey, kind, expected_answer, created_at, expires_at) VALUES ($1, $2, 'puzzle', $3, $4, $5)",
                 )
                 .bind(&puzzle_id)
                 .bind(&req.pubkey)
@@ -326,7 +326,7 @@ pub async fn verify_challenge(
             }
 
             // Correct — mark consumed and issue token
-            sqlx::query("UPDATE bot_challenges SET consumed_at = $1 WHERE id = $2")
+            sqlx::query("UPDATE admission_challenges SET consumed_at = $1 WHERE id = $2")
                 .bind(now)
                 .bind(&req.id)
                 .execute(&state.db)

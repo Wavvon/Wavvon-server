@@ -56,10 +56,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             approval_status   TEXT NOT NULL DEFAULT 'approved',
             avatar             TEXT,
             master_pubkey     TEXT,
-            is_bot            BOOLEAN NOT NULL DEFAULT FALSE,
-            is_bot_removed    BOOLEAN NOT NULL DEFAULT FALSE,
-            bot_invite_token  TEXT,
-            bot_invite_expires BIGINT,
             is_webhook        BOOLEAN NOT NULL DEFAULT FALSE,
             lobby_status      TEXT NOT NULL DEFAULT 'none',
             lobby_entered_at  BIGINT,
@@ -75,7 +71,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             cover              TEXT,
             favorite_hubs      TEXT, -- JSON [{url,name,icon}]; show_hubs gates visibility
             show_hubs          BOOLEAN, -- NULL = false
-            bot_local_note     TEXT, -- admin-only label for an external bot (bots.md 4)
             birthday           TEXT, -- MM-DD, never a year; validated in routes/me.rs
             name_color         TEXT -- per-user override; hub name_color_mode picks the winner
         )",
@@ -93,10 +88,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             public_key        TEXT NOT NULL REFERENCES users(public_key),
             created_at        BIGINT NOT NULL,
             expires_at        BIGINT,
-            expiry_warned_at  BIGINT,
             scope              TEXT NOT NULL DEFAULT 'member', -- 'member' | 'lobby' | 'mini_app'
-            mini_app_channel_id TEXT, -- set only for scope='mini_app': bound channel + bot
-            mini_app_bot_id    TEXT
+            mini_app_channel_id TEXT, -- set only for scope='mini_app': bound channel + host
+            mini_app_host    TEXT
         )",
     )
     .execute(pool)
@@ -269,7 +263,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             visible_to_pubkey TEXT,
             embeds            TEXT,
             reply_count       BIGINT NOT NULL DEFAULT 0,
-            game               TEXT -- bot launch card {entry_url,name,...}; bot-authored only
+            game               TEXT -- launch card {entry_url,name,...}; needs apps.register
         )",
     )
     .execute(pool)
@@ -307,7 +301,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Interactive bot UI components attached to a message.
+    // Interactive UI components attached to a message.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS message_components (
             id            TEXT PRIMARY KEY,
@@ -810,27 +804,33 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     // =======================================================================
-    // Bots
+    // Client apps
     // =======================================================================
 
-    // Baseline reset, not an additive migration: the self-service bot system
-    // is gone (decisions.md, "Every bot is an external bot") and these three
-    // tables go with it rather than lingering as dead schema. `bots` and
-    // `bot_slash_commands` are superseded by `bot_profiles` and
-    // `bot_commands`; `bot_tokens` was already dead — read by two auth paths,
-    // written by none.
+    // Baseline reset, not an additive migration: the bot subsystem is gone
+    // (decisions.md, "A bot is a client like any other"), and with it every
+    // table that existed to tell one kind of client from another. What
+    // survives is keyed on `users` and reachable by any identity holding
+    // `apps.register`: a profile, its slash commands, its event
+    // subscriptions, and the queue behind the polling transport.
     //
-    // Authorised explicitly for beta, where no bot is deployed anywhere —
-    // which is the general rule here, not an exception carved out for this one
-    // statement (see the file header). If you are reading it after 1.0, it
-    // should be gone, and nothing new like it may be added.
-    // Children first, and CASCADE because an already-migrated database still
-    // has `bot_event_queue`'s foreign key pointing at `bots`. That queue
-    // survives — it backs the HTTP polling transport — so it is dropped here
-    // only to be recreated below against `users`, which is where a bot's
-    // identity actually lives now.
+    // `bot_capability_grants` and `bot_channel_scope` do not survive.
+    // Authority is the permission catalogue now — a second grant system
+    // keyed on a pubkey was the bot distinction wearing a different name.
+    //
+    // Authorised explicitly for beta, which is the general rule here rather
+    // than an exception carved out for this one statement (see the file
+    // header). If you are reading it after 1.0, it should be gone, and
+    // nothing new like it may be added. CASCADE because an already-migrated
+    // database has foreign keys pointing at these from each other.
     for table in [
         "bot_event_queue",
+        "bot_subscriptions",
+        "bot_channel_scope",
+        "bot_capability_grants",
+        "bot_challenges",
+        "bot_commands",
+        "bot_profiles",
         "bot_slash_commands",
         "bots",
         "bot_tokens",
@@ -841,16 +841,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     }
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_profiles (
-            pubkey       TEXT PRIMARY KEY,
+        "CREATE TABLE IF NOT EXISTS app_profiles (
+            pubkey       TEXT PRIMARY KEY REFERENCES users(public_key) ON DELETE CASCADE,
             name         TEXT NOT NULL,
             avatar_url   TEXT,
             description  TEXT,
             webhook_url  TEXT,
             homepage_url TEXT,
-            capabilities TEXT NOT NULL DEFAULT '[]',
             updated_at   BIGINT NOT NULL,
-            mini_app_url       TEXT, -- self-declared via BotMeta or PUT /bots/me/profile
+            mini_app_url       TEXT, -- self-declared via AppMeta or PUT /me/app/profile
             requires_camera    BOOLEAN NOT NULL DEFAULT FALSE,
             game               TEXT -- same GameLaunchCard shape as messages.game
         )",
@@ -859,7 +858,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_commands (
+        "CREATE TABLE IF NOT EXISTS app_commands (
             pubkey           TEXT NOT NULL,
             name             TEXT NOT NULL,
             description      TEXT NOT NULL,
@@ -875,51 +874,22 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     // channel_id = '' (empty string) = hub-scope subscription
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_subscriptions (
-            bot_pubkey TEXT NOT NULL,
+        "CREATE TABLE IF NOT EXISTS app_subscriptions (
+            app_pubkey TEXT NOT NULL,
             event_type TEXT NOT NULL,
             channel_id TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (bot_pubkey, event_type, channel_id)
+            PRIMARY KEY (app_pubkey, event_type, channel_id)
         )",
     )
     .execute(pool)
     .await?;
 
+    // Event queue behind the HTTP polling transport (`GET /me/events`), for
+    // a client that holds no persistent WebSocket.
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_channel_scope (
-            bot_pubkey TEXT NOT NULL,
-            channel_id TEXT NOT NULL,
-            PRIMARY KEY (bot_pubkey, channel_id)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Capability grants (bot-capability-layer.md §1): what the hub *permits*
-    // a bot to do, admin-only, separate from `bot_profiles.capabilities`
-    // (what the bot *requests*). The effective gate a runtime checks is
-    // always requested ∩ granted -- see `bots::capabilities::effective_capabilities`.
-    // Replaced atomically by `PUT /admin/bots/:pubkey/capabilities`.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_capability_grants (
-            bot_pubkey TEXT NOT NULL,
-            capability TEXT NOT NULL,
-            granted_by TEXT NOT NULL,
-            granted_at BIGINT NOT NULL,
-            PRIMARY KEY (bot_pubkey, capability)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Event queue behind the HTTP polling transport (`GET /bot/poll`), for
-    // bots that hold no persistent WebSocket. Keyed on `users` now that a bot
-    // is an ordinary identity row — the old FK pointed at the self-service
-    // `bots` table, which no longer exists.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_event_queue (
+        "CREATE TABLE IF NOT EXISTS app_event_queue (
             id         TEXT PRIMARY KEY,
-            bot_pubkey TEXT NOT NULL REFERENCES users(public_key) ON DELETE CASCADE,
+            app_pubkey TEXT NOT NULL REFERENCES users(public_key) ON DELETE CASCADE,
             event_type TEXT NOT NULL,
             payload    TEXT NOT NULL,
             created_at BIGINT NOT NULL,
@@ -929,9 +899,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Bot challenges (anti-spam)
+    // Admission challenges (anti-spam, `challenge_mode`). It was called
+    // `bot_challenges` and never had anything to do with bots: it is the
+    // puzzle a stranger answers on the way in.
     sqlx::query(
-        "CREATE TABLE IF NOT EXISTS bot_challenges (
+        "CREATE TABLE IF NOT EXISTS admission_challenges (
             id              TEXT PRIMARY KEY,
             pubkey          TEXT NOT NULL,
             kind            TEXT NOT NULL,
@@ -945,7 +917,8 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .await?;
 
     sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_bot_challenges_pubkey ON bot_challenges(pubkey, expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_admission_challenges_pubkey
+         ON admission_challenges(pubkey, expires_at)",
     )
     .execute(pool)
     .await?;
@@ -1002,7 +975,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // channel_id NULL (represented as '' sentinel, matching bot_subscriptions
+    // channel_id NULL (represented as '' sentinel, matching app_subscriptions
     // convention) = hub-scope subscription.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS outgoing_webhook_subscriptions (
@@ -1921,29 +1894,10 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
-    // Backfill bot_capability_grants (bot-capability-layer.md decision 1):
-    // "a migration backfills grants from existing capabilities so
-    // already-approved voice bots keep working". Best-effort, idempotent via
-    // ON CONFLICT DO NOTHING -- safe to run on every startup.
-    //
-    // 1. External bots (`users.is_bot=1` + `bot_profiles`): every
-    //    self-declared capability becomes granted, so `can_speak_voice`
-    //    bots that were already approved stay approved once voice_ws.rs
-    //    switches to the requested-∩-granted resolver.
-    let _ = sqlx::query(
-        "INSERT INTO bot_capability_grants (bot_pubkey, capability, granted_by, granted_at)
-         SELECT bp.pubkey, cap, 'system_backfill', bp.updated_at
-         FROM bot_profiles bp, jsonb_array_elements_text(bp.capabilities::jsonb) AS cap
-         ON CONFLICT (bot_pubkey, capability) DO NOTHING",
-    )
-    .execute(pool)
-    .await;
-
-    // A second backfill used to follow, granting `can_use_interactive_ui` to
-    // every row in the self-service `bots` table that had a `mini_app_url`.
-    // Both the table and the system are gone (decisions.md, "Every bot is an
-    // external bot"), and there is nothing to preserve: a bot that wants a
-    // mini-app now declares the capability and an admin grants it.
+    // Two capability backfills used to follow, seeding the grant tables that
+    // gated what a bot could do. Both tables are gone: a client's authority
+    // is its roles, resolved through the permission catalogue like everyone
+    // else's, so there is no per-pubkey grant left to seed.
 
     tracing::info!("Database migrations complete");
 

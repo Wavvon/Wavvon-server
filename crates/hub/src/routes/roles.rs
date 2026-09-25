@@ -283,7 +283,7 @@ pub async fn update_role(
         let icon = updated.icon.clone();
         let category_id = updated.category_id.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "role.appearance_updated",
                 Some(&actor),

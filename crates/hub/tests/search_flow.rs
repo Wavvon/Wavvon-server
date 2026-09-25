@@ -51,7 +51,7 @@ async fn setup_with_search() -> (common::TestHarness, tempfile::TempDir) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: Arc::new(tokio::sync::RwLock::new(None)),
@@ -71,9 +71,8 @@ async fn setup_with_search() -> (common::TestHarness, tempfile::TempDir) {
         search,
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(

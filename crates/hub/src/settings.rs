@@ -165,7 +165,7 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          this to /web-client automatically.",
     ),
     (
-        "WAVVON_BOTS_ALLOW_CAMERA",
+        "WAVVON_APPS_ALLOW_CAMERA",
         "false",
         "Set to `true` to allow bot mini-apps that declare `requires_camera: true` to \
          receive camera access in the client webview/iframe sandbox. Defaults to false; \
@@ -175,15 +175,15 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "WAVVON_BOTS_ALLOW_VIDEO",
         "false",
         "Set to `true` to allow bots granted `can_inject_video` to push frames into the \
-         screen-share relay via `screen_share_start` (bot-capability-layer.md §6 Phase 2). \
+         screen-share relay via `screen_share_start` (apps.md §6 Phase 2). \
          Defaults to false; a per-bot capability grant is necessary but not sufficient -- \
          this operator-level flag must also be on.",
     ),
     (
-        "WAVVON_BOT_VIDEO_STREAM_BUDGET",
+        "WAVVON_HTTP_VIDEO_STREAM_BUDGET",
         "2",
         "Max number of concurrent bot-initiated video streams across the whole hub \
-         (bot-capability-layer.md §4 media budget). `screen_share_start` is rejected once \
+         (apps.md §4 media budget). `screen_share_start` is rejected once \
          this many bot streams are already active; human screen shares are never counted.",
     ),
     (
@@ -319,14 +319,12 @@ pub struct Settings {
     /// Allow bot mini-apps that declare `requires_camera: true` to receive
     /// camera access in client webview/iframe sandboxes.
     ///
-    /// Env: WAVVON_BOTS_ALLOW_CAMERA
-    pub bots_allow_camera: bool,
+    /// Env: WAVVON_APPS_ALLOW_CAMERA
+    pub apps_allow_camera: bool,
     /// Operator kill-switch for `can_inject_video` bot video streams.
-    /// Env: WAVVON_BOTS_ALLOW_VIDEO
-    pub bots_allow_video: bool,
-    /// Max concurrent bot-initiated video streams hub-wide.
-    /// Env: WAVVON_BOT_VIDEO_STREAM_BUDGET
-    pub bot_video_stream_budget: u32,
+    /// Max concurrent video streams started over HTTP, hub-wide.
+    /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
+    pub http_video_stream_budget: u32,
     /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
     /// Env: WAVVON_PUBLIC_URL
     pub public_url: Option<String>,
@@ -392,9 +390,8 @@ pub fn load() -> Result<Settings> {
         .set_default("log_format", "text")?
         .set_default("discovery_url", "https://discovery.wavvon.io")?
         .set_default("trusted_proxy", false)?
-        .set_default("bots_allow_camera", false)?
-        .set_default("bots_allow_video", false)?
-        .set_default("bot_video_stream_budget", 2u32)?
+        .set_default("apps_allow_camera", false)?
+        .set_default("http_video_stream_budget", 2u32)?
         .set_default("device_token_ttl_days", 30u64)?
         .set_default("db_max_connections", 5u32)?
         .set_default("lan_mode", false)?

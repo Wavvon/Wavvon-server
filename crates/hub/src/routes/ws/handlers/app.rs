@@ -15,7 +15,7 @@ pub(in crate::routes::ws) async fn handle_resume(
     cs: &mut ConnState,
     state: &Arc<AppState>,
     ws_tx: &mut WsTx,
-    bot_tx: &mpsc::Sender<String>,
+    app_tx: &mpsc::Sender<String>,
     msg: WsClientMessage,
 ) -> DispatchResult {
     let since_seq = match msg {
@@ -23,24 +23,24 @@ pub(in crate::routes::ws) async fn handle_resume(
         _ => return DispatchResult::Continue,
     };
 
-    // Only bots can resume.
-    if !cs.is_bot {
+    // Resume replays the event stream, which only a registered app has.
+    if !cs.is_app {
         return DispatchResult::Continue;
     }
 
     cs.is_replaying = true;
 
-    let live_seq = crate::bots::events::current_seq(state).await;
+    let live_seq = crate::apps::events::current_seq(state).await;
 
-    let replay_tx = bot_tx.clone();
+    let replay_tx = app_tx.clone();
     let result =
-        crate::bots::events::replay_events_for_bot(state, &cs.public_key, since_seq, &replay_tx)
+        crate::apps::events::replay_events_for_app(state, &cs.public_key, since_seq, &replay_tx)
             .await;
 
     cs.is_replaying = false;
 
     match result {
-        crate::bots::events::ReplayResult::Unavailable {
+        crate::apps::events::ReplayResult::Unavailable {
             earliest_seq,
             earliest_at,
         } => {
@@ -57,7 +57,7 @@ pub(in crate::routes::ws) async fn handle_resume(
                 return DispatchResult::Break;
             }
         }
-        crate::bots::events::ReplayResult::Complete { replayed } => {
+        crate::apps::events::ReplayResult::Complete { replayed } => {
             let msg = serde_json::json!({
                 "type": "replay_complete",
                 "replayed": replayed,

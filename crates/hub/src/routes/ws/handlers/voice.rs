@@ -26,7 +26,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         _ => return DispatchResult::Continue,
     };
 
-    // Mini-app-scoped sessions (bot-mini-apps.md "Scoped session token")
+    // Mini-app-scoped sessions (mini-apps.md "Scoped session token")
     // never had voice in scope — same block the now-deleted `/voice/ws`
     // endpoint enforced (voice-transport-v2.md), re-applied here since the
     // unified `voice_join` handler is now the only voice-join code path.
@@ -65,23 +65,6 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                 .await;
             return DispatchResult::Continue;
         }
-    }
-
-    // Bot audio injection (soundboard.md §2) requires the effective
-    // `can_speak_voice` capability grant — same gate the now-deleted
-    // `/voice/ws` endpoint enforced for bot joins (voice-transport-v2.md).
-    if cs.is_bot
-        && !crate::bots::capabilities::has_capability(&state.db, &cs.public_key, "can_speak_voice")
-            .await
-    {
-        let err = WsServerMessage::Error {
-            context: "voice_join".to_string(),
-            message: "This bot does not have voice permission.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
     }
 
     // Hub-wide voice mute check.
@@ -447,7 +430,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     let json = serde_json::to_string(&reply).unwrap();
     let _ = ws_tx.send(Message::Text(json.into())).await;
 
-    let (display_name, is_bot, visiting_from) =
+    let (display_name, visiting_from) =
         crate::routes::ws::voice_identity(state, &cs.public_key).await;
 
     // An invisible joiner is announced to no one (decisions.md 2026-07-12:
@@ -461,7 +444,6 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                 participant: VoiceParticipantInfo {
                     public_key: cs.public_key.clone(),
                     display_name: display_name.clone(),
-                    is_bot,
                     sender_id: Some(sender_id),
                     visiting_from,
                 },
@@ -558,7 +540,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         let ch = channel_id.clone();
         let dn = display_name;
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.joined",
                 Some(&pk),
@@ -599,7 +581,7 @@ pub(in crate::routes::ws) async fn handle_voice_leave(
         let pk = cs.public_key.clone();
         let ch = channel_id.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.left",
                 Some(&pk),

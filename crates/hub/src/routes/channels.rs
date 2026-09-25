@@ -76,7 +76,6 @@ pub async fn voice_channel_participants(
 
     struct UserInfo {
         display_name: Option<String>,
-        is_bot: bool,
         visiting_from: Option<String>,
     }
     let mut info_by_key: HashMap<String, UserInfo> = HashMap::new();
@@ -87,13 +86,12 @@ pub async fn voice_channel_participants(
             // Same resolution as the WS roster, visitors included — a client
             // that refetches the roster must not lose the hub a visitor is
             // vouched by (alliances.md).
-            let (display_name, is_bot, visiting_from) =
+            let (display_name, visiting_from) =
                 crate::routes::ws::voice_identity(&state, key).await;
             info_by_key.insert(
                 key.clone(),
                 UserInfo {
                     display_name,
-                    is_bot,
                     visiting_from,
                 },
             );
@@ -110,7 +108,6 @@ pub async fn voice_channel_participants(
                 VoiceParticipantInfo {
                     public_key: pk.clone(),
                     display_name: info.and_then(|i| i.display_name.clone()),
-                    is_bot: info.map(|i| i.is_bot).unwrap_or(false),
                     visiting_from: info.and_then(|i| i.visiting_from.clone()),
                 }
             })
@@ -126,7 +123,6 @@ pub async fn voice_channel_participants(
 pub struct VoiceParticipantInfo {
     pub public_key: String,
     pub display_name: Option<String>,
-    pub is_bot: bool,
     /// The hub vouching for an alliance-voice visitor; absent for members.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visiting_from: Option<String>,
@@ -337,7 +333,7 @@ pub async fn create_channel(
         let ch_name = req.name.clone();
         let creator = user.public_key.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.created",
                 Some(&creator),
@@ -804,7 +800,7 @@ pub async fn delete_channel(
         let ch_id = channel_id.clone();
         let actor = user.public_key.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.deleted",
                 Some(&actor),

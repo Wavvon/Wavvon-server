@@ -153,10 +153,10 @@ pub async fn create_webhook(
 
     // Create a users row for the webhook identity so message FKs work.
     // Using the webhook id as "public_key" — a known hack but avoids a
-    // parallel auth path (documented in bots.md §9).
+    // parallel auth path (documented in apps.md).
     sqlx::query(
-        "INSERT INTO users(public_key, display_name, first_seen_at, last_seen_at, approval_status, is_bot, is_webhook)
-         VALUES($1,$2,$3,$4,'approved',TRUE,TRUE) ON CONFLICT (public_key) DO NOTHING",
+        "INSERT INTO users(public_key, display_name, first_seen_at, last_seen_at, approval_status, is_webhook)
+         VALUES($1,$2,$3,$4,'approved',TRUE) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&id)
     .bind(&req.display_name)
@@ -404,7 +404,7 @@ pub async fn post_webhook_message(
         // NOTE: WebhookPostRequest.embeds (freeform serde_json::Value) is a
         // separate, deeper gap than the bot-reply embeds fix elsewhere in
         // this change -- it isn't persisted to `messages.embeds` at all
-        // (no INSERT column, no type mapping to bot_models::Embed). Left
+        // (no INSERT column, no type mapping to app_models::Embed). Left
         // untouched here; a real fix needs a decision on schema and format.
         embeds: None,
         game: None,

@@ -5,9 +5,10 @@ anything that lives in migrations, bootstrap, config or the CLI — which is mos
 of what an operator meets first.
 
 Every bug this harness has found was invisible to the integration suite for
-that reason. The first: `/auth/verify`'s invite gate exempted bots but not
-federating hubs, and a fresh hub is `invite_only`, so **two hubs with default
-settings could never form an alliance**. The in-process tests never wrote the
+that reason. The first: `/auth/verify`'s invite gate exempted the bot
+admission fork (since removed) but not federating hubs, and a fresh hub is
+`invite_only`, so **two hubs with default settings could never form an
+alliance**. The in-process tests never wrote the
 setting, so `is_invite_only` answered false there and every assertion passed.
 
 ## Running it

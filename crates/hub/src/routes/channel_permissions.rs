@@ -314,7 +314,7 @@ pub async fn put_channel_permissions(
             .chain(req.deny.iter().map(|p| (p.clone(), false)))
             .collect();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.permission_overwrite.set",
                 Some(&actor),
@@ -380,7 +380,7 @@ pub async fn delete_channel_permissions(
         let actor = user.public_key.clone();
         let before_map: HashMap<String, bool> = before.into_iter().collect();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.permission_overwrite.cleared",
                 Some(&actor),

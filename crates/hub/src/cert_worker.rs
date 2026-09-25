@@ -64,14 +64,13 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
     let now = crate::auth::handlers::unix_timestamp();
     let threshold = now - standing_days * 86400;
 
-    // Candidates: approved, non-bot users who joined before the standing threshold
+    // Candidates: approved users who joined before the standing threshold
     // and whose pow_level meets the minimum (COALESCE to 0 when column absent/null),
     // and who have no non-revoked, non-expired cert currently active.
     let candidates: Vec<String> = sqlx::query_scalar(
         "SELECT u.public_key
          FROM users u
          WHERE u.approval_status = 'approved'
-           AND COALESCE(u.is_bot, FALSE) = FALSE
            AND u.first_seen_at <= $1
            AND COALESCE(u.pow_level, 0) >= $2
            AND NOT EXISTS (

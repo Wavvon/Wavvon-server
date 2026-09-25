@@ -164,8 +164,6 @@ pub struct UserInfo {
     /// to this user. Used by the client to group members in the sidebar.
     #[serde(default)]
     pub group_role: Option<String>,
-    #[serde(default)]
-    pub is_bot: bool,
     /// "MM-DD", never a year. `null` when unset or when `birthdays_enabled`
     /// is false hub-wide.
     #[serde(default)]
@@ -210,7 +208,7 @@ pub async fn list_users(
     let search = q.map(|q| format!("%{q}%"));
 
     let rows: Vec<UserRowWithRole> = sqlx::query_as::<_, UserRowWithRole>(
-        "SELECT u.public_key, u.display_name, u.avatar, u.is_bot,
+        "SELECT u.public_key, u.display_name, u.avatar,
                 u.presence_status, u.presence_custom, u.birthday, u.name_color,
                 (SELECT r.name FROM roles r
                  INNER JOIN user_roles ur ON r.id = ur.role_id
@@ -226,8 +224,8 @@ pub async fn list_users(
                 (COALESCE(u.display_name, ''), u.public_key) >
                 ((SELECT COALESCE(display_name, '') FROM users WHERE public_key = $2), $2))
            AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
-           AND (u.is_bot = TRUE OR EXISTS
-                (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key))
+           AND EXISTS
+                (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key)
          ORDER BY COALESCE(u.display_name, ''), u.public_key
          LIMIT $3",
     )
@@ -260,7 +258,6 @@ pub async fn list_users(
                 display_name: r.display_name,
                 avatar: r.avatar,
                 group_role: r.group_role,
-                is_bot: r.is_bot,
                 birthday: if show_birthdays { r.birthday } else { None },
                 name_color,
             }
@@ -276,7 +273,6 @@ struct UserRowWithRole {
     public_key: String,
     display_name: Option<String>,
     avatar: Option<String>,
-    is_bot: bool,
     presence_status: Option<String>,
     presence_custom: Option<String>,
     birthday: Option<String>,

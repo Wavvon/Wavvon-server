@@ -46,7 +46,7 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
@@ -66,9 +66,8 @@ async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -1463,9 +1462,8 @@ async fn a_visitor_is_named_by_the_hub_that_vouched_for_them() {
     let resp = redeem_grant(&hub_a_url, &user_b, &minted["grant"]).await;
     assert_eq!(resp.status(), 200, "the visitor should be admitted");
 
-    let (display_name, is_bot, visiting_from) =
+    let (display_name, visiting_from) =
         wavvon_hub::routes::ws::voice_identity(&hub_a_state, &visitor_pk).await;
-    assert!(!is_bot);
     assert_eq!(
         visiting_from.as_deref(),
         Some("hub-b"),
@@ -1482,7 +1480,7 @@ async fn a_visitor_is_named_by_the_hub_that_vouched_for_them() {
     assert_eq!(member_rows, 0, "a visit must never create a member");
 
     // A local member keeps the plain shape: no vouching hub at all.
-    let (_, _, owner_visiting_from) =
+    let (_, owner_visiting_from) =
         wavvon_hub::routes::ws::voice_identity(&hub_a_state, &user_a.public_key_hex()).await;
     assert_eq!(owner_visiting_from, None);
 }

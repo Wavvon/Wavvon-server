@@ -618,7 +618,16 @@ try {
       const byId = new Map(cat.body.permissions.map((p) => [p.id, p]));
 
       // The wildcard is gone, and so are the four strings that gated nothing.
-      for (const dead of ["admin", "manage_bots", "use_video", "start_game", "manage_games"]) {
+      for (const dead of [
+        "admin",
+        "manage_bots",
+        "use_video",
+        "start_game",
+        "manage_games",
+        "bots.admit",
+        "bots.capabilities",
+        "bots.audit.read",
+      ]) {
         check(!byId.has(dead), `${dead} must not be in the catalogue`);
       }
       // And the old spelling shares no id with the new one — there is no
