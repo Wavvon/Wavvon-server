@@ -293,7 +293,8 @@ pub fn create_router_full(
             post(routes::reports::review_report),
         )
         .route("/admin/audit-log", get(routes::apps::admin_audit_log))
-        // ---- App registration (self-service, `apps.register`) ----
+        // ---- Apps: the hub-wide listing, then self-service registration ----
+        .route("/apps", get(routes::apps::list_apps))
         .route("/me/app", get(routes::apps::get_my_app))
         .route("/me/app/profile", put(routes::apps::put_my_app_profile))
         .route("/me/app/commands", put(routes::apps::put_my_app_commands))

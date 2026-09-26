@@ -426,3 +426,52 @@ async fn a_program_joins_through_the_one_admission_gate() {
         .await;
     admitted.assert_status_success();
 }
+
+// ---------------------------------------------------------------------------
+// The hub-wide listing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn any_member_lists_the_registered_apps_with_their_commands() {
+    let (server, _owner_token) = common::setup_with_owner().await;
+    grant_apps_register(&server).await;
+    let (_app, app_token) = register_app(&server, "Scoreboard").await;
+
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&app_token)
+        .json(&json!({
+            "commands": [{ "name": "score", "description": "show the score" }]
+        }))
+        .await
+        .assert_status_success();
+
+    // A plain member, holding nothing in particular: the list is what the
+    // slash-command autocomplete reads, so it cannot need a permission.
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    let apps: serde_json::Value = server
+        .get("/apps")
+        .authorization_bearer(&member_token)
+        .await
+        .json();
+
+    let entries = apps.as_array().unwrap();
+    assert_eq!(entries.len(), 1, "one app is registered");
+    assert_eq!(entries[0]["name"], "Scoreboard");
+    assert_eq!(entries[0]["commands"][0]["name"], "score");
+}
+
+#[tokio::test]
+async fn an_identity_that_registered_nothing_is_not_in_the_listing() {
+    let (server, owner_token) = common::setup_with_owner().await;
+    grant_apps_register(&server).await;
+
+    let apps: serde_json::Value = server
+        .get("/apps")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert!(apps.as_array().unwrap().is_empty());
+}

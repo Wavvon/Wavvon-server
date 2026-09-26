@@ -5,7 +5,7 @@
 //!     decrements it but must not remove the key until the count reaches zero.
 //!
 //! H3: `app_sessions` is now nested: `HashMap<pubkey, HashMap<session_id, Sender>>`.
-//!     A newer bot WS session no longer overwrites the older sender; the first
+//!     A newer app WS session no longer overwrites the older sender; the first
 //!     disconnect removes only its own entry, leaving the surviving session intact.
 
 use std::collections::HashMap;
@@ -328,11 +328,11 @@ async fn h2_users_endpoint_reflects_refcount() {
 // H3 — app_sessions per-session discriminator
 // ---------------------------------------------------------------------------
 
-/// Simulate two concurrent bot WS sessions via direct state manipulation.
+/// Simulate two concurrent app WS sessions via direct state manipulation.
 /// When the "first" session is dropped (its entry removed), the second
 /// session's sender must still be present and functional.
 #[tokio::test]
-async fn h3_bot_sessions_second_session_survives_first_disconnect() {
+async fn h3_app_sessions_second_session_survives_first_disconnect() {
     let (base, state, _guard) = start_hub().await;
     let _ = base; // not needed for this state-level test
 
@@ -412,20 +412,20 @@ async fn h3_bot_sessions_second_session_survives_first_disconnect() {
     );
 }
 
-/// publish_hub_event delivers to all active sessions for a bot, not just one.
+/// publish_hub_event delivers to every active session for an identity, not just one.
 #[tokio::test]
 async fn h3_publish_hub_event_reaches_all_sessions() {
     let (base, state, _guard) = start_hub().await;
     let _ = base;
 
-    // Insert a real bot user row (publish_hub_event queries the DB for
-    // subscriptions, so we need valid app_subscriptions rows).
+    // A real users row: publish_hub_event reads subscriptions from the DB,
+    // so the app_subscriptions row below needs an identity to point at.
     let pk = Identity::generate().public_key_hex();
     let now = wavvon_hub::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO users (public_key, display_name, is_bot, first_seen_at, last_seen_at)
-         VALUES ($1, 'testbot', TRUE, $2, $3)",
+        "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at)
+         VALUES ($1, 'logger-app', $2, $3)",
     )
     .bind(&pk)
     .bind(now)

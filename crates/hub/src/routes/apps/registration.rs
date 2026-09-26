@@ -8,6 +8,7 @@
 //! and gated on `apps.register`, because an embed or a launch card nobody
 //! vouched for is a forgery with a nice border.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -16,11 +17,12 @@ use axum::Json;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
-use crate::routes::app_models::AppCommandDef;
+use crate::routes::app_models::{AppCommandDef, GameLaunchCard};
 use crate::state::AppState;
 
 use super::models::{
-    AppCommandRow, AppMeResponse, AppProfileRow, SetSubscriptionsResponse, UpdateCommandsRequest,
+    AppCommandOwnerRow, AppCommandRow, AppCommandSummary, AppDirectoryRow, AppListEntry,
+    AppMeResponse, AppProfileRow, SetSubscriptionsResponse, UpdateCommandsRequest,
     UpdateSubscriptionsRequest,
 };
 
@@ -33,6 +35,67 @@ async fn require_app_registrar(
 ) -> Result<(), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::APPS_REGISTER)
+}
+
+/// GET /apps — the apps registered on this hub, for any member.
+///
+/// A client needs this for the slash-command list it offers while typing:
+/// the commands live in `app_commands`, and without a way to read them the
+/// autocomplete has nothing to autocomplete. Readable by any session, since
+/// what it returns is what an app already says about itself in public —
+/// registering one is the gated act, listing them is not.
+pub async fn list_apps(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+) -> Result<Json<Vec<AppListEntry>>, (StatusCode, String)> {
+    let profiles = sqlx::query_as::<_, AppDirectoryRow>(
+        "SELECT pubkey, name, avatar_url, description, game
+         FROM app_profiles ORDER BY name, pubkey",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let commands = sqlx::query_as::<_, AppCommandOwnerRow>(
+        "SELECT pubkey, name, description FROM app_commands ORDER BY pubkey, name",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let mut by_pubkey: HashMap<String, Vec<AppCommandSummary>> = HashMap::new();
+    for c in commands {
+        by_pubkey
+            .entry(c.pubkey)
+            .or_default()
+            .push(AppCommandSummary {
+                name: c.name,
+                description: c.description,
+            });
+    }
+
+    Ok(Json(
+        profiles
+            .into_iter()
+            .map(|p| AppListEntry {
+                commands: by_pubkey.remove(&p.pubkey).unwrap_or_default(),
+                game: parse_game(p.game),
+                pubkey: p.pubkey,
+                name: p.name,
+                avatar_url: p.avatar_url,
+                description: p.description,
+            })
+            .collect(),
+    ))
+}
+
+/// Decode an `app_profiles.game` JSON column. A malformed value reads back as
+/// no launch card rather than failing the listing — same "best-effort
+/// optional column" behaviour as `parse_game` in routes/messages.rs.
+fn parse_game(json: Option<String>) -> Option<GameLaunchCard> {
+    json.as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| serde_json::from_str(s).ok())
 }
 
 /// GET /me/app — the caller's own app registration.

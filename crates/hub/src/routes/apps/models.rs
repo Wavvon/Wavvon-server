@@ -55,6 +55,43 @@ pub struct AppProfileRow {
 }
 
 #[derive(sqlx::FromRow)]
+pub struct AppDirectoryRow {
+    pub pubkey: String,
+    pub name: String,
+    pub avatar_url: Option<String>,
+    pub description: Option<String>,
+    pub game: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct AppCommandOwnerRow {
+    pub pubkey: String,
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Serialize)]
+pub struct AppCommandSummary {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Serialize)]
+pub struct AppListEntry {
+    pub pubkey: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Profile-declared game descriptor: what a client needs to offer a Play
+    /// affordance without a launch-card message in view.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub game: Option<crate::routes::app_models::GameLaunchCard>,
+    pub commands: Vec<AppCommandSummary>,
+}
+
+#[derive(sqlx::FromRow)]
 pub struct AppCommandRow {
     pub name: String,
     pub description: String,
