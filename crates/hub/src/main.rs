@@ -7,7 +7,6 @@ use sqlx::postgres::PgPoolOptions;
 use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
-use wavvon_hub::bots::token_expiry;
 use wavvon_hub::cert_worker;
 use wavvon_hub::db;
 use wavvon_hub::dm_worker;
@@ -1286,7 +1285,7 @@ async fn main() -> Result<()> {
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         farm_url,
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
@@ -1307,9 +1306,8 @@ async fn main() -> Result<()> {
         search,
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
-        bots_allow_camera: settings.bots_allow_camera,
-        bots_allow_video: settings.bots_allow_video,
-        bot_video_stream_budget: settings.bot_video_stream_budget as usize,
+        apps_allow_camera: settings.apps_allow_camera,
+        http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
@@ -1379,9 +1377,6 @@ async fn main() -> Result<()> {
 
     // Retry undelivered federated DMs in the background.
     dm_worker::spawn(state.clone());
-
-    // Warn bots about expiring tokens.
-    token_expiry::spawn(state.clone());
 
     // Issue certifications to eligible members daily.
     cert_worker::spawn(state.clone());

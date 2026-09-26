@@ -3,8 +3,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use uuid::Uuid;
 
-use crate::routes::bot_models::{
-    AuthorInfo, BotResponse, ComponentInteraction, ComponentResponse, ComponentUpdate,
+use crate::routes::app_models::{
+    AppResponse, AuthorInfo, ComponentInteraction, ComponentResponse, ComponentUpdate,
     EphemeralReply, SlashInvocation,
 };
 use crate::routes::chat_models::{ChatEvent, MessageResponse, WsServerMessage};
@@ -27,16 +27,16 @@ async fn hub_url(state: &AppState) -> String {
         .unwrap_or_else(|| "https://unknown-hub".to_string())
 }
 
-/// Detect a slash command in the message content and, if a registered bot
-/// handles it, dispatch the invocation to the bot's webhook.
+/// Detect a slash command in the message content and, if a registered app
+/// handles it, dispatch the invocation to the app's webhook.
 ///
 /// Returns:
-/// - `None`  — no bot command matched; caller stores the message normally.
+/// - `None`  — no app command matched; caller stores the message normally.
 /// - `Some(ephemeral_error)` — a command matched but an error occurred; the
 ///   caller should store an ephemeral error message and return early without
 ///   storing the original message.
 ///
-/// When the bot responds with a reply, that reply is inserted into the DB
+/// When the app responds with a reply, that reply is inserted into the DB
 /// here and broadcast via `state.chat_tx` so WS clients receive it.
 pub async fn dispatch_slash(
     state: &Arc<AppState>,
@@ -58,13 +58,12 @@ pub async fn dispatch_slash(
         return None;
     }
 
-    // Look up a matching command. If bot_channel_scope has any rows for this
-    // bot, the channel must be listed there. We join bot_profiles to get the
-    // webhook URL and bot name.
+    // Look up a matching command, joining app_profiles for the webhook URL
+    // and the name the app calls itself.
     #[derive(sqlx::FromRow)]
     struct MatchedCommand {
-        bot_pubkey: String,
-        bot_name: String,
+        app_pubkey: String,
+        app_name: String,
         webhook_url: Option<String>,
         privileged: bool,
         // Reserved for per-user cooldown enforcement (spec §6). Not yet
@@ -74,25 +73,11 @@ pub async fn dispatch_slash(
     }
 
     let matched = sqlx::query_as::<_, MatchedCommand>(
-        "SELECT bc.pubkey as bot_pubkey, bp.name as bot_name, bp.webhook_url,
+        "SELECT bc.pubkey as app_pubkey, bp.name as app_name, bp.webhook_url,
                 bc.privileged, bc.cooldown_seconds
-         FROM bot_commands bc
-         JOIN bot_profiles bp ON bp.pubkey = bc.pubkey
-         JOIN users u ON u.public_key = bc.pubkey
+         FROM app_commands bc
+         JOIN app_profiles bp ON bp.pubkey = bc.pubkey
          WHERE bc.name = $1
-           AND u.is_bot = TRUE
-           AND u.is_bot_removed = FALSE
-           AND (
-             -- Either no channel scope restriction for this bot...
-             NOT EXISTS (
-               SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = bc.pubkey
-             )
-             -- ...or this channel is in the bot's scope.
-             OR EXISTS (
-               SELECT 1 FROM bot_channel_scope
-               WHERE bot_pubkey = bc.pubkey AND channel_id = $2
-             )
-           )
          LIMIT 1",
     )
     .bind(&command_name)
@@ -100,7 +85,7 @@ pub async fn dispatch_slash(
     .fetch_optional(&state.db)
     .await
     .ok()
-    .flatten()?; // None = no bot matched, fall through to normal message storage
+    .flatten()?; // None = no app matched, fall through to normal message storage
 
     // Privileged command: check invoker's permissions.
     if matched.privileged {
@@ -155,7 +140,7 @@ pub async fn dispatch_slash(
 
     let body_json = match serde_json::to_string(&invocation) {
         Ok(j) => j,
-        Err(_) => return Some(format!("Bot @{} failed to respond.", matched.bot_name)),
+        Err(_) => return Some(format!("App @{} failed to respond.", matched.app_name)),
     };
 
     // Sign the body with the hub's federation keypair.
@@ -165,7 +150,7 @@ pub async fn dispatch_slash(
     let sig_hex = hex::encode(signature.to_bytes());
     let timestamp = crate::auth::handlers::unix_timestamp();
 
-    // POST to bot webhook with 5s timeout.
+    // POST to app webhook with 5s timeout.
     let resp = state
         .http_client
         .post(&webhook_url)
@@ -181,24 +166,24 @@ pub async fn dispatch_slash(
     let resp = match resp {
         Ok(r) => r,
         Err(_) => {
-            return Some(format!("Bot @{} failed to respond.", matched.bot_name));
+            return Some(format!("App @{} failed to respond.", matched.app_name));
         }
     };
 
     if !resp.status().is_success() {
-        return Some(format!("Bot @{} failed to respond.", matched.bot_name));
+        return Some(format!("App @{} failed to respond.", matched.app_name));
     }
 
-    let bot_response: BotResponse = match resp.json().await {
+    let app_response: AppResponse = match resp.json().await {
         Ok(r) => r,
         Err(_) => {
-            return Some(format!("Bot @{} failed to respond.", matched.bot_name));
+            return Some(format!("App @{} failed to respond.", matched.app_name));
         }
     };
 
-    // Process bot reply.
-    if let Some(reply) = bot_response.reply {
-        let ephemeral = bot_response.ephemeral.unwrap_or(false);
+    // Process the reply.
+    if let Some(reply) = app_response.reply {
+        let ephemeral = app_response.ephemeral.unwrap_or(false);
         let msg_id = Uuid::new_v4().to_string();
         let now = crate::auth::handlers::unix_timestamp();
 
@@ -216,13 +201,13 @@ pub async fn dispatch_slash(
             }
         });
 
-        // Game-modal launch card (bot-capability-layer.md §2): the reply
-        // this bot posted may carry a "Play" CTA. No capability gate here --
-        // the sender is already a bot by construction (this is the
+        // Game-modal launch card (apps.md §2): the reply
+        // this app posted may carry a "Play" CTA. No second gate here --
+        // the sender is a registered app by construction (this is the
         // slash-command dispatch path) and rendering the card is baseline
         // UI; `can_use_interactive_ui` gates opening the webview instead
-        // (bot_app_join, routes/ws/handlers/mini_app.rs).
-        let game_json = bot_response
+        // (app_join, routes/ws/handlers/mini_app.rs).
+        let game_json = app_response
             .game
             .as_ref()
             .and_then(|g| serde_json::to_string(g).ok());
@@ -233,7 +218,7 @@ pub async fn dispatch_slash(
         )
         .bind(&msg_id)
         .bind(channel_id)
-        .bind(&matched.bot_pubkey)
+        .bind(&matched.app_pubkey)
         .bind(&reply.body)
         .bind(now)
         .bind(visible_to)
@@ -243,10 +228,10 @@ pub async fn dispatch_slash(
         .await
         .ok();
 
-        // Look up bot display name.
-        let bot_name: Option<String> =
+        // Look up the display name.
+        let app_name: Option<String> =
             sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
-                .bind(&matched.bot_pubkey)
+                .bind(&matched.app_pubkey)
                 .fetch_optional(&state.db)
                 .await
                 .ok()
@@ -255,8 +240,8 @@ pub async fn dispatch_slash(
         let message = MessageResponse {
             id: msg_id,
             channel_id: channel_id.to_string(),
-            sender: matched.bot_pubkey,
-            sender_name: bot_name.or(Some(matched.bot_name)),
+            sender: matched.app_pubkey,
+            sender_name: app_name.or(Some(matched.app_name)),
             content: reply.body,
             created_at: now,
             edited_at: None,
@@ -266,7 +251,7 @@ pub async fn dispatch_slash(
             visible_to_pubkey: visible_to.map(|s| s.to_string()),
             reply_count: 0,
             embeds: reply.embeds,
-            game: bot_response.game,
+            game: app_response.game,
         };
 
         {
@@ -352,13 +337,13 @@ pub async fn insert_ephemeral_error(
 }
 
 // ---------------------------------------------------------------------------
-// Component interaction dispatch (WS → bot webhook → apply response)
+// Component interaction dispatch (WS → app webhook → apply response)
 // ---------------------------------------------------------------------------
 
 /// Handle a `component_interaction` WS message from a user.
 ///
-/// Looks up the message's bot author, checks channel scope, POSTs to the
-/// bot's webhook (signed the same way as slash dispatch), then applies the
+/// Looks up the message's app author, checks its channel access, POSTs to
+/// its webhook (signed the same way as slash dispatch), then applies the
 /// `ComponentResponse` (update / ephemeral_reply / defer).
 ///
 /// Errors are logged and swallowed — the WS handler has already sent the
@@ -394,22 +379,12 @@ pub async fn dispatch_component(
         }
     };
 
-    // Verify the sender is a bot.
-    let is_bot: Option<bool> = sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
-        .bind(&msg_info.sender)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-
-    if is_bot != Some(true) {
-        // Message not from a bot — components shouldn't fire on normal messages.
-        return;
-    }
-
-    // Get the bot's webhook_url from bot_profiles.
+    // Components fire on a message authored by a registered app, which is
+    // exactly the set of senders with an `app_profiles` row: a missing
+    // webhook below ends the dispatch on its own, so the row lookup is the
+    // check.
     let webhook_url: Option<String> =
-        sqlx::query_scalar("SELECT webhook_url FROM bot_profiles WHERE pubkey = $1")
+        sqlx::query_scalar("SELECT webhook_url FROM app_profiles WHERE pubkey = $1")
             .bind(&msg_info.sender)
             .fetch_optional(&state.db)
             .await
@@ -422,23 +397,15 @@ pub async fn dispatch_component(
         _ => return, // No webhook — nothing to do.
     };
 
-    // Check channel scope for this bot.
-    let in_scope: bool = sqlx::query_scalar::<_, i64>(
-        "SELECT CASE
-           WHEN NOT EXISTS (SELECT 1 FROM bot_channel_scope WHERE bot_pubkey = $1)
-           THEN 1
-           ELSE (SELECT COUNT(*) FROM bot_channel_scope WHERE bot_pubkey = $2 AND channel_id = $3)
-         END",
-    )
-    .bind(&msg_info.sender)
-    .bind(&msg_info.sender)
-    .bind(&msg_info.channel_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(1)
-        != 0;
+    // The app has to be able to read the channel its own component was
+    // clicked in, same as anyone else.
+    let allowed =
+        crate::permissions::channel_permissions(&state.db, &msg_info.sender, &msg_info.channel_id)
+            .await
+            .map(|perms| perms.has(crate::permissions::MESSAGES_READ))
+            .unwrap_or(false);
 
-    if !in_scope {
+    if !allowed {
         return;
     }
 
@@ -495,7 +462,7 @@ pub async fn dispatch_component(
     let resp = match resp {
         Ok(r) if r.status().is_success() => r,
         Ok(r) => {
-            tracing::warn!("dispatch_component: bot returned HTTP {}", r.status());
+            tracing::warn!("dispatch_component: app returned HTTP {}", r.status());
             return;
         }
         Err(e) => {
@@ -528,10 +495,10 @@ async fn apply_component_response(
     resp: ComponentResponse,
     message_id: &str,
     channel_id: &str,
-    bot_pubkey: &str,
+    app_pubkey: &str,
     interacting_user: &str,
 ) {
-    // defer: hub does nothing; bot will post asynchronously.
+    // defer: hub does nothing; the app will post asynchronously.
     if resp.defer.unwrap_or(false) {
         return;
     }
@@ -598,16 +565,16 @@ async fn apply_component_response(
         )
         .bind(&msg_id)
         .bind(channel_id)
-        .bind(bot_pubkey)
+        .bind(app_pubkey)
         .bind(&body)
         .bind(now)
         .bind(interacting_user)
         .execute(&state.db)
         .await;
 
-        let bot_name: Option<String> =
+        let app_name: Option<String> =
             sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
-                .bind(bot_pubkey)
+                .bind(app_pubkey)
                 .fetch_optional(&state.db)
                 .await
                 .ok()
@@ -616,8 +583,8 @@ async fn apply_component_response(
         let message = MessageResponse {
             id: msg_id,
             channel_id: channel_id.to_string(),
-            sender: bot_pubkey.to_string(),
-            sender_name: bot_name,
+            sender: app_pubkey.to_string(),
+            sender_name: app_name,
             content: body,
             created_at: now,
             edited_at: None,

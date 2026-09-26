@@ -135,7 +135,7 @@ pub(in crate::routes::ws) async fn handle_set_status(
                     },
                 ));
             } else {
-                let (display_name, is_bot, visiting_from) =
+                let (display_name, visiting_from) =
                     crate::routes::ws::voice_identity(state, &cs.public_key).await;
                 let _ = state.voice_event_tx.send((
                     ch.clone(),
@@ -144,7 +144,6 @@ pub(in crate::routes::ws) async fn handle_set_status(
                         participant: crate::routes::chat_models::VoiceParticipantInfo {
                             public_key: cs.public_key.clone(),
                             display_name,
-                            is_bot,
                             sender_id: state
                                 .voice_sender_ids
                                 .read()
@@ -281,7 +280,7 @@ pub(in crate::routes::ws) async fn handle_component_interaction(
     let state_c = state.clone();
     let pk = cs.public_key.clone();
     tokio::spawn(async move {
-        crate::bots::dispatch::dispatch_component(&state_c, &message_id, &custom_id, &values, &pk)
+        crate::apps::dispatch::dispatch_component(&state_c, &message_id, &custom_id, &values, &pk)
             .await;
     });
     DispatchResult::Continue

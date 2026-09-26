@@ -747,7 +747,7 @@ pub async fn list_members(
     perms.require(MEMBERS_READ)?;
 
     let users = sqlx::query_as::<_, UserAdminRow>(
-        "SELECT public_key, display_name, first_seen_at, last_seen_at, is_bot, birthday
+        "SELECT public_key, display_name, first_seen_at, last_seen_at, birthday
          FROM users ORDER BY first_seen_at LIMIT 1000",
     )
     .fetch_all(&state.db)
@@ -852,7 +852,6 @@ pub async fn list_members(
                 first_seen_at: u.first_seen_at,
                 last_seen_at: u.last_seen_at,
                 roles,
-                is_bot: u.is_bot,
                 birthday: if show_birthdays { u.birthday } else { None },
             }
         })
@@ -869,8 +868,6 @@ pub struct MemberAdminInfo {
     pub first_seen_at: i64,
     pub last_seen_at: i64,
     pub roles: Vec<RoleResponse>,
-    #[serde(default)]
-    pub is_bot: bool,
     /// "MM-DD", never a year. `null` when unset or when `birthdays_enabled`
     /// is false hub-wide.
     #[serde(default)]
@@ -883,6 +880,5 @@ struct UserAdminRow {
     display_name: Option<String>,
     first_seen_at: i64,
     last_seen_at: i64,
-    is_bot: bool,
     birthday: Option<String>,
 }

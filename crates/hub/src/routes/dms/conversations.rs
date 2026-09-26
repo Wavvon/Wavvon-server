@@ -11,7 +11,7 @@ use crate::routes::dm_models::*;
 use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
-use super::models::{ensure_user_stub, find_existing_dm, first_bot_among, load_members, ConvRow};
+use super::models::{ensure_user_stub, find_existing_dm, load_members, ConvRow};
 
 pub async fn create_conversation(
     State(state): State<Arc<AppState>>,
@@ -22,17 +22,6 @@ pub async fn create_conversation(
         return Err((
             StatusCode::BAD_REQUEST,
             "Need at least one other member".to_string(),
-        ));
-    }
-
-    // No bot on either end of a DM (bots.md, "Hard-coded in v1"). Checked
-    // for the sender too: a bot reaches this route with an ordinary session.
-    let mut parties = req.members.clone();
-    parties.push(user.public_key.clone());
-    if first_bot_among(&state.db, &parties).await?.is_some() {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Bots cannot take part in direct messages".to_string(),
         ));
     }
 
@@ -259,16 +248,6 @@ pub async fn add_conversation_member(
     // No-op if already a member.
     if members.iter().any(|m| m.public_key == req.public_key) {
         return Ok(StatusCode::NO_CONTENT);
-    }
-
-    if first_bot_among(&state.db, std::slice::from_ref(&req.public_key))
-        .await?
-        .is_some()
-    {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Bots cannot take part in direct messages".to_string(),
-        ));
     }
 
     let now = crate::auth::handlers::unix_timestamp();

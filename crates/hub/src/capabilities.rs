@@ -33,11 +33,16 @@ pub const CAPABILITIES: &[&str] = &[
     // client does not offer a delegation an older hub, where all ten endpoints
     // want the hub-wide permission, would answer 403 to.
     "alliance.permissions",
-    // One bot model: bots are invited by Ed25519 pubkey and authenticate on
-    // the normal session path. A client that does not see this string is
-    // talking to a hub that still has `POST /admin/bots`, so its admin panel
-    // must offer the hub-minted-token flow instead of an invite field.
-    "bots.external",
+    // There is no bot account. A program joins like anyone — an invite, a
+    // keypair, a session — and a member holding `apps.register` registers a
+    // profile, slash commands and event subscriptions for it under `/me/app`.
+    // This replaces `bots.external`, which is gone rather than kept as a
+    // synonym: a client that still tests for it is offering `POST /bots` and
+    // a capability grant panel, and both endpoints answer 404 now. Removing
+    // a published string is a breaking change and it is taken deliberately
+    // here, in beta, because the alternative is an admin panel that looks
+    // alive and cannot work.
+    "apps.register",
     // Every channel in `GET /channels` carries `can_move_members`: the
     // caller's own `voice.move_members` there, resolved channel-scoped. A
     // client that does not see this string has no way to know which

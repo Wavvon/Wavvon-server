@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Bot metadata sent by the bot operator at auth / accept-invite time.
+// Profile an app declares for itself at registration time.
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotMeta {
+pub struct AppMeta {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
@@ -16,28 +16,28 @@ pub struct BotMeta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub homepage_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub commands: Option<Vec<BotCommandDef>>,
+    pub commands: Option<Vec<AppCommandDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Vec<String>>,
-    /// Mini-app / game-modal registration (bot-mini-apps.md, bots.md §17).
-    /// Absent = this bot has no interactive-UI surface.
+    /// Mini-app / game-modal registration (mini-apps.md, apps.md).
+    /// Absent = this app has no interactive-UI surface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mini_app_url: Option<String>,
     /// Requests camera access for the mini-app webview. Still gated on the
-    /// hub operator's `bots_allow_camera` setting at `bot_app_join` time.
+    /// hub operator's `apps_allow_camera` setting at `app_join` time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requires_camera: Option<bool>,
-    /// Profile-declared game descriptor (bot-capability-layer.md §11): lets
-    /// the per-hub bot directory show a Play affordance for this bot without
+    /// Profile-declared game descriptor (apps.md §11): lets
+    /// a hub app listing show a Play affordance for this bot without
     /// a live launch-card message in view. Absent = this bot has no game to
     /// advertise. Independent of the per-message `game` launch card
-    /// (`BotResponse.game`) -- this one lives on the profile, not a message.
+    /// (`AppResponse.game`) -- this one lives on the profile, not a message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game: Option<GameLaunchCard>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotCommandDef {
+pub struct AppCommandDef {
     pub name: String,
     pub description: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,7 +55,7 @@ pub struct BotCommandDef {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotProfile {
+pub struct AppProfile {
     pub pubkey: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -74,14 +74,14 @@ pub struct BotProfile {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotSubscription {
+pub struct AppSubscription {
     pub event: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channels: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
-// Slash-command invocation envelope (hub → bot webhook)
+// Slash-command invocation envelope (hub → app webhook)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -105,7 +105,7 @@ pub struct SlashInvocation {
 }
 
 // ---------------------------------------------------------------------------
-// Component interaction envelope (hub → bot webhook)
+// Component interaction envelope (hub → app webhook)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -121,11 +121,11 @@ pub struct ComponentInteraction {
 }
 
 // ---------------------------------------------------------------------------
-// Bot response types (bot → hub, synchronous)
+// App response types (app → hub, synchronous)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotReaction {
+pub struct AppReaction {
     pub message_id: String,
     pub emoji: String,
 }
@@ -172,7 +172,7 @@ pub struct SelectOption {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotComponent {
+pub struct AppComponent {
     #[serde(rename = "type")]
     pub kind: String, // "button" or "select"
     pub custom_id: String,
@@ -196,11 +196,11 @@ pub struct BotComponent {
 pub struct ComponentRow {
     #[serde(rename = "type")]
     pub kind: String, // always "row"
-    pub components: Vec<BotComponent>,
+    pub components: Vec<AppComponent>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotReply {
+pub struct AppReply {
     pub body: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub embeds: Option<Vec<Embed>>,
@@ -211,26 +211,26 @@ pub struct BotReply {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotResponse {
+pub struct AppResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply: Option<BotReply>,
+    pub reply: Option<AppReply>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ephemeral: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reactions: Option<Vec<BotReaction>>,
+    pub reactions: Option<Vec<AppReaction>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defer: Option<bool>,
-    /// Game-modal launch card (bot-capability-layer.md §2, §6 Phase 1 item
+    /// Game-modal launch card (apps.md §2, §6 Phase 1 item
     /// 3): a "Play" CTA attached to `reply`'s message. Baseline UI -- no
     /// capability grant needed to render the card itself; opening the
     /// webview it points at is what `can_use_interactive_ui` gates
-    /// (`bot_app_join`, routes/ws/handlers/mini_app.rs). Ignored if `reply`
+    /// (`app_join`, routes/ws/handlers/mini_app.rs). Ignored if `reply`
     /// is absent -- there is no message for the card to attach to.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub game: Option<GameLaunchCard>,
 }
 
-/// A bot-authored "Play" launch card (bot-capability-layer.md §2).
+/// An app-authored "Play" launch card (apps.md §2).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GameLaunchCard {
     pub entry_url: String,
@@ -242,7 +242,7 @@ pub struct GameLaunchCard {
 }
 
 // ---------------------------------------------------------------------------
-// Component response types (bot → hub, on component interaction)
+// Component response types (app → hub, on component interaction)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -269,7 +269,7 @@ pub struct ComponentResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Hub event push (hub → bot WebSocket)
+// Hub event push (hub → app WebSocket)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -285,20 +285,5 @@ pub struct HubEvent {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle messages (hub → bot WebSocket)
+// Lifecycle messages (hub → app WebSocket)
 // ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct BotRemovedMsg {
-    #[serde(rename = "type")]
-    pub kind: String, // always "bot_removed"
-    pub reason: String,
-    pub hub_url: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TokenExpiringSoon {
-    #[serde(rename = "type")]
-    pub kind: String, // always "token_expiring_soon"
-    pub expires_at: i64,
-}

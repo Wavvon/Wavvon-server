@@ -1,6 +1,5 @@
 mod auth;
 mod badges;
-mod bots;
 mod certs;
 mod channels;
 mod dms;

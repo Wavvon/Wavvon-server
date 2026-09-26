@@ -75,7 +75,7 @@ pub async fn create_role_category(
     let cat_id = id.clone();
     let name = resp.name.clone();
     tokio::spawn(async move {
-        crate::bots::events::publish_hub_event(
+        crate::apps::events::publish_hub_event(
             &state_c,
             "role_category.created",
             Some(&actor),
@@ -147,7 +147,7 @@ pub async fn update_role_category(
     let actor = user.public_key.clone();
     let cat_id = category_id.clone();
     tokio::spawn(async move {
-        crate::bots::events::publish_hub_event(
+        crate::apps::events::publish_hub_event(
             &state_c,
             "role_category.updated",
             Some(&actor),
@@ -183,7 +183,7 @@ pub async fn delete_role_category(
     let actor = user.public_key.clone();
     let cat_id = category_id.clone();
     tokio::spawn(async move {
-        crate::bots::events::publish_hub_event(
+        crate::apps::events::publish_hub_event(
             &state_c,
             "role_category.deleted",
             Some(&actor),

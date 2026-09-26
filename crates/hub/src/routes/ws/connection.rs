@@ -17,7 +17,7 @@ const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2
 /// stall, short enough that a phantom voice participant clears in a minute
 /// rather than never.
 const KEEPALIVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(65);
-use super::handlers::{bot, chat, mini_app, screen, voice};
+use super::handlers::{app, chat, mini_app, screen, voice};
 use super::voice::get_voice_roster;
 
 pub(super) async fn handle_socket(
@@ -29,14 +29,15 @@ pub(super) async fn handle_socket(
 ) {
     // ── Connection setup ─────────────────────────────────────────────────────
 
-    let is_bot: bool =
-        sqlx::query_scalar::<_, bool>("SELECT is_bot FROM users WHERE public_key = $1")
-            .bind(&public_key)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(false);
+    let is_app: bool = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM app_profiles WHERE pubkey = $1)",
+    )
+    .bind(&public_key)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
 
     // Increment the online-users refcount for this pubkey.
     {
@@ -46,10 +47,10 @@ pub(super) async fn handle_socket(
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let (bot_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
+    let (app_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
 
     // Unique id for this specific WS session — used to discriminate
-    // bot_sessions and ws_key_senders entries so a newer session does not
+    // app_sessions and ws_key_senders entries so a newer session does not
     // overwrite the older sender, and so the first disconnect does not evict
     // the second session.
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -57,7 +58,7 @@ pub(super) async fn handle_socket(
     // V4 voice encryption: per-connection unbounded channel for targeted key
     // distribution messages.  Registered in ws_key_senders so other connections
     // can send directly to this one without going through the broadcast bus.
-    // Filed under this session's own id, for the reason bot_sessions is: a
+    // Filed under this session's own id, for the reason app_sessions is: a
     // pubkey with two sockets used to leave one of them registered nowhere,
     // and a voice participant registered nowhere receives no sender key and
     // hears silence (state.rs, `ws_key_senders`).
@@ -70,14 +71,14 @@ pub(super) async fn handle_socket(
         .or_default()
         .insert(session_id.clone(), key_tx);
 
-    if is_bot {
+    if is_app {
         state
-            .bot_sessions
+            .app_sessions
             .write()
             .await
             .entry(public_key.clone())
             .or_default()
-            .insert(session_id.clone(), bot_tx.clone());
+            .insert(session_id.clone(), app_tx.clone());
     }
 
     let mut chat_rx = state.chat_tx.subscribe();
@@ -112,7 +113,7 @@ pub(super) async fn handle_socket(
     let mut voice_rx = state.voice_event_tx.subscribe();
     let mut screen_share_rx = state.screen_share_tx.subscribe();
 
-    // A mini-app session (bot-mini-apps.md "Scoped session token") is bound
+    // A mini-app session (mini-apps.md "Scoped session token") is bound
     // to exactly one channel and never sees DMs — it's a game/interactive
     // relay for one channel, not a general-purpose login. Skip the normal
     // "every readable channel" auto-subscribe and DM-membership load
@@ -180,14 +181,14 @@ pub(super) async fn handle_socket(
 
     // Send `hello` with live_seq.
     {
-        let live_seq = crate::bots::events::current_seq(&state).await;
+        let live_seq = crate::apps::events::current_seq(&state).await;
         let hello = serde_json::json!({ "type": "hello", "live_seq": live_seq });
         let _ = ws_tx.send(Message::Text(hello.to_string().into())).await;
     }
 
     let mut cs = ConnState::new(
         public_key.clone(),
-        is_bot,
+        is_app,
         is_mini_app,
         alliance_voice_channel,
         session_id.clone(),
@@ -416,7 +417,7 @@ pub(super) async fn handle_socket(
                                 &mut cs,
                                 &state,
                                 &mut ws_tx,
-                                &bot_tx,
+                                &app_tx,
                                 client_msg,
                             ).await;
                             if matches!(result, DispatchResult::Break) {
@@ -722,11 +723,11 @@ pub(super) async fn handle_socket(
         }
     }
 
-    if is_bot {
-        let mut sessions = state.bot_sessions.write().await;
-        if let Some(per_bot) = sessions.get_mut(&public_key) {
-            per_bot.remove(&session_id);
-            if per_bot.is_empty() {
+    if is_app {
+        let mut sessions = state.app_sessions.write().await;
+        if let Some(per_app) = sessions.get_mut(&public_key) {
+            per_app.remove(&session_id);
+            if per_app.is_empty() {
                 sessions.remove(&public_key);
             }
         }
@@ -828,7 +829,7 @@ async fn dispatch_client_msg(
     cs: &mut ConnState,
     state: &Arc<AppState>,
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    bot_tx: &mpsc::Sender<String>,
+    app_tx: &mpsc::Sender<String>,
     msg: WsClientMessage,
 ) -> DispatchResult {
     // Alliance-voice visitor confinement (alliances.md "Scope enforcement —
@@ -951,15 +952,11 @@ async fn dispatch_client_msg(
         }
 
         // ── Bot mini-apps ──────────────────────────────────────────────────
-        WsClientMessage::BotAppAnnounce { .. } => {
-            mini_app::handle_bot_app_announce(cs, state, msg).await
-        }
+        WsClientMessage::AppAnnounce { .. } => mini_app::handle_app_announce(cs, state, msg).await,
         WsClientMessage::BotAppJoin { .. } => {
-            mini_app::handle_bot_app_join(cs, state, ws_tx, msg).await
+            mini_app::handle_app_join(cs, state, ws_tx, msg).await
         }
-        WsClientMessage::BotAppDismiss { .. } => {
-            mini_app::handle_bot_app_dismiss(cs, state, msg).await
-        }
+        WsClientMessage::AppDismiss { .. } => mini_app::handle_app_dismiss(cs, state, msg).await,
         WsClientMessage::MiniAppMessage { .. } => {
             mini_app::handle_mini_app_message(cs, state, msg).await
         }
@@ -970,7 +967,7 @@ async fn dispatch_client_msg(
         }
 
         // ── Bots ───────────────────────────────────────────────────────────
-        WsClientMessage::Resume { .. } => bot::handle_resume(cs, state, ws_tx, bot_tx, msg).await,
+        WsClientMessage::Resume { .. } => app::handle_resume(cs, state, ws_tx, app_tx, msg).await,
     }
 }
 

@@ -49,19 +49,16 @@ pub(super) fn send_whisper_notification(
 /// hub-asserted rather than proven, which is why it never travels without the
 /// hub that asserted it: a client renders "name · HubName", never a name that
 /// could pass for a local member's.
-pub async fn voice_identity(
-    state: &AppState,
-    pubkey: &str,
-) -> (Option<String>, bool, Option<String>) {
-    let member: Option<(Option<String>, bool)> =
-        sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
+pub async fn voice_identity(state: &AppState, pubkey: &str) -> (Option<String>, Option<String>) {
+    let member: Option<Option<String>> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
             .bind(pubkey)
             .fetch_optional(&state.db)
             .await
             .ok()
             .flatten();
-    if let Some((display_name, is_bot)) = member {
-        return (display_name, is_bot, None);
+    if let Some(display_name) = member {
+        return (display_name, None);
     }
 
     let visitor: Option<(Option<String>, Option<String>)> = sqlx::query_as(
@@ -77,8 +74,8 @@ pub async fn voice_identity(
     .flatten();
 
     match visitor {
-        Some((display_name, hub_name)) => (display_name, false, hub_name),
-        None => (None, false, None),
+        Some((display_name, hub_name)) => (display_name, hub_name),
+        None => (None, None),
     }
 }
 
@@ -112,12 +109,11 @@ pub async fn get_voice_participants(
         .iter()
         .filter(|pk| Some(pk.as_str()) == viewer || !invisible.contains(*pk))
     {
-        let (display_name, is_bot, visiting_from) = voice_identity(state, pk).await;
+        let (display_name, visiting_from) = voice_identity(state, pk).await;
 
         result.push(VoiceParticipantInfo {
             public_key: pk.clone(),
             display_name,
-            is_bot,
             sender_id: sender_ids.get(pk).copied(),
             visiting_from,
         });

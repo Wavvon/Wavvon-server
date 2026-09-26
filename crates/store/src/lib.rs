@@ -8,7 +8,6 @@ pub use row_types::*;
 
 pub use traits::auth::AuthStore;
 pub use traits::badges::BadgeStore;
-pub use traits::bots::BotStore;
 pub use traits::certs::CertStore;
 pub use traits::channels::ChannelStore;
 pub use traits::dms::DmStore;
@@ -34,7 +33,6 @@ pub trait HubStore:
     + InviteStore
     + ModerationStore
     + SettingsStore
-    + BotStore
     + DmStore
     + FederationStore
     + PollStore
@@ -57,7 +55,6 @@ impl<T> HubStore for T where
         + InviteStore
         + ModerationStore
         + SettingsStore
-        + BotStore
         + DmStore
         + FederationStore
         + PollStore

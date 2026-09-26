@@ -95,9 +95,9 @@ Axum HTTP + WebSocket (port 3000), WebTransport/QUIC voice relay over UDP 3001
 sqlx + Tantivy FTS. Handles: channels (text + voice + forum + banner + spawner),
 messages, polls/events (incl. organizer staging), roles + role categories,
 moderation, E2E DMs, federation (outbox DMs, alliances, federated ban lists),
-bots/webhooks, soundboard, recovery-contact attestation, and background workers
-for DM outbox delivery, ban-list sync, data retention + rotation-request expiry,
-and cert maintenance.
+apps (slash commands, mini-apps, hub events) and webhooks, soundboard,
+recovery-contact attestation, and background workers for DM outbox delivery,
+ban-list sync, data retention + rotation-request expiry, and cert maintenance.
 
 It is also a **home hub** for whoever designates it: `routes/identity.rs` holds
 the personal axis — the master-signed `HomeHubList` designation, the device
@@ -136,7 +136,7 @@ envelope is a cross-repo operation — use the **`wire-format-change`** skill.
 
 Entry: `crates/store/src/lib.rs`. Trait-based: `HubStore` = `AuthStore +
 UserStore + ChannelStore + MessageStore + RoleStore + DmStore + FederationStore +
-BotStore + ...`. The hub holds `Arc<dyn HubStore>`. PostgreSQL is the one and
+...`. The hub holds `Arc<dyn HubStore>`. PostgreSQL is the one and
 only backend (`crates/store/src/impls/`). The trait split's value today is error
 normalization and keeping SQL out of route handlers — prefer it over raw
 `sqlx::query` in new hub code.
@@ -159,7 +159,6 @@ reaches `Settings`.
 - **`farm`** — fleet control plane: hub lifecycle (spawn, monitor, stop), server registration, reverse-proxy to hub processes, farm-level SSO. Partially implemented; see the wiki's `farm-model.md` and `farm-impl.md`.
 - **`agent`** — fleet worker node. Reverse-connects to farm over WebSocket, spawns and monitors local hub processes on its behalf. No HTTP surface.
 - **`demo-seed`** — populates a running hub with realistic demo data for screenshots.
-- **`bot-kit`, `ttt-bot`** — bot SDK and example bot.
 
 ---
 
@@ -275,7 +274,7 @@ variant: the DM outbox dropped an unparsable envelope with `.ok()` and
 delivered the message hollow, recording it a success — and the naive fix
 (propagate the error) would have parked the whole queue behind one bad row,
 so the two failures are now distinguished, `Db` ending the pass and
-`Unreadable` bouncing that row alone. The other was the demo bot exiting on a
+`Unreadable` bouncing that row alone. The other was the demo client exiting on a
 429 from the shared per-IP auth limiter while waiting to be invited, which
 kept the clients' live workflow red for days.
 
@@ -288,7 +287,7 @@ every targeted message to it was dropped silently; for voice that is no sender
 key, so every datagram is discarded at the key lookup and the call is silent
 while the roster, the transport and the relay all look right. Two tabs, a
 paired device, or the overlap of an ordinary reconnect arranges it. The map is
-now nested by `session_id`, which `bot_sessions` and the screen-share teardown
+now nested by `session_id`, which `app_sessions` and the screen-share teardown
 next door had been doing all along, each with a comment saying why. **When you
 add a per-user map, ask how many sockets one user has** — the answer is not
 one, and the failure is quiet.

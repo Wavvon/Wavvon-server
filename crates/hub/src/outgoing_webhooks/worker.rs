@@ -1,9 +1,9 @@
 //! Event dispatch: matches a hub event against `outgoing_webhook_subscriptions`
 //! and spawns a delivery task per matching, active webhook.
 //!
-//! Called directly from `bots::events::publish_hub_event` (this codebase does
+//! Called directly from `apps::events::publish_hub_event` (this codebase does
 //! not have a `tokio::sync::broadcast` channel for hub events — see the
-//! module doc on `bots::events` — so dispatch is a plain async call rather
+//! module doc on `apps::events` — so dispatch is a plain async call rather
 //! than a subscriber loop).
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -73,7 +73,7 @@ static BUCKET: LazyLock<TokenBucket> = LazyLock::new(TokenBucket::new);
 
 /// Dispatch a hub event to all active, subscribed outgoing webhooks.
 ///
-/// `payload` should be the same JSON value used for the bot WS `hub_event`
+/// `payload` should be the same JSON value used for the app WS `hub_event`
 /// envelope. Errors are logged and swallowed — outgoing webhook delivery is
 /// best-effort and must never block `publish_hub_event`.
 pub async fn dispatch_event(
@@ -107,7 +107,7 @@ pub async fn dispatch_event(
         return;
     }
 
-    let hub_url = crate::bots::dispatch::hub_url_public(state).await;
+    let hub_url = crate::apps::dispatch::hub_url_public(state).await;
     let hub_pubkey = state.hub_identity.public_key_hex();
 
     for sub in subs {

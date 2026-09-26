@@ -1,7 +1,7 @@
 //! Wire types for the outgoing-webhooks feature: DB row shapes and the 8
 //! admin route request/response DTOs (see `docs/docs/outgoing-webhooks.md` §9).
 //!
-//! Not to be confused with `routes::bot_models::BotSubscription` — the JSON
+//! Not to be confused with `routes::app_models::AppSubscription` — the JSON
 //! shape is intentionally identical (`{ "event": ..., "channels": [...] }`)
 //! so the admin UI can reuse the same subscription editor component, but
 //! outgoing webhooks persist to their own tables.
@@ -32,7 +32,7 @@ pub struct WebhookSubscriptionRow {
     pub webhook_id: String,
     pub event_type: String,
     /// `''` sentinel = hub-scope (no channel filter), matching the
-    /// `bot_subscriptions` convention.
+    /// `app_subscriptions` convention.
     pub channel_id: String,
 }
 
@@ -68,7 +68,7 @@ pub struct WebhookEventEnvelope {
 }
 
 // ---------------------------------------------------------------------------
-// Subscription DTO (shared shape with bots)
+// Subscription DTO (shared shape with app subscriptions)
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

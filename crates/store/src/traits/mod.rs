@@ -1,6 +1,5 @@
 pub mod auth;
 pub mod badges;
-pub mod bots;
 pub mod certs;
 pub mod channels;
 pub mod dms;

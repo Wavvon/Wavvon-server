@@ -1,10 +1,10 @@
 pub mod admin_search;
 pub mod alliance_models;
 pub mod alliances;
+pub mod app_models;
+pub mod apps;
 pub mod badges;
 pub mod banlist;
-pub mod bot_models;
-pub mod bots;
 pub mod certs;
 pub mod challenge;
 pub mod channel_permissions;

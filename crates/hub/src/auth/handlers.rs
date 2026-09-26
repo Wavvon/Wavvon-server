@@ -8,10 +8,7 @@ use rand::RngCore;
 use sqlx::PgPool;
 use wavvon_identity::SubkeyCert;
 
-use crate::auth::middleware::AuthUser;
-use crate::auth::models::{
-    ChallengeRequest, ChallengeResponse, RenewResponse, VerifyRequest, VerifyResponse,
-};
+use crate::auth::models::{ChallengeRequest, ChallengeResponse, VerifyRequest, VerifyResponse};
 use crate::state::{AppState, PendingChallenge};
 
 /// Map an authenticating (subkey, optional cert) pair to a stable
@@ -192,97 +189,6 @@ pub async fn verify(
         }
     }
 
-    // External bot gate: when is_bot=true the hub requires a pre-existing
-    // users row with approval_status='bot_pending' or 'approved'. Bots cannot
-    // self-register — the invite flow creates the row first.
-    if req.is_bot == Some(true) {
-        let status: Option<String> = sqlx::query_scalar::<_, String>(
-            "SELECT approval_status FROM users WHERE public_key = $1 AND is_bot = TRUE",
-        )
-        .bind(&canonical_pubkey)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-        match status.as_deref() {
-            None => return Err((StatusCode::FORBIDDEN, "bot_not_invited".to_string())),
-            Some("bot_pending") | Some("approved") => {} // proceed
-            _ => return Err((StatusCode::FORBIDDEN, "bot_not_invited".to_string())),
-        }
-
-        // Ensure is_bot flag is set (idempotent).
-        sqlx::query("UPDATE users SET is_bot = TRUE WHERE public_key = $1")
-            .bind(&canonical_pubkey)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-        // Upsert bot_profiles from bot_meta and register commands.
-        if let Some(meta) = &req.bot_meta {
-            let now = unix_timestamp();
-            let game_json = meta
-                .game
-                .as_ref()
-                .map(|g| serde_json::to_string(g).unwrap_or_default());
-            sqlx::query(
-                "INSERT INTO bot_profiles(pubkey, name, avatar_url, description, webhook_url, homepage_url, capabilities, mini_app_url, requires_camera, game, updated_at)
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                 ON CONFLICT(pubkey) DO UPDATE SET
-                   name=excluded.name, avatar_url=excluded.avatar_url,
-                   description=excluded.description, webhook_url=excluded.webhook_url,
-                   homepage_url=excluded.homepage_url, capabilities=excluded.capabilities,
-                   mini_app_url=excluded.mini_app_url, requires_camera=excluded.requires_camera,
-                   game=excluded.game,
-                   updated_at=excluded.updated_at",
-            )
-            .bind(&canonical_pubkey)
-            .bind(&meta.name)
-            .bind(&meta.avatar_url)
-            .bind(&meta.description)
-            .bind(&meta.webhook_url)
-            .bind(&meta.homepage_url)
-            .bind(serde_json::to_string(&meta.capabilities.as_deref().unwrap_or(&[])).unwrap())
-            .bind(&meta.mini_app_url)
-            .bind(meta.requires_camera.unwrap_or(false))
-            .bind(&game_json)
-            .bind(now)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-            if let Some(cmds) = &meta.commands {
-                sqlx::query("DELETE FROM bot_commands WHERE pubkey = $1")
-                    .bind(&canonical_pubkey)
-                    .execute(&state.db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-                for cmd in cmds {
-                    sqlx::query(
-                        "INSERT INTO bot_commands(pubkey,name,description,args,scope,privileged,cooldown_seconds)
-                         VALUES($1,$2,$3,$4,$5,$6,$7)",
-                    )
-                    .bind(&canonical_pubkey)
-                    .bind(&cmd.name)
-                    .bind(&cmd.description)
-                    .bind(&cmd.args)
-                    .bind(cmd.scope.as_deref().unwrap_or("channel"))
-                    .bind(cmd.privileged.unwrap_or(false))
-                    .bind(cmd.cooldown_seconds.unwrap_or(3))
-                    .execute(&state.db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-                }
-            }
-
-            // Flip approval_status to approved (idempotent if already approved).
-            sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
-                .bind(&canonical_pubkey)
-                .execute(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        }
-    }
-
     // Bans follow the canonical identity — a banned user can't
     // bypass by pairing a new device.
     if crate::routes::moderation::is_banned(&state.db, &canonical_pubkey).await? {
@@ -318,7 +224,7 @@ pub async fn verify(
     // user are never lobby-confined or hard-rejected by min_security_level
     // on their own hub. Without this, a nonzero min_security_level preset
     // locks the owner out of their own first join (found live 2026-07-06 —
-    // see bootstrap.rs presets::gaming and lobby-bot-survey.md Feature 1).
+    // see bootstrap.rs presets::gaming and lobby-survey.md Feature 1).
     let already_owner: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM user_roles WHERE user_public_key = $1 AND role_id = 'builtin-owner')",
     )
@@ -331,7 +237,7 @@ pub async fn verify(
     // fail opaquely against a gated hub. Exempt it like owner/first-user.
     let owner_exempt = existing_users == 0 || already_owner || req.is_hub == Some(true);
 
-    // Check security level requirement (lobby-bot-survey.md Feature 1).
+    // Check security level requirement (lobby-survey.md Feature 1).
     let min_level: u32 = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'min_security_level'",
     )
@@ -542,7 +448,7 @@ pub async fn verify(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Compute session scope (lobby-bot-survey.md Feature 1): a session is
+    // Compute session scope (lobby-survey.md Feature 1): a session is
     // "lobby"-scoped when the lobby is enabled and the user's persisted PoW
     // level is below min_security_level. The owner/first-user exemption
     // computed above means those two identities always land at "member"
@@ -587,20 +493,13 @@ pub async fn verify(
         bytes
     });
 
-    // Bot sessions carry a 30-day expiry; human sessions don't expire.
-    let bot_expires_at: Option<i64> = if req.is_bot == Some(true) {
-        Some(now + 30 * 24 * 3600)
-    } else {
-        None
-    };
-
     sqlx::query(
         "INSERT INTO sessions (token, public_key, created_at, expires_at, scope) VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&token)
     .bind(&canonical_pubkey)
     .bind(now)
-    .bind(bot_expires_at)
+    .bind(Option::<i64>::None)
     .bind(&scope)
     .execute(&state.db)
     .await
@@ -619,16 +518,15 @@ pub async fn verify(
     let mut invite_grant_role_id: Option<String> = None;
     let mut invite_created_by: Option<String> = None;
 
-    // A bot already passed the is_bot-specific admission gate above (a
-    // pre-existing 'bot_pending'/'approved' users row created by an admin's
-    // `POST /bots` invite-by-pubkey, bots.md §2) — that *is* this bot's
-    // invite. Applying the human invite-code gate on top made every
-    // external bot 403 on any invite_only hub (the default for a fresh hub,
-    // per WelcomeScreen's join-by-code requirement) even after an admin had
-    // already invited and capability-granted it — found live running the
-    // ttt-bot demo end to end (bot-capability-layer.md §7).
-    // A federating peer hub (is_hub=true) is exempt for the same reason, and it
-    // is the same bug twice: it is not a person joining this community. It
+    // One admission gate, and a program goes through it: a client running
+    // unattended presents an invite code like anybody else. The second gate
+    // that used to stand beside this one — a pubkey the admin had pre-seeded
+    // with `is_bot = TRUE` — is gone with the flag, and with it the hole
+    // where a stranger's pubkey could be flagged before its owner ever
+    // arrived (decisions.md, "A bot is a client like any other").
+    //
+    // A federating peer hub (is_hub=true) stays exempt, and that exemption is
+    // a different thing: it is not a person joining this community. It
     // authenticates to deliver federation traffic, receives no human roles, and
     // its token is tagged so `PeerHub` can tell it apart. An invite code is a
     // thing a community gives a person; there is nobody here to give one to.
@@ -640,7 +538,7 @@ pub async fn verify(
     // suite, which builds `AppState` directly and never writes the
     // `invite_only` setting, so `is_invite_only` answered false there. Found
     // by driving two real hub binaries (e2e-topology).
-    if has_roles == 0 && req.is_bot != Some(true) && req.is_hub != Some(true) {
+    if has_roles == 0 && req.is_hub != Some(true) {
         // New user — check if hub requires an invite
         if crate::routes::invites::is_invite_only(&state.db).await? {
             match &req.invite_code {
@@ -704,7 +602,7 @@ pub async fn verify(
         }
     }
 
-    // Bot challenge gate: if challenge_mode != 'off', require a valid token.
+    // Admission challenge gate: if challenge_mode != 'off', require a valid token.
     let challenge_mode: String = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'challenge_mode'",
     )
@@ -773,7 +671,7 @@ pub async fn verify(
 
     // Hub federation path: when is_hub=true, register the caller in the
     // `peers` table so the `PeerHub` extractor can route hub sessions
-    // separately from human/bot sessions.  We still complete the full
+    // separately from member sessions.  We still complete the full
     // human-admission flow above (users row + roles) because the hub needs
     // `send_messages` permission to proxy alliance messages.
     //
@@ -816,12 +714,12 @@ pub async fn verify(
 /// Result of a successful [`validate_ws_token`] call.
 pub struct WsAuth {
     pub public_key: String,
-    /// Session scope: `"member"`, `"mini_app"`, `"alliance_voice"`, or (bot
-    /// tokens / legacy rows) effectively `"member"`. Never `"lobby"` — that
-    /// scope is rejected before this is constructed.
+    /// Session scope: `"member"`, `"mini_app"` or `"alliance_voice"`; a
+    /// legacy row reads as `"member"`. Never `"lobby"` — that scope is
+    /// rejected before this is constructed.
     pub scope: String,
     /// Set only when `scope == "mini_app"`: the single channel this
-    /// mini-app session (bot-mini-apps.md "Scoped session token") is bound
+    /// mini-app session (mini-apps.md "Scoped session token") is bound
     /// to. Callers use this to confine auto-subscription/roster loading to
     /// just this channel instead of every channel the underlying user can
     /// read.
@@ -834,16 +732,16 @@ pub struct WsAuth {
 /// cannot drift:
 ///   1. Session lookup + expiry (same query as the HTTP path)
 ///   2. Subkey revocation check
-///   3. `approval_status` gate (bots are always "approved")
+///   3. `approval_status` gate
 ///   4. Local ban check (bans table)
-///   5. Lobby scope gate: a lobby-scoped session (lobby-bot-survey.md
+///   5. Lobby scope gate: a lobby-scoped session (lobby-survey.md
 ///      Feature 1) cannot open a WebSocket at all — channel messaging,
 ///      presence, and voice signaling all ride the WS connection, and none
 ///      of that is on the lobby allowlist. WS push for lobby promotion is
 ///      deferred (v1 polls `/lobby/status`), so there is nothing a lobby
 ///      session legitimately needs a WS for yet.
 ///
-/// A `mini_app`-scoped session (bot-mini-apps.md) is allowed through — the
+/// A `mini_app`-scoped session (mini-apps.md) is allowed through — the
 /// mini-app webview's whole purpose is to talk over `/ws` — but callers
 /// must consult `WsAuth::mini_app_channel_id` to confine what it can see.
 pub async fn validate_ws_token(
@@ -888,9 +786,9 @@ pub async fn validate_ws_token(
             (pk, status, scope, mini_app_channel_id)
         } else {
             // A `bot_tokens` lookup used to sit here, ahead of the farm
-            // branch. It is gone: nothing ever wrote that table, and bots
-            // now arrive on the session path above like every other identity
-            // (decisions.md, "Every bot is an external bot").
+            // branch. It is gone: nothing ever wrote that table, and a
+            // program arrives on the session path above like every other
+            // identity (decisions.md, "A bot is a client like any other").
             //
             // Farm-issued token, verified against the farm pubkey exactly
             // as the HTTP path does — one function, so the two cannot
@@ -1037,84 +935,4 @@ pub fn iso_from_unix(secs: i64) -> String {
 /// Returns the current UTC time as a compact ISO-8601 string (`YYYY-MM-DDTHH:MM:SSZ`).
 pub fn unix_timestamp_iso() -> String {
     iso_from_unix(unix_timestamp())
-}
-
-/// POST /auth/renew — issue a fresh 30-day session token while the current one
-/// is still live. Intended for bots renewing their long-lived tokens
-/// proactively. The old token is NOT invalidated — the running WS session
-/// continues on it until its original expiry.
-///
-/// Wire shape: same challenge-response body as `/auth/verify`. The bearer
-/// token in the Authorization header authenticates the current session; the
-/// challenge-response proves the caller still holds the private key.
-pub async fn renew(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Json(req): Json<VerifyRequest>,
-) -> Result<Json<RenewResponse>, (StatusCode, String)> {
-    // The caller must have a valid existing session (AuthUser extractor handles that).
-    // Validate the new challenge-response the same way verify() does.
-
-    let pending = state
-        .pending_challenges
-        .write()
-        .await
-        .remove(&req.challenge)
-        .ok_or((
-            StatusCode::UNAUTHORIZED,
-            "No pending challenge for this key".to_string(),
-        ))?;
-
-    if pending.public_key != req.public_key {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "Challenge was issued to a different key".to_string(),
-        ));
-    }
-
-    if Instant::now() > pending.expires_at {
-        return Err((StatusCode::UNAUTHORIZED, "Challenge expired".to_string()));
-    }
-
-    let challenge_bytes = hex::decode(&req.challenge)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid challenge hex".to_string()))?;
-
-    if challenge_bytes != pending.challenge_bytes {
-        return Err((StatusCode::UNAUTHORIZED, "Challenge mismatch".to_string()));
-    }
-
-    let signature_bytes = hex::decode(&req.signature)
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
-
-    // The renewing pubkey must match the authenticated user's public key.
-    if req.public_key != user.public_key {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Renew pubkey does not match authenticated identity".to_string(),
-        ));
-    }
-
-    wavvon_identity::verify_signature(&req.public_key, &challenge_bytes, &signature_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
-
-    let token = hex::encode({
-        let mut bytes = vec![0u8; 32];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        bytes
-    });
-    let now = unix_timestamp();
-    let expires_at = now + 30 * 24 * 3600;
-
-    sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(&token)
-    .bind(&user.public_key)
-    .bind(now)
-    .bind(expires_at)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    Ok(Json(RenewResponse { token, expires_at }))
 }

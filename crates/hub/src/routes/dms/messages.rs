@@ -12,9 +12,7 @@ use crate::state::{AppState, DmEvent};
 use super::keys::{
     bind_cert_master, group_envelope_signing_bytes, verify_envelope_sender, verify_tiered_signature,
 };
-use super::models::{
-    ensure_user_stub, first_bot_among, load_members, parse_dm_attachments, DmMessageRow,
-};
+use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
 
 pub async fn send_dm(
     State(state): State<Arc<AppState>>,
@@ -27,19 +25,6 @@ pub async fn send_dm(
         return Err((
             StatusCode::FORBIDDEN,
             "Not a member of this conversation".to_string(),
-        ));
-    }
-
-    // The conversation routes keep bots out of a DM in the first place; this
-    // is the same rule at the point of speech, for a bot that was seated
-    // before the rule existed or through a route that grows later.
-    if first_bot_among(&state.db, std::slice::from_ref(&user.public_key))
-        .await?
-        .is_some()
-    {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Bots cannot take part in direct messages".to_string(),
         ));
     }
 
@@ -617,21 +602,6 @@ pub async fn receive_federated_dm(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if exists.is_some() {
         return Ok(StatusCode::OK);
-    }
-
-    // The bot rule, as far as it can reach across a hub boundary: `is_bot` is
-    // a local flag and nothing in the wire format carries it, so this can only
-    // recognise a bot **this** hub knows — the same identity invited here and
-    // there. A bot unknown locally is indistinguishable from a person, and the
-    // hub that holds its row is the one that refuses it at the send.
-    if first_bot_among(&state.db, std::slice::from_ref(&req.sender))
-        .await?
-        .is_some()
-    {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Bots cannot take part in direct messages".to_string(),
-        ));
     }
 
     // Block check for federated inbound DM: if any local recipient has blocked the sender,
