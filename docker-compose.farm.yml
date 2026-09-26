@@ -1,7 +1,11 @@
 # Farm + hub setup — farm handles auth, hub handles community state.
 #
 # Quick start:
+#   echo "WAVVON_DB_PASSWORD=$(openssl rand -hex 16)" > .env
 #   docker compose -f docker-compose.farm.yml up -d
+#
+# WAVVON_DB_PASSWORD has no default on purpose — compose refuses to start
+# without it. A shipped default is a password everyone knows.
 #
 # Set WAVVON_FARM_URL to the farm's externally reachable URL before starting.
 # The hub will discover the farm at startup and delegate auth to it.
@@ -25,7 +29,7 @@ services:
         condition: service_healthy
     environment:
       WAVVON_HTTP_PORT: "4000"
-      WAVVON_DATABASE_URL: "postgres://wavvon:${WAVVON_DB_PASSWORD:-wavvon}@db:5432/wavvon_farm"
+      WAVVON_DATABASE_URL: "postgres://wavvon:${WAVVON_DB_PASSWORD:?set WAVVON_DB_PASSWORD in .env - see README}@db:5432/wavvon_farm"
       # Must match the URL clients and hubs use to reach the farm externally:
       WAVVON_FARM_URL: "${WAVVON_FARM_URL:-http://localhost:4000}"
       # Connection-pool size. Caps concurrent database work, not concurrent
@@ -50,7 +54,7 @@ services:
     environment:
       WAVVON_HTTP_PORT: "3000"
       WAVVON_VOICE_UDP_PORT: "3001"
-      WAVVON_DATABASE_URL: "postgres://wavvon:${WAVVON_DB_PASSWORD:-wavvon}@db:5432/wavvon"
+      WAVVON_DATABASE_URL: "postgres://wavvon:${WAVVON_DB_PASSWORD:?set WAVVON_DB_PASSWORD in .env - see README}@db:5432/wavvon"
       # Point the hub at the farm so it delegates auth:
       WAVVON_FARM_URL: http://farm:4000
       # WAVVON_DB_MAX_CONNECTIONS: "5"
@@ -69,7 +73,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: wavvon
-      POSTGRES_PASSWORD: "${WAVVON_DB_PASSWORD:-wavvon}"
+      POSTGRES_PASSWORD: "${WAVVON_DB_PASSWORD:?set WAVVON_DB_PASSWORD in .env - see README}"
       POSTGRES_DB: wavvon
     volumes:
       - db-data:/var/lib/postgresql/data

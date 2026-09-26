@@ -258,7 +258,7 @@ async fn admin_granting_invite_is_forced_single_use() {
 
     let role_id = create_role(&server, &token, "Sub-Admin", 100).await;
     // Grant it the admin permission directly (below the owner's priority).
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -339,7 +339,7 @@ async fn join_with_invite_priority_guard_blocks_grant_above_inviters_current_pri
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["invites.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -414,7 +414,7 @@ async fn join_with_invite_role_grant_respects_single_use_admin_invite() {
     let owner_token = common::authenticate(&server, &owner).await;
 
     let role_id = create_role(&server, &owner_token, "Sub-Admin", 100).await;
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -627,7 +627,7 @@ async fn non_admin_member_with_invite_permission_can_grant_role_below_own_priori
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["invites.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -686,7 +686,7 @@ async fn non_admin_member_with_invite_permission_cannot_grant_role_at_or_above_o
     let manager_resp = server
         .post("/roles")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "Manager", "permissions": ["manage_channels"], "priority": 500 }))
+        .json(&json!({ "name": "Manager", "permissions": ["invites.manage"], "priority": 500 }))
         .await;
     manager_resp.assert_status(axum::http::StatusCode::CREATED);
     let manager_role: RoleResponse = manager_resp.json();
@@ -958,7 +958,7 @@ async fn default_invite_role_skipped_when_role_gains_admin_after_being_configure
 
     // The role gains `admin` directly at the DB layer after being configured
     // as the default — simulates an admin editing role permissions later.
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -998,7 +998,7 @@ async fn setting_admin_permission_role_as_default_invite_role_is_rejected() {
     let owner_token = common::authenticate(&server, &owner).await;
 
     let role_id = create_role(&server, &owner_token, "Sub-Admin", 100).await;
-    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'admin')")
+    sqlx::query("INSERT INTO role_permissions (role_id, permission) VALUES ($1, 'roles.manage')")
         .bind(&role_id)
         .execute(&server.state().db)
         .await
@@ -1064,4 +1064,225 @@ async fn default_invite_role_can_be_set_and_cleared() {
         .await;
     let settings: HubSettings = resp.json();
     assert!(settings.default_invite_role_id.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// GET /join/:code answers a person and a program differently
+// ---------------------------------------------------------------------------
+
+/// The pilot operator sent this link to a friend, who saw
+/// `{"code":…,"hub_name":…}` on a white page and asked what to do with it.
+/// A browser must land in the web client; the JSON preview stays for callers
+/// that ask for it.
+#[tokio::test]
+async fn join_link_serves_the_web_client_to_a_browser() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("index.html"),
+        "<!doctype html><html><head><title>Wavvon</title></head><body></body></html>",
+    )
+    .unwrap();
+
+    let (server, owner_token) = common::setup_with_owner_and_web_client(dir.path()).await;
+
+    let invite: serde_json::Value = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await
+        .json();
+    let code = invite["code"].as_str().unwrap().to_string();
+
+    // A browser sends Accept: text/html and gets the SPA shell.
+    let page = server
+        .get(&format!("/join/{code}"))
+        .add_header("accept", "text/html,application/xhtml+xml")
+        .await;
+    page.assert_status_success();
+    let body = page.text();
+    assert!(
+        body.contains("<!doctype html"),
+        "a browser must get the web client, got: {}",
+        &body[..body.len().min(120)]
+    );
+    assert!(
+        !body.contains("\"hub_name\""),
+        "the JSON preview must not be what a browser sees"
+    );
+
+    // An API caller still gets the preview.
+    let api = server
+        .get(&format!("/join/{code}"))
+        .add_header("accept", "application/json")
+        .await;
+    api.assert_status_success();
+    let json: serde_json::Value = api.json();
+    assert_eq!(json["code"], code);
+    assert!(json["hub_name"].is_string());
+}
+
+/// With no web client configured there is nothing better to answer with, so
+/// the endpoint keeps its old behaviour rather than 404ing a browser.
+#[tokio::test]
+async fn join_link_falls_back_to_json_when_no_web_client_is_served() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let invite: serde_json::Value = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await
+        .json();
+    let code = invite["code"].as_str().unwrap().to_string();
+
+    let resp = server
+        .get(&format!("/join/{code}"))
+        .add_header("accept", "text/html")
+        .await;
+    resp.assert_status_success();
+    let json: serde_json::Value = resp.json();
+    assert_eq!(json["code"], code);
+}
+
+#[tokio::test]
+async fn invite_cannot_grant_a_role_carrying_a_permission_the_creator_lacks() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    // The delegate can create invites (manage_channels) and manage roles, but
+    // holds no moderation power of its own.
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "name": "Delegate",
+            // Minting a role-granting invite needs invites.manage; roles.manage
+            // is what the ceiling then bounds.
+            "permissions": ["roles.manage", "invites.manage"],
+            "priority": 50,
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let delegate_role: RoleResponse = resp.json();
+
+    let delegate = Identity::generate();
+    let delegate_token = common::authenticate(&server, &delegate).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            delegate.public_key_hex(),
+            delegate_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    let resp = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Enforcer", "permissions": ["moderation.ban.permanent"], "priority": 20 }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let enforcer: RoleResponse = resp.json();
+
+    // Priority 20 is below the delegate's 50, so the existing priority guard
+    // lets this through. An invite that grants a role is deferred role
+    // assignment, and this is the widest door of the four: it needs only
+    // manage_channels, so without the ceiling whoever can invite people could
+    // redeem this as a second identity and come back holding ban_members.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&delegate_token)
+        .json(&json!({ "grant_role_id": enforcer.id }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert!(resp.text().contains("moderation.ban.permanent"));
+
+    // The owner holds admin, so the same invite is fine from them.
+    server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "grant_role_id": enforcer.id }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+}
+
+/// The list answers "which way in is open", so it hides the invites that can
+/// no longer admit anyone — and says why for the ones it shows, instead of
+/// leaving an operator to work it out from `uses`, `max_uses` and a Unix
+/// timestamp.
+#[tokio::test]
+async fn list_hides_dead_invites_and_marks_the_rest() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    let mint = |body: serde_json::Value| {
+        let server = &server;
+        let token = token.clone();
+        async move {
+            let resp = server
+                .post("/invites")
+                .authorization_bearer(&token)
+                .json(&body)
+                .await;
+            resp.assert_status(axum::http::StatusCode::CREATED);
+            resp.json::<InviteResponse>()
+        }
+    };
+
+    let live = mint(json!({ "max_uses": 5 })).await;
+    assert_eq!(live.status, "live", "a fresh invite is live");
+
+    let used_up = mint(json!({ "max_uses": 1 })).await;
+    let expired = mint(json!({ "expires_in_seconds": 60 })).await;
+
+    // Burn one and age the other past its expiry.
+    sqlx::query("UPDATE invites SET uses = max_uses WHERE code = $1")
+        .bind(&used_up.code)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE invites SET expires_at = expires_at - 3600 WHERE code = $1")
+        .bind(&expired.code)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+
+    let resp = server.get("/invites").authorization_bearer(&token).await;
+    let listed: Vec<InviteResponse> = resp.json();
+    let codes: Vec<&str> = listed.iter().map(|i| i.code.as_str()).collect();
+    assert_eq!(
+        codes,
+        vec![live.code.as_str()],
+        "only the invite that can still admit someone"
+    );
+    assert_eq!(listed[0].status, "live");
+
+    let resp = server
+        .get("/invites?include_inactive=true")
+        .authorization_bearer(&token)
+        .await;
+    let all: Vec<InviteResponse> = resp.json();
+    assert_eq!(all.len(), 3, "the toggle brings the history back");
+
+    let status_of = |code: &str| {
+        all.iter()
+            .find(|i| i.code == code)
+            .unwrap_or_else(|| panic!("{code} missing"))
+            .status
+            .clone()
+    };
+    // The paging keys still reach `PageQuery` through the flattened struct —
+    // a silently ignored `limit` would page the same first page forever.
+    let resp = server
+        .get("/invites?include_inactive=true&limit=1")
+        .authorization_bearer(&token)
+        .await;
+    assert_eq!(resp.json::<Vec<InviteResponse>>().len(), 1);
+
+    assert_eq!(status_of(&used_up.code), "used_up");
+    assert_eq!(status_of(&expired.code), "expired");
+    assert_eq!(status_of(&live.code), "live");
 }

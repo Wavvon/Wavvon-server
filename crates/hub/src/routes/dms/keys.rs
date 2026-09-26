@@ -55,17 +55,44 @@ pub(super) fn verify_envelope_sender(
     env: &crate::routes::dm_models::EncryptedDmEnvelope,
     authoritative_sender: &str,
 ) -> Result<Option<String>, (StatusCode, String)> {
-    let msg = envelope_signing_bytes(env);
-    let sig_bytes = hex::decode(&env.signature_hex)
+    verify_tiered_signature(
+        &envelope_signing_bytes(env),
+        &env.signature_hex,
+        env.signer_cert.as_ref(),
+        authoritative_sender,
+        "envelope",
+    )
+}
+
+/// The tiered check itself, for every payload a paired device can sign.
+///
+/// Extracted because it is the same rule three times over — the 1:1 envelope,
+/// the group envelope and the sender-key distribution — and it had been
+/// implemented once. The other two verified against the canonical pubkey with
+/// no cert tier at all, which a paired device cannot produce a signature for:
+/// it holds its own subkey and the cert naming it, and nothing else. So group
+/// DMs did not work from any device except the one that created the identity,
+/// and neither did distributing the sender key needed to start one.
+///
+/// `what` names the payload in the error: three call sites all reporting
+/// "Invalid signature" would tell an operator nothing.
+pub(super) fn verify_tiered_signature(
+    msg: &[u8],
+    signature_hex: &str,
+    signer_cert: Option<&wavvon_identity::SubkeyCert>,
+    authoritative_sender: &str,
+    what: &str,
+) -> Result<Option<String>, (StatusCode, String)> {
+    let sig_bytes = hex::decode(signature_hex)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
 
-    match &env.signer_cert {
+    match signer_cert {
         None => {
-            wavvon_identity::verify_signature(authoritative_sender, &msg, &sig_bytes).map_err(
+            wavvon_identity::verify_signature(authoritative_sender, msg, &sig_bytes).map_err(
                 |e| {
                     (
                         StatusCode::BAD_REQUEST,
-                        format!("Invalid envelope signature: {e}"),
+                        format!("Invalid {what} signature: {e}"),
                     )
                 },
             )?;
@@ -74,17 +101,38 @@ pub(super) fn verify_envelope_sender(
         Some(cert) => {
             cert.verify()
                 .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid signer cert: {e}")))?;
-            wavvon_identity::verify_signature(&cert.subkey_pubkey, &msg, &sig_bytes).map_err(
+            wavvon_identity::verify_signature(&cert.subkey_pubkey, msg, &sig_bytes).map_err(
                 |e| {
                     (
                         StatusCode::BAD_REQUEST,
-                        format!("Invalid envelope signature: {e}"),
+                        format!("Invalid {what} signature: {e}"),
                     )
                 },
             )?;
             Ok(Some(cert.master_pubkey.clone()))
         }
     }
+}
+
+/// The binding half: a cert only speaks for the identity it belongs to.
+///
+/// Without it a valid cert from *any* identity would let its holder sign as
+/// this session — the signature checks out against that cert's subkey, and
+/// nothing has said the cert is this user's.
+pub(super) fn bind_cert_master(
+    cert_master: Option<String>,
+    user: &AuthUser,
+) -> Result<(), (StatusCode, String)> {
+    let Some(master) = cert_master else {
+        return Ok(());
+    };
+    if Some(master.as_str()) != user.master_pubkey.as_deref() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "signer_cert master does not match the authenticated session".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn group_envelope_signing_bytes(
@@ -157,17 +205,18 @@ pub async fn push_sender_keys(
         ));
     }
 
-    // Verify Ed25519 signature over the distribution payload
+    // Verify the distribution signature, tiered: a paired device signs with
+    // its subkey and sends the cert that names it.
     let msg =
         sender_key_dist_signing_bytes(&conversation_id, req.sender_key_version, &req.recipients);
-    let sig_bytes = hex::decode(&req.signature_hex)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-    wavvon_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid distribution signature: {e}"),
-        )
-    })?;
+    let cert_master = verify_tiered_signature(
+        &msg,
+        &req.signature_hex,
+        req.signer_cert.as_ref(),
+        &user.public_key,
+        "distribution",
+    )?;
+    bind_cert_master(cert_master, &user)?;
 
     let now = crate::auth::handlers::unix_timestamp();
 

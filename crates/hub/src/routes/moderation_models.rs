@@ -4,6 +4,12 @@ use serde::{Deserialize, Serialize};
 pub struct BanRequest {
     pub target_public_key: String,
     pub reason: Option<String>,
+    /// Absent is a permanent ban and needs `moderation.ban.permanent`; present
+    /// is a temporary one and needs `moderation.ban.temporary`. They are split
+    /// by irreversibility: an hour is a cooling-off period, forever is a
+    /// decision (permissions.md §2).
+    #[serde(default)]
+    pub duration_seconds: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -11,6 +17,9 @@ pub struct BanResponse {
     pub target_public_key: String,
     pub banned_by: String,
     pub reason: Option<String>,
+    /// NULL for a permanent ban.
+    #[serde(default)]
+    pub expires_at: Option<i64>,
     pub created_at: i64,
 }
 
@@ -70,7 +79,7 @@ pub struct TalkPowerResponse {
 //
 // The only channel-ban API. A second set of routes under
 // /moderation/channels/:id/bans used to write the same `channel_bans` table
-// with a different field name, a weaker permission gate (MUTE_MEMBERS) and no
+// with a different field name, a weaker permission gate (MODERATION_MUTE) and no
 // `reason` on write — so whichever client banned last decided whether the
 // reason survived. Unified here (2026-08-08).
 

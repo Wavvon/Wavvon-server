@@ -24,10 +24,15 @@
 //! is what produced the original bug, and it produced it silently: a hub that
 //! cannot get a place of its own is not started at all.
 //!
-//! What neither layout gives you: **containment of a hostile hub.** Every hub
-//! connects with the same role, so a compromised hub process can reach its
-//! siblings' data under either. That would need a PostgreSQL role per hub,
-//! which is orthogonal to this choice and works with both.
+//! What neither layout gives you on its own: **containment of a hostile hub.**
+//! Under `hub_db_role = 'shared'` every hub connects with the farm's role, so a
+//! compromised hub process can reach its siblings' data either way. That is
+//! what `per_hub` is for — a login role per hub, granted its own database or
+//! schema and nothing else. Orthogonal to the layout above, and so a separate
+//! setting: it works with both.
+//!
+//! `shared` stays the default because a role per hub needs `CREATEROLE`, and
+//! the managed plans `schema` exists for do not hand that out either.
 
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
@@ -183,6 +188,174 @@ pub async fn provision_hub(
         Isolation::Database => provision_hub_database(farm_pool, base_url, hub_id).await,
         Isolation::Schema => provision_hub_schema(farm_pool, base_url, hub_id).await,
     }
+}
+
+// ---------------------------------------------------------------------------
+// A PostgreSQL role per hub
+// ---------------------------------------------------------------------------
+
+/// Which credentials a spawned hub connects with.
+///
+/// Neither isolation layout contains a *hostile* hub on its own: a database
+/// and a schema each stop hubs colliding, not one hub reading another's data,
+/// because every hub connects as the farm's own role. A role per hub, granted
+/// only its own space, is the part that contains it — and it works with either
+/// layout, which is why it is a separate setting rather than a third value of
+/// `hub_isolation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleMode {
+    /// Every hub connects as the farm's role. What farms did before this
+    /// existed, and still the default: a role per hub needs `CREATEROLE`, and
+    /// a managed plan that granted one database rarely grants that too.
+    Shared,
+    /// Each hub gets its own login role, granted its own database or schema
+    /// and nothing else.
+    PerHub,
+}
+
+impl RoleMode {
+    /// Anything unrecognised is the conservative value: a farm must still
+    /// start, and starting with fewer privileges than intended is the safe
+    /// direction — it fails visibly at spawn rather than silently widening
+    /// access.
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "per_hub" => RoleMode::PerHub,
+            _ => RoleMode::Shared,
+        }
+    }
+}
+
+/// Login role for a hub row id. Same derivation as the database name, in a
+/// different namespace — PostgreSQL keeps roles and databases apart.
+pub fn role_name(hub_id: &str) -> String {
+    format!("wavvon_hub_{hub_id}")
+}
+
+/// A password for a hub's role: 32 hex characters from the OS RNG.
+///
+/// Hex on purpose. It goes into `CREATE ROLE ... PASSWORD '<literal>'`, which
+/// takes no bind parameters, and an alphabet with no quote in it cannot end
+/// the literal early. `assert_password_is_literal_safe` holds the line if the
+/// alphabet ever changes.
+fn generate_password() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn is_literal_safe(password: &str) -> bool {
+    !password.is_empty() && password.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Rewrite a PostgreSQL URL to connect as a different role.
+pub fn with_credentials(base_url: &str, user: &str, password: &str) -> Result<String> {
+    let mut url = url::Url::parse(base_url).context("hub database URL is not a valid URL")?;
+    url.set_username(user)
+        .map_err(|_| anyhow::anyhow!("cannot set a username on {base_url}"))?;
+    url.set_password(Some(password))
+        .map_err(|_| anyhow::anyhow!("cannot set a password on {base_url}"))?;
+    Ok(url.to_string())
+}
+
+/// The database a URL points at, without the leading slash.
+fn database_of(url: &str) -> Result<String> {
+    let parsed = url::Url::parse(url).context("database URL is not a valid URL")?;
+    Ok(parsed.path().trim_start_matches('/').to_string())
+}
+
+/// Create (or re-password) this hub's login role and grant it exactly its own
+/// space, returning a URL that connects as it.
+///
+/// Idempotent, and safe to call for a hub that already exists: the role is
+/// re-passworded rather than left with a credential nobody holds any more.
+/// `hub_url` is the URL `provision_hub` just produced — the right database in
+/// `database` isolation, the right `search_path` in `schema` isolation.
+pub async fn provision_hub_role(
+    farm_pool: &PgPool,
+    admin_url: &str,
+    hub_url: &str,
+    hub_id: &str,
+    isolation: Isolation,
+) -> Result<String> {
+    if !is_safe_id(hub_id) {
+        bail!("hub id {hub_id:?} is not a safe role identifier");
+    }
+    let role = role_name(hub_id);
+    let password = generate_password();
+    if !is_literal_safe(&password) {
+        bail!("generated password is not safe to inline into CREATE ROLE");
+    }
+
+    let exists: Option<i32> = sqlx::query_scalar("SELECT 1 FROM pg_roles WHERE rolname = $1")
+        .bind(&role)
+        .fetch_optional(farm_pool)
+        .await
+        .context("could not check whether the hub role already exists")?;
+
+    let statement = if exists.is_some() {
+        format!("ALTER ROLE \"{role}\" WITH LOGIN PASSWORD '{password}'")
+    } else {
+        format!("CREATE ROLE \"{role}\" LOGIN PASSWORD '{password}'")
+    };
+    sqlx::query(&statement)
+        .execute(farm_pool)
+        .await
+        .with_context(|| {
+            format!(
+                "could not create role {role}. The role the farm connects as needs CREATEROLE \
+                 for hub_db_role = 'per_hub'; leave it 'shared' where that right is not available."
+            )
+        })?;
+
+    match isolation {
+        Isolation::Database => {
+            let database = database_of(hub_url)?;
+            // Nobody but this hub may even connect. Without the REVOKE the
+            // grant below is decoration: PUBLIC has CONNECT on a new database
+            // by default, so every sibling role could open it.
+            for sql in [
+                format!("REVOKE ALL ON DATABASE \"{database}\" FROM PUBLIC"),
+                format!("GRANT ALL PRIVILEGES ON DATABASE \"{database}\" TO \"{role}\""),
+            ] {
+                sqlx::query(&sql)
+                    .execute(farm_pool)
+                    .await
+                    .with_context(|| format!("could not grant {database} to {role}"))?;
+            }
+
+            // The hub creates its own tables, so it needs CREATE on the schema
+            // they land in — and that grant lives *inside* the hub's database,
+            // which the farm's pool is not connected to.
+            let admin_in_hub_db = with_database(admin_url, &database)?;
+            let conn = PgPool::connect(&admin_in_hub_db)
+                .await
+                .with_context(|| format!("could not connect to {database} to grant its schema"))?;
+            let granted = sqlx::query(&format!("GRANT ALL ON SCHEMA public TO \"{role}\""))
+                .execute(&conn)
+                .await;
+            conn.close().await;
+            granted.with_context(|| format!("could not grant schema public in {database}"))?;
+        }
+        Isolation::Schema => {
+            let schema = schema_name(hub_id);
+            let database = database_of(admin_url)?;
+            for sql in [
+                format!("GRANT CONNECT ON DATABASE \"{database}\" TO \"{role}\""),
+                format!("REVOKE ALL ON SCHEMA \"{schema}\" FROM PUBLIC"),
+                format!("GRANT ALL ON SCHEMA \"{schema}\" TO \"{role}\""),
+            ] {
+                sqlx::query(&sql)
+                    .execute(farm_pool)
+                    .await
+                    .with_context(|| format!("could not grant schema {schema} to {role}"))?;
+            }
+        }
+    }
+
+    tracing::info!(hub_id, role = %role, "Provisioned a role for the hub");
+    with_credentials(hub_url, &role, &password)
 }
 
 #[cfg(test)]

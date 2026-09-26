@@ -32,6 +32,7 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -50,7 +51,7 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: Arc::new(tokio::sync::RwLock::new(None)),
@@ -60,7 +61,9 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
@@ -68,9 +71,8 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -441,4 +443,258 @@ async fn patch_cert_settings_rejects_invalid_mode() {
         .json(&json!({ "cert_mode": "banana" }))
         .await;
     resp.assert_status_bad_request();
+}
+
+// ---------------------------------------------------------------------------
+// §11 — the receiving hub pulls a portfolio from its trusted issuers
+// ---------------------------------------------------------------------------
+
+/// A mock issuing hub: serves `GET /identity/:pubkey/certs` with whatever
+/// portfolio the test hands it. Returns its base URL.
+async fn start_mock_portfolio_issuer(portfolio: serde_json::Value) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = portfolio.to_string();
+    let app = axum::Router::new().route(
+        "/identity/{pubkey}/certs",
+        axum::routing::get(move || {
+            let b = body.clone();
+            async move {
+                (
+                    axum::http::StatusCode::OK,
+                    [("content-type", "application/json")],
+                    b,
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A standing cert for `subject`, signed by `issuer` the way an issuing hub
+/// signs one: Ed25519 over the payload's JSON.
+fn signed_cert(issuer: &Identity, issuer_url: &str, subject_pubkey: &str) -> serde_json::Value {
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    // Built from the real payload type, not a `json!` literal: the signature
+    // covers `serde_json::to_string(&payload)` in *struct field order*, and a
+    // hand-written map serialises its keys sorted. Same bytes or no signature.
+    let payload = wavvon_hub::routes::certs::CertPayload {
+        subject_kind: "user".to_string(),
+        issuer_pubkey: issuer.public_key_hex(),
+        issuer_url: issuer_url.to_string(),
+        subject_pubkey: subject_pubkey.to_string(),
+        member_since: now - 90 * 86400,
+        standing: "good".to_string(),
+        pow_level: None,
+        issued_at: now,
+        expires_at: now + 86400,
+        capabilities: Vec::new(),
+        label: None,
+        description: None,
+        icon: None,
+    };
+    let payload_json = serde_json::to_string(&payload).unwrap();
+    let signature = issuer.sign(payload_json.as_bytes());
+    json!({
+        "payload": serde_json::from_str::<serde_json::Value>(&payload_json).unwrap(),
+        "signature": hex::encode(signature.to_bytes()),
+    })
+}
+
+/// Turn on `cert_mode = trusted` for `issuer_pubkey`, optionally telling the
+/// hub where to reach it.
+async fn trust_issuer(
+    server: &TestServer,
+    owner_token: &str,
+    issuer_pubkey: &str,
+    issuer_url: Option<&str>,
+) {
+    let mut body = json!({
+        "cert_mode": "trusted",
+        "cert_trusted_issuers": [issuer_pubkey],
+    });
+    if let Some(url) = issuer_url {
+        body["cert_issuer_urls"] = json!({ issuer_pubkey: url });
+    }
+    server
+        .patch("/admin/settings/certs")
+        .authorization_bearer(owner_token)
+        .json(&body)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+}
+
+/// The whole point of §11: nothing presents a cert, so the hub fetches the
+/// candidate's portfolio from the issuers it trusts and admits them on what it
+/// finds. Without this a hub with `cert_mode != none` refuses everyone, which
+/// is a lockout rather than a relay.
+#[tokio::test]
+async fn a_trusted_issuer_is_pulled_when_the_client_presents_nothing() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+
+    let issuer = Identity::generate();
+    let newcomer = Identity::generate();
+    let newcomer_pk = newcomer.public_key_hex();
+
+    let issuer_url = start_mock_portfolio_issuer(json!([signed_cert(
+        &issuer,
+        "http://issuer.example",
+        &newcomer_pk
+    )]))
+    .await;
+
+    trust_issuer(
+        &server,
+        &owner_token,
+        &issuer.public_key_hex(),
+        Some(&issuer_url),
+    )
+    .await;
+
+    let ch_resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": newcomer_pk }))
+        .await;
+    ch_resp.assert_status_ok();
+    let ch: ChallengeResponse = ch_resp.json();
+    let sig = newcomer.sign(&hex::decode(&ch.challenge).unwrap());
+
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": newcomer_pk,
+            "challenge": ch.challenge,
+            "signature": hex::encode(sig.to_bytes()),
+            // Deliberately no `certifications`: no client sends one.
+        }))
+        .await;
+    resp.assert_status_ok();
+    let v: VerifyResponse = resp.json();
+    assert!(!v.token.is_empty());
+}
+
+/// Trust and reachability are different facts, and the setting that carries
+/// the address is optional. An issuer with no URL is simply not pullable —
+/// its pushed certs would still be honoured — so this candidate is refused.
+#[tokio::test]
+async fn an_issuer_with_no_url_is_not_pulled() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+
+    let issuer = Identity::generate();
+    let newcomer = Identity::generate();
+    let newcomer_pk = newcomer.public_key_hex();
+
+    trust_issuer(&server, &owner_token, &issuer.public_key_hex(), None).await;
+
+    let ch_resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": newcomer_pk }))
+        .await;
+    ch_resp.assert_status_ok();
+    let ch: ChallengeResponse = ch_resp.json();
+    let sig = newcomer.sign(&hex::decode(&ch.challenge).unwrap());
+
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": newcomer_pk,
+            "challenge": ch.challenge,
+            "signature": hex::encode(sig.to_bytes()),
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert!(resp.text().contains("cert_required"));
+}
+
+/// A pulled cert goes through exactly the predicate a presented one does, so
+/// answering the fetch with someone else's cert buys an issuer nothing. This
+/// is what makes "the hub pulls" safe: the fetch chooses *where* to look, never
+/// what counts.
+#[tokio::test]
+async fn a_pulled_cert_signed_by_someone_untrusted_is_refused() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+
+    let issuer = Identity::generate();
+    let stranger = Identity::generate();
+    let newcomer = Identity::generate();
+    let newcomer_pk = newcomer.public_key_hex();
+
+    // Served from the trusted issuer's address, but signed by a key this hub
+    // has never trusted.
+    let issuer_url = start_mock_portfolio_issuer(json!([signed_cert(
+        &stranger,
+        "http://issuer.example",
+        &newcomer_pk
+    )]))
+    .await;
+
+    trust_issuer(
+        &server,
+        &owner_token,
+        &issuer.public_key_hex(),
+        Some(&issuer_url),
+    )
+    .await;
+
+    let ch_resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": newcomer_pk }))
+        .await;
+    ch_resp.assert_status_ok();
+    let ch: ChallengeResponse = ch_resp.json();
+    let sig = newcomer.sign(&hex::decode(&ch.challenge).unwrap());
+
+    let resp = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": newcomer_pk,
+            "challenge": ch.challenge,
+            "signature": hex::encode(sig.to_bytes()),
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+    assert!(resp.text().contains("cert_required"));
+}
+
+/// The admin UI PATCHes the settings object it rendered: booleans as booleans,
+/// numbers as numbers. This pins that shape down.
+#[tokio::test]
+async fn patch_accepts_the_shape_the_admin_ui_sends() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+
+    let resp = server
+        .patch("/admin/settings/certs")
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "cert_mode": "any",
+            "cert_auto_issue": false,
+            "cert_min_age_days": 30,
+            "cert_validity_days": 90,
+            "cert_trusted_issuers": [],
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let read = server
+        .get("/admin/settings/certs")
+        .authorization_bearer(&owner_token)
+        .await;
+    read.assert_status_ok();
+    let v: serde_json::Value = read.json();
+    assert_eq!(
+        v["cert_auto_issue"], false,
+        "the toggle the admin flipped must stick"
+    );
 }

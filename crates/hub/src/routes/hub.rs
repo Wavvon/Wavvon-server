@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, HUB_ADMISSION, HUB_SETTINGS, MEMBERS_READ, MODERATION_SETTINGS};
+use crate::routes::paging::PageQuery;
 use crate::routes::role_models::RoleResponse;
 use crate::state::AppState;
 
@@ -19,7 +20,7 @@ pub async fn update_hub(
     Json(req): Json<UpdateHubRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     if let Some(name) = req.name.as_deref() {
         let trimmed = name.trim();
@@ -58,6 +59,19 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "welcome_label", label).await?;
     }
+    // Longer than welcome_label because it is a sentence or two rather than a
+    // byline, and still capped: it renders inside a dialog, and an operator
+    // with a wall of text at the moment someone is leaving is the abuse this
+    // bound exists for.
+    if let Some(label) = req.farewell_label.as_deref() {
+        if label.chars().count() > 280 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "farewell_label must be at most 280 characters".to_string(),
+            ));
+        }
+        upsert_setting(&state.db, "farewell_label", label).await?;
+    }
     if let Some(invite_url) = req.welcome_invite_url.as_deref() {
         if !invite_url.is_empty() {
             validate_welcome_invite_url(invite_url)?;
@@ -82,7 +96,7 @@ pub async fn update_hub(
                     "default_invite_role_id does not reference an existing role".to_string(),
                 ));
             }
-            if crate::routes::invites::role_grants_admin(&state.db, role_id).await? {
+            if crate::routes::invites::role_is_a_takeover_token(&state.db, role_id).await? {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     "default_invite_role_id cannot carry the admin permission — a default that \
@@ -135,6 +149,18 @@ pub async fn update_hub(
             ));
         }
         upsert_setting(&state.db, "afk_timeout_secs", &secs.to_string()).await?;
+    }
+    if let Some(bytes) = req.max_attachment_bytes {
+        if !(MIN_MAX_ATTACHMENT_BYTES..=MAX_MAX_ATTACHMENT_BYTES).contains(&bytes) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "max_attachment_bytes must be between {} and {} bytes",
+                    MIN_MAX_ATTACHMENT_BYTES, MAX_MAX_ATTACHMENT_BYTES
+                ),
+            ));
+        }
+        upsert_setting(&state.db, "max_attachment_bytes", &bytes.to_string()).await?;
     }
     if let Some(mode) = req.name_color_mode.as_deref() {
         if !crate::routes::users::NAME_COLOR_MODES.contains(&mode) {
@@ -211,15 +237,23 @@ fn validate_welcome_invite_url(raw: &str) -> Result<(), (StatusCode, String)> {
 pub async fn list_pending(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<PendingUser>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_ADMISSION)?;
 
+    // Oldest first — the queue is worked from the front, so the cursor moves
+    // forward rather than back like the newest-first lists.
     let rows = sqlx::query_as::<_, PendingUserRow>(
         "SELECT public_key, display_name, first_seen_at
          FROM users WHERE approval_status = 'pending'
-         ORDER BY first_seen_at",
+           AND ($1::text IS NULL OR (first_seen_at, public_key) >
+                ((SELECT first_seen_at FROM users WHERE public_key = $1), $1))
+         ORDER BY first_seen_at, public_key
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -242,7 +276,7 @@ pub async fn approve_user(
     axum::extract::Path(target_key): axum::extract::Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_ADMISSION)?;
 
     sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
         .bind(&target_key)
@@ -259,7 +293,7 @@ pub async fn get_pow_settings(
     user: AuthUser,
 ) -> Result<Json<PowSettingsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     let min_pow_level: u8 = read_setting(&state.db, "min_pow_level")
         .await
@@ -276,7 +310,7 @@ pub async fn patch_pow_settings(
     Json(req): Json<PowSettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     upsert_setting(&state.db, "min_pow_level", &req.min_pow_level.to_string()).await?;
     Ok(StatusCode::OK)
@@ -298,7 +332,7 @@ pub async fn get_channel_depth(
     user: AuthUser,
 ) -> Result<Json<ChannelDepthResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     let max_channel_depth: u32 = read_setting(&state.db, "max_channel_depth")
         .await
@@ -315,7 +349,7 @@ pub async fn patch_channel_depth(
     Json(req): Json<ChannelDepthRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     upsert_setting(
         &state.db,
@@ -342,7 +376,7 @@ pub async fn get_hub_settings(
     user: AuthUser,
 ) -> Result<Json<HubSettings>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     let require_approval: bool = read_setting(&state.db, "require_approval")
         .await
@@ -385,6 +419,8 @@ pub async fn get_hub_settings(
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_AFK_TIMEOUT_SECS);
 
+    let max_attachment_bytes = read_attachment_cap(&state.db).await;
+
     let name_color_mode = crate::routes::users::name_color_mode(&state.db).await;
 
     Ok(Json(HubSettings {
@@ -398,7 +434,37 @@ pub async fn get_hub_settings(
         afk_channel_id,
         afk_timeout_secs,
         name_color_mode,
+        max_attachment_bytes,
     }))
+}
+
+/// Default attachment cap: the value that used to be the compile-time
+/// constant, so an existing hub behaves identically until an operator changes
+/// it.
+pub const DEFAULT_MAX_ATTACHMENT_BYTES: u64 = 3 * 1024 * 1024;
+
+/// Floor. Below this, ordinary screenshots stop working and the setting looks
+/// broken rather than strict.
+pub const MIN_MAX_ATTACHMENT_BYTES: u64 = 64 * 1024;
+
+/// Ceiling, and it is not arbitrary. Attachments are stored **inline** — the
+/// `attachments` column is TEXT holding base64 — so the cap is really a cap on
+/// how large a single message row may get, and base64 inflates by a third
+/// on top. A reverse proxy in front will refuse the request first anyway:
+/// hosting.md's nginx vhost sets `client_max_body_size 10M`. Letting an
+/// operator raise this past that point would produce uploads that fail at the
+/// proxy with no explanation from the hub.
+pub const MAX_MAX_ATTACHMENT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The configured attachment cap, falling back to the default when unset or
+/// unparseable. Read per request: an operator raising the limit should not
+/// need to restart the hub.
+pub async fn read_attachment_cap(db: &sqlx::PgPool) -> u64 {
+    read_setting(db, "max_attachment_bytes")
+        .await
+        .and_then(|v| v.parse().ok())
+        .filter(|b| *b >= MIN_MAX_ATTACHMENT_BYTES && *b <= MAX_MAX_ATTACHMENT_BYTES)
+        .unwrap_or(DEFAULT_MAX_ATTACHMENT_BYTES)
 }
 
 /// Default idle threshold for the AFK sweep when a channel is configured but
@@ -436,6 +502,14 @@ pub struct HubSettings {
     /// "user_only", "none". Defaults to "role_over_user" when unset.
     #[serde(default = "default_name_color_mode")]
     pub name_color_mode: String,
+    /// Largest total attachment payload a single message may carry, in bytes.
+    /// Was a compile-time constant, so an operator had no way to change it.
+    #[serde(default = "default_attachment_cap")]
+    pub max_attachment_bytes: u64,
+}
+
+fn default_attachment_cap() -> u64 {
+    DEFAULT_MAX_ATTACHMENT_BYTES
 }
 
 fn default_afk_timeout() -> u32 {
@@ -504,6 +578,10 @@ pub struct UpdateHubRequest {
     /// `wavvon://`. Empty string clears the setting.
     #[serde(default)]
     pub welcome_invite_url: Option<String>,
+    /// Farewell shown when someone removes this hub from their device. Plain
+    /// text, max 280 chars. Empty string clears the setting.
+    #[serde(default)]
+    pub farewell_label: Option<String>,
     /// Hub-level invite role policy default (invite role policies). Role to
     /// grant a new user who joins via an invite that doesn't itself carry an
     /// explicit `grant_role_id`. Must reference an existing role that does
@@ -528,6 +606,11 @@ pub struct UpdateHubRequest {
     /// Idle threshold for the AFK sweep, in seconds. Minimum 60.
     #[serde(default)]
     pub afk_timeout_secs: Option<u32>,
+    /// Largest total attachment payload per message, in bytes. Clamped to
+    /// [`MIN_MAX_ATTACHMENT_BYTES`, `MAX_MAX_ATTACHMENT_BYTES`] — see those
+    /// constants for why there is a ceiling at all.
+    #[serde(default)]
+    pub max_attachment_bytes: Option<u64>,
     /// Priority order for resolving a member's displayed name color (member
     /// name colors feature). Must be one of `NAME_COLOR_MODES`
     /// ("user_over_role", "role_over_user", "role_only", "user_only",
@@ -551,7 +634,7 @@ pub async fn get_moderation_settings(
     user: AuthUser,
 ) -> Result<Json<ModerationSettingsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MODERATION_SETTINGS)?;
 
     let webhook_url = read_setting(&state.db, "moderation_webhook_url").await;
     let webhook_secret_set = read_setting(&state.db, "moderation_webhook_secret")
@@ -595,7 +678,7 @@ pub async fn patch_moderation_settings(
     Json(req): Json<ModerationSettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MODERATION_SETTINGS)?;
 
     if let Some(url) = req.webhook_url.as_deref() {
         upsert_setting(&state.db, "moderation_webhook_url", url).await?;
@@ -661,10 +744,10 @@ pub async fn list_members(
     user: AuthUser,
 ) -> Result<Json<Vec<MemberAdminInfo>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(MEMBERS_READ)?;
 
     let users = sqlx::query_as::<_, UserAdminRow>(
-        "SELECT public_key, display_name, first_seen_at, last_seen_at, is_bot, birthday
+        "SELECT public_key, display_name, first_seen_at, last_seen_at, birthday
          FROM users ORDER BY first_seen_at LIMIT 1000",
     )
     .fetch_all(&state.db)
@@ -769,7 +852,6 @@ pub async fn list_members(
                 first_seen_at: u.first_seen_at,
                 last_seen_at: u.last_seen_at,
                 roles,
-                is_bot: u.is_bot,
                 birthday: if show_birthdays { u.birthday } else { None },
             }
         })
@@ -786,8 +868,6 @@ pub struct MemberAdminInfo {
     pub first_seen_at: i64,
     pub last_seen_at: i64,
     pub roles: Vec<RoleResponse>,
-    #[serde(default)]
-    pub is_bot: bool,
     /// "MM-DD", never a year. `null` when unset or when `birthdays_enabled`
     /// is false hub-wide.
     #[serde(default)]
@@ -800,6 +880,5 @@ struct UserAdminRow {
     display_name: Option<String>,
     first_seen_at: i64,
     last_seen_at: i64,
-    is_bot: bool,
     birthday: Option<String>,
 }

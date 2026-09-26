@@ -1,20 +1,22 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::Json;
 use rand::RngCore;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, MANAGE_CHANNELS};
-use crate::routes::invite_models::{CreateInviteRequest, InviteResponse};
+use crate::permissions::{self, INVITES_MANAGE};
+use crate::routes::invite_models::{invite_status, CreateInviteRequest, InviteResponse};
+use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
 /// Short expiry forced onto invites that grant an admin-holding role (or
 /// `builtin-owner`) when the creator didn't already ask for something
 /// shorter. A role-granting invite is a takeover token — it shouldn't sit
 /// around unused indefinitely (task #34).
-const ADMIN_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
+const TAKEOVER_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
 
 /// True if holding `role_id` alone grants the `admin` permission.
 /// `builtin-owner` is seeded with an explicit `admin` row (see
@@ -23,14 +25,30 @@ const ADMIN_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
 /// `pub(crate)` so `routes::hub::update_hub` can reuse it to reject an
 /// admin-holding role as `default_invite_role_id` (hub-level invite role
 /// policy).
-pub(crate) async fn role_grants_admin(
+/// Does this role amount to a takeover if handed out on a bearer code?
+///
+/// It used to ask whether the role carried `admin`, and with the wildcard gone
+/// that has nothing to look for. What it was really protecting against is a
+/// code that lets whoever holds it rewrite the hub's permissions, and that is
+/// now `roles.manage`: mint a role carrying anything you hold, assign it.
+/// Ownership itself counts for the obvious reason.
+///
+/// The subset ceiling already stops a delegate minting *above* themselves
+/// (permissions.md §1.6). This is the second half: bounding how long and how
+/// widely such a code can travel, because an invite is a bearer token and the
+/// ceiling says nothing about who ends up holding it.
+pub(crate) async fn role_is_a_takeover_token(
     db: &sqlx::PgPool,
     role_id: &str,
 ) -> Result<bool, (StatusCode, String)> {
+    if role_id == crate::permissions::BUILTIN_OWNER_ROLE_ID {
+        return Ok(true);
+    }
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission = 'admin')",
+        "SELECT EXISTS(SELECT 1 FROM role_permissions WHERE role_id = $1 AND permission = $2)",
     )
     .bind(role_id)
+    .bind(crate::permissions::ROLES_MANAGE)
     .fetch_one(db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
@@ -42,7 +60,7 @@ pub async fn create_invite(
     Json(req): Json<CreateInviteRequest>,
 ) -> Result<(StatusCode, Json<InviteResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_CHANNELS)?;
+    perms.require(INVITES_MANAGE)?;
 
     let now = crate::auth::handlers::unix_timestamp();
     let mut max_uses = req.max_uses;
@@ -69,12 +87,27 @@ pub async fn create_invite(
             ));
         }
 
-        // An admin-holding role is a takeover token: cap it to a single use
-        // and a short expiry, unless the creator already asked for
-        // something even shorter/more restrictive.
-        if role_grants_admin(&state.db, role_id).await? {
+        // An invite that grants a role is deferred role assignment, so it
+        // needs the same escalation ceiling (permissions.md §1.6). Without it
+        // this is the widest door of the four: creating an invite needs
+        // `manage_channels`, not `manage_roles`, so whoever can invite people
+        // could mint a role-granting code and redeem it as a second identity.
+        // The admin-takeover clamp below is not a substitute — it only looks
+        // for `admin`, and the point of the catalogue is that `admin` goes
+        // away while ~40 named permissions remain.
+        let carried: Vec<String> =
+            sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
+                .bind(role_id)
+                .fetch_all(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        perms.require_can_grant(carried.iter().map(String::as_str))?;
+
+        // Cap a takeover-shaped grant to a single use and a short expiry,
+        // unless the creator already asked for something stricter.
+        if role_is_a_takeover_token(&state.db, role_id).await? {
             max_uses = Some(max_uses.map_or(1, |m| m.min(1)));
-            let forced_expiry = now + ADMIN_GRANT_DEFAULT_EXPIRY_SECS;
+            let forced_expiry = now + TAKEOVER_GRANT_DEFAULT_EXPIRY_SECS;
             expires_at = Some(match expires_at {
                 Some(existing) if existing < forced_expiry => existing,
                 _ => forced_expiry,
@@ -100,6 +133,7 @@ pub async fn create_invite(
     Ok((
         StatusCode::CREATED,
         Json(InviteResponse {
+            status: invite_status(0, max_uses, expires_at, now).to_string(),
             code,
             created_by: user.public_key,
             max_uses,
@@ -111,16 +145,56 @@ pub async fn create_invite(
     ))
 }
 
+/// `GET /invites` query: the shared paging keys plus one filter.
+///
+/// The paging keys are spelled out rather than `#[serde(flatten)]`-ed in from
+/// `PageQuery`, because `Query` deserializes with `serde_urlencoded`, which
+/// hands a flattened struct every value as a string and then fails to parse
+/// `limit` as an integer. The failure only shows when `limit` or `cursor` is
+/// actually present, so a flattened version looks fine until someone pages.
+#[derive(serde::Deserialize)]
+pub struct ListInvitesQuery {
+    pub limit: Option<i64>,
+    pub cursor: Option<String>,
+    /// Include the invites that can no longer admit anyone. Off by default:
+    /// the list is the answer to "which way in is open right now", and an
+    /// invite that burned its one use in July answers nothing while pushing a
+    /// live one off the page.
+    #[serde(default)]
+    pub include_inactive: bool,
+}
+
 pub async fn list_invites(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(query): Query<ListInvitesQuery>,
 ) -> Result<Json<Vec<InviteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_CHANNELS)?;
+    perms.require(INVITES_MANAGE)?;
 
+    let page = PageQuery {
+        limit: query.limit,
+        cursor: query.cursor.clone(),
+    };
+    let now = crate::auth::handlers::unix_timestamp();
+
+    // The filter is in SQL rather than over the fetched rows because it has to
+    // happen before `LIMIT`: dropping dead rows afterwards would hand back a
+    // short page, and a client paging to exhaustion would read that as the end
+    // of the list.
     let rows = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites ORDER BY created_at DESC",
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites
+         WHERE ($1::text IS NULL OR (created_at, code) <
+                ((SELECT created_at FROM invites WHERE code = $1), $1))
+           AND ($3 OR ((max_uses IS NULL OR uses < max_uses)
+                       AND (expires_at IS NULL OR expires_at > $4)))
+         ORDER BY created_at DESC, code DESC
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
+    .bind(query.include_inactive)
+    .bind(now)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -128,6 +202,7 @@ pub async fn list_invites(
     Ok(Json(
         rows.into_iter()
             .map(|r| InviteResponse {
+                status: invite_status(r.uses, r.max_uses, r.expires_at, now).to_string(),
                 code: r.code,
                 created_by: r.created_by,
                 max_uses: r.max_uses,
@@ -146,7 +221,7 @@ pub async fn revoke_invite(
     Path(code): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_CHANNELS)?;
+    perms.require(INVITES_MANAGE)?;
 
     sqlx::query("DELETE FROM invites WHERE code = $1")
         .bind(&code)
@@ -296,7 +371,7 @@ pub async fn apply_invite_role_grant(
             if !exists {
                 return Ok(()); // the default role was deleted since it was configured
             }
-            if role_grants_admin(db, &default_role_id).await? {
+            if role_is_a_takeover_token(db, &default_role_id).await? {
                 // Defense in depth: the role gained `admin` since it was set
                 // as the default — refuse to silently hand out admin.
                 return Ok(());
@@ -379,7 +454,7 @@ pub async fn maybe_mint_first_boot_owner_invite(
     }
 
     let code = generate_invite_code();
-    let expires_at = now + ADMIN_GRANT_DEFAULT_EXPIRY_SECS;
+    let expires_at = now + TAKEOVER_GRANT_DEFAULT_EXPIRY_SECS;
     sqlx::query(
         "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at, grant_role_id)
          VALUES ($1, 'system', 1, 0, $2, $3, 'builtin-owner')",
@@ -532,4 +607,42 @@ struct InviteRow {
     expires_at: Option<i64>,
     created_at: i64,
     grant_role_id: Option<String>,
+}
+
+/// GET /join/:code — the same URL for a person and for a program.
+///
+/// This is the link an operator pastes into a chat, so opening it in a browser
+/// has to land in the web client. It used to answer JSON unconditionally, which
+/// meant a new user’s first contact with Wavvon was
+/// `{"code":…,"hub_name":…}` on a white page. A request that accepts HTML now
+/// gets the client (which reads the code back out of the path); anything else,
+/// including every API caller, still gets the preview JSON.
+///
+/// `index_html` is `None` when the hub serves no web client, and then there is
+/// nothing better to answer with than the JSON.
+pub async fn get_join_page_or_info(
+    State(state): State<Arc<AppState>>,
+    Path(code): Path<String>,
+    headers: HeaderMap,
+    index_html: Option<Arc<[u8]>>,
+) -> Response {
+    let wants_html = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"));
+
+    if wants_html {
+        if let Some(bytes) = index_html {
+            return (
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                bytes.to_vec(),
+            )
+                .into_response();
+        }
+    }
+
+    match get_join_info(State(state), Path(code)).await {
+        Ok(json) => json.into_response(),
+        Err((status, message)) => (status, message).into_response(),
+    }
 }

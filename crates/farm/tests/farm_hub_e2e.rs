@@ -444,3 +444,86 @@ async fn a_schema_isolated_hub_gets_its_own_schema_and_not_public() {
 
     let _ = state.hub_manager.stop_hub(&hub_id).await;
 }
+
+/// The same path with `hub_db_role = 'per_hub'`: the hub connects as a role of
+/// its own rather than as the farm.
+///
+/// A database each and a schema each stop hubs colliding; neither stops one
+/// hub reading another, because they all connect as the farm's role. This is
+/// the mode that contains it — and the thing that has to be *run* rather than
+/// unit-tested is whether a hub can still do its job under the narrower
+/// grants. A hub that cannot run its own migrations is not isolated, it is
+/// broken, and that failure only shows up with a real binary against a real
+/// server.
+#[tokio::test]
+async fn a_hub_with_its_own_role_still_boots_and_migrates() {
+    let Some(hub_bin) = hub_binary() else {
+        assert!(
+            std::env::var("WAVVON_REQUIRE_E2E").is_err(),
+            "wavvon-hub is not built, and WAVVON_REQUIRE_E2E is set"
+        );
+        eprintln!("WAVVON-TEST-SKIPPED: farm_hub_e2e per_hub — wavvon-hub not built");
+        return;
+    };
+
+    let (farm_url, state, _guard) = start_farm(hub_bin, 9950, 10950).await;
+    sqlx::query("UPDATE farms SET hub_db_role = 'per_hub' WHERE id = 1")
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let token = token_for(&state, &"33".repeat(32), &farm_url);
+    let created: serde_json::Value = Client::new()
+        .post(format!("{farm_url}/farm/hubs"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "Own Role Hub" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let hub_id = created["id"].as_str().expect("hub id").to_string();
+
+    let db_url: String = sqlx::query_scalar("SELECT db_url FROM hubs WHERE id = $1")
+        .bind(&hub_id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    let role = format!("wavvon_hub_{hub_id}");
+    assert!(
+        db_url.contains(&role),
+        "the hub must be handed credentials of its own, got {db_url}"
+    );
+
+    // Claiming its serial means it connected, migrated and heartbeated — all
+    // as a role that owns nothing but its own database.
+    let pool = state.db.clone();
+    let id = hub_id.clone();
+    wait_for(
+        "the hub with its own role to start",
+        Duration::from_secs(45),
+        || {
+            let pool = pool.clone();
+            let id = id.clone();
+            async move {
+                sqlx::query_scalar::<_, Option<String>>("SELECT hub_pubkey FROM hubs WHERE id = $1")
+                    .bind(&id)
+                    .fetch_one(&pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some()
+            }
+        },
+    )
+    .await;
+
+    let _ = state.hub_manager.stop_hub(&hub_id).await;
+
+    // Roles are server-wide, so the suite's database teardown never reaches
+    // them.
+    let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{role}\""))
+        .execute(&state.db)
+        .await;
+}

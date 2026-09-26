@@ -90,14 +90,18 @@ pub fn create_router_full(
     trusted_proxy: bool,
     web_client: Option<Arc<WebClientConfig>>,
 ) -> Router {
-    let auth_limiter = RateLimiter::new(Config::AUTH, trusted_proxy);
+    let auth_limiter = RateLimiter::new(Config::auth(), trusted_proxy);
     let write_limiter = RateLimiter::new(Config::WRITE, trusted_proxy);
+
+    // `GET /join/{code}` answers a browser with the web client and a program
+    // with JSON, so it needs the index bytes. Cloned out before the builder
+    // chain consumes `web_client` for the SPA fallback at the end.
+    let join_index_html = web_client.as_ref().map(|c| c.index_html.clone());
 
     // Rate-limited auth sub-router (strict, because anyone can hit these).
     let auth_routes = Router::new()
         .route("/auth/challenge", post(auth::handlers::challenge))
         .route("/auth/verify", post(auth::handlers::verify))
-        .route("/auth/renew", post(auth::handlers::renew))
         .route(
             "/auth/webauthn/begin",
             post(routes::webauthn::register_begin),
@@ -224,7 +228,12 @@ pub fn create_router_full(
         )
         .merge(auth_routes)
         .merge(write_routes)
-        .route("/me", get(routes::me::me).patch(routes::me::update_me))
+        .route(
+            "/me",
+            get(routes::me::me)
+                .patch(routes::me::update_me)
+                .delete(routes::me::leave_hub),
+        )
         .route("/me/credentials", get(routes::webauthn::list_credentials))
         .route(
             "/me/credentials/{id}",
@@ -283,86 +292,30 @@ pub fn create_router_full(
             "/admin/reports/{id}/review",
             post(routes::reports::review_report),
         )
-        // ---- Admin bot management (internal service accounts) ----
+        .route("/admin/audit-log", get(routes::apps::admin_audit_log))
+        // ---- Apps: the hub-wide listing, then self-service registration ----
+        .route("/apps", get(routes::apps::list_apps))
+        .route("/me/app", get(routes::apps::get_my_app))
+        .route("/me/app/profile", put(routes::apps::put_my_app_profile))
+        .route("/me/app/commands", put(routes::apps::put_my_app_commands))
         .route(
-            "/admin/bots",
-            get(routes::bots::admin_list_bots).post(routes::bots::admin_create_bot),
+            "/me/app/subscriptions",
+            put(routes::apps::put_my_app_subscriptions),
         )
-        // ---- External bot admin view (bots.md §4) ----
-        // Registered before /admin/bots/{pubkey} for the same reason as
-        // /bots/me below -- keeps "external" from ever being treated as a
-        // pubkey path parameter.
+        // ---- Event polling transport, for a client with no WebSocket ----
         .route(
-            "/admin/bots/external",
-            get(routes::bots::admin_list_external_bots),
+            "/me/events",
+            get(routes::apps::poll_events).delete(routes::apps::ack_events),
         )
+        // ---- Voice and screenshare over HTTP, same reason ----
+        .route("/voice/leave", delete(routes::apps::voice::voice_leave))
         .route(
-            "/admin/bots/{pubkey}",
-            get(routes::bots::admin_get_bot).delete(routes::bots::admin_delete_bot),
-        )
-        .route(
-            "/admin/bots/{pubkey}/webhook",
-            put(routes::bots::admin_set_webhook),
-        )
-        .route(
-            "/admin/bots/{pubkey}/capabilities",
-            get(routes::bots::admin_get_bot_capabilities)
-                .put(routes::bots::admin_set_bot_capabilities),
+            "/screenshare/start",
+            post(routes::apps::screenshare::screenshare_start),
         )
         .route(
-            "/admin/bots/{pubkey}/channels",
-            get(routes::bots::admin_get_bot_channel_scope)
-                .put(routes::bots::admin_set_bot_channel_scope),
-        )
-        .route("/admin/audit-log", get(routes::bots::admin_audit_log))
-        // ---- Bot API (token auth, internal service accounts) ----
-        .route("/bot/commands", put(routes::bots::bot_set_commands))
-        .route("/bot/send", post(routes::bots::bot_send_message))
-        .route("/bot/poll", get(routes::bots::bot_poll))
-        .route(
-            "/bot/events",
-            axum::routing::delete(routes::bots::bot_ack_events),
-        )
-        // ---- External bot system ----
-        // /bots/me, /bots/me/profile, /bots/me/commands, /bots/me/subscriptions
-        // must be registered before /bots/{pubkey} so axum doesn't match "me"
-        // as a path parameter.
-        .route("/bots/me", get(routes::bots::ext_bot_me))
-        .route(
-            "/bots/me/profile",
-            put(routes::bots::ext_update_bot_profile),
-        )
-        .route(
-            "/bots/me/commands",
-            put(routes::bots::ext_update_bot_commands),
-        )
-        .route(
-            "/bots/me/subscriptions",
-            put(routes::bots::ext_update_bot_subscriptions),
-        )
-        .route("/bots/accept-invite", post(routes::bots::ext_accept_invite))
-        .route(
-            "/bots",
-            get(routes::bots::ext_list_bots).post(routes::bots::ext_invite_bot),
-        )
-        .route("/bots/{pubkey}", delete(routes::bots::ext_remove_bot))
-        // ---- Bot voice REST endpoints ----
-        .route(
-            "/bots/{id}/voice/join",
-            post(routes::bots::voice::bot_voice_join),
-        )
-        .route(
-            "/bots/{id}/voice/leave",
-            delete(routes::bots::voice::bot_voice_leave),
-        )
-        // ---- Bot screenshare REST endpoints ----
-        .route(
-            "/bots/{id}/screenshare/start",
-            post(routes::bots::screenshare::bot_screenshare_start),
-        )
-        .route(
-            "/bots/{id}/screenshare/stop",
-            delete(routes::bots::screenshare::bot_screenshare_stop),
+            "/screenshare/stop",
+            delete(routes::apps::screenshare::screenshare_stop),
         )
         // ---- Incoming webhooks ----
         .route(
@@ -479,6 +432,14 @@ pub fn create_router_full(
             get(routes::roles::list_roles).post(routes::roles::create_role),
         )
         .route(
+            "/permissions",
+            get(routes::permission_catalogue::get_catalogue),
+        )
+        .route(
+            "/users/{public_key}/permissions/why",
+            get(routes::permission_catalogue::why),
+        )
+        .route(
             "/roles/{role_id}",
             axum::routing::patch(routes::roles::update_role).delete(routes::roles::delete_role),
         )
@@ -515,7 +476,17 @@ pub fn create_router_full(
         // ---- Join links (Feature 5) ----
         .route(
             "/join/{code}",
-            get(routes::invites::get_join_info).post(routes::invites::join_with_invite),
+            get(
+                move |state: axum::extract::State<Arc<AppState>>,
+                      path: axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let index = join_index_html.clone();
+                    async move {
+                        routes::invites::get_join_page_or_info(state, path, headers, index).await
+                    }
+                },
+            )
+            .post(routes::invites::join_with_invite),
         )
         // ---- Unread counts (Feature 2) ----
         // Must be registered before /channels/{channel_id} to avoid "unread" being matched as a path param.
@@ -588,6 +559,10 @@ pub fn create_router_full(
             get(routes::moderation::list_raise_hands),
         )
         .route(
+            "/channels/{channel_id}/talk-grants/{pubkey}",
+            post(routes::moderation::grant_talk),
+        )
+        .route(
             "/alliances",
             get(routes::alliances::list_alliances).post(routes::alliances::create_alliance),
         )
@@ -628,8 +603,21 @@ pub fn create_router_full(
             axum::routing::delete(routes::alliances::leave_alliance),
         )
         .route(
+            "/alliances/{alliance_id}/managers",
+            get(routes::alliances::list_alliance_managers),
+        )
+        .route(
+            "/alliances/{alliance_id}/managers/{role_id}",
+            axum::routing::put(routes::alliances::grant_alliance_manager)
+                .delete(routes::alliances::revoke_alliance_manager),
+        )
+        .route(
             "/alliances/{alliance_id}/channels",
             get(routes::alliances::list_shared_channels).post(routes::alliances::share_channel),
+        )
+        .route(
+            "/alliances/{alliance_id}/voice-grant",
+            post(routes::alliances::mint_voice_grant),
         )
         .route(
             "/alliances/{alliance_id}/channels/{channel_id}",
@@ -685,6 +673,11 @@ pub fn create_router_full(
         .route(
             "/federation/alliance-invite",
             post(routes::alliances::receive_federation_alliance_invite),
+        )
+        .route(
+            "/federation/alliance-member",
+            post(routes::alliances::receive_alliance_member)
+                .delete(routes::alliances::receive_alliance_member_left),
         )
         .route(
             "/identity/{master}/designation",

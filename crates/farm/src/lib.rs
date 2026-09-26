@@ -1,6 +1,7 @@
 pub mod db;
 pub mod hub_manager;
 pub mod monitor;
+pub mod node;
 pub mod placement;
 pub mod proxy;
 pub mod routes;

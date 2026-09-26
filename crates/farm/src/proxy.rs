@@ -1,4 +1,4 @@
-/// Reverse proxy: /hub/:serial/* → http://127.0.0.1:{port}/*
+/// Reverse proxy: /hub/:serial/* → the hub process, wherever it runs.
 ///
 /// Routes by the hub's Ed25519 pubkey ("serial"), resolved via the unique
 /// partial index on `hubs.hub_pubkey` — see docs/docs/farm-impl.md,
@@ -27,18 +27,36 @@ use axum::response::Response;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::node::NodeTarget;
 use crate::state::FarmState;
 
-/// Resolve an address segment to `(suspended_at, process_port)`.
+/// One resolved row: whether the hub is suspended, which port it listens
+/// on, and — since the farm became multi-node — *which machine* that port is
+/// on and how to trust it.
+type ResolvedHub = (
+    Option<i64>,
+    Option<i32>,
+    Option<String>,
+    String,
+    Option<String>,
+);
+
+/// Resolve an address segment to a hub row.
 ///
 /// A released slug does not resolve: that is the point of releasing it. The
 /// pubkey always does, which is what makes it the address of last resort — a
 /// client that has lost track of a hub's current name still has its key.
-async fn resolve_hub(state: &FarmState, segment: &str) -> Option<(Option<i64>, Option<i32>)> {
+///
+/// The join to `servers` is a LEFT join and every node column is optional: a
+/// hub with no server row is one this farm runs itself, which is every hub a
+/// single-node farm has.
+async fn resolve_hub(state: &FarmState, segment: &str) -> Option<ResolvedHub> {
     if crate::slug::looks_like_pubkey(segment) {
         return sqlx::query_as(
-            "SELECT suspended_at, process_port FROM hubs
-             WHERE hub_pubkey = $1 AND deleted_at IS NULL",
+            "SELECT h.suspended_at, h.process_port, s.host,
+                    COALESCE(s.tls_mode, 'ca'), s.cert_sha256
+             FROM hubs h LEFT JOIN servers s ON s.id = h.server_id
+             WHERE h.hub_pubkey = $1 AND h.deleted_at IS NULL",
         )
         .bind(segment)
         .fetch_optional(&state.db)
@@ -49,9 +67,11 @@ async fn resolve_hub(state: &FarmState, segment: &str) -> Option<(Option<i64>, O
     // Slugs are stored lowercase, so an address typed with different capitals
     // reaches the same hub instead of a stranger's.
     let lowered = segment.to_ascii_lowercase();
-    let row: Option<(Option<i64>, Option<i32>)> = sqlx::query_as(
-        "SELECT h.suspended_at, h.process_port
+    let row: Option<ResolvedHub> = sqlx::query_as(
+        "SELECT h.suspended_at, h.process_port, n.host,
+                COALESCE(n.tls_mode, 'ca'), n.cert_sha256
          FROM hub_slugs s JOIN hubs h ON h.id = s.hub_id
+         LEFT JOIN servers n ON n.id = h.server_id
          WHERE s.slug = $1 AND s.released_at IS NULL AND h.deleted_at IS NULL",
     )
     .bind(&lowered)
@@ -88,12 +108,13 @@ pub async fn proxy_handler(
     // i64 (as a prior version of this query did) makes sqlx's runtime type
     // check reject every row with a non-null process_port, silently
     // degrading to a false "not found" via `unwrap_or(None)` below.
-    let (suspended_at, process_port) = match resolve_hub(&state, &serial).await {
-        None => {
-            return json_error(StatusCode::NOT_FOUND, "hub_not_found");
-        }
-        Some(r) => r,
-    };
+    let (suspended_at, process_port, host, tls_mode, cert_sha256) =
+        match resolve_hub(&state, &serial).await {
+            None => {
+                return json_error(StatusCode::NOT_FOUND, "hub_not_found");
+            }
+            Some(r) => r,
+        };
 
     if suspended_at.is_some() {
         return json_error(StatusCode::SERVICE_UNAVAILABLE, "hub_suspended");
@@ -122,11 +143,18 @@ pub async fn proxy_handler(
         .unwrap_or_default();
     let upstream_path_and_query = format!("{upstream_path}{query}");
 
+    let node = NodeTarget {
+        host,
+        port,
+        tls_mode,
+        cert_sha256,
+    };
+
     if is_upgrade_request(req.headers()) {
-        return bridge_upgrade(req, &serial, port, upstream_path_and_query).await;
+        return bridge_upgrade(req, &serial, &node, upstream_path_and_query).await;
     }
 
-    proxy_buffered(req, &serial, port, upstream_path_and_query, &state).await
+    proxy_buffered(req, &serial, &node, upstream_path_and_query, &state).await
 }
 
 /// True when the request is an HTTP `Upgrade` request (WebSocket, etc.) —
@@ -152,11 +180,26 @@ fn is_upgrade_request(headers: &HeaderMap) -> bool {
 async fn proxy_buffered(
     req: Request<Body>,
     serial: &str,
-    port: u16,
+    node: &NodeTarget,
     upstream_path_and_query: String,
     state: &FarmState,
 ) -> Response<Body> {
-    let upstream_url = format!("http://127.0.0.1:{port}{upstream_path_and_query}");
+    let upstream_url = format!(
+        "{}://{}{upstream_path_and_query}",
+        node.scheme(),
+        node.authority()
+    );
+
+    // A hub on this machine keeps using the farm's shared client. A remote one
+    // needs a client whose TLS configuration matches *that node* — pinning is
+    // per-node by construction — so they are built once each and cached.
+    let client = match node_client(state, node).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(serial, host = ?node.host, error = %e, "No usable TLS configuration for node");
+            return json_error(StatusCode::BAD_GATEWAY, "upstream_error");
+        }
+    };
 
     // Build the forwarded request.
     let method = req.method().clone();
@@ -182,7 +225,7 @@ async fn proxy_buffered(
     };
 
     // Build reqwest request.
-    let mut rb = state.http_client.request(method.clone(), &upstream_url);
+    let mut rb = client.request(method.clone(), &upstream_url);
 
     // Forward headers (skip hop-by-hop headers that reqwest manages).
     for (name, value) in &headers {
@@ -255,7 +298,7 @@ async fn proxy_buffered(
 async fn bridge_upgrade(
     mut req: Request<Body>,
     serial: &str,
-    port: u16,
+    node: &NodeTarget,
     upstream_path_and_query: String,
 ) -> Response<Body> {
     let method = req.method().clone();
@@ -273,10 +316,14 @@ async fn bridge_upgrade(
     // Upgrade response.
     let on_upgrade = hyper::upgrade::on(&mut req);
 
-    let mut hub_stream = match TcpStream::connect(("127.0.0.1", port)).await {
+    // The forgettable half. Everything above this line is shared with the
+    // buffered path, and a WebSocket that still went to loopback would look
+    // fine on every REST call and fail only for the live connection — which is
+    // the connection a chat client spends its whole session on.
+    let mut hub_stream = match connect_upstream(node).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::warn!(serial, port, error = %e, "Failed to connect to hub for upgrade");
+            tracing::warn!(serial, upstream = %node.authority(), error = %e, "Failed to connect to hub for upgrade");
             return json_error(StatusCode::BAD_GATEWAY, "upstream_error");
         }
     };
@@ -286,23 +333,23 @@ async fn bridge_upgrade(
     let mut request_text = format!("{method} {upstream_path_and_query} HTTP/1.1\r\n");
     for (name, value) in headers.iter() {
         if name.as_str().eq_ignore_ascii_case("host") {
-            continue; // rewritten below to point at the hub's loopback address.
+            continue; // rewritten below to point at the hub's own address.
         }
         if let Ok(v) = value.to_str() {
             request_text.push_str(&format!("{}: {}\r\n", name.as_str(), v));
         }
     }
-    request_text.push_str(&format!("host: 127.0.0.1:{port}\r\n\r\n"));
+    request_text.push_str(&format!("host: {}\r\n\r\n", node.authority()));
 
     if let Err(e) = hub_stream.write_all(request_text.as_bytes()).await {
-        tracing::warn!(serial, port, error = %e, "Failed to send upgrade request to hub");
+        tracing::warn!(serial, upstream = %node.authority(), error = %e, "Failed to send upgrade request to hub");
         return json_error(StatusCode::BAD_GATEWAY, "upstream_error");
     }
 
     let (status, resp_headers, leftover) = match read_response_head(&mut hub_stream).await {
         Ok(v) => v,
         Err(e) => {
-            tracing::warn!(serial, port, error = %e, "Failed to read upgrade response from hub");
+            tracing::warn!(serial, upstream = %node.authority(), error = %e, "Failed to read upgrade response from hub");
             return json_error(StatusCode::BAD_GATEWAY, "upstream_error");
         }
     };
@@ -354,8 +401,8 @@ async fn bridge_upgrade(
 /// the header terminator. Those trailing bytes belong to the upgraded
 /// protocol (e.g. the first WS frame, if the hub wrote eagerly) and must be
 /// replayed to the client before the raw byte copy starts.
-async fn read_response_head(
-    stream: &mut TcpStream,
+async fn read_response_head<S: tokio::io::AsyncRead + Unpin + ?Sized>(
+    stream: &mut S,
 ) -> std::io::Result<(u16, Vec<(String, String)>, Vec<u8>)> {
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 512];
@@ -399,6 +446,53 @@ async fn read_response_head(
 
 fn find_double_crlf(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
+}
+
+/// A byte stream to a hub: a plain socket on this machine, a TLS session to
+/// another one.
+trait Upstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Upstream for T {}
+
+/// Open the socket the upgrade bridge copies bytes over.
+async fn connect_upstream(node: &NodeTarget) -> anyhow::Result<Box<dyn Upstream>> {
+    let tcp = TcpStream::connect(node.authority()).await?;
+    let Some(host) = node.tls_host() else {
+        return Ok(Box::new(tcp));
+    };
+
+    let config = crate::node::client_config(node)?;
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(config));
+    let name = rustls::pki_types::ServerName::try_from(host)?;
+    Ok(Box::new(connector.connect(name, tcp).await?))
+}
+
+/// The HTTP client for a node, built once and kept.
+///
+/// A per-request client would be a fresh TLS handshake and a fresh connection
+/// pool on every call — and for a pinned node it would rebuild the verifier
+/// each time too. Keyed by everything that changes the configuration, so a
+/// node that rotates its certificate gets a new client rather than a stale
+/// one that trusts the old digest.
+async fn node_client(state: &FarmState, node: &NodeTarget) -> anyhow::Result<reqwest::Client> {
+    if node.is_local() {
+        return Ok(state.http_client.clone());
+    }
+    let key = format!(
+        "{}|{}|{}",
+        node.authority(),
+        node.tls_mode,
+        node.cert_sha256.as_deref().unwrap_or("")
+    );
+    if let Some(client) = state.node_clients.read().await.get(&key) {
+        return Ok(client.clone());
+    }
+
+    let config = crate::node::client_config(node)?;
+    let client = reqwest::Client::builder()
+        .use_preconfigured_tls(config)
+        .build()?;
+    state.node_clients.write().await.insert(key, client.clone());
+    Ok(client)
 }
 
 fn json_error(status: StatusCode, error: &'static str) -> Response<Body> {

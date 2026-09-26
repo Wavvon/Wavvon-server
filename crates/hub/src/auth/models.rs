@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use wavvon_identity::SubkeyCert;
 
-use crate::routes::bot_models::BotMeta;
 use crate::routes::certs::Certification;
 
 #[derive(Deserialize)]
@@ -42,7 +41,7 @@ pub struct VerifyRequest {
     /// master to find the canonical user row across devices.
     #[serde(default)]
     pub subkey_cert: Option<SubkeyCert>,
-    /// Bot challenge token (required when challenge_mode != 'off').
+    /// Admission challenge token (required when challenge_mode != 'off').
     #[serde(default)]
     pub challenge_token: Option<String>,
     /// Hub self-declaration. When true the caller is a peer hub authenticating
@@ -51,18 +50,18 @@ pub struct VerifyRequest {
     /// so that `PeerHub` can distinguish it from regular user sessions.
     #[serde(default)]
     pub is_hub: Option<bool>,
-    /// External bot self-declaration. When true, the hub expects a
-    /// pre-existing `users` row with approval_status='bot_pending'.
-    #[serde(default)]
-    pub is_bot: Option<bool>,
-    /// Bot metadata to upsert on successful auth. Only processed when
-    /// is_bot=true.
-    #[serde(default)]
-    pub bot_meta: Option<BotMeta>,
     /// Hub certifications presented at auth time. Evaluated when
     /// cert_mode != 'none' (Task #21).
     #[serde(default)]
     pub certifications: Option<Vec<Certification>>,
+    /// Voice in alliance channels (alliances.md): an origin hub's signed
+    /// assertion that the caller is its member and the named channel is shared
+    /// with an alliance this hub is in. Admits a **visitor** — an
+    /// `alliance_voice`-scoped session with no `users` row — and is ignored
+    /// entirely for anyone who is already a member here, who has a better
+    /// session available.
+    #[serde(default)]
+    pub alliance_voice_grant: Option<crate::routes::alliances::AllianceVoiceGrant>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -85,14 +84,4 @@ pub struct VerifyResponse {
 pub struct ChallengeTokenField {
     #[serde(default)]
     pub challenge_token: Option<String>,
-}
-
-/// Response body for `POST /auth/renew`.
-/// Carries the new token and its expiry so the bot can schedule the next
-/// renewal without polling.
-#[derive(Serialize, Deserialize)]
-pub struct RenewResponse {
-    pub token: String,
-    /// Unix timestamp (seconds) when this token expires.
-    pub expires_at: i64,
 }

@@ -40,6 +40,45 @@ pub(super) fn send_whisper_notification(
     let _ = state.chat_tx.send((ev, json));
 }
 
+/// How one pubkey in a voice room is named to everyone else: display name,
+/// bot flag, and — for an alliance-voice visitor — the hub that vouched for
+/// them (alliances.md).
+///
+/// A visitor has no `users` row here by design, so the plain lookup returns
+/// nothing and, before this, they appeared as a bare key. Their name is
+/// hub-asserted rather than proven, which is why it never travels without the
+/// hub that asserted it: a client renders "name · HubName", never a name that
+/// could pass for a local member's.
+pub async fn voice_identity(state: &AppState, pubkey: &str) -> (Option<String>, Option<String>) {
+    let member: Option<Option<String>> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
+            .bind(pubkey)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    if let Some(display_name) = member {
+        return (display_name, None);
+    }
+
+    let visitor: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT v.display_name, m.hub_name
+         FROM alliance_voice_visitors v
+         LEFT JOIN alliance_members m ON m.hub_public_key = v.origin_hub_pubkey
+         WHERE v.subject_pubkey = $1",
+    )
+    .bind(pubkey)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    match visitor {
+        Some((display_name, hub_name)) => (display_name, hub_name),
+        None => (None, None),
+    }
+}
+
 /// Builds the participant list for `channel_id` as seen by `viewer`:
 /// invisible members are omitted (decisions.md 2026-07-12 — invisible users
 /// are shown offline to everyone else; the voice list was the known gap),
@@ -70,24 +109,13 @@ pub async fn get_voice_participants(
         .iter()
         .filter(|pk| Some(pk.as_str()) == viewer || !invisible.contains(*pk))
     {
-        let row: Option<(Option<String>, bool)> =
-            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
-                .bind(pk)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-
-        let (display_name, is_bot) = match row {
-            Some((dn, b)) => (dn, b),
-            None => (None, false),
-        };
+        let (display_name, visiting_from) = voice_identity(state, pk).await;
 
         result.push(VoiceParticipantInfo {
             public_key: pk.clone(),
             display_name,
-            is_bot,
             sender_id: sender_ids.get(pk).copied(),
+            visiting_from,
         });
     }
     result
@@ -214,7 +242,7 @@ pub(super) async fn re_resolve_whisper_sessions(state: &AppState) {
 /// Called from the voice-join path (`routes/ws/handlers/voice.rs`) right
 /// after a join succeeds. Pushes a `voice_move`
 /// exactly like a live move — creating a voice-only presence grant (§7.4)
-/// first if the target lacks `READ_MESSAGES` on the assigned channel. The
+/// first if the target lacks `MESSAGES_READ` on the assigned channel. The
 /// assignment row is intentionally left in place (not consumed): a
 /// drop-and-rejoin during the event re-applies it (doc ruling).
 ///
@@ -228,8 +256,8 @@ pub async fn apply_pending_voice_move_assignment(
 ) {
     let now = crate::auth::handlers::unix_timestamp();
 
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT ema.event_id, ema.target_channel_id
+    let row: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT ema.event_id, ema.target_channel_id, ema.assigned_by
          FROM event_move_assignments ema
          INNER JOIN hub_events he ON he.id = ema.event_id
          WHERE ema.user_pubkey = $1
@@ -246,9 +274,52 @@ pub async fn apply_pending_voice_move_assignment(
     .ok()
     .flatten();
 
-    let Some((event_id, target_channel_id)) = row else {
+    let Some((event_id, target_channel_id, assigned_by)) = row else {
         return;
     };
+
+    push_event_move(
+        state,
+        pubkey,
+        &event_id,
+        &target_channel_id,
+        joined_channel_id,
+        &assigned_by,
+    )
+    .await;
+}
+
+/// Push one queued assignment as a `voice_move`, from whichever trigger
+/// reached it: the target's voice join, or the event's start
+/// (`reminder_worker`). Shared so both triggers apply the same rules.
+///
+/// `assigned_by`'s authority is re-checked here, not only when the assignment
+/// was written: an organizer demoted between the two must not still be moving
+/// people, and a queued move can outlive the role that authorised it by hours.
+pub async fn push_event_move(
+    state: &AppState,
+    pubkey: &str,
+    event_id: &str,
+    target_channel_id: &str,
+    source_channel_id: &str,
+    assigned_by: &str,
+) {
+    let target_channel_id = target_channel_id.to_string();
+    let event_id = event_id.to_string();
+
+    match crate::permissions::channel_permissions(&state.db, assigned_by, &target_channel_id).await
+    {
+        Ok(perms) if perms.has(crate::permissions::VOICE_MOVE_MEMBERS) => {}
+        _ => {
+            tracing::info!(
+                "Queued voice move skipped: {} no longer holds move_members on channel {} (event {})",
+                &assigned_by[..16.min(assigned_by.len())],
+                &target_channel_id[..8.min(target_channel_id.len())],
+                event_id
+            );
+            return;
+        }
+    }
 
     let target_channel_name: Option<String> =
         sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND is_category = false")
@@ -266,11 +337,11 @@ pub async fn apply_pending_voice_move_assignment(
     };
 
     // §7.4: create a voice-only presence grant before the push if the
-    // target lacks effective READ_MESSAGES on the assigned channel.
+    // target lacks effective MESSAGES_READ on the assigned channel.
     if let Ok(perms) =
         crate::permissions::channel_permissions(&state.db, pubkey, &target_channel_id).await
     {
-        if !perms.has(crate::permissions::READ_MESSAGES) {
+        if !perms.has(crate::permissions::MESSAGES_READ) {
             state
                 .staging_voice_grants
                 .write()
@@ -299,7 +370,7 @@ pub async fn apply_pending_voice_move_assignment(
     let push = crate::routes::chat_models::WsServerMessage::VoiceMove {
         target_channel_id: target_channel_id.clone(),
         target_channel_name,
-        source_channel_id: Some(joined_channel_id.to_string()),
+        source_channel_id: Some(source_channel_id.to_string()),
         event_id: Some(event_id.clone()),
         auto,
     };

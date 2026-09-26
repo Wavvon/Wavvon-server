@@ -20,8 +20,11 @@
 # resulting layer so COPY --from=web-builder in the runtime stage never fails.
 #
 # CI/release: actions/checkout puts Wavvon-client at web-client-src/ in the context
-#   → pnpm install --frozen-lockfile && pnpm --filter wavvon-web build
-#   → /web-client contains the built SPA from apps/web/dist/.
+#   → pnpm install --frozen-lockfile && pnpm --filter wavvon-web build:hub
+#   → /web-client contains the built SPA from apps/web/dist-hub/.
+#   → The *hub* target, not the default one: a hub serves the client for itself
+#     alone, with no add-hub, no directory and no home-hub editor. The user
+#     build (apps/web/dist) is the multi-hub client, hosted elsewhere.
 #   → ENV WAVVON_WEB_CLIENT_DIR=/web-client activates serving.
 #
 # Local `docker build` without web-client-src/:
@@ -46,8 +49,8 @@ RUN mkdir -p /web-client && \
     if [ -f /build-web/web-client-src/apps/web/package.json ]; then \
         cd /build-web/web-client-src && \
         pnpm install --frozen-lockfile && \
-        pnpm --filter wavvon-web build && \
-        cp -r apps/web/dist/. /web-client/; \
+        pnpm --filter wavvon-web build:hub && \
+        cp -r apps/web/dist-hub/. /web-client/; \
     fi
 
 # ── Rust build stage ──────────────────────────────────────────────────────────

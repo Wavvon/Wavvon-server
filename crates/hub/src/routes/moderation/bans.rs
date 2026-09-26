@@ -1,12 +1,16 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, BAN_MEMBERS, KICK_MEMBERS, MUTE_MEMBERS, TIMEOUT_MEMBERS};
+use crate::permissions::{
+    self, MODERATION_BAN_PERMANENT, MODERATION_BAN_TEMPORARY, MODERATION_KICK, MODERATION_MUTE,
+    MODERATION_TIMEOUT,
+};
 use crate::routes::moderation_models::*;
+use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
 use super::models::{require_can_moderate, BanRow, MuteRow};
@@ -45,23 +49,38 @@ pub async fn ban_user(
     user: AuthUser,
     Json(req): Json<BanRequest>,
 ) -> Result<(StatusCode, Json<BanResponse>), (StatusCode, String)> {
-    require_can_moderate(
-        &state,
-        &user.public_key,
-        &req.target_public_key,
-        BAN_MEMBERS,
-    )
-    .await?;
+    // Which permission this needs is decided by the request, not the route:
+    // the split is by irreversibility, and a caller who may cool someone off
+    // for an hour is not thereby allowed to end their membership for good.
+    let needed = match req.duration_seconds {
+        Some(_) => MODERATION_BAN_TEMPORARY,
+        None => MODERATION_BAN_PERMANENT,
+    };
+    require_can_moderate(&state, &user.public_key, &req.target_public_key, needed).await?;
 
     let now = crate::auth::handlers::unix_timestamp();
+    let expires_at = match req.duration_seconds {
+        // A zero-length ban is a request the caller did not mean: it would
+        // read as permanent everywhere downstream, which is the opposite of
+        // what they asked for.
+        Some(0) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "duration_seconds must be greater than zero".to_string(),
+            ))
+        }
+        Some(secs) => Some(now + secs as i64),
+        None => None,
+    };
 
     sqlx::query(
-        "INSERT INTO bans (target_public_key, banned_by, reason, created_at) VALUES ($1, $2, $3, $4)
-         ON CONFLICT (target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, created_at = excluded.created_at",
+        "INSERT INTO bans (target_public_key, banned_by, reason, expires_at, created_at) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (target_public_key) DO UPDATE SET banned_by = excluded.banned_by, reason = excluded.reason, expires_at = excluded.expires_at, created_at = excluded.created_at",
     )
     .bind(&req.target_public_key)
     .bind(&user.public_key)
     .bind(&req.reason)
+    .bind(expires_at)
     .bind(now)
     .execute(&state.db)
     .await
@@ -85,13 +104,13 @@ pub async fn ban_user(
         let target = req.target_public_key.clone();
         let reason = req.reason.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.banned",
                 Some(&actor),
                 Some(&target),
                 None,
-                serde_json::json!({ "reason": reason }),
+                serde_json::json!({ "reason": reason, "expires_at": expires_at }),
             )
             .await;
         });
@@ -103,6 +122,7 @@ pub async fn ban_user(
             target_public_key: req.target_public_key,
             banned_by: user.public_key,
             reason: req.reason,
+            expires_at,
             created_at: now,
         }),
     ))
@@ -114,7 +134,7 @@ pub async fn unban_user(
     Path(target_key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(BAN_MEMBERS)?;
+    perms.require(MODERATION_BAN_PERMANENT)?;
 
     sqlx::query("DELETE FROM bans WHERE target_public_key = $1")
         .bind(&target_key)
@@ -128,13 +148,20 @@ pub async fn unban_user(
 pub async fn list_bans(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<BanResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(BAN_MEMBERS)?;
+    perms.require(MODERATION_BAN_PERMANENT)?;
 
     let rows = sqlx::query_as::<_, BanRow>(
-        "SELECT target_public_key, banned_by, reason, created_at FROM bans ORDER BY created_at DESC",
+        "SELECT target_public_key, banned_by, reason, expires_at, created_at FROM bans
+         WHERE ($1::text IS NULL OR (created_at, target_public_key) <
+                ((SELECT created_at FROM bans WHERE target_public_key = $1), $1))
+         ORDER BY created_at DESC, target_public_key DESC
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -145,6 +172,7 @@ pub async fn list_bans(
                 target_public_key: r.target_public_key,
                 banned_by: r.banned_by,
                 reason: r.reason,
+                expires_at: r.expires_at,
                 created_at: r.created_at,
             })
             .collect(),
@@ -162,7 +190,7 @@ pub async fn mute_user(
         &state,
         &user.public_key,
         &req.target_public_key,
-        MUTE_MEMBERS,
+        MODERATION_MUTE,
     )
     .await?;
 
@@ -200,7 +228,7 @@ pub async fn unmute_user(
     Path(target_key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     sqlx::query("DELETE FROM mutes WHERE target_public_key = $1")
         .bind(&target_key)
@@ -214,13 +242,20 @@ pub async fn unmute_user(
 pub async fn list_mutes(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<MuteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     let rows = sqlx::query_as::<_, MuteRow>(
-        "SELECT target_public_key, muted_by, reason, expires_at, created_at FROM mutes ORDER BY created_at DESC",
+        "SELECT target_public_key, muted_by, reason, expires_at, created_at FROM mutes
+         WHERE ($1::text IS NULL OR (created_at, target_public_key) <
+                ((SELECT created_at FROM mutes WHERE target_public_key = $1), $1))
+         ORDER BY created_at DESC, target_public_key DESC
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -249,7 +284,7 @@ pub async fn timeout_user(
         &state,
         &user.public_key,
         &req.target_public_key,
-        TIMEOUT_MEMBERS,
+        MODERATION_TIMEOUT,
     )
     .await?;
 
@@ -298,7 +333,7 @@ pub async fn kick_user(
         &state,
         &user.public_key,
         &req.target_public_key,
-        KICK_MEMBERS,
+        MODERATION_KICK,
     )
     .await?;
 
@@ -322,7 +357,7 @@ pub async fn kick_user(
         let actor = user.public_key.clone();
         let target = req.target_public_key.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.kicked",
                 Some(&actor),

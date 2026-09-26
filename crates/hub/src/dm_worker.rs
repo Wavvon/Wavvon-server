@@ -35,7 +35,7 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
     let now = crate::auth::handlers::unix_timestamp();
 
     let due: Vec<OutboxRow> = sqlx::query_as::<_, OutboxRow>(
-        "SELECT message_id, recipient_hub_url, attempts
+        "SELECT message_id, recipient_hub_url, attempts, COALESCE(mirror, FALSE) AS mirror
          FROM dm_outbox
          WHERE bounced_at IS NULL AND next_attempt_at <= $1
          LIMIT 100",
@@ -45,7 +45,30 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
     .await?;
 
     for row in due {
-        let Some(envelope) = load_envelope(state, &row.message_id).await? else {
+        let loaded = match load_envelope(state, &row.message_id).await {
+            Ok(v) => v,
+            // One unreadable row must not take the queue with it: propagating
+            // here aborts the whole batch and the next tick starts on the same
+            // row, so every other queued DM waits behind it forever. Bounce it
+            // with the reason recorded, exactly like a delivery that kept
+            // failing, and carry on.
+            Err(LoadEnvelopeError::Unreadable(why)) => {
+                sqlx::query(
+                    "UPDATE dm_outbox SET last_error = $1, bounced_at = $2
+                     WHERE message_id = $3 AND recipient_hub_url = $4",
+                )
+                .bind(&why)
+                .bind(now)
+                .bind(&row.message_id)
+                .bind(&row.recipient_hub_url)
+                .execute(&state.db)
+                .await?;
+                tracing::error!("DM {} bounced unsent: {why}", &row.message_id[..8]);
+                continue;
+            }
+            Err(LoadEnvelopeError::Db(e)) => return Err(e),
+        };
+        let Some(mut envelope) = loaded else {
             // Message was deleted from dm_messages — drop the orphan.
             sqlx::query("DELETE FROM dm_outbox WHERE message_id = $1 AND recipient_hub_url = $2")
                 .bind(&row.message_id)
@@ -54,6 +77,9 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
                 .await?;
             continue;
         };
+
+        // A copy stays a copy across retries — see the `mirror` column.
+        envelope.mirror = row.mirror;
 
         match super::routes::dms::deliver_federated_dm_public(
             state,
@@ -117,10 +143,23 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// A row that cannot be rebuilt is not the same failure as a database that
+/// cannot be read: one is about this message, the other about every message.
+enum LoadEnvelopeError {
+    Db(sqlx::Error),
+    Unreadable(String),
+}
+
+impl From<sqlx::Error> for LoadEnvelopeError {
+    fn from(e: sqlx::Error) -> Self {
+        LoadEnvelopeError::Db(e)
+    }
+}
+
 async fn load_envelope(
     state: &AppState,
     message_id: &str,
-) -> Result<Option<FederatedDmRequest>, sqlx::Error> {
+) -> Result<Option<FederatedDmRequest>, LoadEnvelopeError> {
     use crate::routes::dm_models::{EncryptedDmEnvelope, GroupEncryptedEnvelope};
 
     #[allow(clippy::type_complexity)]
@@ -170,20 +209,36 @@ async fn load_envelope(
     let is_encrypted = msg.7;
     let is_group_encrypted = msg.9;
 
-    let encrypted_envelope = if is_encrypted {
-        msg.8
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<EncryptedDmEnvelope>(s).ok())
-    } else {
-        None
+    // A row that says "encrypted" whose stored envelope will not parse used to
+    // be delivered anyway — an encrypted DM carrying nothing, which at the far
+    // end is what a tampered message looks like, recorded here as a success.
+    // Nothing has been seen to produce it (this code wrote the JSON on send),
+    // but this is the crate that changes envelope formats without migrating
+    // what is already queued, which is exactly that shape. It now refuses,
+    // and the caller bounces the row with the reason on it.
+    let envelope_json = |flag: bool, kind: &str| -> Result<Option<&str>, LoadEnvelopeError> {
+        if !flag {
+            return Ok(None);
+        }
+        msg.8.as_deref().map(Some).ok_or_else(|| {
+            LoadEnvelopeError::Unreadable(format!("{kind} is set but ciphertext_json is NULL"))
+        })
     };
 
-    let group_encrypted_envelope = if is_group_encrypted {
-        msg.8
-            .as_deref()
-            .and_then(|s| serde_json::from_str::<GroupEncryptedEnvelope>(s).ok())
-    } else {
-        None
+    let encrypted_envelope = match envelope_json(is_encrypted, "is_encrypted")? {
+        Some(s) => Some(serde_json::from_str::<EncryptedDmEnvelope>(s).map_err(|e| {
+            LoadEnvelopeError::Unreadable(format!("unparsable EncryptedDmEnvelope: {e}"))
+        })?),
+        None => None,
+    };
+
+    let group_encrypted_envelope = match envelope_json(is_group_encrypted, "is_group_encrypted")? {
+        Some(s) => Some(
+            serde_json::from_str::<GroupEncryptedEnvelope>(s).map_err(|e| {
+                LoadEnvelopeError::Unreadable(format!("unparsable GroupEncryptedEnvelope: {e}"))
+            })?,
+        ),
+        None => None,
     };
 
     // Re-derive the top-level signer_cert from the stored envelope so a
@@ -207,6 +262,9 @@ async fn load_envelope(
         group_encrypted_envelope,
         sender_hub_url: None,
         signer_cert,
+        // Set per row by the caller: the message is neither an original nor a
+        // copy, the *delivery* is.
+        mirror: false,
     }))
 }
 
@@ -215,4 +273,5 @@ struct OutboxRow {
     message_id: String,
     recipient_hub_url: String,
     attempts: i64,
+    mirror: bool,
 }

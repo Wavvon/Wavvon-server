@@ -234,6 +234,80 @@ pub fn compare_row_counts(
     )
 }
 
+/// What a completed move carried.
+pub struct MoveReport {
+    pub rows: i64,
+    pub tables: usize,
+}
+
+/// Copy a hub's database from one PostgreSQL to another.
+///
+/// The third user of this one dump/restore path (decisions.md, "One mechanism
+/// moves the data"), and the reason it waited for bundled PostgreSQL: with no
+/// embedded side, moving was `backup` then `restore` against another URL,
+/// which both commands already did. With one, "adopt my own PostgreSQL" and
+/// "give it up again" are operations an operator actually has — and neither
+/// should require a `pg_dump` incantation they cannot run, because the
+/// binaries live inside our install directory.
+///
+/// **Copies, and stops.** Nothing switches mode here: the operator sets or
+/// unsets `WAVVON_DATABASE_URL` and restarts. The source is left intact, so a
+/// destination that misbehaves is undone by changing one variable back.
+///
+/// Database only. The identity file and the uploads directory are files on
+/// one machine and do not move with a database; `backup` is the command that
+/// takes all three.
+pub async fn move_database(source_url: &str, target_url: &str, force: bool) -> Result<MoveReport> {
+    if source_url == target_url {
+        bail!("the source and the destination are the same database");
+    }
+
+    let source = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(source_url)
+        .await
+        .context("cannot open the source database")?;
+    let target = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(target_url)
+        .await
+        .context("cannot open the destination database")?;
+
+    // Direction first, before a single byte is written. A dump restores into
+    // an equal or newer major and not into an older one — and that cuts
+    // against intuition now that the bundled PostgreSQL follows upstream: the
+    // embedded side is usually the *newer* one, so "move my data to my own
+    // PostgreSQL" is the direction most likely to be refused.
+    let source_version = server_version_num(&source).await?;
+    let target_version = server_version_num(&target).await?;
+    check_direction(source_version, target_version)?;
+
+    if !is_empty(&target).await? && !force {
+        bail!(
+            "the destination already has tables. Writing into it would merge two hubs into one. \
+             Point at an empty database, or pass --force if you meant this one."
+        );
+    }
+
+    let schema = current_schema(&source).await?;
+    let expected = row_counts(&source).await?;
+
+    let staging = tempfile::tempdir()?;
+    let dump_path = staging.path().join("database.dump");
+    dump(source_url, &dump_path, &schema)?;
+    restore(target_url, &dump_path)?;
+
+    // The source's counts are the contract, exactly as an archive's are for a
+    // restore: a partial move is reported as partial rather than as done.
+    let actual = row_counts(&target).await?;
+    compare_row_counts(&expected, &actual)?;
+
+    Ok(MoveReport {
+        rows: expected.values().sum(),
+        tables: expected.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

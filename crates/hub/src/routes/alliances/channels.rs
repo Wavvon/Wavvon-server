@@ -5,8 +5,9 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
+use super::models;
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions;
 use crate::routes::alliance_models::*;
 use crate::routes::post_models::{
     CreatePostRequest, CreateReplyRequest, PostDetail, PostListParams, PostListResponse,
@@ -30,7 +31,35 @@ use super::models::{EffectiveChannelRow, LocalMessageRow, MemberRow};
 /// whenever the real parent is not itself part of the effective set.
 /// Order is depth-first-ish (depth, then display_order) so categories tend
 /// to precede their children.
-async fn effective_shared_channels(
+/// A federation token for one alliance peer, from the cache or freshly
+/// obtained. `None` means the peer could not be authenticated to and the caller
+/// should move on to the next one — every caller here is walking members
+/// looking for the one that owns a channel, and one unreachable hub must not
+/// fail the whole walk.
+pub(super) async fn peer_token(state: &AppState, member: &MemberRow) -> Option<String> {
+    if let Some(t) = state
+        .peer_tokens
+        .read()
+        .await
+        .get(&member.hub_public_key)
+        .cloned()
+    {
+        return Some(t);
+    }
+    let t = state
+        .federation_client
+        .authenticate(&member.hub_url, &state.hub_identity)
+        .await
+        .ok()?;
+    state
+        .peer_tokens
+        .write()
+        .await
+        .insert(member.hub_public_key.clone(), t.clone());
+    Some(t)
+}
+
+pub(super) async fn effective_shared_channels(
     db: &sqlx::PgPool,
     alliance_id: &str,
 ) -> Result<Vec<EffectiveChannelRow>, sqlx::Error> {
@@ -78,8 +107,15 @@ pub async fn share_channel(
     Path(alliance_id): Path<String>,
     Json(req): Json<ShareChannelRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+    // Both halves, and the second one is the point (decisions.md, "Alliance
+    // permissions"): sharing a channel is also a channel act, so managing one
+    // federation link must not let someone expose a private channel they
+    // cannot even read.
+    super::require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
+    permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id)
+        .await?
+        .require(permissions::CHANNELS_MANAGE)?;
 
     // Verify alliance exists
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM alliances WHERE id = $1")
@@ -115,6 +151,15 @@ pub async fn share_channel(
         }
     }
 
+    if let Some(policy) = &req.voice_remote_join {
+        if !matches!(policy.as_str(), "allowed" | "none") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "voice_remote_join must be 'allowed' or 'none'".to_string(),
+            ));
+        }
+    }
+
     let now = crate::auth::handlers::unix_timestamp();
 
     // `forum_remote_write` is COALESCEd on both branches: an insert with no
@@ -123,17 +168,19 @@ pub async fn share_channel(
     // that omits the field leaves the existing policy untouched rather than
     // clobbering it back to the default.
     sqlx::query(
-        "INSERT INTO alliance_shared_channels (alliance_id, channel_id, shared_at, include_descendants, forum_remote_write)
-         VALUES ($1, $2, $3, $4, COALESCE($5, 'replies_only'))
+        "INSERT INTO alliance_shared_channels (alliance_id, channel_id, shared_at, include_descendants, forum_remote_write, voice_remote_join)
+         VALUES ($1, $2, $3, $4, COALESCE($5, 'replies_only'), COALESCE($6, 'allowed'))
          ON CONFLICT (alliance_id, channel_id)
          DO UPDATE SET include_descendants = EXCLUDED.include_descendants,
-                       forum_remote_write = COALESCE($5, alliance_shared_channels.forum_remote_write)",
+                       forum_remote_write = COALESCE($5, alliance_shared_channels.forum_remote_write),
+                       voice_remote_join = COALESCE($6, alliance_shared_channels.voice_remote_join)",
     )
     .bind(&alliance_id)
     .bind(&req.channel_id)
     .bind(now)
     .bind(req.include_descendants)
     .bind(&req.forum_remote_write)
+    .bind(&req.voice_remote_join)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -146,8 +193,14 @@ pub async fn unshare_channel(
     user: AuthUser,
     Path((alliance_id, channel_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+    // Same pair as sharing: unsharing is the same channel act in reverse, and
+    // an asymmetric check would let a delegate undo a decision they could not
+    // have made.
+    super::require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
+    permissions::channel_permissions(&state.db, &user.public_key, &channel_id)
+        .await?
+        .require(permissions::CHANNELS_MANAGE)?;
 
     sqlx::query("DELETE FROM alliance_shared_channels WHERE alliance_id = $1 AND channel_id = $2")
         .bind(&alliance_id)
@@ -175,10 +228,17 @@ pub struct ListSharedChannelsQuery {
 
 pub async fn list_shared_channels(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(alliance_id): Path<String>,
     Query(q): Query<ListSharedChannelsQuery>,
 ) -> Result<Json<Vec<SharedChannelResponse>>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+    // A stale member list loses content silently, and this is the read that
+    // depends on it. Local callers only: a peer answers `local_only` and must
+    // not start a second conversation about who is here.
+    if !q.local_only && !models::caller_is_peer(&state, &user.public_key).await? {
+        super::membership::reconcile_members(&state, &alliance_id).await;
+    }
     let hub_key = state.hub_identity.public_key_hex();
 
     // 1) Locally shared channels -- the effective set (explicit shares plus
@@ -190,14 +250,17 @@ pub async fn list_shared_channels(
     // forum_remote_write only lives on the *direct* share row (see
     // `forum_write_policy` in routes/posts.rs); descendant-inherited entries
     // fall back to the same default the migration applies.
-    let policy_rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT channel_id, forum_remote_write FROM alliance_shared_channels WHERE alliance_id = $1",
+    let policy_rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT channel_id, forum_remote_write, voice_remote_join FROM alliance_shared_channels WHERE alliance_id = $1",
     )
     .bind(&alliance_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let policy_map: std::collections::HashMap<String, String> = policy_rows.into_iter().collect();
+    let policy_map: std::collections::HashMap<String, (String, String)> = policy_rows
+        .into_iter()
+        .map(|(id, forum, voice)| (id, (forum, voice)))
+        .collect();
 
     let local_hub_name = crate::routes::hub::current_hub_name(&state).await;
     let mut out: Vec<SharedChannelResponse> = rows
@@ -205,8 +268,12 @@ pub async fn list_shared_channels(
         .map(|r| SharedChannelResponse {
             forum_remote_write: policy_map
                 .get(&r.id)
-                .cloned()
+                .map(|(forum, _)| forum.clone())
                 .unwrap_or_else(|| "replies_only".to_string()),
+            voice_remote_join: policy_map
+                .get(&r.id)
+                .map(|(_, voice)| voice.clone())
+                .unwrap_or_else(|| "allowed".to_string()),
             channel_id: r.id,
             channel_name: r.name,
             hub_public_key: hub_key.clone(),
@@ -303,8 +370,9 @@ pub async fn post_alliance_channel_message(
     ),
     (StatusCode, String),
 > {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(crate::permissions::SEND_MESSAGES)?;
+    perms.require(crate::permissions::MESSAGES_SEND)?;
 
     let hub_key = state.hub_identity.public_key_hex();
 
@@ -430,6 +498,7 @@ pub async fn get_alliance_forum_posts(
     Path((alliance_id, channel_id)): Path<(String, String)>,
     Query(params): Query<PostListParams>,
 ) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let hub_key = state.hub_identity.public_key_hex();
 
     let effective = effective_shared_channels(&state.db, &alliance_id)
@@ -526,6 +595,7 @@ pub async fn get_alliance_forum_post(
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
     Query(params): Query<ReplyListParams>,
 ) -> Result<Json<PostDetail>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let hub_key = state.hub_identity.public_key_hex();
 
     let effective = effective_shared_channels(&state.db, &alliance_id)
@@ -625,6 +695,7 @@ pub async fn post_alliance_forum_post(
     Path((alliance_id, channel_id)): Path<(String, String)>,
     Json(req): Json<CreatePostRequest>,
 ) -> Result<(StatusCode, Json<PostDetail>), (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -712,6 +783,7 @@ pub async fn post_alliance_forum_reply(
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
     Json(req): Json<CreateReplyRequest>,
 ) -> Result<(StatusCode, Json<ReplyView>), (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -807,6 +879,7 @@ pub async fn react_alliance_forum(
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -915,6 +988,7 @@ pub async fn delete_alliance_forum_post(
     user: AuthUser,
     Path((alliance_id, channel_id, post_id)): Path<(String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -1000,6 +1074,7 @@ pub async fn delete_alliance_forum_reply(
     user: AuthUser,
     Path((alliance_id, channel_id, post_id, reply_id)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -1088,6 +1163,7 @@ pub async fn get_alliance_channel_messages(
     user: AuthUser,
     Path((alliance_id, channel_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<crate::routes::chat_models::MessageResponse>>, (StatusCode, String)> {
+    models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
     let hub_key = state.hub_identity.public_key_hex();
 
     // Locally-owned alliance channel (explicit share, or a descendant of an
@@ -1169,27 +1245,8 @@ pub async fn get_alliance_channel_messages(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
+        let Some(token) = peer_token(&state, &member).await else {
+            continue;
         };
 
         // Check if this peer owns the channel by listing their shared channels.

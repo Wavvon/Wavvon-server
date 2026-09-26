@@ -2,17 +2,9 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 pub struct BootstrapConfig {
-    /// Raw template JSON URL, or a `wavvon://templates/<id>` discovery pointer.
-    /// Second in precedence, behind `bootstrap_token`. See hub-creation-wizard.md
-    /// piece 1/3 (discovery catalog + wizard) — this hub crate only *consumes*
-    /// a resolved template, it never talks to the catalog beyond a plain GET.
+    /// Raw template JSON URL. Highest precedence. The hub only ever does a
+    /// plain GET of it — there is no catalogue to talk to.
     pub template_url: Option<String>,
-    /// Wizard-issued one-use token, redeemed against `discovery_url`. Highest
-    /// precedence — carries the operator's customisations. Deferred here: the
-    /// hub does not verify the JWT itself (see hub-creation-wizard.md §2), it
-    /// only presents it to discovery's redeem endpoint.
-    pub bootstrap_token: Option<String>,
-    pub discovery_url: String,
     /// Path to a local template JSON file (`WAVVON_TEMPLATE_FILE`). Third in
     /// precedence. This is the offline/no-catalog equivalent of `template_url`
     /// — same document shape, no signature verification (local files are
@@ -66,11 +58,7 @@ pub async fn maybe_bootstrap(
     }
 
     // No bootstrap source configured — start blank.
-    if cfg.bootstrap_token.is_none()
-        && cfg.template_url.is_none()
-        && cfg.template_file.is_none()
-        && cfg.preset.is_none()
-    {
+    if cfg.template_url.is_none() && cfg.template_file.is_none() && cfg.preset.is_none() {
         tracing::info!("No bootstrap config set; starting blank hub");
         return Ok(());
     }
@@ -83,43 +71,12 @@ pub async fn maybe_bootstrap(
         presets::resolve(name).map_err(anyhow::Error::msg)?;
     }
 
-    // Resolve config JSON in precedence order: bootstrap_token (wizard
-    // handoff, carries customisations) > template_url (raw catalog/URL
-    // pointer) > template_file (local offline template) > preset (built-in,
-    // no-network fallback).
-    let config_json = if let Some(token) = &cfg.bootstrap_token {
-        let url = format!("{}/api/bootstrap/redeem", cfg.discovery_url);
-        tracing::info!("Redeeming bootstrap token from {url}");
-        match http
-            .post(&url)
-            .json(&serde_json::json!({ "token": token }))
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<serde_json::Value>().await {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        tracing::warn!("Bootstrap token response was not valid JSON ({e}); trying template_url");
-                        resolve_fallback(cfg, http).await
-                    }
-                }
-            }
-            Ok(resp) => {
-                tracing::warn!(
-                    "Bootstrap token redeem returned {}; trying template_url",
-                    resp.status()
-                );
-                resolve_fallback(cfg, http).await
-            }
-            Err(e) => {
-                tracing::warn!("Bootstrap token redeem failed ({e}); trying template_url");
-                resolve_fallback(cfg, http).await
-            }
-        }
-    } else {
-        resolve_fallback(cfg, http).await
-    };
+    // Resolve config JSON in precedence order: template_url (a plain GET of a
+    // JSON document the operator points at) > template_file (the same document
+    // on disk) > preset (built-in, no network). All three are things the
+    // operator supplies, which is the only way a hub is set up now — the
+    // wizard handoff that used to sit above them is gone with the wizard.
+    let config_json = resolve_fallback(cfg, http).await;
 
     let Some(config) = config_json else {
         tracing::info!("No bootstrap config resolved; starting blank hub");
@@ -157,7 +114,7 @@ async fn resolve_fallback(
     cfg: &BootstrapConfig,
     http: &reqwest::Client,
 ) -> Option<serde_json::Value> {
-    if let Some(v) = fetch_template(&cfg.template_url, &cfg.discovery_url, http).await {
+    if let Some(v) = fetch_template(&cfg.template_url, http).await {
         return Some(v);
     }
     if let Some(path) = &cfg.template_file {
@@ -195,34 +152,20 @@ fn load_template_file(path: &str) -> Option<serde_json::Value> {
     }
 }
 
-/// Resolve a template URL and return its JSON payload.
+/// Fetch a template document over plain HTTP(S) and return its JSON.
 ///
-/// Handles two forms:
-/// - `wavvon://templates/<id>` — resolved against the discovery service as
-///   `{discovery_url}/api/templates/<id>`; returns the `payload` field of the
-///   response JSON (the full response if `payload` is absent).
-/// - Any HTTPS/HTTP URL — fetched directly.
+/// The `wavvon://templates/<id>` pointer form went with the discovery
+/// catalogue: there is no catalogue to resolve an id against any more.
 ///
 /// Returns `None` on any failure so a bad template never blocks startup.
-async fn fetch_template(
-    url: &Option<String>,
-    discovery_url: &str,
-    http: &reqwest::Client,
-) -> Option<serde_json::Value> {
-    let raw = url.as_deref()?;
-
-    let resolved_url = if raw.starts_with("wavvon://templates/") {
-        let id = raw.trim_start_matches("wavvon://templates/");
-        format!("{discovery_url}/api/templates/{id}")
-    } else {
-        raw.to_owned()
-    };
+async fn fetch_template(url: &Option<String>, http: &reqwest::Client) -> Option<serde_json::Value> {
+    let resolved_url = url.as_deref()?.to_owned();
 
     tracing::info!("Fetching bootstrap template from {resolved_url}");
     match http.get(&resolved_url).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<serde_json::Value>().await {
             Ok(v) => {
-                // Discovery wraps templates: {"payload": {...}}  — unwrap if present.
+                // A document may still arrive wrapped as {"payload": {...}}.
                 if let Some(payload) = v.get("payload") {
                     if payload.is_object() {
                         return Some(payload.clone());
@@ -566,13 +509,13 @@ pub mod presets {
             ],
             "roles": [
                 { "name": "Member", "priority": 5,
-                  "permissions": ["read_messages", "send_messages", "create_posts", "start_game"] },
+                  "permissions": ["messages.read", "messages.send", "forum.posts.create"] },
                 { "name": "Moderator", "priority": 50,
-                  "permissions": ["manage_messages", "mute_members", "kick_members", "manage_channels"] }
+                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "channels.manage"] }
             ],
             "settings": {
                 // Re-added (was pulled in a4e57f9 as a stopgap: the lobby
-                // soft-landing — lobby-bot-survey.md Feature 1 — hard-403'd
+                // soft-landing — lobby-survey.md Feature 1 — hard-403'd
                 // every sub-level join instead of admitting them, which
                 // locked the OWNER out of their own first join). /auth/verify
                 // now admits a sub-level joiner into scope="lobby" instead of
@@ -608,9 +551,9 @@ pub mod presets {
             ],
             "roles": [
                 { "name": "Member", "priority": 5,
-                  "permissions": ["read_messages", "send_messages", "create_posts", "create_events"] },
+                  "permissions": ["messages.read", "messages.send", "forum.posts.create", "events.create"] },
                 { "name": "Moderator", "priority": 50,
-                  "permissions": ["manage_messages", "mute_members", "kick_members", "timeout_members", "manage_channels"] }
+                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "moderation.timeout", "channels.manage"] }
             ],
             "settings": {
                 "require_approval": false
@@ -745,8 +688,6 @@ mod bootstrap_tests {
     fn default_cfg() -> BootstrapConfig {
         BootstrapConfig {
             template_url: None,
-            bootstrap_token: None,
-            discovery_url: "https://discovery.wavvon.io".to_owned(),
             template_file: None,
             preset: None,
         }
@@ -767,7 +708,7 @@ mod bootstrap_tests {
                  "channel_type": "text", "category": "Lobby"}
             ],
             "roles": [
-                {"name": "Gamer", "priority": 10, "permissions": ["send_messages", "read_messages"]}
+                {"name": "Gamer", "priority": 10, "permissions": ["messages.send", "messages.read"]}
             ],
             "welcome_message": "Welcome to the hub!",
             "suggested_bots": ["bot-a", "bot-b"]
@@ -934,24 +875,23 @@ mod bootstrap_tests {
         assert!(bots_val.is_some(), "suggested_bots should be stored");
     }
 
-    // ── Test 5: wavvon:// URI resolution ─────────────────────────────────────
-    // The actual HTTP call would fail against a real server, but we can verify
-    // the URL rewriting logic produces the correct target URL by checking that
-    // the function returns None (since the URL is unreachable in CI) but doesn't
-    // panic or corrupt state.
+    // ── Test 5: an unusable template URL never blocks startup ───────────────
+    // The pointer form this used to resolve (`wavvon://templates/<id>`) went
+    // with the discovery catalogue. What still matters is the property that
+    // outlived it: whatever is in `template_url`, a hub that cannot fetch a
+    // template starts blank instead of failing to start.
 
     #[tokio::test]
-    async fn wavvon_uri_resolves_gracefully() {
+    async fn unusable_template_url_returns_none() {
         let http = reqwest::Client::new();
-        let result = fetch_template(
-            &Some("wavvon://templates/starter".into()),
-            "https://discovery.wavvon.io",
-            &http,
-        )
-        .await;
-        // The remote will be unreachable in CI — we only assert it doesn't panic
-        // and returns None (not an Err that would propagate to kill the hub).
-        let _ = result; // None or Some — either is acceptable
+        for url in [
+            "wavvon://templates/starter",         // no longer a scheme we resolve
+            "http://127.0.0.1:1/never-listening", // unreachable
+            "not a url at all",
+        ] {
+            let result = fetch_template(&Some(url.into()), &http).await;
+            assert!(result.is_none(), "{url} should resolve to None, not panic");
+        }
     }
 
     // ── Test 6: existing users (no channels) is also a no-op ──────────────────

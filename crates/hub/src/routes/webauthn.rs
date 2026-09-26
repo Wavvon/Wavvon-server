@@ -72,10 +72,12 @@ pub async fn register_begin(
     let exclude: Option<Vec<webauthn_rs::prelude::CredentialID>> = if existing.is_empty() {
         None
     } else {
+        // `CredentialID` is a `Vec<u8>` alias in webauthn-rs 0.6, so there is
+        // nothing to convert. The annotation on `exclude` keeps this honest:
+        // were it to become a newtype again, this stops compiling.
         let ids = existing
             .iter()
             .filter_map(|id| hex::decode(id).ok())
-            .map(webauthn_rs::prelude::CredentialID::from)
             .collect::<Vec<_>>();
         if ids.is_empty() {
             None
@@ -149,7 +151,7 @@ pub async fn register_finish(
         .finish_passkey_registration(&body.credential, &challenge.state)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Registration failed: {e}")))?;
 
-    let credential_id = hex::encode(passkey.cred_id().as_ref());
+    let credential_id = hex::encode(passkey.cred_id().as_slice());
     let passkey_json = serde_json::to_string(&passkey)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -286,7 +288,7 @@ pub async fn assert_finish(
         if sk.cred_id() == auth_result.cred_id() {
             sk.update_credential(&auth_result);
             let updated_json = serde_json::to_string(sk).unwrap_or_default();
-            let cred_id = hex::encode(sk.cred_id().as_ref());
+            let cred_id = hex::encode(sk.cred_id().as_slice());
             let _ = sqlx::query(
                 "UPDATE webauthn_credentials \
                  SET passkey_json = $1, last_used_at = $2 \

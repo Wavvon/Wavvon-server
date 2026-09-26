@@ -40,6 +40,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -58,7 +59,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: Arc::new(RwLock::new(None)),
@@ -68,7 +69,9 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: RwLock::new(HashMap::new()),
         whisper_optouts: RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
@@ -76,9 +79,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             Arc::new(
@@ -344,8 +346,18 @@ async fn key_offer_unknown_recipient_is_silently_dropped() {
 
     // The connection must remain alive — we can still receive voice_joined
     // (already consumed) so we just verify no error arrives within 1 s.
+    // `while let Some(Ok(TsMessage::Text(_)))` used to bound this loop, which
+    // made a WebSocket **control** frame end it: the pattern fails to match, the
+    // async block completes, and the timeout below never fires, so the test
+    // reports "the hub sent something" when what arrived was the hub's own
+    // keepalive Ping. Passed locally and failed in CI, where the ping lands
+    // inside the 500 ms window. Same shape as the `moderation_flow` flake.
     let no_error = tokio::time::timeout(std::time::Duration::from_millis(500), async {
-        while let Some(Ok(TsMessage::Text(raw))) = rx_a.next().await {
+        while let Some(Ok(frame)) = rx_a.next().await {
+            let TsMessage::Text(raw) = frame else {
+                // Ping/Pong/Binary are protocol traffic, not an answer.
+                continue;
+            };
             let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
             if v.get("type").and_then(|t| t.as_str()) == Some("error") {
                 panic!("unexpected error from hub: {v}");
@@ -431,4 +443,117 @@ async fn sender_id_present_in_key_received() {
         received_sender_id, b_sender_id,
         "from_sender_id in voice_key_received must match B's assigned sender_id"
     );
+}
+
+/// Two sessions of one pubkey, and the one that stays gets the key.
+///
+/// Registration used to be one sender per pubkey: the newer socket
+/// overwrote the older, and then the *older* socket's disconnect cleanup
+/// removed the entry the newer one had just written. Whoever was left was
+/// registered nowhere, and a targeted message to them went into the void
+/// with nothing reporting it — for voice that is no sender key, so every
+/// datagram is dropped at the key lookup and the call is silent while the
+/// roster, the transport and the relay all look perfect. Two tabs, a paired
+/// device, or the overlap of an ordinary reconnect is enough to arrange it.
+#[tokio::test]
+async fn a_closed_second_session_does_not_unregister_the_first() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let token_a = authenticate_http(&base, &id_a).await;
+    let token_b = authenticate_http(&base, &id_b).await;
+    let ch = create_channel(&base, &token_a, "enc-two-sessions").await;
+
+    // A's real session, and then a second one — the shape of a second tab, or
+    // of the invite-minting context the browser suite opens with the owner's
+    // own saved session.
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token_a).await;
+    let (_tx_a2, rx_a2) = connect_ws(&base, &token_a).await;
+
+    send_ws(
+        &mut tx_a,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    // Wait for the join to land before the second session goes away, so the
+    // ordering under test is "registered, then a sibling disconnects".
+    let _ = next_msg_of_type(&mut rx_a, "voice_joined").await;
+
+    // The second session leaves. Dropping both halves closes the socket.
+    drop(rx_a2);
+    drop(_tx_a2);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let (mut tx_b, _rx_b) = connect_ws(&base, &token_b).await;
+    send_ws(
+        &mut tx_b,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    send_ws(
+        &mut tx_b,
+        json!({
+            "type": "voice_key_offer",
+            "channel_id": ch.id,
+            "bundles": [{
+                "recipient_pubkey": id_a.public_key_hex(),
+                "ciphertext_hex": "aabb",
+                "nonce_hex": "ccdd"
+            }]
+        }),
+    )
+    .await;
+
+    let msg = next_msg_of_type(&mut rx_a, "voice_key_received").await;
+    assert_eq!(
+        msg["from_pubkey"].as_str().unwrap(),
+        id_b.public_key_hex(),
+        "the surviving session must still receive keys addressed to its pubkey"
+    );
+}
+
+/// Both live sessions of one pubkey get the bundle.
+///
+/// The hub cannot tell which of a user's sockets is the one in voice, so it
+/// tells all of them; a client with no voice session ignores it. Picking one
+/// would be a guess, and the guess is what silenced people.
+#[tokio::test]
+async fn a_key_offer_reaches_every_live_session_of_the_recipient() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let token_a = authenticate_http(&base, &id_a).await;
+    let token_b = authenticate_http(&base, &id_b).await;
+    let ch = create_channel(&base, &token_a, "enc-fanout").await;
+
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token_a).await;
+    let (_tx_a2, mut rx_a2) = connect_ws(&base, &token_a).await;
+    send_ws(
+        &mut tx_a,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    let _ = next_msg_of_type(&mut rx_a, "voice_joined").await;
+
+    let (mut tx_b, _rx_b) = connect_ws(&base, &token_b).await;
+    send_ws(
+        &mut tx_b,
+        json!({
+            "type": "voice_key_offer",
+            "channel_id": ch.id,
+            "bundles": [{
+                "recipient_pubkey": id_a.public_key_hex(),
+                "ciphertext_hex": "0101",
+                "nonce_hex": "0202"
+            }]
+        }),
+    )
+    .await;
+
+    for rx in [&mut rx_a, &mut rx_a2] {
+        let msg = next_msg_of_type(rx, "voice_key_received").await;
+        assert_eq!(msg["ciphertext_hex"].as_str().unwrap(), "0101");
+    }
 }

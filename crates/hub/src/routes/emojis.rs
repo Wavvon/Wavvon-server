@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, HUB_APPEARANCE};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -74,7 +74,7 @@ pub async fn create_emoji(
     Json(req): Json<CreateEmojiRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_APPEARANCE)?;
 
     if req.name.is_empty() || req.data_b64.len() > 90_000 {
         return Err((StatusCode::BAD_REQUEST, "Invalid emoji".into()));
@@ -108,7 +108,7 @@ pub async fn delete_emoji(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_APPEARANCE)?;
 
     sqlx::query("DELETE FROM hub_emojis WHERE id = $1")
         .bind(&id)

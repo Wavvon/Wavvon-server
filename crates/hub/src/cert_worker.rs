@@ -64,14 +64,13 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
     let now = crate::auth::handlers::unix_timestamp();
     let threshold = now - standing_days * 86400;
 
-    // Candidates: approved, non-bot users who joined before the standing threshold
+    // Candidates: approved users who joined before the standing threshold
     // and whose pow_level meets the minimum (COALESCE to 0 when column absent/null),
     // and who have no non-revoked, non-expired cert currently active.
     let candidates: Vec<String> = sqlx::query_scalar(
         "SELECT u.public_key
          FROM users u
          WHERE u.approval_status = 'approved'
-           AND COALESCE(u.is_bot, FALSE) = FALSE
            AND u.first_seen_at <= $1
            AND COALESCE(u.pow_level, 0) >= $2
            AND NOT EXISTS (
@@ -95,13 +94,18 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
 
     tracing::info!("Cert worker: sweeping {} candidates", candidates.len());
 
-    // Load banned pubkeys in one query to avoid per-user ban checks.
-    let banned: std::collections::HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT target_public_key FROM bans")
-            .fetch_all(&state.db)
-            .await?
-            .into_iter()
-            .collect();
+    // Load banned pubkeys in one query to avoid per-user ban checks. Expired
+    // rows are left in the table as the record of what was decided, so every
+    // reader filters rather than trusting the row's existence.
+    let now = crate::auth::handlers::unix_timestamp();
+    let banned: std::collections::HashSet<String> = sqlx::query_scalar::<_, String>(
+        "SELECT target_public_key FROM bans WHERE expires_at IS NULL OR expires_at > $1",
+    )
+    .bind(now)
+    .fetch_all(&state.db)
+    .await?
+    .into_iter()
+    .collect();
 
     let mut issued = 0usize;
     for pubkey in candidates {

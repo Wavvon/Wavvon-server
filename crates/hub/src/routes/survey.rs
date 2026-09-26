@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, SURVEYS_MANAGE, SURVEYS_RESPONSES_READ};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -390,7 +390,7 @@ pub async fn submit_survey(
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")));
     }
 
-    // Free-text always routes to manual review (see lobby-bot-survey.md
+    // Free-text always routes to manual review (see lobby-survey.md
     // Feature 3 decisions: "the hub cannot mechanically decide if a
     // free-text answer earns roles"). Auto-assignment of mapped roles only
     // happens when every *answered* question in this submission is
@@ -481,7 +481,7 @@ pub async fn admin_get_survey(
     user: AuthUser,
 ) -> Result<Json<Option<SurveyAdmin>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(SURVEYS_MANAGE)?;
 
     // Find the active (or most-recently-updated) survey
     let survey_id: Option<String> =
@@ -498,12 +498,18 @@ pub async fn admin_get_survey(
     Ok(Json(survey))
 }
 
-/// Validates every role referenced by a choice's `role_ids`: the role must
-/// exist, and it must not hold the `admin` permission (directly or via
-/// `builtin-owner`, which is granted `admin` at bootstrap). A survey is a
-/// self-service onboarding gate — it must never be able to grant admin.
+/// Validates every role a choice can grant: it must exist, and it must not
+/// carry a permission the survey's author does not hold themselves.
+///
+/// A survey is a **self-service onboarding gate** — whoever answers it grants
+/// themselves the mapped roles with nobody in the loop — so it is a role-grant
+/// path like `create_role`, `assign_role` and a role-granting invite, and it
+/// takes the same escalation ceiling (permissions.md §1.6). It used to refuse
+/// only roles holding `admin`; with the wildcard gone that check had nothing
+/// left to look for, and the ceiling is what it was reaching for all along.
 async fn validate_role_mappings(
     db: &sqlx::PgPool,
+    perms: &permissions::UserPermissions,
     req: &SurveyAdmin,
 ) -> Result<(), (StatusCode, String)> {
     let mut role_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -530,20 +536,24 @@ async fn validate_role_mappings(
             ));
         }
 
-        let has_admin: Option<String> = sqlx::query_scalar(
-            "SELECT permission FROM role_permissions WHERE role_id = $1 AND permission = $2",
-        )
-        .bind(role_id)
-        .bind(permissions::ADMIN)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        if has_admin.is_some() {
+        let carried: Vec<String> =
+            sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
+                .bind(role_id)
+                .fetch_all(db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if let Some(p) = perms.first_not_held(carried.iter().map(String::as_str)) {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 format!(
-                    "Role '{role_id}' holds the admin permission and cannot be used in a survey mapping"
+                    "Role '{role_id}' carries '{p}', which you do not hold — a survey cannot grant it"
                 ),
+            ));
+        }
+        if role_id == permissions::BUILTIN_OWNER_ROLE_ID {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "A survey cannot hand out ownership".to_string(),
             ));
         }
     }
@@ -558,9 +568,9 @@ pub async fn admin_put_survey(
     Json(req): Json<SurveyAdmin>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(SURVEYS_MANAGE)?;
 
-    validate_role_mappings(&state.db, &req).await?;
+    validate_role_mappings(&state.db, &perms, &req).await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -642,7 +652,7 @@ pub async fn admin_list_responses(
     Query(q): Query<ResponsesQuery>,
 ) -> Result<Json<Vec<SurveyResponseAdmin>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(SURVEYS_RESPONSES_READ)?;
 
     let rows: Vec<ResponseRow> = if q.status == "all" {
         sqlx::query_as(
@@ -694,7 +704,7 @@ pub async fn admin_get_response_for_pubkey(
     Path(pubkey): Path<String>,
 ) -> Result<Json<Option<SurveyResponseAdmin>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(SURVEYS_RESPONSES_READ)?;
 
     let row: Option<ResponseRow> = sqlx::query_as(
         "SELECT sr.id, sr.pubkey, u.display_name, sr.submitted_at

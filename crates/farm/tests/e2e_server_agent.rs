@@ -30,6 +30,76 @@ use totp_rs::{Algorithm, Secret, TOTP};
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
 use wavvon_identity::Identity;
 
+/// Poll until the condition holds, or fail saying what was being waited for.
+///
+/// Nothing in a WebSocket send acknowledges that the farm has processed it, so
+/// every "say hello, then look" in this file is a race — invisible on a fast
+/// machine and lost on a loaded runner. Two tests here failed in CI that way
+/// while passing everywhere else, which is one per fixed sleep that was left.
+///
+/// The condition may await; it is expanded in place.
+macro_rules! wait_until {
+    ($what:expr, $cond:expr) => {{
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if $cond {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {}",
+                $what
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }};
+}
+
+/// Wait until the `servers.host` column reads `want`, or fail saying what it
+/// held instead. Two hellos in a row also have to land *in order* for the
+/// assertion that follows them to mean anything, and a sleep does not
+/// establish that either.
+async fn wait_for_host(db: &sqlx::PgPool, server_id: &str, want: Option<&str>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let got: Option<String> = sqlx::query_scalar("SELECT host FROM servers WHERE id = $1")
+            .bind(server_id)
+            .fetch_one(db)
+            .await
+            .unwrap();
+        if got.as_deref() == want {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for host {want:?}; it is {got:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Whether the farm currently reports `server_id` as connected.
+async fn agent_connected(client: &Client, base: &str, token: &str, server_id: &str) -> bool {
+    let Ok(resp) = client
+        .get(format!("{base}/farm/admin/servers"))
+        .bearer_auth(token)
+        .send()
+        .await
+    else {
+        return false;
+    };
+    let Ok(body) = resp.json::<Value>().await else {
+        return false;
+    };
+    body["servers"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .any(|s| s["id"] == server_id && s["connected"].as_bool().unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Test server setup
 // ---------------------------------------------------------------------------
@@ -179,8 +249,10 @@ async fn server_agent_connects_and_receives_hub_spawn() {
         .await
         .unwrap();
 
-    // Brief pause for the farm to process the hello and update last_seen_at.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_until!(
+        "the agent to show connected",
+        agent_connected(&client, &base, &token, &server_id).await
+    );
 
     // --- 4. Confirm server shows as connected ---
     let resp = client
@@ -235,7 +307,15 @@ async fn server_agent_connects_and_receives_hub_spawn() {
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_until!("the hub row to be assigned to the agent", {
+        let assigned: Option<String> =
+            sqlx::query_scalar("SELECT server_id FROM hubs WHERE id = $1")
+                .bind(&hub_id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assigned.is_some()
+    });
 
     // --- 8. Verify hub row is assigned to our server ---
     let assigned_server_id: Option<String> =
@@ -258,10 +338,31 @@ async fn server_agent_connects_and_receives_hub_spawn() {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::type_complexity)]
+/// Waits for the farm to have written what `hub_spawned` carries. A fixed
+/// sleep here is what made the force-restart test 409 on a runner: the route
+/// refuses a hub whose `process_port` is NULL, and 50ms is a guess about how
+/// fast the farm got to the write, not a fact about it.
+async fn await_hub_port(db: &sqlx::PgPool, hub_id: &str) {
+    for _ in 0..100 {
+        let port: Option<Option<i32>> =
+            sqlx::query_scalar("SELECT process_port FROM hubs WHERE id = $1")
+                .bind(hub_id)
+                .fetch_optional(db)
+                .await
+                .unwrap();
+        if matches!(port, Some(Some(_))) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the farm never recorded a process_port for {hub_id}");
+}
+
 async fn create_hub_via_agent(
     client: &Client,
     base: &str,
     token: &str,
+    db: &sqlx::PgPool,
 ) -> (
     futures_util::stream::SplitSink<
         tokio_tungstenite::WebSocketStream<
@@ -306,8 +407,10 @@ async fn create_hub_via_agent(
         .await
         .unwrap();
 
-    // Brief pause for the farm to process hello and register the sender.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    wait_until!(
+        "the agent to be registered before a hub is created through it",
+        agent_connected(client, base, token, &server_id).await
+    );
 
     // Create a hub — farm should delegate the spawn to our connected agent.
     let resp = client
@@ -345,7 +448,7 @@ async fn create_hub_via_agent(
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    await_hub_port(db, &hub_id).await;
 
     (ws_write, ws_read, hub_id, server_id)
 }
@@ -368,7 +471,7 @@ async fn force_restart_agent_hosted_hub_delegates_to_agent() {
         .unwrap();
 
     let (mut ws_write, mut ws_read, hub_id, server_id) =
-        create_hub_via_agent(&client, &base, &token).await;
+        create_hub_via_agent(&client, &base, &token, &state.db).await;
 
     // Simulate a few prior failed auto-restart attempts, so we can prove the
     // force-restart route resets the counter.
@@ -451,13 +554,15 @@ async fn force_restart_agent_hosted_hub_offline_agent_returns_503() {
         .await
         .unwrap();
 
-    let (ws_write, ws_read, hub_id, _server_id) =
-        create_hub_via_agent(&client, &base, &token).await;
+    let (ws_write, ws_read, hub_id, server_id) =
+        create_hub_via_agent(&client, &base, &token, &state.db).await;
 
     // Drop the mock agent's WebSocket connection to simulate it going offline.
     drop(ws_write);
     drop(ws_read);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_until!("the agent to show disconnected", {
+        !agent_connected(&client, &base, &token, &server_id).await
+    });
 
     let resp = client
         .post(format!("{base}/farm/hubs/{hub_id}/restart"))
@@ -602,4 +707,189 @@ fn totp_code_from_secret(secret_b32: &str) -> String {
     )
     .unwrap();
     totp.generate_current().unwrap()
+}
+
+/// The node tells the farm where it is, and the farm writes it down.
+///
+/// Without this the proxy keeps dialing `127.0.0.1` for a hub that runs on
+/// another machine — the control plane is multi-node and the data plane is
+/// not (farm-model.md, "Multi-node data plane"). Recorded on *every* connect,
+/// so a node that moves or rotates its certificate corrects the farm by
+/// reconnecting rather than by an operator remembering to.
+#[tokio::test]
+async fn an_agents_hello_records_where_the_node_is() {
+    let (base, state, _guard) = start_farm().await;
+    let client = Client::new();
+    let admin = Identity::generate();
+    let token = authenticate(&client, &base, &admin).await;
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/farm/admin/server-token"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "node-2", "region": "test" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+    let reg: Value = resp.json().await.unwrap();
+    let reg_token = reg["token"].as_str().unwrap().to_string();
+    let server_id = reg["server_id"].as_str().unwrap().to_string();
+
+    let ws_url = format!("{}/ws/agent", base.replacen("http://", "ws://", 1));
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut ws_write, _ws_read) = ws_stream.split();
+    ws_write
+        .send(Message::Text(
+            json!({
+                "type": "hello",
+                "version": "0.1.0",
+                "token": reg_token,
+                "host": "node-2.example",
+                "tls_mode": "pin",
+                "cert_sha256": "ab".repeat(32),
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_host(&state.db, &server_id, Some("node-2.example")).await;
+
+    let row: (Option<String>, String, Option<String>) =
+        sqlx::query_as("SELECT host, tls_mode, cert_sha256 FROM servers WHERE id = $1")
+            .bind(&server_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(row.0.as_deref(), Some("node-2.example"));
+    assert_eq!(row.1, "pin");
+    assert_eq!(row.2.as_deref(), Some("ab".repeat(32).as_str()));
+}
+
+/// An agent that advertises nothing is the farm's own machine, and saying so
+/// has to *clear* a host recorded earlier — a stale one would send the proxy
+/// to an address where nothing answers.
+#[tokio::test]
+async fn a_hello_without_a_host_clears_the_one_recorded_before() {
+    let (base, state, _guard) = start_farm().await;
+    let client = Client::new();
+    let admin = Identity::generate();
+    let token = authenticate(&client, &base, &admin).await;
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/farm/admin/server-token"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "node-3", "region": "test" }))
+        .send()
+        .await
+        .unwrap();
+    let reg: Value = resp.json().await.unwrap();
+    let reg_token = reg["token"].as_str().unwrap().to_string();
+    let server_id = reg["server_id"].as_str().unwrap().to_string();
+
+    let ws_url = format!("{}/ws/agent", base.replacen("http://", "ws://", 1));
+    // Each hello is waited for by its own effect, not by a clock: the second
+    // one only proves anything once the first has actually recorded a host.
+    for (hello, expected) in [
+        (
+            json!({"type": "hello", "token": reg_token, "host": "node-3.example", "tls_mode": "ca"}),
+            Some("node-3.example"),
+        ),
+        (json!({"type": "hello", "token": reg_token}), None),
+    ] {
+        let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+        let (mut ws_write, _r) = ws_stream.split();
+        ws_write
+            .send(Message::Text(hello.to_string().into()))
+            .await
+            .unwrap();
+        wait_for_host(&state.db, &server_id, expected).await;
+    }
+}
+
+/// The spawn command has to carry enough for a node with its own PostgreSQL
+/// to place the hub *there*: the database name, and this server's template.
+/// A node that only gets the farm's own URL would either share a database with
+/// its siblings or reach across the network for every query.
+#[tokio::test]
+async fn the_spawn_command_carries_the_database_name_and_template() {
+    let (base, state, _guard) = start_farm().await;
+    let client = Client::new();
+    let admin = Identity::generate();
+    let token = authenticate(&client, &base, &admin).await;
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{base}/farm/admin/server-token"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "node-4", "region": "test" }))
+        .send()
+        .await
+        .unwrap();
+    let reg: Value = resp.json().await.unwrap();
+    let reg_token = reg["token"].as_str().unwrap().to_string();
+    let server_id = reg["server_id"].as_str().unwrap().to_string();
+
+    sqlx::query("UPDATE servers SET db_url_template = $1 WHERE id = $2")
+        .bind("postgres://node@localhost:5432/{db}")
+        .bind(&server_id)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let ws_url = format!("{}/ws/agent", base.replacen("http://", "ws://", 1));
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut ws_write, mut ws_read) = ws_stream.split();
+    ws_write
+        .send(Message::Text(
+            json!({"type": "hello", "token": reg_token, "host": "node-4.example"})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_host(&state.db, &server_id, Some("node-4.example")).await;
+
+    let resp = client
+        .post(format!("{base}/farm/hubs"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "remote-hub", "visibility": "private" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "create hub failed");
+    let hub: Value = resp.json().await.unwrap();
+    let hub_id = hub["id"].as_str().unwrap().to_string();
+
+    let cmd_msg = tokio::time::timeout(Duration::from_secs(5), ws_read.next())
+        .await
+        .expect("timeout waiting for spawn_hub")
+        .unwrap()
+        .unwrap();
+    let cmd: Value = serde_json::from_str(&cmd_msg.into_text().unwrap()).unwrap();
+    assert_eq!(cmd["type"], "spawn_hub");
+    assert_eq!(
+        cmd["db_name"].as_str(),
+        Some(format!("wavvon_hub_{hub_id}").as_str()),
+        "the agent needs the database name to place it on its own server"
+    );
+    assert_eq!(
+        cmd["db_url_template"].as_str(),
+        Some("postgres://node@localhost:5432/{db}"),
+        "this server's template must travel with the command"
+    );
 }

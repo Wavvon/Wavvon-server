@@ -13,8 +13,6 @@ use wavvon_hub::bootstrap::{maybe_bootstrap, BootstrapConfig};
 fn no_config() -> BootstrapConfig {
     BootstrapConfig {
         template_url: None,
-        bootstrap_token: None,
-        discovery_url: "https://discovery.wavvon.io".into(),
         template_file: None,
         preset: None,
     }
@@ -23,8 +21,6 @@ fn no_config() -> BootstrapConfig {
 fn config_with_template(template_url: &str) -> BootstrapConfig {
     BootstrapConfig {
         template_url: Some(template_url.into()),
-        bootstrap_token: None,
-        discovery_url: "https://discovery.wavvon.io".into(),
         template_file: None,
         preset: None,
     }
@@ -163,7 +159,7 @@ async fn template_applies_channels_roles_settings_and_welcome_message() {
             {
                 "name": "Member",
                 "priority": 5,
-                "permissions": ["send_messages", "read_messages", "create_posts"]
+                "permissions": ["messages.send", "messages.read", "forum.posts.create"]
             }
         ],
         "welcome_message": "Hello and welcome!",

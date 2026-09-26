@@ -86,10 +86,10 @@ pub struct ScreenStreamMeta {
     pub has_audio: bool,
     pub sharer_pubkey: String,
     /// Whether the sharer is a bot (`can_inject_video` gate,
-    /// bot-capability-layer.md §3/§6 Phase 2). Used to scope the per-hub
+    /// apps.md §3/§6 Phase 2). Used to scope the per-hub
     /// concurrent bot-video-stream budget to bot streams only -- human
     /// screen shares never count against it.
-    pub is_bot: bool,
+    pub via_http: bool,
     /// Unique WS session id of the connection that started this stream.
     /// Used to discriminate cleanup: on disconnect only streams from the
     /// disconnecting session are removed, leaving streams from other
@@ -238,6 +238,10 @@ pub struct AuthChallenge {
     pub passkeys: Vec<webauthn_rs::prelude::Passkey>,
 }
 
+/// `(issuer_pubkey, master_pubkey)` → `(fetched_at, portfolio)`.
+pub type CertPortfolioCache =
+    HashMap<(String, String), (i64, Vec<crate::routes::certs::Certification>)>;
+
 pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
@@ -254,6 +258,12 @@ pub struct AppState {
     /// other's challenge — e.g. two simultaneous federated DM deliveries to
     /// the same peer hub.
     pub pending_challenges: RwLock<HashMap<String, PendingChallenge>>,
+    /// `(issuer_pubkey, master_pubkey)` → `(fetched_at, portfolio)` for certs
+    /// this hub pulled from a trusted issuer during admission
+    /// (hub-certifications.md §11). Short-lived on purpose: a sibling that
+    /// revokes is honoured within one TTL, and within a farm the fetch it
+    /// saves is a loopback call anyway.
+    pub cert_portfolio_cache: RwLock<CertPortfolioCache>,
     pub chat_tx: broadcast::Sender<(ChatEvent, Arc<str>)>,
     pub federation_client: FederationClient,
     pub peer_tokens: RwLock<HashMap<String, String>>,
@@ -305,7 +315,7 @@ pub struct AppState {
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.
     pub screen_share_tx: broadcast::Sender<ScreenChunkEvent>,
-    /// Active bot WS sessions: bot_pubkey → { session_id → mpsc sender }.
+    /// Active bot WS sessions: app_pubkey → { session_id → mpsc sender }.
     ///
     /// A bot pubkey can have multiple concurrent WS sessions (e.g. reconnect
     /// overlap, multi-process bot deployments).  Each session is identified by
@@ -315,7 +325,7 @@ pub struct AppState {
     ///
     /// Token-expiry sweep removes all sessions for a pubkey at once (a token
     /// revocation is pubkey-wide).
-    pub bot_sessions: RwLock<HashMap<String, HashMap<String, mpsc::Sender<String>>>>,
+    pub app_sessions: RwLock<HashMap<String, HashMap<String, mpsc::Sender<String>>>>,
 
     /// Active voice zones: (channel_id, zone_id) → VoiceZone.
     /// Ephemeral — cleared on hub restart.
@@ -379,9 +389,18 @@ pub struct AppState {
     /// `RwLock<HashSet>` to avoid adding a new crate dependency.
     pub voice_relay_active: RwLock<HashSet<String>>,
 
+    /// Per-sender outbound packet loss, seen from the relay: pubkey ->
+    /// counter-span tracker (voice_loss.rs). Reported back to that sender on
+    /// its own `pong`, which is the only client that may see it -- outbound
+    /// loss is a property of one participant's uplink and telling the channel
+    /// about it would be gossip, not diagnostics.
+    ///
+    /// Reset on voice join, so a figure never describes a previous session.
+    pub voice_outbound_loss: RwLock<HashMap<String, crate::voice_loss::SenderLoss>>,
+
     /// Voice-only presence grants (events.md §7.4): pubkey → set of
     /// channel_ids the pubkey may join voice on despite lacking effective
-    /// `READ_MESSAGES` there.
+    /// `MESSAGES_READ` there.
     ///
     /// Ephemeral, in-memory only — never persisted, never survives a
     /// restart. Created just before the hub pushes a `voice_move` whose
@@ -391,6 +410,23 @@ pub struct AppState {
     /// consults this map — message history, WS subscribe, channel list, and
     /// event read-gating all stay strict per the decisions.md entry.
     pub staging_voice_grants: RwLock<HashMap<String, HashSet<String>>>,
+
+    /// Pubkeys present in voice who may **not** transmit there: below the
+    /// channel's `min_talk_power` and holding no talk grant
+    /// (permissions.md, "Talk power is not this").
+    ///
+    /// The answer is computed once, on join, because the only place it can be
+    /// enforced is `relay_datagram` — the hot path, where a query per
+    /// datagram is not an option. Storing the refusal rather than the
+    /// permission keeps the common case (nobody is blocked) an empty set and
+    /// one `HashSet` read beside the one already there.
+    ///
+    /// A talk grant is the removal of a pubkey from this set and nothing
+    /// else, which is what makes it last exactly one voice session: the
+    /// shared teardown in `connection.rs` clears the entry on leave and on
+    /// disconnect, the same block the voice-only presence grant evaporates
+    /// in. Nothing about it is persisted, so no grant outlives a restart.
+    pub voice_talk_blocked: RwLock<HashSet<String>>,
 
     /// Pending WebTransport session-binds waiting for the client to open its
     /// `voice_wt_url?token=<hex>` session (voice-transport-v2.md).
@@ -402,11 +438,23 @@ pub struct AppState {
     /// session-accept attempt.
     pub voice_pending_binds: RwLock<HashMap<String, PendingVoiceBind>>,
 
-    /// Per-user WS sender for targeted voice key distribution messages (V4).
-    /// Registered on WS connect, deregistered on disconnect.
-    /// Key: user public key hex.
-    pub ws_key_senders:
-        RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>>,
+    /// Per-*session* WS senders for targeted delivery: voice key
+    /// distribution (V4) and mini-app messages addressed to a user.
+    /// Keyed `pubkey -> session_id -> sender`, registered on WS connect and
+    /// deregistered on that session's own disconnect.
+    ///
+    /// Nested, and not one sender per pubkey, for the reason `app_sessions`
+    /// is nested: one pubkey has several sockets more often than not — a
+    /// second tab, a paired device, or the overlap while a reconnect stands
+    /// up its socket before the old one finishes tearing down. A flat map
+    /// took the newest socket and then let the *older* socket's cleanup
+    /// remove it, so the survivor was registered nowhere and every targeted
+    /// message to that user was dropped with nothing reporting it. For voice
+    /// that means no sender key arrives, so every datagram is discarded at
+    /// the key lookup and the call is silent — see `send_to_user`.
+    pub ws_key_senders: RwLock<
+        HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>>,
+    >,
 
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
@@ -436,25 +484,23 @@ pub struct AppState {
     /// `Some`, the auto-grant is skipped entirely.
     pub owner_pubkey: Option<String>,
 
-    /// Mirror of `Settings::bots_allow_camera`.
-    /// When true, bot mini-apps that declare `requires_camera` receive camera
+    /// Mirror of `Settings::apps_allow_camera`.
+    /// When true, a mini-app that declares `requires_camera` receives camera
     /// access in the client webview/iframe sandbox.
-    pub bots_allow_camera: bool,
+    pub apps_allow_camera: bool,
 
-    /// Mirror of `Settings::bots_allow_video` (bot-capability-layer.md §1/§4/§6
-    /// Phase 2). Operator kill-switch for `can_inject_video`: a grant alone is
-    /// never sufficient, this flag must also be on. Defaults to false.
-    pub bots_allow_video: bool,
-    /// Mirror of `Settings::bot_video_stream_budget` (bot-capability-layer.md
-    /// §4 "media budget"). Max number of concurrent bot-initiated video
-    /// streams across the whole hub; frames aren't buffered/queued past this,
-    /// `screen_share_start` is simply rejected once the cap is hit.
+    /// Mirror of `Settings::http_video_stream_budget`. Max concurrent video
+    /// streams started over `POST /screenshare/start` across the whole hub;
+    /// frames aren't buffered past this, the start is simply rejected.
     ///
-    /// ponytail: coarse hub-wide counter, not per-channel/per-bot. Docs leave
-    /// the exact shape open ("the precise number is a hub config knob") --
-    /// upgrade to a finer-grained (per-channel or per-bot) budget if a single
-    /// hub-wide cap proves too coarse in practice.
-    pub bot_video_stream_budget: usize,
+    /// It counts the HTTP route rather than a kind of account, because that
+    /// is the honest discriminator: a person clicking Share holds a socket,
+    /// an unattended pusher usually does not. A program that does hold one
+    /// is bounded by the same channel permission as everyone else.
+    ///
+    /// ponytail: coarse hub-wide counter, not per-channel. Upgrade to a
+    /// finer-grained budget if one cap proves too blunt.
+    pub http_video_stream_budget: usize,
 
     /// WebAuthn relying-party instance. Shared across all requests.
     pub webauthn: Arc<Webauthn>,
@@ -482,6 +528,27 @@ pub struct AppState {
     /// when `lan_mode` is on and `lan_tls_mode == Some("self")`. Surfaced on
     /// `/info` and in the mDNS `fp` TXT record so clients can pin it TOFU-style.
     pub lan_fingerprint: Option<String>,
+}
+
+impl AppState {
+    /// Deliver a targeted WS message to **every** session a pubkey has open,
+    /// and report how many took it.
+    ///
+    /// All of them rather than a chosen one: the hub cannot tell which of a
+    /// user's sockets is the one in voice, and the messages routed this way
+    /// are ignored by a client that has no session for them (the web client
+    /// no-ops when `voiceSessionRef` is null). Sending to one guessed socket
+    /// is how a user with two tabs open hears nothing.
+    pub async fn send_to_user(&self, pubkey: &str, msg: WsServerMessage) -> usize {
+        let senders = self.ws_key_senders.read().await;
+        let Some(sessions) = senders.get(pubkey) else {
+            return 0;
+        };
+        sessions
+            .values()
+            .filter(|tx| tx.send(msg.clone()).is_ok())
+            .count()
+    }
 }
 
 pub struct PendingChallenge {

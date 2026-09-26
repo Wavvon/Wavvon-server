@@ -39,7 +39,7 @@ EXPOSE 4000
 # appeared to work because it matched the built-in default.
 ENV WAVVON_HTTP_PORT=4000
 # PostgreSQL connection URL. Required — the farm will not start without it.
-# ENV WAVVON_DATABASE_URL=postgres://wavvon:wavvon@db:5432/wavvon_farm
+# ENV WAVVON_DATABASE_URL=postgres://wavvon:YOUR_DB_PASSWORD@db:5432/wavvon_farm
 # The externally reachable URL of this farm — used in session tokens.
 # Must be set correctly in production.
 # ENV WAVVON_FARM_URL=https://farm.example.com

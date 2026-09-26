@@ -111,7 +111,7 @@ pub async fn create_webhook(
     Json(req): Json<CreateWebhookRequest>,
 ) -> Result<(StatusCode, Json<CreateWebhookResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     // Verify channel exists.
     let ch_exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
@@ -153,10 +153,10 @@ pub async fn create_webhook(
 
     // Create a users row for the webhook identity so message FKs work.
     // Using the webhook id as "public_key" — a known hack but avoids a
-    // parallel auth path (documented in bots.md §9).
+    // parallel auth path (documented in apps.md).
     sqlx::query(
-        "INSERT INTO users(public_key, display_name, first_seen_at, last_seen_at, approval_status, is_bot, is_webhook)
-         VALUES($1,$2,$3,$4,'approved',TRUE,TRUE) ON CONFLICT (public_key) DO NOTHING",
+        "INSERT INTO users(public_key, display_name, first_seen_at, last_seen_at, approval_status, is_webhook)
+         VALUES($1,$2,$3,$4,'approved',TRUE) ON CONFLICT (public_key) DO NOTHING",
     )
     .bind(&id)
     .bind(&req.display_name)
@@ -196,7 +196,7 @@ pub async fn list_webhooks(
     user: AuthUser,
 ) -> Result<Json<Vec<WebhookInfoResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -244,7 +244,7 @@ pub async fn regenerate_webhook(
     Path(webhook_id): Path<String>,
 ) -> Result<Json<CreateWebhookResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     let secret_token = new_secret_token();
     let token_hash = sha256_hex(secret_token.as_bytes());
@@ -279,7 +279,7 @@ pub async fn delete_webhook(
     Path(webhook_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     let rows = sqlx::query("UPDATE webhooks SET active = FALSE WHERE id = $1")
         .bind(&webhook_id)
@@ -404,7 +404,7 @@ pub async fn post_webhook_message(
         // NOTE: WebhookPostRequest.embeds (freeform serde_json::Value) is a
         // separate, deeper gap than the bot-reply embeds fix elsewhere in
         // this change -- it isn't persisted to `messages.embeds` at all
-        // (no INSERT column, no type mapping to bot_models::Embed). Left
+        // (no INSERT column, no type mapping to app_models::Embed). Left
         // untouched here; a real fix needs a decision on schema and format.
         embeds: None,
         game: None,

@@ -1,6 +1,6 @@
-//! Security-hardening coverage for the `bot_app_join`-minted mini-app
-//! session token (bot-mini-apps.md "Scoped session token"). Before this
-//! fix, `handle_bot_app_join` (routes/ws/handlers/mini_app.rs) inserted a
+//! Security-hardening coverage for the `app_join`-minted mini-app
+//! session token (mini-apps.md "Scoped session token"). Before this
+//! fix, `handle_app_join` (routes/ws/handlers/mini_app.rs) inserted a
 //! plain `scope = 'member'` session row bound to the joining user's pubkey
 //! — indistinguishable from that user's own full login, so a mini-app
 //! webview holding it could call every REST route the user's roles
@@ -40,6 +40,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -58,7 +59,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(256).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
@@ -68,7 +69,9 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
@@ -76,9 +79,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -170,40 +172,41 @@ async fn send_message(base: &str, token: &str, channel_id: &str, content: &str) 
     assert!(resp.status().is_success());
 }
 
-/// POST /admin/bots — registers a bot with a `mini_app_url`, then grants it
-/// `can_use_interactive_ui` (bot-capability-layer.md §1, §6 Phase 1 item 3)
-/// via the new admin capabilities route so this file's tests -- which cover
-/// session-token scoping, not the capability gate itself -- keep exercising
-/// a bot that's actually allowed to open the mini-app modal. `token` is
-/// always the hub owner in this file's callers, so it already holds admin.
-async fn create_mini_app_bot(base: &str, token: &str) -> Value {
-    let resp = reqwest::Client::new()
-        .post(format!("{base}/admin/bots"))
-        .bearer_auth(token)
+/// An identity that holds `apps.register`, has authenticated normally and
+/// has declared a `mini_app_url`. These tests cover session-token scoping,
+/// not the permission gate, so the grant is written straight to the role.
+async fn create_mini_app_host(base: &str, db: &sqlx::PgPool) -> Value {
+    let client = reqwest::Client::new();
+    let host = Identity::generate();
+    let app_id = host.public_key_hex();
+
+    sqlx::query(
+        "INSERT INTO role_permissions (role_id, permission)
+         VALUES ('builtin-everyone', 'apps.register')
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(db)
+    .await
+    .unwrap();
+
+    let token = authenticate_http(base, &host).await;
+
+    let registered = client
+        .put(format!("{base}/me/app/profile"))
+        .bearer_auth(&token)
         .json(&json!({
-            "display_name": "Gartic Bot",
+            "name": "Gartic",
             "mini_app_url": "https://gartic.example.com/wavvon",
         }))
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "bot creation should succeed");
-    let bot: Value = resp.json().await.unwrap();
-
-    let bot_id = bot["public_key"].as_str().unwrap();
-    let grant = reqwest::Client::new()
-        .put(format!("{base}/admin/bots/{bot_id}/capabilities"))
-        .bearer_auth(token)
-        .json(&json!({ "capabilities": ["can_use_interactive_ui"] }))
-        .send()
-        .await
-        .unwrap();
     assert!(
-        grant.status().is_success(),
-        "capability grant should succeed"
+        registered.status().is_success(),
+        "app registration should succeed"
     );
 
-    bot
+    json!({ "public_key": app_id })
 }
 
 type WsSink = futures_util::stream::SplitSink<
@@ -252,19 +255,19 @@ async fn next_meaningful_frame(rx: &mut WsStream, timeout: std::time::Duration) 
     }
 }
 
-/// Drives the full `bot_app_join` handshake over `member_token`'s own WS
+/// Drives the full `app_join` handshake over `member_token`'s own WS
 /// connection and returns the minted `session_token`.
-async fn join_mini_app(base: &str, member_token: &str, bot_id: &str, channel_id: &str) -> String {
+async fn join_mini_app(base: &str, member_token: &str, app_id: &str, channel_id: &str) -> String {
     let (mut tx, mut rx) = connect_ws(base, member_token).await;
     send_text(
         &mut tx,
-        json!({ "type": "bot_app_join", "bot_id": bot_id, "channel_id": channel_id }),
+        json!({ "type": "app_join", "app_id": app_id, "channel_id": channel_id }),
     )
     .await;
     let frame = next_meaningful_frame(&mut rx, std::time::Duration::from_secs(15))
         .await
-        .expect("expected a bot_app_open reply");
-    assert_eq!(frame["type"], "bot_app_open");
+        .expect("expected a app_open reply");
+    assert_eq!(frame["type"], "app_open");
     frame["session_token"].as_str().unwrap().to_string()
 }
 
@@ -276,7 +279,7 @@ async fn join_mini_app(base: &str, member_token: &str, bot_id: &str, channel_id:
 /// its bound channel — the legitimate thing mini-apps need.
 #[tokio::test]
 async fn mini_app_token_can_join_ws_and_receive_bound_channel_events() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let owner = Identity::generate();
     let member = Identity::generate();
@@ -286,10 +289,10 @@ async fn mini_app_token_can_join_ws_and_receive_bound_channel_events() {
     let channel = create_channel(&base, &owner_token, "game-room").await;
     let channel_id = channel["id"].as_str().unwrap().to_string();
 
-    let bot = create_mini_app_bot(&base, &owner_token).await;
-    let bot_id = bot["public_key"].as_str().unwrap().to_string();
+    let host = create_mini_app_host(&base, &state.db).await;
+    let app_id = host["public_key"].as_str().unwrap().to_string();
 
-    let session_token = join_mini_app(&base, &member_token, &bot_id, &channel_id).await;
+    let session_token = join_mini_app(&base, &member_token, &app_id, &channel_id).await;
     assert!(!session_token.is_empty());
 
     // The scoped token opens its own /ws connection successfully...
@@ -308,7 +311,7 @@ async fn mini_app_token_can_join_ws_and_receive_bound_channel_events() {
 /// it's bound to, even though the underlying user can read both.
 #[tokio::test]
 async fn mini_app_token_does_not_leak_events_from_other_channels() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let owner = Identity::generate();
     let member = Identity::generate();
@@ -320,10 +323,10 @@ async fn mini_app_token_does_not_leak_events_from_other_channels() {
     let other_channel = create_channel(&base, &owner_token, "general").await;
     let other_channel_id = other_channel["id"].as_str().unwrap().to_string();
 
-    let bot = create_mini_app_bot(&base, &owner_token).await;
-    let bot_id = bot["public_key"].as_str().unwrap().to_string();
+    let host = create_mini_app_host(&base, &state.db).await;
+    let app_id = host["public_key"].as_str().unwrap().to_string();
 
-    let session_token = join_mini_app(&base, &member_token, &bot_id, &bound_channel_id).await;
+    let session_token = join_mini_app(&base, &member_token, &app_id, &bound_channel_id).await;
 
     let (_mini_tx, mut mini_rx) = connect_ws(&base, &session_token).await;
 
@@ -344,7 +347,7 @@ async fn mini_app_token_does_not_leak_events_from_other_channels() {
 /// only voice-join code path.
 #[tokio::test]
 async fn mini_app_token_cannot_join_voice() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let owner = Identity::generate();
     let member = Identity::generate();
@@ -354,10 +357,10 @@ async fn mini_app_token_cannot_join_voice() {
     let channel = create_channel(&base, &owner_token, "game-room-voice").await;
     let channel_id = channel["id"].as_str().unwrap().to_string();
 
-    let bot = create_mini_app_bot(&base, &owner_token).await;
-    let bot_id = bot["public_key"].as_str().unwrap().to_string();
+    let host = create_mini_app_host(&base, &state.db).await;
+    let app_id = host["public_key"].as_str().unwrap().to_string();
 
-    let session_token = join_mini_app(&base, &member_token, &bot_id, &channel_id).await;
+    let session_token = join_mini_app(&base, &member_token, &app_id, &channel_id).await;
 
     let (mut mini_tx, mut mini_rx) = connect_ws(&base, &session_token).await;
     send_text(
@@ -376,7 +379,7 @@ async fn mini_app_token_cannot_join_voice() {
 /// The minted token cannot call an admin REST route.
 #[tokio::test]
 async fn mini_app_token_cannot_call_admin_route() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let owner = Identity::generate();
     let member = Identity::generate();
@@ -386,13 +389,16 @@ async fn mini_app_token_cannot_call_admin_route() {
     let channel = create_channel(&base, &owner_token, "game-room").await;
     let channel_id = channel["id"].as_str().unwrap().to_string();
 
-    let bot = create_mini_app_bot(&base, &owner_token).await;
-    let bot_id = bot["public_key"].as_str().unwrap().to_string();
+    let host = create_mini_app_host(&base, &state.db).await;
+    let app_id = host["public_key"].as_str().unwrap().to_string();
 
-    let session_token = join_mini_app(&base, &member_token, &bot_id, &channel_id).await;
+    let session_token = join_mini_app(&base, &member_token, &app_id, &channel_id).await;
 
+    // Any admin route will do; this one has to still exist, or a 404 from
+    // routing would masquerade as the scope check doing its job. GET
+    // /admin/bots used to stand here and stopped existing.
     let resp = reqwest::Client::new()
-        .get(format!("{base}/admin/bots"))
+        .get(format!("{base}/admin/audit-log"))
         .bearer_auth(&session_token)
         .send()
         .await
@@ -405,7 +411,7 @@ async fn mini_app_token_cannot_call_admin_route() {
 /// for this scope, not just the admin subset.
 #[tokio::test]
 async fn mini_app_token_cannot_post_messages_over_rest() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let owner = Identity::generate();
     let member = Identity::generate();
@@ -415,10 +421,10 @@ async fn mini_app_token_cannot_post_messages_over_rest() {
     let channel = create_channel(&base, &owner_token, "game-room").await;
     let channel_id = channel["id"].as_str().unwrap().to_string();
 
-    let bot = create_mini_app_bot(&base, &owner_token).await;
-    let bot_id = bot["public_key"].as_str().unwrap().to_string();
+    let host = create_mini_app_host(&base, &state.db).await;
+    let app_id = host["public_key"].as_str().unwrap().to_string();
 
-    let session_token = join_mini_app(&base, &member_token, &bot_id, &channel_id).await;
+    let session_token = join_mini_app(&base, &member_token, &app_id, &channel_id).await;
 
     let resp = reqwest::Client::new()
         .post(format!("{base}/channels/{channel_id}/messages"))
@@ -435,7 +441,7 @@ async fn mini_app_token_cannot_post_messages_over_rest() {
 /// not.
 #[tokio::test]
 async fn mini_app_token_cannot_patch_me() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
 
     let owner = Identity::generate();
     let member = Identity::generate();
@@ -445,10 +451,10 @@ async fn mini_app_token_cannot_patch_me() {
     let channel = create_channel(&base, &owner_token, "game-room").await;
     let channel_id = channel["id"].as_str().unwrap().to_string();
 
-    let bot = create_mini_app_bot(&base, &owner_token).await;
-    let bot_id = bot["public_key"].as_str().unwrap().to_string();
+    let host = create_mini_app_host(&base, &state.db).await;
+    let app_id = host["public_key"].as_str().unwrap().to_string();
 
-    let session_token = join_mini_app(&base, &member_token, &bot_id, &channel_id).await;
+    let session_token = join_mini_app(&base, &member_token, &app_id, &channel_id).await;
 
     let resp = reqwest::Client::new()
         .patch(format!("{base}/me"))

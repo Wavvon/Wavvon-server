@@ -1,8 +1,9 @@
 //! `wavvon-hub setup` — the offline install wizard.
 //!
-//! This is the CLI counterpart to the discovery web wizard described in
-//! `docs/docs/hub-creation-wizard.md` §3 (the "CLI-only setup wizard"
-//! alternative, listed there as a deferred stretch goal). It targets the
+//! This is now the guided path to a running hub. The discovery web wizard it
+//! was once the counterpart to is gone: a hub is self-hosted, so the only
+//! setup that exists is the one the operator runs on their own machine
+//! (`hub-creation-wizard.md` in the wiki is superseded). It targets the
 //! operator who has a box (bare metal, a VPS, a home server) and Docker, but
 //! doesn't want to hand-author `docker-compose.yml` and generate a database
 //! password themselves.

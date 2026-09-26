@@ -88,6 +88,14 @@ pub struct GroupEncryptedEnvelope {
     pub ciphertext_hex: String,
     pub nonce_hex: String,
     pub signature_hex: String,
+    /// Present when a paired device's subkey signed this, exactly as on
+    /// `EncryptedDmEnvelope` — same decision (decisions.md, "Paired-device DMs
+    /// attribute to canonical via cert-chained envelopes"), which had only
+    /// ever been implemented for 1:1. Not part of the signing bytes, so this
+    /// is not a wire-format version change: it rides alongside the signature
+    /// rather than under it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_cert: Option<wavvon_identity::SubkeyCert>,
 }
 
 /// One recipient blob in a sender-key distribution push.
@@ -107,6 +115,11 @@ pub struct PushSenderKeyRequest {
     pub recipients: Vec<SenderKeyRecipientBlob>,
     /// Ed25519 sig over canonical bytes (see design doc)
     pub signature_hex: String,
+    /// Present when a paired device's subkey signed the distribution. Same
+    /// rule as the envelopes: the signature is checked against the cert's
+    /// subkey, and the cert's master against the authenticated session.
+    #[serde(default)]
+    pub signer_cert: Option<wavvon_identity::SubkeyCert>,
 }
 
 /// Row returned from GET /conversations/:id/sender-keys
@@ -176,4 +189,14 @@ pub struct FederatedDmRequest {
     /// primary/legacy-device encrypted DMs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer_cert: Option<SubkeyCert>,
+    /// True when this delivery is an **inbox copy** being forwarded between a
+    /// recipient's home hubs, rather than the original delivery from the
+    /// sender's hub (home-hub.md "DM delivery", step 2).
+    ///
+    /// It exists to stop the copy being copied again. Dedupe by `message_id`
+    /// already makes a second arrival a no-op, but without this every hub that
+    /// accepted a message would fan out to every other one before the dedupe
+    /// settled — n hubs, n² deliveries. A mirror is one hop by construction.
+    #[serde(default)]
+    pub mirror: bool,
 }

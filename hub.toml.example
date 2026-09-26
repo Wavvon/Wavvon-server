@@ -41,8 +41,8 @@ discovery_url = "https://discovery.wavvon.io"
 # ── Database ─────────────────────────────────────────────────────────────────
 # PostgreSQL connection. Leave unset to use the local default:
 # postgres://postgres:postgres@localhost:5432/wavvon
-# database_url = "postgresql://wavvon:secret@localhost/hub_prod"
-# database_read_url = "postgresql://wavvon:secret@replica/hub_prod"
+# database_url = "postgresql://wavvon:YOUR_DB_PASSWORD@localhost/hub_prod"
+# database_read_url = "postgresql://wavvon:YOUR_DB_PASSWORD@replica/hub_prod"
 
 # ── Search ───────────────────────────────────────────────────────────────────
 

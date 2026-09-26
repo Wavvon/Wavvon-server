@@ -1,5 +1,5 @@
 //! The 9 `/admin/outgoing-webhooks` routes (doc §9). All gated by
-//! `permissions::ADMIN`, matching the `create_webhook`/`delete_webhook`
+//! `permissions::WEBHOOKS_OUTGOING_MANAGE`, matching the `create_webhook`/`delete_webhook`
 //! pattern in `routes::webhooks` (incoming webhooks).
 
 use std::net::{IpAddr, ToSocketAddrs};
@@ -31,7 +31,7 @@ use super::worker::new_webhook_id;
 const HKDF_SALT: &[u8] = b"wavvon-webhook-signing";
 
 // ---------------------------------------------------------------------------
-// URL validation — same rule as bot `webhook_url` (doc §1, §7): https only,
+// URL validation — same rule as an app `webhook_url` (doc §1, §7): https only,
 // reject private/loopback ranges. `routes::preview` owns the canonical
 // private-IP-range check; we reuse it here rather than duplicating the list.
 // ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ pub async fn create_webhook(
     Json(req): Json<CreateOutgoingWebhookRequest>,
 ) -> Result<(StatusCode, Json<CreateOutgoingWebhookResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     validate_webhook_url(&req.url)?;
 
@@ -173,7 +173,7 @@ pub async fn list_webhooks(
     user: AuthUser,
 ) -> Result<Json<Vec<OutgoingWebhookSummary>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -229,7 +229,7 @@ pub async fn update_webhook(
     Json(req): Json<UpdateOutgoingWebhookRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")
@@ -282,7 +282,7 @@ pub async fn delete_webhook(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let rows = super::worker::delete_webhook_cascade(&state.db, &id)
         .await
@@ -305,7 +305,7 @@ pub async fn list_subscriptions(
     Path(id): Path<String>,
 ) -> Result<Json<ListSubscriptionsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")
@@ -374,7 +374,7 @@ pub async fn replace_subscriptions(
     Json(req): Json<ReplaceSubscriptionsRequest>,
 ) -> Result<Json<ReplaceSubscriptionsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")
@@ -386,11 +386,10 @@ pub async fn replace_subscriptions(
         return Err((StatusCode::NOT_FOUND, "Webhook not found".to_string()));
     }
 
-    // Same privacy gate as bot subscriptions (doc §2): message.* events
+    // Same privacy gate as app subscriptions (doc §2): message.* events
     // require an explicit channels list.
     for sub in &req.subscriptions {
-        let is_message_event =
-            sub.event.starts_with("message.") && sub.event != "message.mention_bot";
+        let is_message_event = sub.event.starts_with("message.") && sub.event != "message.mention";
         if is_message_event && sub.channels.as_ref().is_none_or(|v| v.is_empty()) {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -455,7 +454,7 @@ pub async fn rotate_secret(
     Path(id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let (secret, signing_key) = generate_secret_and_key();
 
@@ -484,7 +483,7 @@ pub async fn enable_webhook(
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let rows =
         sqlx::query("UPDATE outgoing_webhooks SET active = TRUE, failure_count = 0 WHERE id = $1")
@@ -512,7 +511,7 @@ pub async fn list_deliveries(
     Query(q): Query<ListDeliveriesQuery>,
 ) -> Result<Json<Vec<DeliveryRecord>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
     let exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM outgoing_webhooks WHERE id = $1")

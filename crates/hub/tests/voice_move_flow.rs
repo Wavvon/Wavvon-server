@@ -40,6 +40,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -58,7 +59,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: Arc::new(RwLock::new(None)),
@@ -68,7 +69,9 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: RwLock::new(HashMap::new()),
         whisper_optouts: RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
@@ -76,9 +79,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             Arc::new(
@@ -371,7 +373,7 @@ async fn build_fixture(grant_mover_move_members: bool) -> Fixture {
     let dest = create_channel(&base, &owner_token, "voice-dest").await;
 
     if grant_mover_move_members {
-        let mover_role = create_role(&base, &owner_token, "Marshal", &["move_members"]).await;
+        let mover_role = create_role(&base, &owner_token, "Marshal", &["voice.move_members"]).await;
         assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
     }
 
@@ -498,7 +500,7 @@ async fn rejects_target_not_in_voice() {
 
     let dest = create_channel(&base, &owner_token, "voice-dest-2").await;
 
-    let mover_role = create_role(&base, &owner_token, "Marshal2", &["move_members"]).await;
+    let mover_role = create_role(&base, &owner_token, "Marshal2", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     // Target authenticates (and has a WS connection open to observe
@@ -536,20 +538,29 @@ async fn rejects_target_not_in_voice() {
 /// presence grant only kicks in with an event context; see
 /// `voice_only_grant_allows_join_but_not_message_history` below.
 #[tokio::test]
-async fn rejects_target_without_read_access_to_destination() {
+async fn moves_a_target_who_cannot_join_the_destination_and_reveals_no_text() {
+    // This used to assert a refusal, and the refusal is gone on purpose
+    // (permissions.md §3, Voice). The mover holding `move_members` on the
+    // destination *is* the authorization; asking the target's own admission
+    // defeats the feature, because pulling in someone who does not hold the
+    // role yet is the case a move exists for.
+    //
+    // What must still hold is the reason the old refusal existed: the move
+    // puts the target in the call and reveals no text.
     let mut fx = build_fixture(true).await;
 
-    // Deny read_messages for @everyone on the destination — the target
-    // holds only builtin-everyone, so this removes their read access there.
+    // Closed both ways: no reading, and no joining under their own power.
     deny_overwrite(
         &fx.base,
         &fx.owner_token,
         &fx.dest.id,
         "builtin-everyone",
-        &["read_messages"],
+        &["messages.read", "voice.join"],
     )
     .await;
 
+    // No event context — a plain mod-tool move, which is exactly the case
+    // that used to be rejected outright.
     send_ws(
         &mut fx.mover_ws.0,
         json!({
@@ -560,10 +571,34 @@ async fn rejects_target_without_read_access_to_destination() {
     )
     .await;
 
-    let err = wait_for(&mut fx.mover_ws.1, "error").await;
-    assert_eq!(err["context"], "voice_move");
+    let push = wait_for(&mut fx.target_ws.1, "voice_move").await;
+    assert_eq!(push["target_channel_id"], fx.dest.id);
 
-    assert_not_received(&mut fx.target_ws.1, "voice_move").await;
+    // The voice-only presence grant carries them through the join gate.
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_leave", "channel_id": fx.source.id }),
+    )
+    .await;
+    send_ws(
+        &mut fx.target_ws.0,
+        json!({ "type": "voice_join", "channel_id": fx.dest.id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for(&mut fx.target_ws.1, "voice_joined").await;
+
+    // And carries nothing else: the text stays closed.
+    let resp = reqwest::Client::new()
+        .get(format!("{}/channels/{}/messages", fx.base, fx.dest.id))
+        .bearer_auth(&fx.target_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "a moved participant must not gain message history"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -593,7 +628,8 @@ async fn queued_assignment_upserted_and_overwritten_on_reissue() {
     let squad_a = create_channel(&base, &owner_token, "squad-a").await;
     let squad_b = create_channel(&base, &owner_token, "squad-b").await;
 
-    let mover_role = create_role(&base, &owner_token, "MarshalQueue", &["move_members"]).await;
+    let mover_role =
+        create_role(&base, &owner_token, "MarshalQueue", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     let event = create_event(&base, &owner_token, &squad_a.id, "Raid Night").await;
@@ -670,7 +706,8 @@ async fn queued_assignment_applies_on_join_auto_false_and_persists_across_rejoin
     let lobby = create_channel(&base, &owner_token, "lobby-voice").await;
     let squad = create_channel(&base, &owner_token, "squad-voice").await;
 
-    let mover_role = create_role(&base, &owner_token, "MarshalApply", &["move_members"]).await;
+    let mover_role =
+        create_role(&base, &owner_token, "MarshalApply", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     let event = create_event(&base, &owner_token, &squad.id, "Raid Night").await;
@@ -748,14 +785,16 @@ async fn queued_assignment_applies_on_join_auto_false_and_persists_across_rejoin
 async fn voice_only_grant_allows_join_but_not_message_history_and_evaporates_on_leave() {
     let mut fx = build_fixture(true).await;
 
-    // Deny read_messages for @everyone on the destination -- the target
-    // holds only builtin-everyone, so this removes their read access there.
+    // Deny both for @everyone on the destination -- the target holds only
+    // builtin-everyone. `voice.join` is what closes voice now that admission
+    // is its own question; `read_messages` is what keeps the history shut,
+    // which is the half this test is really about.
     deny_overwrite(
         &fx.base,
         &fx.owner_token,
         &fx.dest.id,
         "builtin-everyone",
-        &["read_messages"],
+        &["messages.read", "voice.join"],
     )
     .await;
 
@@ -844,7 +883,7 @@ async fn get_assignments_happy_path_and_gated_for_non_organizer() {
     let outsider_token = authenticate_http(&base, &outsider).await;
 
     let dest = create_channel(&base, &owner_token, "assignments-dest").await;
-    let mover_role = create_role(&base, &owner_token, "MarshalGet", &["move_members"]).await;
+    let mover_role = create_role(&base, &owner_token, "MarshalGet", &["voice.move_members"]).await;
     assign_role(&base, &owner_token, &mover_key, &mover_role.id).await;
 
     let event = create_event(&base, &owner_token, &dest.id, "Raid Night").await;
@@ -888,7 +927,7 @@ async fn get_assignments_happy_path_and_gated_for_non_organizer() {
         &owner_token,
         &dest.id,
         "builtin-everyone",
-        &["read_messages"],
+        &["messages.read"],
     )
     .await;
 
@@ -967,4 +1006,234 @@ async fn reminder_worker_sweep_prunes_assignments_for_ended_events() {
             .await
             .unwrap();
     assert_eq!(live_count, 1, "still-live event's assignment must survive");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: assignments fire at the event's start (events.md §7.3)
+// ---------------------------------------------------------------------------
+
+async fn create_event_starting_at(
+    base: &str,
+    token: &str,
+    channel_id: &str,
+    title: &str,
+    starts_at: i64,
+) -> EventResponse {
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/events"))
+        .bearer_auth(token)
+        .json(&json!({
+            "channel_id": channel_id,
+            "title": title,
+            "starts_at": starts_at,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "create_event failed: {resp:?}");
+    resp.json().await.unwrap()
+}
+
+/// Put `target` into `channel`'s voice over a real WS connection, so the hub
+/// has them in `voice_channels` the way the start-time sweep will look them up.
+async fn join_voice(base: &str, token: &str, channel_id: &str) -> (WsSink, WsStream) {
+    let (mut tx, mut rx) = connect_ws(base, token).await;
+    send_ws(
+        &mut tx,
+        json!({ "type": "voice_join", "channel_id": channel_id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for(&mut rx, "voice_joined").await;
+    (tx, rx)
+}
+
+/// The reported bug: a raid at 21:00 whose members have been sitting in the
+/// lobby since 20:30 moved nobody, because the assignment only fired on the
+/// target's *next* voice join. The start-time sweep pushes it to someone who
+/// is already in voice, and marks the event so the 60s tick doesn't do it
+/// again for the whole raid.
+#[tokio::test]
+async fn assignments_fire_when_the_event_starts() {
+    let (base, state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let owner_key = owner.public_key_hex();
+
+    let target = Identity::generate();
+    let target_token = authenticate_http(&base, &target).await;
+    let target_pubkey = target.public_key_hex();
+
+    let lobby = create_channel(&base, &owner_token, "lobby").await;
+    let raid = create_channel(&base, &owner_token, "raid").await;
+
+    let (_tx, mut target_rx) = join_voice(&base, &target_token, &lobby.id).await;
+
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    let event = create_event_starting_at(&base, &owner_token, &raid.id, "Raid", now - 60).await;
+
+    sqlx::query(
+        "INSERT INTO event_move_assignments
+             (event_id, user_pubkey, target_channel_id, assigned_by, created_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&event.id)
+    .bind(&target_pubkey)
+    .bind(&raid.id)
+    .bind(&owner_key)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    wavvon_hub::reminder_worker::tick(&state)
+        .await
+        .expect("tick should succeed");
+
+    let push = wait_for(&mut target_rx, "voice_move").await;
+    assert_eq!(push["target_channel_id"], raid.id);
+    assert_eq!(
+        push["source_channel_id"], lobby.id,
+        "the push should name the channel they were actually sitting in"
+    );
+    assert_eq!(push["event_id"], event.id);
+
+    let applied: Option<i64> =
+        sqlx::query_scalar("SELECT moves_applied_at FROM hub_events WHERE id = $1")
+            .bind(&event.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert!(applied.is_some(), "the event should be marked as applied");
+
+    // A second tick must not push the same move again — the assignment row
+    // stays for the rejoin case, so the marker column is what stops it.
+    wavvon_hub::reminder_worker::tick(&state)
+        .await
+        .expect("second tick should succeed");
+    assert_not_received(&mut target_rx, "voice_move").await;
+}
+
+/// Authority is re-checked when the assignment fires, not only when it was
+/// made: an organizer demoted between the two moves nobody.
+#[tokio::test]
+async fn a_demoted_organizers_queued_move_does_not_fire() {
+    let (base, state, _guard) = start_hub().await;
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    let mover = Identity::generate();
+    let mover_key = mover.public_key_hex();
+
+    let target = Identity::generate();
+    let target_token = authenticate_http(&base, &target).await;
+    let target_pubkey = target.public_key_hex();
+
+    let lobby = create_channel(&base, &owner_token, "lobby").await;
+    let raid = create_channel(&base, &owner_token, "raid").await;
+
+    let (_tx, mut target_rx) = join_voice(&base, &target_token, &lobby.id).await;
+
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    let event = create_event_starting_at(&base, &owner_token, &raid.id, "Raid", now - 60).await;
+
+    // `mover` never held `voice.move_members`: whatever they held when the row
+    // was written is gone by the time it fires.
+    sqlx::query(
+        "INSERT INTO event_move_assignments
+             (event_id, user_pubkey, target_channel_id, assigned_by, created_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&event.id)
+    .bind(&target_pubkey)
+    .bind(&raid.id)
+    .bind(&mover_key)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    wavvon_hub::reminder_worker::tick(&state)
+        .await
+        .expect("tick should succeed");
+
+    assert_not_received(&mut target_rx, "voice_move").await;
+}
+
+/// `GET /channels` answers, per channel, whether the caller may move members
+/// into it — so a destination picker can stop offering the ones that will
+/// refuse (events.md §7.1). Channel-scoped: a deny overwrite on one channel
+/// flips that channel's answer and nothing else.
+#[tokio::test]
+async fn channel_list_says_where_the_caller_may_move_members() {
+    let (base, _state, _guard) = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+
+    let mover = Identity::generate();
+    let mover_token = authenticate_http(&base, &mover).await;
+    let mover_key = mover.public_key_hex();
+
+    let open = create_channel(&base, &owner_token, "open-raid").await;
+    let closed = create_channel(&base, &owner_token, "closed-raid").await;
+
+    let list_for = |token: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/channels"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<ChannelResponse>>()
+                .await
+                .unwrap()
+        }
+    };
+    let flag = |channels: &[ChannelResponse], id: &str| {
+        channels
+            .iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("channel {id} missing from the list"))
+            .can_move_members
+    };
+
+    // Nobody has it by default.
+    let before = list_for(mover_token.clone()).await;
+    assert!(!flag(&before, &open.id));
+    assert!(!flag(&before, &closed.id));
+
+    let role = create_role(&base, &owner_token, "Marshal", &["voice.move_members"]).await;
+    assign_role(&base, &owner_token, &mover_key, &role.id).await;
+
+    // Denied on `closed` specifically: the hub-wide grant still stands
+    // everywhere else.
+    let resp = client
+        .put(format!(
+            "{base}/channels/{}/permissions/{}",
+            closed.id, role.id
+        ))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "allow": [], "deny": ["voice.move_members"] }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "set overwrite failed: {resp:?}");
+
+    let after = list_for(mover_token).await;
+    assert!(flag(&after, &open.id), "the granted channel should say yes");
+    assert!(
+        !flag(&after, &closed.id),
+        "the denied channel should say no — the picker must not offer it"
+    );
+
+    // The owner holds everything everywhere.
+    let owner_view = list_for(owner_token).await;
+    assert!(flag(&owner_view, &open.id));
+    assert!(flag(&owner_view, &closed.id));
 }

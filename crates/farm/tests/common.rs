@@ -103,6 +103,15 @@ impl Drop for TestDbGuardInner {
                         sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
                             .execute(&admin_pool)
                             .await;
+                    // A hub's login role is named after its database
+                    // (`hub_db_role = 'per_hub'`). Dropping the database
+                    // removes the grants but never the role, and a role is
+                    // server-wide: left behind they pile up forever, and the
+                    // next test to reuse a hub id inherits a password nobody
+                    // holds.
+                    let _ = sqlx::query(&format!("DROP ROLE IF EXISTS \"{name}\""))
+                        .execute(&admin_pool)
+                        .await;
                 }
                 Ok::<(), sqlx::Error>(())
             })

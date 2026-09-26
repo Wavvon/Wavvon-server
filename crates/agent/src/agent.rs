@@ -16,7 +16,19 @@ pub async fn run(cfg: &Settings, manager: Arc<HubManager>) -> Result<()> {
 
     let (mut write, mut read) = ws_stream.split();
 
-    let hello = serde_json::json!({"type": "hello", "version": "0.1.0", "token": cfg.server_token});
+    // The farm's proxy has to know where this node is, and how to trust it:
+    // without a host it keeps dialing 127.0.0.1 and every hub over here is
+    // unreachable through the farm's domain (farm-model.md, "Multi-node data
+    // plane"). Sent on every connect, so a node that moves or rotates its
+    // certificate corrects the farm by reconnecting.
+    let hello = serde_json::json!({
+        "type": "hello",
+        "version": "0.1.0",
+        "token": cfg.server_token,
+        "host": cfg.node_host,
+        "tls_mode": cfg.node_tls,
+        "cert_sha256": cfg.node_cert_sha256,
+    });
     write.send(Message::Text(hello.to_string().into())).await?;
 
     while let Some(raw) = read.next().await {
@@ -56,7 +68,7 @@ pub async fn run(cfg: &Settings, manager: Arc<HubManager>) -> Result<()> {
 async fn handle_message(
     msg: &serde_json::Value,
     manager: &HubManager,
-    _cfg: &Settings,
+    cfg: &Settings,
 ) -> Option<String> {
     let msg_type = msg.get("type")?.as_str()?;
     match msg_type {
@@ -84,9 +96,16 @@ async fn handle_message(
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
 
+            let resolved = match resolve_db(msg, cfg, &db_url).await {
+                Ok(url) => url,
+                Err(e) => {
+                    return Some(serde_json::json!({"type": "error", "hub_id": hub_id, "code": "no_database", "message": e.to_string()}).to_string());
+                }
+            };
+
             match manager.spawn_hub(
                 &hub_id,
-                &db_url,
+                &resolved,
                 port,
                 voice_port,
                 owner_pubkey.as_deref(),
@@ -114,10 +133,17 @@ async fn handle_message(
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
 
+            let resolved = match resolve_db(msg, cfg, &db_url).await {
+                Ok(url) => url,
+                Err(e) => {
+                    return Some(serde_json::json!({"type": "error", "hub_id": hub_id, "code": "no_database", "message": e.to_string()}).to_string());
+                }
+            };
+
             match manager
                 .restart_hub(
                     &hub_id,
-                    &db_url,
+                    &resolved,
                     port,
                     voice_port,
                     owner_pubkey.as_deref(),
@@ -142,6 +168,24 @@ async fn handle_message(
         }
         _ => None,
     }
+}
+
+/// The database URL for a hub the farm asked this node to start.
+///
+/// Split out because spawn and restart must agree: a restart that fell back to
+/// a different database would look like a hub that lost its history.
+async fn resolve_db(
+    msg: &serde_json::Value,
+    cfg: &Settings,
+    farm_db_url: &str,
+) -> anyhow::Result<String> {
+    crate::provision::resolve(
+        cfg.db_template.as_deref(),
+        msg.get("db_url_template").and_then(|v| v.as_str()),
+        Some(farm_db_url),
+        msg.get("db_name").and_then(|v| v.as_str()),
+    )
+    .await
 }
 
 fn build_ws_url(farm_url: &str) -> String {

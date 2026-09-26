@@ -6,11 +6,12 @@ use axum::Json;
 use uuid::Uuid;
 
 use crate::auth::middleware::{AuthUser, PeerHub};
-use crate::routes::chat_models::MAX_ATTACHMENTS_BYTES;
 use crate::routes::dm_models::*;
 use crate::state::{AppState, DmEvent};
 
-use super::keys::{group_envelope_signing_bytes, verify_envelope_sender};
+use super::keys::{
+    bind_cert_master, group_envelope_signing_bytes, verify_envelope_sender, verify_tiered_signature,
+};
 use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
 
 pub async fn send_dm(
@@ -129,14 +130,18 @@ pub async fn send_dm(
     }
 
     // Same per-message attachment cap as channel messages.
-    let attach_total: usize = req.attachments.iter().map(|a| a.data_b64.len()).sum();
-    if attach_total > MAX_ATTACHMENTS_BYTES {
+    // Operator-configurable since 2026-08-21 (hub_settings
+    // `max_attachment_bytes`); the old constant is now only the default.
+    let cap = crate::routes::hub::read_attachment_cap(&state.db).await;
+    let attach_total: u64 = req
+        .attachments
+        .iter()
+        .map(|a| a.data_b64.len() as u64)
+        .sum();
+    if attach_total > cap {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "Attachments exceed {}MB cap",
-                MAX_ATTACHMENTS_BYTES / 1024 / 1024
-            ),
+            format!("Attachments exceed {}MB cap", cap / 1024 / 1024),
         ));
     }
 
@@ -153,14 +158,7 @@ pub async fn send_dm(
         // unchanged); a signer_cert verifies against the cert's subkey and
         // returns the cert's master for the binding check below.
         let cert_master = verify_envelope_sender(env, &user.public_key)?;
-        if let Some(master) = &cert_master {
-            if Some(master.as_str()) != user.master_pubkey.as_deref() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "signer_cert master does not match the authenticated session".to_string(),
-                ));
-            }
-        }
+        bind_cert_master(cert_master, &user)?;
         // The envelope always claims the canonical pubkey as sender —
         // whether signed directly (no cert) or via a paired device's
         // subkey (cert present) — never the authenticated session's own
@@ -188,18 +186,24 @@ pub async fn send_dm(
             &env.ciphertext_hex,
             &env.nonce_hex,
         );
-        let sig_bytes = hex::decode(&env.signature_hex).map_err(|e| {
-            (
+        // Tiered, for the same reason the 1:1 envelope above is: a paired
+        // device holds its subkey and a cert, never the canonical signing key.
+        let cert_master = verify_tiered_signature(
+            &msg,
+            &env.signature_hex,
+            env.signer_cert.as_ref(),
+            &user.public_key,
+            "group envelope",
+        )?;
+        bind_cert_master(cert_master, &user)?;
+
+        if env.sender_pubkey != user.public_key {
+            return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Bad group envelope signature hex: {e}"),
-            )
-        })?;
-        wavvon_identity::verify_signature(&user.public_key, &msg, &sig_bytes).map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid group envelope signature: {e}"),
-            )
-        })?;
+                "group_encrypted_envelope.sender_pubkey must match the authenticated identity"
+                    .to_string(),
+            ));
+        }
     }
 
     let attachments_json = if req.attachments.is_empty() {
@@ -345,14 +349,11 @@ pub async fn send_dm(
 
         // Resolve delivery URLs via the home-hub designation when available.
         let delivery_urls: Vec<String> = {
-            // Step 1: look up master_pubkey for this member.
-            let master_pubkey: Option<String> =
-                sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
-                    .bind(&m.public_key)
-                    .fetch_optional(&state.db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-                    .flatten();
+            // Step 1: look up master_pubkey for this member. Same resolver the
+            // mirror path uses — reading only `users.master_pubkey` here meant
+            // a member whose cert was registered without a re-auth got mirrored
+            // to but never fanned out to.
+            let master_pubkey: Option<String> = master_of(&state, &m.public_key).await;
 
             // Step 2: if a master is known, try the designation table.
             let designation_urls: Option<Vec<String>> = if let Some(ref mpk) = master_pubkey {
@@ -402,6 +403,8 @@ pub async fn send_dm(
                 .encrypted_envelope
                 .as_ref()
                 .and_then(|e| e.signer_cert.clone()),
+            // The sender's own delivery, whoever it reaches.
+            mirror: false,
         };
 
         for hub_url in &delivery_urls {
@@ -809,14 +812,123 @@ pub async fn receive_federated_dm(
     };
 
     let _ = state.dm_tx.send(DmEvent::Message {
-        conversation_id: req.conversation_id,
-        sender: req.sender,
+        conversation_id: req.conversation_id.clone(),
+        sender: req.sender.clone(),
         sender_name,
         content: ws_content,
         timestamp: req.created_at.max(now),
     });
 
+    // Step 2 of home-hub.md "DM delivery": this hub accepted the message, and
+    // the recipient's *other* home hubs have to end up with it too, or a
+    // client reading a different slot sees nothing. A copy is never copied
+    // again — see FederatedDmRequest::mirror.
+    if !req.mirror {
+        queue_home_hub_mirrors(&state, &req, now).await;
+    }
+
     Ok(StatusCode::OK)
+}
+
+/// Queue an inbox copy of `req` to every other home hub of every local
+/// recipient.
+///
+/// Queued rather than sent: the outbox already has backoff, bounce and restart
+/// survival, and "as soon as they're reachable" is the specified behaviour —
+/// a peer that is down when the message lands still has to converge.
+///
+/// Best-effort by design. Failing to mirror must not fail the delivery that
+/// already succeeded: the message is stored and the local recipient has it.
+/// The master identity a roster pubkey belongs to, or `None` when this hub
+/// cannot tell.
+///
+/// A home hub list is signed by, and stored under, the **master** key — which
+/// is derived from the identity seed and is not the pubkey the roster knows
+/// anyone by. The hub learns the link from a device cert: at auth
+/// (`resolve_canonical_identity` writes `users.master_pubkey`) or when one is
+/// registered. An identity that has never presented a cert — a single device
+/// whose owner never named it — has no link here, and so no home hub list this
+/// hub can find. That is a limit of what the hub knows, not of the mirroring:
+/// it is the same condition under which a *sender's* hub declines to fan out.
+async fn master_of(state: &AppState, member: &str) -> Option<String> {
+    let from_users: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
+            .bind(member)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    if from_users.is_some() {
+        return from_users;
+    }
+    // A cert registered without an auth that carried it still names the master.
+    sqlx::query_scalar("SELECT master_pubkey FROM subkey_certs WHERE subkey_pubkey = $1")
+        .bind(member)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn queue_home_hub_mirrors(state: &AppState, req: &FederatedDmRequest, now: i64) {
+    let own_url = state
+        .canonical_url
+        .read()
+        .await
+        .clone()
+        .map(|u| u.trim_end_matches('/').to_string());
+
+    let mut targets: Vec<String> = Vec::new();
+    for member in &req.members {
+        if member == &req.sender {
+            continue;
+        }
+        let Some(master) = master_of(state, member).await else {
+            continue;
+        };
+
+        let hubs_json: Option<String> = sqlx::query_scalar(
+            "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = $1",
+        )
+        .bind(&master)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+        let Some(hubs) = hubs_json.and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+        else {
+            continue;
+        };
+
+        for hub in hubs {
+            let hub = hub.trim_end_matches('/').to_string();
+            if hub.is_empty() || Some(&hub) == own_url.as_ref() || targets.contains(&hub) {
+                continue;
+            }
+            targets.push(hub);
+        }
+    }
+
+    for hub_url in targets {
+        // ON CONFLICT DO NOTHING: the sender may already have delivered here
+        // (it fans out to the whole list when it knows it), and a second
+        // arrival is a no-op anyway.
+        let queued = sqlx::query(
+            "INSERT INTO dm_outbox
+             (message_id, recipient_hub_url, attempts, next_attempt_at, mirror)
+             VALUES ($1, $2, 0, $3, TRUE)
+             ON CONFLICT (message_id, recipient_hub_url) DO NOTHING",
+        )
+        .bind(&req.message_id)
+        .bind(&hub_url)
+        .bind(now)
+        .execute(&state.db)
+        .await;
+        if let Err(e) = queued {
+            tracing::warn!("DM mirror to {hub_url} could not be queued: {e}");
+        }
+    }
 }
 
 /// Resolve whether `master` (a `signer_cert.master_pubkey` carried on an

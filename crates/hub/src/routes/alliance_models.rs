@@ -46,6 +46,11 @@ pub struct ShareChannelRequest {
     /// share) rather than forcing every caller to always restate it.
     #[serde(default)]
     pub forum_remote_write: Option<String>,
+    /// Whether members of allied hubs may join voice in this share
+    /// (alliances.md "Moderation"): `"allowed"` | `"none"`. Same
+    /// leave-it-alone semantics as `forum_remote_write`.
+    #[serde(default)]
+    pub voice_remote_join: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -72,6 +77,11 @@ pub struct SharedChannelResponse {
     /// still parse under the same default the migration applies.
     #[serde(default = "default_forum_remote_write")]
     pub forum_remote_write: String,
+    /// Remote-voice-join policy in effect for this share (alliances.md):
+    /// `"allowed"` | `"none"`. Defaults to `"allowed"`, matching the
+    /// migration, so a peer that has not upgraded still parses.
+    #[serde(default = "default_voice_remote_join")]
+    pub voice_remote_join: String,
 }
 
 fn default_channel_type() -> String {
@@ -80,6 +90,10 @@ fn default_channel_type() -> String {
 
 fn default_forum_remote_write() -> String {
     "replies_only".to_string()
+}
+
+fn default_voice_remote_join() -> String {
+    "allowed".to_string()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -134,6 +148,28 @@ pub struct FederationAllianceInvitePayload {
     pub from_hub_public_key: String,
     pub invite_token: String,
     pub message: Option<String>,
+}
+
+/// Sent by a hub that has just joined an alliance to every other member it
+/// learned about, so their member lists converge. Carries the same invite
+/// token the inviter minted, which every member can verify against a hub
+/// already in its own list (alliances.md).
+#[derive(Serialize, Deserialize)]
+pub struct AllianceMemberAnnouncement {
+    pub alliance_id: String,
+    /// The announcing hub's own address, asked for its pubkey rather than
+    /// trusted to state one.
+    pub hub_url: String,
+    pub inviter_public_key: String,
+    pub invite_token: String,
+}
+
+/// Sent by a hub leaving an alliance. It names only the alliance: which hub
+/// is leaving comes from the authenticated peer, because a hub may unmake its
+/// own membership and nobody else's.
+#[derive(Serialize, Deserialize)]
+pub struct AllianceMemberDeparture {
+    pub alliance_id: String,
 }
 
 /// A row from `pending_alliance_invites` as returned to the client.

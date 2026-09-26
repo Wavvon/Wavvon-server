@@ -1,6 +1,6 @@
 //! Role category CRUD — display-only grouping containers for roles.
 //! Categories carry no permissions (see docs/docs/role-categories.md §1);
-//! mutations require hub-wide MANAGE_ROLES since categories have no channel
+//! mutations require hub-wide ROLES_MANAGE since categories have no channel
 //! dimension.
 
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use axum::Json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, MANAGE_ROLES};
+use crate::permissions::{self, ROLES_MANAGE};
 use crate::routes::role_models::{
     is_valid_color, is_valid_icon, CreateRoleCategoryRequest, RoleCategoryResponse,
     UpdateRoleCategoryRequest,
@@ -39,7 +39,7 @@ pub async fn create_role_category(
     Json(req): Json<CreateRoleCategoryRequest>,
 ) -> Result<(StatusCode, Json<RoleCategoryResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     validate_appearance(req.color.as_deref(), req.icon.as_deref())?;
 
@@ -75,7 +75,7 @@ pub async fn create_role_category(
     let cat_id = id.clone();
     let name = resp.name.clone();
     tokio::spawn(async move {
-        crate::bots::events::publish_hub_event(
+        crate::apps::events::publish_hub_event(
             &state_c,
             "role_category.created",
             Some(&actor),
@@ -96,7 +96,7 @@ pub async fn update_role_category(
     Json(req): Json<UpdateRoleCategoryRequest>,
 ) -> Result<Json<RoleCategoryResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     get_category(&state.db, &category_id).await?;
 
@@ -147,7 +147,7 @@ pub async fn update_role_category(
     let actor = user.public_key.clone();
     let cat_id = category_id.clone();
     tokio::spawn(async move {
-        crate::bots::events::publish_hub_event(
+        crate::apps::events::publish_hub_event(
             &state_c,
             "role_category.updated",
             Some(&actor),
@@ -167,7 +167,7 @@ pub async fn delete_role_category(
     Path(category_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     get_category(&state.db, &category_id).await?;
 
@@ -183,7 +183,7 @@ pub async fn delete_role_category(
     let actor = user.public_key.clone();
     let cat_id = category_id.clone();
     tokio::spawn(async move {
-        crate::bots::events::publish_hub_event(
+        crate::apps::events::publish_hub_event(
             &state_c,
             "role_category.deleted",
             Some(&actor),

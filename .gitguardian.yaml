@@ -1,0 +1,19 @@
+version: 2
+
+secret:
+  ignored_paths:
+    # Test fixtures: session/bot/pairing tokens are literals on purpose, and
+    # every one of them is meaningless outside its own test database.
+    - "**/tests/**"
+    # Config templates ship placeholder credentials by definition.
+    - "**/*.example"
+    - ".claude/skills/**"
+    - "docker-compose.dev.yml"
+
+  ignored_matches:
+    # The hub's documented local-development default, in README, CLAUDE.md,
+    # CI services and the Settings default itself. Localhost-only and never a
+    # deployment credential -- the shipped compose files have no default
+    # password at all, which is what makes this one safe to silence.
+    - name: "local dev PostgreSQL default (postgres/postgres on localhost)"
+      match: postgres

@@ -1,10 +1,14 @@
-//! Integration tests for WebAuthn device token and credential management.
+//! Integration tests for WebAuthn: the passkey ceremony, device tokens and
+//! credential management.
 //!
-//! Tests for the full passkey registration/assertion flow (register_begin,
-//! register_finish, assert_begin, assert_finish) are intentionally omitted:
-//! those endpoints require a real authenticator (or the webauthn-rs internal
-//! test helpers which are not stable public API).  The device token and
-//! credential management paths are fully exercised here without an authenticator.
+//! The ceremony test (`passkey_register_then_authenticate`) drives all four
+//! endpoints against `webauthn-authenticator-rs`'s software authenticator.
+//! It was previously omitted here on the grounds that it needed a real
+//! authenticator or webauthn-rs's unstable internal helpers; neither is true
+//! -- upstream publishes the authenticator side as its own crate and uses it
+//! for exactly this. It matters because everything else in this file
+//! exercises credential *bookkeeping* and never runs attestation or signature
+//! verification, which is the half that a change of crypto backend moves.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,6 +69,7 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -84,7 +89,7 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         farm_url: None,
         cached_farm_pubkey: Arc::new(RwLock::new(None)),
         last_farm_pubkey_fetch: Arc::new(RwLock::new(0)),
@@ -93,7 +98,9 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: RwLock::new(HashMap::new()),
         whisper_optouts: RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
@@ -101,9 +108,8 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
@@ -121,6 +127,118 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
 async fn setup_server() -> common::TestHarness {
     let (state, guard) = make_state().await;
     common::TestHarness::new(TestServer::new(server::create_router(state)), guard)
+}
+
+// ---------------------------------------------------------------------------
+// Passkey ceremony
+// ---------------------------------------------------------------------------
+
+/// Register a passkey, then authenticate with it.
+///
+/// This is the only test here that runs the crypto: `finish_passkey_registration`
+/// parses the attestation object and the COSE public key, and
+/// `finish_passkey_authentication` verifies a signature over the authenticator
+/// data. A software authenticator stands in for a real one; the RP id and
+/// origin match `make_state()`.
+#[tokio::test]
+async fn passkey_register_then_authenticate() {
+    use webauthn_authenticator_rs::softpasskey::SoftPasskey;
+    use webauthn_authenticator_rs::AuthenticatorBackend;
+    use webauthn_rs::prelude::{CreationChallengeResponse, RequestChallengeResponse};
+
+    let (state, guard) = make_state().await;
+    let db = state.db.clone();
+    let identity = Identity::generate();
+    let pubkey = identity.public_key_hex();
+
+    sqlx::query(
+        "INSERT INTO users (public_key, first_seen_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+    )
+    .bind(&pubkey)
+    .bind(unix_now())
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let server = common::TestHarness::new(TestServer::new(server::create_router(state)), guard);
+    let origin = Url::parse("http://localhost:3000").unwrap();
+    // falsify_uv: the authenticator claims user verification, which is what a
+    // real platform authenticator reports after a biometric or PIN.
+    let mut authenticator = SoftPasskey::new(true);
+
+    // -- registration -------------------------------------------------------
+    let res = server
+        .post("/auth/webauthn/begin")
+        .json(&json!({ "user_pubkey": pubkey, "display_name": "Ceremony Test" }))
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    let reg_session = body["session_id"].as_str().unwrap().to_string();
+    let ccr: CreationChallengeResponse = serde_json::from_value(body["options"].clone())
+        .expect("hub's registration options must deserialise as a CreationChallengeResponse");
+
+    let credential = authenticator
+        .perform_register(origin.clone(), ccr.public_key, 60_000)
+        .expect("software authenticator registration");
+
+    let res = server
+        .post("/auth/webauthn/finish")
+        .json(&json!({
+            "session_id": reg_session,
+            "credential": credential,
+            "friendly_name": "Soft key",
+        }))
+        .await;
+    res.assert_status_ok();
+    let token = res.json::<serde_json::Value>()["session_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!token.is_empty(), "registration must issue a session token");
+
+    // The credential is persisted, and `passkey_json` is what assert/begin
+    // will have to read back.
+    let (stored,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM webauthn_credentials WHERE user_pubkey = $1")
+            .bind(&pubkey)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(stored, 1, "one credential should be stored");
+
+    // -- authentication -----------------------------------------------------
+    let res = server
+        .post("/auth/webauthn/assert/begin")
+        .json(&json!({ "user_pubkey": pubkey }))
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    let auth_session = body["session_id"].as_str().unwrap().to_string();
+    let rcr: RequestChallengeResponse = serde_json::from_value(body["options"].clone())
+        .expect("hub's assertion options must deserialise as a RequestChallengeResponse");
+
+    let assertion = authenticator
+        .perform_auth(origin, rcr.public_key, 60_000)
+        .expect("software authenticator assertion");
+
+    let res = server
+        .post("/auth/webauthn/assert/finish")
+        .json(&json!({ "session_id": auth_session, "credential": assertion }))
+        .await;
+    res.assert_status_ok();
+    let token = res.json::<serde_json::Value>()["session_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!token.is_empty(), "assertion must issue a session token");
+
+    // A stale session id must not be replayable.
+    let res = server
+        .post("/auth/webauthn/assert/finish")
+        .json(&json!({ "session_id": auth_session, "credential": assertion }))
+        .await;
+    // Single-use: the challenge was consumed above, so the session id is gone.
+    res.assert_status(axum::http::StatusCode::BAD_REQUEST);
 }
 
 // ---------------------------------------------------------------------------

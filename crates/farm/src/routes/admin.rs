@@ -5,7 +5,6 @@
 /// GET  /farm/me/hub-quota                  — current user's hub-creation eligibility (authed)
 /// GET  /farm/users                         — paginated farm-user index (admin)
 /// POST /farm/users/:pubkey/revoke-sessions — revoke all sessions for a user (admin)
-/// GET  /farm/public-info                   — narrow discovery probe (unauthenticated)
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -94,7 +93,6 @@ struct FarmRow {
     creation_policy: String,
     max_hubs_per_user: i64,
     max_hubs_total: i64,
-    allow_discovery_listing: bool,
     languages: String,
     tags: String,
     country: Option<String>,
@@ -113,7 +111,6 @@ async fn fetch_farm_row(
         String,
         i64,
         i64,
-        bool,
         String,
         String,
         Option<String>,
@@ -122,7 +119,7 @@ async fn fetch_farm_row(
     )> = sqlx::query_as(
         "SELECT name, description, directory_public,
                 creation_policy, max_hubs_per_user, max_hubs_total,
-                allow_discovery_listing, languages, tags,
+                languages, tags,
                 country, region, admin_pubkey
          FROM farms WHERE id = 1",
     )
@@ -149,12 +146,11 @@ async fn fetch_farm_row(
         creation_policy: row.3,
         max_hubs_per_user: row.4,
         max_hubs_total: row.5,
-        allow_discovery_listing: row.6,
-        languages: row.7,
-        tags: row.8,
-        country: row.9,
-        region: row.10,
-        admin_pubkey: row.11,
+        languages: row.6,
+        tags: row.7,
+        country: row.8,
+        region: row.9,
+        admin_pubkey: row.10,
     })
 }
 
@@ -235,7 +231,6 @@ pub struct FarmSettingsResponse {
     pub creation_policy: String,
     pub max_hubs_per_user: i64,
     pub max_hubs_total: i64,
-    pub allow_discovery_listing: bool,
     pub languages: serde_json::Value,
     pub tags: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,7 +261,6 @@ pub async fn get_settings(
         creation_policy: row.creation_policy,
         max_hubs_per_user: row.max_hubs_per_user,
         max_hubs_total: row.max_hubs_total,
-        allow_discovery_listing: row.allow_discovery_listing,
         languages,
         tags,
         country: row.country,
@@ -287,7 +281,6 @@ pub struct PatchSettingsRequest {
     pub creation_policy: Option<String>,
     pub max_hubs_per_user: Option<i64>,
     pub max_hubs_total: Option<i64>,
-    pub allow_discovery_listing: Option<bool>,
     pub languages: Option<Vec<String>>,
     pub tags: Option<Vec<String>>,
     pub country: Option<String>,
@@ -329,9 +322,6 @@ pub async fn patch_settings(
     let new_creation_policy = req.creation_policy.unwrap_or(row.creation_policy);
     let new_max_per_user = req.max_hubs_per_user.unwrap_or(row.max_hubs_per_user);
     let new_max_total = req.max_hubs_total.unwrap_or(row.max_hubs_total);
-    let new_allow_discovery = req
-        .allow_discovery_listing
-        .unwrap_or(row.allow_discovery_listing);
     let new_languages = req
         .languages
         .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "[\"en\"]".to_string()))
@@ -351,11 +341,10 @@ pub async fn patch_settings(
             creation_policy = $4,
             max_hubs_per_user = $5,
             max_hubs_total = $6,
-            allow_discovery_listing = $7,
-            languages = $8,
-            tags = $9,
-            country = $10,
-            region = $11
+            languages = $7,
+            tags = $8,
+            country = $9,
+            region = $10
          WHERE id = 1",
     )
     .bind(&new_name)
@@ -364,7 +353,6 @@ pub async fn patch_settings(
     .bind(&new_creation_policy)
     .bind(new_max_per_user)
     .bind(new_max_total)
-    .bind(new_allow_discovery)
     .bind(&new_languages)
     .bind(&new_tags)
     .bind(&new_country)
@@ -390,7 +378,6 @@ pub async fn patch_settings(
         creation_policy: new_creation_policy,
         max_hubs_per_user: new_max_per_user,
         max_hubs_total: new_max_total,
-        allow_discovery_listing: new_allow_discovery,
         languages: languages_val,
         tags: tags_val,
         country: new_country,
@@ -636,67 +623,5 @@ pub async fn revoke_user_sessions(
 
     Ok(Json(RevokeSessionsResponse {
         revoked: result.rows_affected(),
-    }))
-}
-
-// ---------------------------------------------------------------------------
-// GET /farm/public-info
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-pub struct PublicInfoResponse {
-    pub kind: &'static str,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub creation_policy: String,
-    pub hub_count: i64,
-    pub max_hubs_total: i64,
-    pub allow_discovery_listing: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub country: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-    pub languages: serde_json::Value,
-    pub tags: serde_json::Value,
-    /// Farm Ed25519 public key (hex). Required by the seed node to verify farm identity.
-    pub public_key: String,
-}
-
-pub async fn public_info(
-    State(state): State<Arc<FarmState>>,
-) -> Result<Json<PublicInfoResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let row = fetch_farm_row(&state.db).await?;
-
-    if !row.allow_discovery_listing {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "discovery_disabled"})),
-        ));
-    }
-
-    let hub_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM hubs WHERE deleted_at IS NULL")
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
-
-    let languages: serde_json::Value =
-        serde_json::from_str(&row.languages).unwrap_or_else(|_| serde_json::json!(["en"]));
-    let tags: serde_json::Value =
-        serde_json::from_str(&row.tags).unwrap_or_else(|_| serde_json::json!([]));
-
-    Ok(Json(PublicInfoResponse {
-        kind: "wavvon-farm-public",
-        name: row.name,
-        description: row.description,
-        creation_policy: row.creation_policy,
-        hub_count,
-        max_hubs_total: row.max_hubs_total,
-        allow_discovery_listing: row.allow_discovery_listing,
-        country: row.country,
-        region: row.region,
-        languages,
-        tags,
-        public_key: state.public_key_hex(),
     }))
 }

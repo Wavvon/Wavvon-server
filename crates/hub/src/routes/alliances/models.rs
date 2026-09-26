@@ -1,4 +1,9 @@
-// DB row types shared across alliance submodules.
+// DB row types shared across alliance submodules, and the visibility rule
+// every alliance route applies to its caller.
+
+use axum::http::StatusCode;
+
+use crate::state::AppState;
 
 #[derive(sqlx::FromRow)]
 pub(super) struct AllianceRow {
@@ -53,4 +58,63 @@ pub(super) struct PendingInviteRow {
     pub invite_token: String,
     pub created_at: i64,
     pub message: Option<String>,
+}
+
+/// Refuse a **peer hub** asking about an alliance it is not in.
+///
+/// A hub can be in many alliances and they do not merge: it shares different
+/// channels into each, and a partner in one has no standing in another. The
+/// question only arises for a federating peer — a local caller is a member of
+/// *this* hub, which is in the alliance by definition.
+///
+/// It has to be asked, because a peer token is not a relationship: any hub may
+/// authenticate here with `is_hub=true` and lands in `peers` with no invite
+/// (deliberately — a peer is not a person joining a community). Without this,
+/// `GET /alliances` handed a stranger the id and name of every alliance this
+/// hub is in, and the routes below then served their shared channels and their
+/// messages.
+pub(super) async fn require_alliance_visibility(
+    state: &AppState,
+    caller: &str,
+    alliance_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let is_peer: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM peers WHERE public_key = $1)")
+            .bind(caller)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if !is_peer {
+        return Ok(());
+    }
+
+    let member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM alliance_members WHERE alliance_id = $1 AND hub_public_key = $2)",
+    )
+    .bind(alliance_id)
+    .bind(caller)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if member {
+        Ok(())
+    } else {
+        // Not found rather than forbidden: whether an alliance exists here is
+        // itself the thing being withheld.
+        Err((StatusCode::NOT_FOUND, "Alliance not found".to_string()))
+    }
+}
+
+/// Whether `caller` is a peer hub, for the routes that filter a list instead
+/// of refusing outright.
+pub(super) async fn caller_is_peer(
+    state: &AppState,
+    caller: &str,
+) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM peers WHERE public_key = $1)")
+        .bind(caller)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
 }

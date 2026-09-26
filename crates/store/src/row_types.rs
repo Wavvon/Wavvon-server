@@ -13,10 +13,6 @@ pub struct UserRow {
     pub approval_status: String,
     pub avatar: Option<String>,
     pub master_pubkey: Option<String>,
-    pub is_bot: bool,
-    pub is_bot_removed: bool,
-    pub bot_invite_token: Option<String>,
-    pub bot_invite_expires: Option<i64>,
     pub is_webhook: bool,
     pub lobby_status: String,
     pub lobby_entered_at: Option<i64>,
@@ -208,52 +204,6 @@ pub struct NewReport {
     pub reporter_pubkey: String,
     pub reason: String,
     pub reported_at: i64,
-}
-
-// ---- Bots ----
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BotProfileRow {
-    pub pubkey: String,
-    pub name: String,
-    pub avatar_url: Option<String>,
-    pub description: Option<String>,
-    pub webhook_url: Option<String>,
-    pub homepage_url: Option<String>,
-    pub capabilities: String,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BotRow {
-    pub public_key: String,
-    pub display_name: String,
-    pub created_by: String,
-    pub token_hash: String,
-    pub webhook_url: Option<String>,
-    pub mini_app_url: Option<String>,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BotCommandRow {
-    pub pubkey: String,
-    pub name: String,
-    pub description: String,
-    pub args: Option<String>,
-    pub scope: String,
-    pub privileged: bool,
-    pub cooldown_seconds: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BotEventQueueRow {
-    pub id: String,
-    pub bot_pubkey: String,
-    pub event_type: String,
-    pub payload: String,
-    pub created_at: i64,
-    pub delivered: bool,
 }
 
 // ---- DMs ----

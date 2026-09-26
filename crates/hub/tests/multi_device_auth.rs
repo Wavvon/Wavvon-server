@@ -26,6 +26,7 @@ async fn setup() -> (common::TestHarness, PgPool) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx: broadcast::channel(16).0,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -44,7 +45,7 @@ async fn setup() -> (common::TestHarness, PgPool) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
@@ -54,7 +55,9 @@ async fn setup() -> (common::TestHarness, PgPool) {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
@@ -62,9 +65,8 @@ async fn setup() -> (common::TestHarness, PgPool) {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -401,4 +403,88 @@ async fn non_revoked_key_is_not_affected() {
         .authorization_bearer(&bob_token)
         .await
         .assert_status_unauthorized();
+}
+
+/// A device that presents its cert at auth must land in the device registry,
+/// not only on the user row. The two are read by different things: home-hub
+/// lookups follow `users.master_pubkey`, while the Devices screen lists
+/// `subkey_certs` — so recording one without the other left a device linked
+/// and invisible to its own owner, with nothing reporting it.
+#[tokio::test]
+async fn auth_records_the_presented_cert_in_the_device_registry() {
+    let (server, db) = setup().await;
+    let master = Identity::generate().master().unwrap();
+    let laptop = DeviceSubkey::generate("laptop".into());
+    let cert = make_cert(&master, &laptop.public_key_hex(), "laptop");
+
+    auth_with_cert(&server, &laptop, Some(&cert))
+        .await
+        .expect("auth should succeed");
+
+    let label: Option<String> = sqlx::query_scalar(
+        "SELECT device_label FROM subkey_certs WHERE master_pubkey = $1 AND subkey_pubkey = $2",
+    )
+    .bind(master.public_key_hex())
+    .bind(laptop.public_key_hex())
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        label.as_deref(),
+        Some("laptop"),
+        "the cert presented at auth should be in the registry the device list reads"
+    );
+
+    // And the endpoint that list actually calls agrees.
+    let resp = server
+        .get(&format!("/identity/{}/devices", master.public_key_hex()))
+        .await;
+    resp.assert_status_ok();
+    let devices: Vec<serde_json::Value> = resp.json();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0]["subkey_pubkey"], laptop.public_key_hex());
+}
+
+/// A rejected sign-in must leave nothing behind. The cert is verified early,
+/// in `resolve_canonical_identity`, but the gates that can still refuse the
+/// request — ban, invite, proof-of-work — all run after it, so recording the
+/// device there would have written a row for someone the hub just turned away.
+#[tokio::test]
+async fn a_banned_device_is_not_recorded_in_the_registry() {
+    let (server, db) = setup().await;
+    let master = Identity::generate().master().unwrap();
+    let laptop = DeviceSubkey::generate("laptop".into());
+    let cert = make_cert(&master, &laptop.public_key_hex(), "laptop");
+
+    // Sign in once so the canonical row exists, then ban it.
+    auth_with_cert(&server, &laptop, Some(&cert))
+        .await
+        .expect("first auth should succeed");
+    sqlx::query(
+        "INSERT INTO bans (target_public_key, banned_by, reason, created_at)
+         VALUES ($1, $1, NULL, 0)",
+    )
+    .bind(master.public_key_hex())
+    .execute(&db)
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM subkey_certs WHERE master_pubkey = $1")
+        .bind(master.public_key_hex())
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let second = DeviceSubkey::generate("phone".into());
+    let second_cert = make_cert(&master, &second.public_key_hex(), "phone");
+    auth_with_cert(&server, &second, Some(&second_cert))
+        .await
+        .expect_err("a banned identity must not be able to sign in");
+
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM subkey_certs WHERE master_pubkey = $1")
+            .bind(master.public_key_hex())
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(rows, 0, "a refused sign-in must not write to the registry");
 }

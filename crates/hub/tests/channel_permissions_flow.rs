@@ -87,7 +87,12 @@ async fn deny_read_messages_hides_channel_and_blocks_history() {
         &secret.id,
         "builtin-everyone",
         &[],
-        &["read_messages"],
+        // Hiding a channel is **two** denials now that voice admission is its
+        // own question (permissions.md §3, Voice). Denying read alone leaves
+        // it listed and joinable, because voice.join is seeded on
+        // builtin-everyone -- which is the documented price of the split, not
+        // a leak: the channel renders voice-only and carries no text.
+        &["messages.read", "voice.join"],
     )
     .await;
 
@@ -150,7 +155,8 @@ async fn parent_deny_cascades_to_child_and_child_allow_overrides() {
         &category.id,
         "builtin-everyone",
         &[],
-        &["read_messages"],
+        // Both halves, same reason as above.
+        &["messages.read", "voice.join"],
     )
     .await;
 
@@ -169,7 +175,7 @@ async fn parent_deny_cascades_to_child_and_child_allow_overrides() {
         &owner_token,
         &child.id,
         "builtin-everyone",
-        &["read_messages"],
+        &["messages.read"],
         &[],
     )
     .await;
@@ -212,7 +218,7 @@ async fn allow_wins_over_deny_across_two_roles_same_channel() {
         &chan.id,
         &deny_role.id,
         &[],
-        &["send_messages"],
+        &["messages.send"],
     )
     .await;
 
@@ -233,7 +239,7 @@ async fn allow_wins_over_deny_across_two_roles_same_channel() {
         &owner_token,
         &chan.id,
         &allow_role.id,
-        &["send_messages"],
+        &["messages.send"],
         &[],
     )
     .await;
@@ -262,18 +268,18 @@ async fn admin_routes_put_get_delete_happy_path() {
         &owner_token,
         &chan.id,
         &staff.id,
-        &["manage_messages"],
-        &["read_messages"],
+        &["messages.manage"],
+        &["messages.read"],
     )
     .await;
     assert_eq!(view.role_id, staff.id);
     assert!(view
         .overwrites
         .allow
-        .contains(&"manage_messages".to_string()));
-    assert!(view.overwrites.deny.contains(&"read_messages".to_string()));
-    assert!(view.effective.contains(&"manage_messages".to_string()));
-    assert!(!view.effective.contains(&"read_messages".to_string()));
+        .contains(&"messages.manage".to_string()));
+    assert!(view.overwrites.deny.contains(&"messages.read".to_string()));
+    assert!(view.effective.contains(&"messages.manage".to_string()));
+    assert!(!view.effective.contains(&"messages.read".to_string()));
 
     let resp = server
         .get(&format!("/channels/{}/permissions", chan.id))
@@ -290,11 +296,11 @@ async fn admin_routes_put_get_delete_happy_path() {
     assert!(staff_view
         .overwrites
         .allow
-        .contains(&"manage_messages".to_string()));
+        .contains(&"messages.manage".to_string()));
     assert!(staff_view
         .overwrites
         .deny
-        .contains(&"read_messages".to_string()));
+        .contains(&"messages.read".to_string()));
 
     // @everyone has no overwrites on this channel -- inherited == effective,
     // and both come straight from its baseline permissions.
@@ -344,7 +350,7 @@ async fn admin_routes_reject_non_admin() {
             chan.id
         ))
         .authorization_bearer(&user2_token)
-        .json(&json!({ "allow": [], "deny": ["send_messages"] }))
+        .json(&json!({ "allow": [], "deny": ["messages.send"] }))
         .await
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
@@ -371,7 +377,10 @@ async fn setup_manager(
         server,
         &owner_token,
         "Manager",
-        &["manage_roles", "send_messages"],
+        // Editing one channel's overwrites is `channels.permissions`, not
+        // hub-wide `roles.manage` — the split is the point of having both
+        // (permissions.md §3, Channels).
+        &["channels.permissions", "messages.send"],
         10,
     )
     .await;
@@ -381,16 +390,19 @@ async fn setup_manager(
 }
 
 #[tokio::test]
-async fn manager_cannot_grant_admin_via_overwrite() {
+async fn an_unknown_permission_is_refused_as_an_overwrite() {
     let server = common::setup().await;
     let (_owner_token, user2_token, chan_id, _manager, _user2_key) = setup_manager(&server).await;
 
     server
         .put(&format!("/channels/{chan_id}/permissions/builtin-everyone"))
         .authorization_bearer(&user2_token)
+        // `admin` is no longer a permission at all — ownership is a property
+        // (permissions.md §1.1) — so the code-not-data special case that used
+        // to live here is gone, and the catalogue validator is what refuses it.
         .json(&json!({ "allow": ["admin"], "deny": [] }))
         .await
-        .assert_status(axum::http::StatusCode::FORBIDDEN);
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -402,7 +414,7 @@ async fn manager_cannot_grant_permission_they_do_not_hold() {
     server
         .put(&format!("/channels/{chan_id}/permissions/builtin-everyone"))
         .authorization_bearer(&user2_token)
-        .json(&json!({ "allow": ["manage_channels"], "deny": [] }))
+        .json(&json!({ "allow": ["channels.manage"], "deny": [] }))
         .await
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
@@ -418,7 +430,7 @@ async fn manager_cannot_edit_overwrites_for_higher_priority_role() {
     server
         .put(&format!("/channels/{chan_id}/permissions/{}", senior.id))
         .authorization_bearer(&user2_token)
-        .json(&json!({ "allow": ["send_messages"], "deny": [] }))
+        .json(&json!({ "allow": ["messages.send"], "deny": [] }))
         .await
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 
@@ -442,11 +454,11 @@ async fn manager_can_grant_permission_they_hold_on_same_or_lower_role() {
         &user2_token,
         &chan_id,
         "builtin-everyone",
-        &["send_messages"],
+        &["messages.send"],
         &[],
     )
     .await;
-    assert!(view.overwrites.allow.contains(&"send_messages".to_string()));
+    assert!(view.overwrites.allow.contains(&"messages.send".to_string()));
 }
 
 #[tokio::test]
@@ -488,7 +500,7 @@ async fn send_messages_deny_blocks_one_channel_not_sibling() {
         &chan_a.id,
         "builtin-everyone",
         &[],
-        &["send_messages"],
+        &["messages.send"],
     )
     .await;
 
@@ -524,7 +536,7 @@ async fn my_permissions_reflects_channel_overwrites_without_manage_roles() {
     let lounge = create_channel(&server, &owner_token, "lounge", None, false).await;
 
     // user2 gets a role granting use_soundboard hub-wide…
-    let dj = create_role(&server, &owner_token, "dj", &["use_soundboard"], 1).await;
+    let dj = create_role(&server, &owner_token, "dj", &["voice.soundboard.use"], 1).await;
     assign_role(&server, &owner_token, &user2.public_key_hex(), &dj.id).await;
 
     // …which the stage channel explicitly denies for that role.
@@ -534,7 +546,7 @@ async fn my_permissions_reflects_channel_overwrites_without_manage_roles() {
         &stage.id,
         &dj.id,
         &[],
-        &["use_soundboard"],
+        &["voice.soundboard.use"],
     )
     .await;
 
@@ -546,9 +558,11 @@ async fn my_permissions_reflects_channel_overwrites_without_manage_roles() {
         .await;
     resp.assert_status_ok();
     let on_stage: MyChannelPermissionsResponse = resp.json();
-    assert!(!on_stage.is_admin);
+    assert!(!on_stage.is_owner);
     assert!(
-        !on_stage.permissions.contains(&"use_soundboard".to_string()),
+        !on_stage
+            .permissions
+            .contains(&"voice.soundboard.use".to_string()),
         "stage denies use_soundboard for dj: {:?}",
         on_stage.permissions
     );
@@ -562,7 +576,7 @@ async fn my_permissions_reflects_channel_overwrites_without_manage_roles() {
     let on_lounge: MyChannelPermissionsResponse = resp.json();
     assert!(on_lounge
         .permissions
-        .contains(&"use_soundboard".to_string()));
+        .contains(&"voice.soundboard.use".to_string()));
 
     // The owner is admin: flag set.
     let resp = server
@@ -571,7 +585,7 @@ async fn my_permissions_reflects_channel_overwrites_without_manage_roles() {
         .await;
     resp.assert_status_ok();
     let owner_view: MyChannelPermissionsResponse = resp.json();
-    assert!(owner_view.is_admin);
+    assert!(owner_view.is_owner);
 }
 
 #[tokio::test]

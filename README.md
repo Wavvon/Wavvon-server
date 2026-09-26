@@ -16,8 +16,8 @@ stays connected to the wider network while you keep full control of
 your data.
 
 This repository is the entire backend: the hub server plus the optional
-fleet tooling (farm controller, server agent, seed registry) and the
-canonical identity crate.
+fleet tooling (farm controller, server agent) and the canonical identity
+crate.
 
 ![A community served by a single hub binary - unified channels, voice, presence](https://raw.githubusercontent.com/Wavvon/Wavvon-docs/main/assets/screenshot-channel.png)
 
@@ -60,11 +60,14 @@ canonical identity crate.
 ```bash
 git clone https://github.com/Wavvon/Wavvon-server
 cd Wavvon-server
+echo "WAVVON_DB_PASSWORD=$(openssl rand -hex 16)" > .env
 docker compose up -d
 ```
 
 The bundled `docker-compose.yml` starts the hub plus a PostgreSQL
-sidecar. Prefer a guided install? The interactive wizard generates a
+sidecar. It has no default database password — compose refuses to start
+until `WAVVON_DB_PASSWORD` is set, so no hub ever runs on a password
+that ships in a public repo. Prefer a guided install? The interactive wizard generates a
 tailored compose file and `.env` for you:
 
 ```bash
@@ -146,10 +149,11 @@ own keypair lives in `hub_identity.json` in the working directory
 | `identity/` | Ed25519 keypairs, BIP39 recovery, PoW helpers — the canonical wire-format authority |
 | `farm/` | Optional control plane for running a fleet of hubs |
 | `agent/` | Fleet worker that runs hubs on compute nodes for a farm |
-| `seed/` | Self-hostable cross-farm discovery registry |
 | `store/` | Trait-based storage layer with the PostgreSQL backend |
+| `hub-env/` | The names of every `WAVVON_*` env key that crosses a process boundary |
 | `demo-seed/` | Populates a running hub with demo content |
-| `discord-import/` | Import an existing Discord community into a hub |
+| `bot-kit/` | Rust SDK for writing a bot against the hub |
+| `ttt-bot/` | Example bot — tic-tac-toe over the mini-app surface |
 
 Multi-hub deployments use `docker-compose.farm.yml` — see
 [farm-model.md](https://github.com/Wavvon/Wavvon-docs/blob/main/docs/farm-model.md).

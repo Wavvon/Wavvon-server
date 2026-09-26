@@ -1,7 +1,9 @@
 mod channels;
 mod crud;
+mod managers;
 mod membership;
 mod models;
+mod voice;
 
 // Re-export all public items so server.rs paths remain unchanged.
 pub use channels::{
@@ -11,8 +13,16 @@ pub use channels::{
     react_alliance_forum, share_channel, unshare_channel,
 };
 pub use crud::{create_alliance, get_alliance, leave_alliance, list_alliances};
+pub use managers::{
+    grant_alliance_manager, list_alliance_managers, require_alliance_manager,
+    revoke_alliance_manager,
+};
 pub use membership::{
     accept_pending_invite, create_invite, decline_pending_invite, join_alliance,
-    join_alliance_local, list_pending_invites, push_invite_handler,
-    receive_federation_alliance_invite,
+    join_alliance_local, list_pending_invites, push_invite_handler, receive_alliance_member,
+    receive_alliance_member_left, receive_federation_alliance_invite,
+};
+pub use voice::{
+    admitted_channel, mint_voice_grant, record_visit, resolve_visitor_token, verify_grant,
+    AllianceVoiceGrant, GRANT_TTL_SECS, VISIT_TTL_SECS,
 };

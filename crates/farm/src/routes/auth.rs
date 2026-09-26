@@ -46,6 +46,11 @@ pub struct VerifyRequest {
     pub scope: Option<String>,
     /// TOTP code — required when the admin account has TOTP enabled.
     pub totp_code: Option<String>,
+    /// Multi-device: the cert the master identity signed for this device's
+    /// subkey. Present it and the session speaks for the master identity —
+    /// the farm's half of `resolve_canonical_identity`.
+    #[serde(default)]
+    pub subkey_cert: Option<wavvon_identity::SubkeyCert>,
 }
 
 #[derive(Serialize)]
@@ -213,14 +218,50 @@ pub async fn verify(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Upsert the farm_users row. Canonical pubkey = auth pubkey (no cert resolution
-    // in Phase 1 — that lives on the hub still; the farm just records who showed up).
+    // Resolve the canonical identity: a paired device authenticates as its own
+    // subkey and presents the cert its master signed, and the session has to
+    // speak for the master or the device shows up as a stranger. The hub does
+    // this in its own /auth/verify — but a farm-hosted hub's client sends
+    // /auth/* here (`/info.farm_url`), so the hub never sees the cert, and a
+    // paired device landed on every farm-hosted hub as a brand-new user.
+    let master_pubkey: Option<String> = match &req.subkey_cert {
+        None => None,
+        Some(cert) => {
+            if cert.subkey_pubkey != req.public_key {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "subkey_cert is for a different key".to_string(),
+                ));
+            }
+            cert.verify().map_err(|_| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid subkey_cert signature".to_string(),
+                )
+            })?;
+            if cert.not_after.is_some_and(|exp| (now as u64) >= exp) {
+                return Err((StatusCode::UNAUTHORIZED, "subkey_cert expired".to_string()));
+            }
+            Some(cert.master_pubkey.clone())
+        }
+    };
+    // What the token speaks for, and what every hub of this farm will read as
+    // the user's identity.
+    let canonical_pubkey = master_pubkey
+        .clone()
+        .unwrap_or_else(|| req.public_key.clone());
+
+    // Upsert the farm_users row — the device's own key, carrying the master it
+    // resolved to.
     sqlx::query(
         "INSERT INTO farm_users (public_key, master_pubkey, first_seen_at, last_seen_at)
-         VALUES ($1, NULL, $2, $3)
-         ON CONFLICT(public_key) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at",
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT(public_key) DO UPDATE SET
+             last_seen_at = EXCLUDED.last_seen_at,
+             master_pubkey = COALESCE(EXCLUDED.master_pubkey, farm_users.master_pubkey)",
     )
     .bind(&req.public_key)
+    .bind(&master_pubkey)
     .bind(now)
     .bind(now)
     .execute(&state.db)
@@ -253,8 +294,8 @@ pub async fn verify(
         v: 1,
         iss: state.farm_url.clone(),
         iss_pk: state.public_key_hex(),
-        sub: req.public_key.clone(),
-        master: None,
+        sub: canonical_pubkey,
+        master: master_pubkey,
         jti,
         iat: now,
         exp,

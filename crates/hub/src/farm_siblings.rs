@@ -8,7 +8,7 @@
 //! - adds that sibling to `cert_trusted_issuers`, so a member vouched for on
 //!   one hub of a farm is not a stranger on the next.
 //!
-//! That is the anti-bot story assembled from primitives that already exist —
+//! That is the anti-abuse story assembled from primitives that already exist —
 //! federated ban lists and hub certifications — rather than a farm-level
 //! reputation store, which decisions.md rules out. The trust decision stays
 //! local to each hub; the farm only saves its owner from wiring it by hand.
@@ -47,6 +47,16 @@ async fn read_set(db: &PgPool, key: &str) -> HashSet<String> {
         .flatten()
         .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
         .map(|v| v.into_iter().collect())
+        .unwrap_or_default()
+}
+
+async fn read_url_map(db: &PgPool) -> std::collections::HashMap<String, String> {
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'cert_issuer_urls'")
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
 }
 
@@ -117,6 +127,29 @@ pub async fn reconcile(db: &PgPool, siblings: &[Sibling]) {
             db,
             "cert_trusted_issuers",
             &serde_json::to_string(&list).unwrap_or_else(|_| "[]".to_string()),
+        )
+        .await;
+    }
+
+    // Where each of them can be reached, so the admission gate can pull a
+    // candidate's portfolio (hub-certifications.md §11). A separate setting
+    // from the trust list on purpose: trusting an issuer and knowing its
+    // address are different facts, and the list that decides admission stays
+    // the flat array of pubkeys it has to be. Additive here too — an address
+    // the owner corrected by hand is not overwritten by a heartbeat.
+    let mut urls = read_url_map(db).await;
+    let before = urls.len();
+    for sibling in &fresh {
+        if wired.contains(&sibling.hub_pubkey) {
+            urls.entry(sibling.hub_pubkey.clone())
+                .or_insert_with(|| sibling.hub_url.trim_end_matches('/').to_string());
+        }
+    }
+    if urls.len() != before {
+        let _ = crate::routes::hub::upsert_setting(
+            db,
+            "cert_issuer_urls",
+            &serde_json::to_string(&urls).unwrap_or_else(|_| "{}".to_string()),
         )
         .await;
     }

@@ -6,7 +6,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN};
+use crate::permissions::{self, HUB_SETTINGS};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ pub async fn submit_pow(
 
     // Promote lobby -> member in place. `lobby_status` above is a
     // client-facing display flag; `sessions.scope` is what the AuthUser
-    // extractor actually enforces (lobby-bot-survey.md Feature 1), so it
+    // extractor actually enforces (lobby-survey.md Feature 1), so it
     // must flip too or the just-promoted user stays confined until their
     // next full /auth/verify. Every currently-lobby-scoped session for this
     // pubkey is promoted, not just the one behind this request's token,
@@ -248,7 +248,7 @@ pub async fn update_lobby_settings(
     Json(req): Json<UpdateLobbySettingsRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(HUB_SETTINGS)?;
 
     upsert_setting(
         &state.db,

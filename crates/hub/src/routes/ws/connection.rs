@@ -8,7 +8,16 @@ use crate::routes::chat_models::{WsClientMessage, WsServerMessage};
 use crate::state::AppState;
 
 use super::conn_state::{ConnState, DispatchResult};
-use super::handlers::{bot, chat, mini_app, screen, voice};
+
+/// How often the hub pings an idle socket.
+const KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long a socket may go without a single inbound frame before it is
+/// treated as dead. Three missed pings — generous enough to survive a brief
+/// stall, short enough that a phantom voice participant clears in a minute
+/// rather than never.
+const KEEPALIVE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(65);
+use super::handlers::{app, chat, mini_app, screen, voice};
 use super::voice::get_voice_roster;
 
 pub(super) async fn handle_socket(
@@ -16,17 +25,19 @@ pub(super) async fn handle_socket(
     state: Arc<AppState>,
     public_key: String,
     mini_app_channel_id: Option<String>,
+    alliance_voice_channel: Option<String>,
 ) {
     // ── Connection setup ─────────────────────────────────────────────────────
 
-    let is_bot: bool =
-        sqlx::query_scalar::<_, bool>("SELECT is_bot FROM users WHERE public_key = $1")
-            .bind(&public_key)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(false);
+    let is_app: bool = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM app_profiles WHERE pubkey = $1)",
+    )
+    .bind(&public_key)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(false);
 
     // Increment the online-users refcount for this pubkey.
     {
@@ -36,31 +47,38 @@ pub(super) async fn handle_socket(
 
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    let (bot_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
+    let (app_tx, mut bot_rx): (mpsc::Sender<String>, mpsc::Receiver<String>) = mpsc::channel(256);
+
+    // Unique id for this specific WS session — used to discriminate
+    // app_sessions and ws_key_senders entries so a newer session does not
+    // overwrite the older sender, and so the first disconnect does not evict
+    // the second session.
+    let session_id = uuid::Uuid::new_v4().to_string();
 
     // V4 voice encryption: per-connection unbounded channel for targeted key
     // distribution messages.  Registered in ws_key_senders so other connections
     // can send directly to this one without going through the broadcast bus.
+    // Filed under this session's own id, for the reason app_sessions is: a
+    // pubkey with two sockets used to leave one of them registered nowhere,
+    // and a voice participant registered nowhere receives no sender key and
+    // hears silence (state.rs, `ws_key_senders`).
     let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<WsServerMessage>();
     state
         .ws_key_senders
         .write()
         .await
-        .insert(public_key.clone(), key_tx);
+        .entry(public_key.clone())
+        .or_default()
+        .insert(session_id.clone(), key_tx);
 
-    // Unique id for this specific WS session — used to discriminate
-    // bot_sessions entries so a newer session does not overwrite the older
-    // sender, and so the first disconnect does not evict the second session.
-    let session_id = uuid::Uuid::new_v4().to_string();
-
-    if is_bot {
+    if is_app {
         state
-            .bot_sessions
+            .app_sessions
             .write()
             .await
             .entry(public_key.clone())
             .or_default()
-            .insert(session_id.clone(), bot_tx.clone());
+            .insert(session_id.clone(), app_tx.clone());
     }
 
     let mut chat_rx = state.chat_tx.subscribe();
@@ -95,7 +113,7 @@ pub(super) async fn handle_socket(
     let mut voice_rx = state.voice_event_tx.subscribe();
     let mut screen_share_rx = state.screen_share_tx.subscribe();
 
-    // A mini-app session (bot-mini-apps.md "Scoped session token") is bound
+    // A mini-app session (mini-apps.md "Scoped session token") is bound
     // to exactly one channel and never sees DMs — it's a game/interactive
     // relay for one channel, not a general-purpose login. Skip the normal
     // "every readable channel" auto-subscribe and DM-membership load
@@ -121,11 +139,18 @@ pub(super) async fn handle_socket(
     // Read-gating (§3.5): a channel the caller can't effectively read is
     // never auto-subscribed, so no chat/typing/etc. events for it are ever
     // delivered over this connection.
+    //
+    // MESSAGES_READ **only**, deliberately. The channel list in
+    // `routes/channels.rs` asks read OR VOICE_JOIN, because a channel you may
+    // only talk in still has to render; this one must not widen to match it,
+    // or that channel's messages, edits, typing and reactions arrive over the
+    // socket for someone with no right to read them (permissions.md §3, "the
+    // split that must not be got wrong").
     let readable_channels: std::collections::HashSet<String> =
         crate::permissions::channels_with_permission(
             &state.db,
             &public_key,
-            crate::permissions::READ_MESSAGES,
+            crate::permissions::MESSAGES_READ,
         )
         .await
         .unwrap_or_default();
@@ -156,15 +181,16 @@ pub(super) async fn handle_socket(
 
     // Send `hello` with live_seq.
     {
-        let live_seq = crate::bots::events::current_seq(&state).await;
+        let live_seq = crate::apps::events::current_seq(&state).await;
         let hello = serde_json::json!({ "type": "hello", "live_seq": live_seq });
         let _ = ws_tx.send(Message::Text(hello.to_string().into())).await;
     }
 
     let mut cs = ConnState::new(
         public_key.clone(),
-        is_bot,
+        is_app,
         is_mini_app,
+        alliance_voice_channel,
         session_id.clone(),
         subscribed,
         my_conversations,
@@ -210,6 +236,22 @@ pub(super) async fn handle_socket(
             }
         }
     }
+
+    // ── Liveness ─────────────────────────────────────────────────────────────
+    //
+    // Nothing used to notice a client that vanished without closing its socket
+    // — a slept laptop, a changed network, a killed tab. The read loop stayed
+    // parked on a half-open TCP connection for as long as the OS took to
+    // notice, and because the disconnect cleanup below is the *only* thing
+    // that calls `leave_voice`, that member sat in the voice roster the whole
+    // time. Reconnecting then showed them talking to themselves.
+    //
+    // WebSocket ping is the right tool: browsers answer at the protocol level,
+    // so this needs no client cooperation. Any inbound frame counts as proof
+    // of life, pong included.
+    let mut keepalive = tokio::time::interval(KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_seen = std::time::Instant::now();
 
     // ── Main select! loop ────────────────────────────────────────────────────
 
@@ -345,7 +387,28 @@ pub(super) async fn handle_socket(
             }
 
             // ── Inbound client frame ──────────────────────────────────────
+            // ── Liveness probe ────────────────────────────────────────────
+            _ = keepalive.tick() => {
+                if last_seen.elapsed() > KEEPALIVE_DEADLINE {
+                    // Breaking runs the disconnect cleanup below, which is
+                    // what actually frees the voice roster entry.
+                    tracing::debug!(
+                        "WebSocket liveness timeout, closing: {}",
+                        public_key
+                    );
+                    break;
+                }
+                if ws_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+
             msg = ws_rx.next() => {
+                // Proof of life before anything else: a pong, or a frame this
+                // loop ignores, still means the peer is there.
+                if matches!(msg, Some(Ok(_))) {
+                    last_seen = std::time::Instant::now();
+                }
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         // Silently ignore unparseable frames (protocol contract).
@@ -354,7 +417,7 @@ pub(super) async fn handle_socket(
                                 &mut cs,
                                 &state,
                                 &mut ws_tx,
-                                &bot_tx,
+                                &app_tx,
                                 client_msg,
                             ).await;
                             if matches!(result, DispatchResult::Break) {
@@ -548,8 +611,18 @@ pub(super) async fn handle_socket(
 
     // ── Disconnect cleanup ───────────────────────────────────────────────────
 
-    // V4 voice encryption: deregister this connection's key sender.
-    state.ws_key_senders.write().await.remove(&public_key);
+    // V4 voice encryption: deregister *this session's* key sender, leaving
+    // any concurrent session of the same pubkey registered — removing the
+    // whole entry is what used to silence the surviving socket.
+    {
+        let mut senders = state.ws_key_senders.write().await;
+        if let Some(sessions) = senders.get_mut(&public_key) {
+            sessions.remove(&session_id);
+            if sessions.is_empty() {
+                senders.remove(&public_key);
+            }
+        }
+    }
 
     if let Some(ch_id) = cs.voice_channel {
         leave_voice(&state, &public_key, &ch_id).await;
@@ -650,11 +723,11 @@ pub(super) async fn handle_socket(
         }
     }
 
-    if is_bot {
-        let mut sessions = state.bot_sessions.write().await;
-        if let Some(per_bot) = sessions.get_mut(&public_key) {
-            per_bot.remove(&session_id);
-            if per_bot.is_empty() {
+    if is_app {
+        let mut sessions = state.app_sessions.write().await;
+        if let Some(per_app) = sessions.get_mut(&public_key) {
+            per_app.remove(&session_id);
+            if per_app.is_empty() {
                 sessions.remove(&public_key);
             }
         }
@@ -711,13 +784,71 @@ pub(super) async fn handle_socket(
 
 // ── Per-message dispatch ─────────────────────────────────────────────────────
 
+/// The only WS messages an `alliance_voice` visitor may send
+/// (alliances.md). Everything a room genuinely needs and nothing else: join,
+/// leave, the speaking flag, the E2E key offer, and the latency probe.
+///
+/// The design also listed `voice_key_request`; there is no such client
+/// message. `VoiceKeyRequest` is server->client, part of `WsServerMessage` —
+/// the hub asks a sender to re-offer, the client answers with another
+/// `voice_key_offer`. Listing it would have been a no-op arm for a variant
+/// that cannot arrive.
+///
+/// Written as an explicit `matches!` over named variants rather than a wildcard
+/// so that adding a variant to `WsClientMessage` cannot quietly grant it to
+/// visitors.
+fn visitor_may_send(msg: &WsClientMessage) -> bool {
+    matches!(
+        msg,
+        WsClientMessage::VoiceJoin { .. }
+            | WsClientMessage::VoiceLeave { .. }
+            | WsClientMessage::VoiceSpeaking { .. }
+            | WsClientMessage::VoiceKeyOffer { .. }
+            | WsClientMessage::Ping { .. }
+    )
+}
+
+/// A short name for the log line above. Only used for diagnostics, so it does
+/// not have to be exhaustive — but it does have to say *something*, which is
+/// the whole difference from a silent drop.
+fn msg_kind(msg: &WsClientMessage) -> &'static str {
+    match msg {
+        WsClientMessage::Subscribe { .. } => "subscribe",
+        WsClientMessage::Unsubscribe { .. } => "unsubscribe",
+        WsClientMessage::Typing { .. } => "typing",
+        WsClientMessage::SetStatus { .. } => "set_status",
+        WsClientMessage::DmTyping { .. } => "dm_typing",
+        WsClientMessage::ComponentInteraction { .. } => "component_interaction",
+        WsClientMessage::VoiceWatch { .. } => "voice_watch",
+        WsClientMessage::VoiceUnwatch => "voice_unwatch",
+        _ => "other",
+    }
+}
+
 async fn dispatch_client_msg(
     cs: &mut ConnState,
     state: &Arc<AppState>,
     ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
-    bot_tx: &mpsc::Sender<String>,
+    app_tx: &mpsc::Sender<String>,
     msg: WsClientMessage,
 ) -> DispatchResult {
+    // Alliance-voice visitor confinement (alliances.md "Scope enforcement —
+    // allowlist, not denylist").
+    //
+    // An allowlist, so a route added tomorrow is closed by default rather than
+    // open by omission. And the refused case *logs* instead of falling into a
+    // silent no-op: an `Other => {}` arm on this very enum is how four hub
+    // features were absent for months with no symptom, and the server
+    // CLAUDE.md names it as the bug class to watch for here.
+    if cs.alliance_voice_channel.is_some() && !visitor_may_send(&msg) {
+        tracing::info!(
+            visitor = %&cs.public_key[..16.min(cs.public_key.len())],
+            message = msg_kind(&msg),
+            "Dropped WS message outside the alliance_voice allowlist"
+        );
+        return DispatchResult::Continue;
+    }
+
     match msg {
         // ── Subscriptions ──────────────────────────────────────────────────
         WsClientMessage::Subscribe { .. } => screen::handle_subscribe(cs, state, ws_tx, msg).await,
@@ -735,6 +866,21 @@ async fn dispatch_client_msg(
         WsClientMessage::VoiceJoin { .. } => voice::handle_voice_join(cs, state, ws_tx, msg).await,
         WsClientMessage::VoiceWatch { channel_id } => {
             cs.voice_channel = Some(channel_id);
+            DispatchResult::Continue
+        }
+        // The client still times the round trip itself — the hub keeps no
+        // probe table. The loss figure is read from a map the relay maintains
+        // anyway, so replying costs one lock and no bookkeeping.
+        WsClientMessage::Ping { nonce } => {
+            let outbound_loss_pct = crate::voice_loss::loss_percent(
+                state.voice_outbound_loss.read().await.get(&cs.public_key),
+            );
+            let json = serde_json::to_string(&WsServerMessage::Pong {
+                nonce,
+                outbound_loss_pct,
+            })
+            .unwrap();
+            let _ = ws_tx.send(Message::Text(json.into())).await;
             DispatchResult::Continue
         }
         WsClientMessage::VoiceUnwatch => {
@@ -806,15 +952,11 @@ async fn dispatch_client_msg(
         }
 
         // ── Bot mini-apps ──────────────────────────────────────────────────
-        WsClientMessage::BotAppAnnounce { .. } => {
-            mini_app::handle_bot_app_announce(cs, state, msg).await
-        }
+        WsClientMessage::AppAnnounce { .. } => mini_app::handle_app_announce(cs, state, msg).await,
         WsClientMessage::BotAppJoin { .. } => {
-            mini_app::handle_bot_app_join(cs, state, ws_tx, msg).await
+            mini_app::handle_app_join(cs, state, ws_tx, msg).await
         }
-        WsClientMessage::BotAppDismiss { .. } => {
-            mini_app::handle_bot_app_dismiss(cs, state, msg).await
-        }
+        WsClientMessage::AppDismiss { .. } => mini_app::handle_app_dismiss(cs, state, msg).await,
         WsClientMessage::MiniAppMessage { .. } => {
             mini_app::handle_mini_app_message(cs, state, msg).await
         }
@@ -825,7 +967,7 @@ async fn dispatch_client_msg(
         }
 
         // ── Bots ───────────────────────────────────────────────────────────
-        WsClientMessage::Resume { .. } => bot::handle_resume(cs, state, ws_tx, bot_tx, msg).await,
+        WsClientMessage::Resume { .. } => app::handle_resume(cs, state, ws_tx, app_tx, msg).await,
     }
 }
 
@@ -983,6 +1125,11 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
 
     // Revoke the voice relay slot.
     state.voice_relay_active.write().await.remove(public_key);
+    state.voice_outbound_loss.write().await.remove(public_key);
+    // And the talk-power verdict with it, grant included: the floor is
+    // permission to speak *now*, not a standing property of the member, so it
+    // dies with the session that was given it rather than being revoked.
+    state.voice_talk_blocked.write().await.remove(public_key);
 
     // events.md §7.4: a voice-only presence grant for this exact
     // (pubkey, channel) pair evaporates on leave -- never persisted, never

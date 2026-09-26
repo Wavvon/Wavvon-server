@@ -1,6 +1,6 @@
 [package]
 name = "wavvon-hub"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [[bin]]
@@ -47,20 +47,26 @@ tantivy = { workspace = true }
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
-webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
-# webauthn-rs links OpenSSL; vendor it on every target so builds never need
-# system OpenSSL headers — required for the static-musl release binaries and
-# the Docker image (was cfg(windows)-only, which left Linux CI unvendored).
-openssl = { version = "0.10", features = ["vendored"] }
+# 0.6.x is the first line that does not link OpenSSL: it swapped it for
+# crypto-glue (RustCrypto). That removes the last C dependency in the hub and
+# with it perl as a build prerequisite — everything else here is already
+# rustls. Pinned exactly because upstream ships this line as `-dev`
+# prereleases, which a caret requirement would not resolve.
+webauthn-rs = { version = "0.6.1-dev", features = ["danger-allow-state-serialisation"] }
 url = "2"
 mdns-sd = "0.20" # LAN mode: `_wavvon._tcp.local` mDNS/DNS-SD advertisement
 rcgen = "0.14" # LAN mode: self-signed TLS cert generation for the fingerprint-pinning trust tier
 rustls-pemfile = "2" # LAN mode: re-derive a persisted self-signed cert's fingerprint on reload
 dialoguer = "0.11" # `wavvon-hub setup` interactive prompts; small, well-maintained, TTY-only (bypassed entirely in non-interactive/scripted use)
 wtransport = "0.7.1" # Voice transport v2 (voice-transport-v2.md): single WebTransport/QUIC relay replacing raw UDP + the web WS relay
+postgresql_embedded = { version = "0.21", default-features = false, features = ["bundled", "theseus", "tls-rustls-ring", "tokio"] }
 
 [dev-dependencies]
 axum-test = "19"
+# Software authenticator for the passkey ceremony test. Upstream's own test
+# suite uses it, and it is what makes attestation + signature verification
+# testable without a physical key. Version-matched to webauthn-rs.
+webauthn-authenticator-rs = { version = "0.6.1-dev", features = ["softpasskey"] }
 tokio = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 tokio-tungstenite = "0.24"

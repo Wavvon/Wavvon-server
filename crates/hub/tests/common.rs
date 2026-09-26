@@ -177,6 +177,44 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
     (pool, guard)
 }
 
+/// A test database with **no schema at all**, plus its URL.
+///
+/// `create_test_db` migrates, which is what almost every test wants and
+/// exactly what a `db move` destination must not be: the point of that
+/// command's emptiness check is that writing into somebody else's hub merges
+/// two communities, so a test needs a genuinely empty database to prove the
+/// happy path and a migrated one to prove the refusal.
+#[allow(dead_code)]
+pub async fn create_bare_test_db() -> (PgPool, TestDbGuard, String) {
+    let base_url = base_db_url();
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&format!("{base_url}/postgres"))
+        .await
+        .expect("Failed to connect to PostgreSQL (admin)");
+
+    let db_name = format!("wavvon_test_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
+        .execute(&admin_pool)
+        .await
+        .expect("Failed to create test database");
+
+    let guard = TestDbGuard(Arc::new(TestDbGuardInner {
+        db_name: db_name.clone(),
+        base_url: base_url.clone(),
+    }));
+
+    let url = format!("{base_url}/{db_name}");
+    let pool = PgPoolOptions::new()
+        .max_connections(3)
+        .acquire_timeout(std::time::Duration::from_secs(60))
+        .connect(&url)
+        .await
+        .expect("Failed to connect to test database");
+
+    (pool, guard, url)
+}
+
 /// One-shot maintenance helper: drops every leftover `wavvon_test_*`
 /// database on the target Postgres server. Safe to run at any time — each
 /// test run uses a fresh UUID-derived name, so a backlog left behind by
@@ -275,6 +313,17 @@ fn make_test_webauthn() -> Arc<webauthn_rs::Webauthn> {
 /// (which doesn't, for tests that specifically exercise the invite-first
 /// default from task #31).
 async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
+    build_harness_with_web_client(db, guard, None).await
+}
+
+/// Same harness, with an optional web client mounted. Only the join-link test
+/// needs one: `GET /join/{code}` answers a browser with the client and a
+/// program with JSON, and with no client configured there is nothing to serve.
+async fn build_harness_with_web_client(
+    db: PgPool,
+    guard: TestDbGuard,
+    web_client: Option<Arc<wavvon_hub::web_client::WebClientConfig>>,
+) -> TestHarness {
     let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
@@ -286,6 +335,7 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -304,7 +354,7 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
@@ -314,7 +364,9 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
@@ -322,9 +374,8 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: make_test_webauthn(),
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
@@ -336,7 +387,7 @@ async fn build_harness(db: PgPool, guard: TestDbGuard) -> TestHarness {
         lan_tls_mode: None,
         lan_fingerprint: None,
     });
-    let app = server::create_router(state.clone());
+    let app = server::create_router_full(state.clone(), "*", false, web_client);
     TestHarness {
         server: TestServer::new(app),
         _guard: guard,
@@ -385,6 +436,22 @@ pub async fn authenticate(server: &TestServer, identity: &Identity) -> String {
         .await;
     let verify: VerifyResponse = resp.json();
     verify.token
+}
+
+/// A harness whose hub serves a web client out of `dir`, plus an owner token.
+/// `dir` must contain an `index.html`; the caller owns its lifetime (use a
+/// tempdir that outlives the harness).
+#[allow(dead_code)]
+pub async fn setup_with_owner_and_web_client(
+    dir: impl Into<std::path::PathBuf>,
+) -> (TestHarness, String) {
+    let cfg =
+        wavvon_hub::web_client::WebClientConfig::load(dir).expect("web client dir should load");
+    let (db, guard) = create_test_db().await;
+    let server = build_harness_with_web_client(db, guard, Some(Arc::new(cfg))).await;
+    let owner = Identity::generate();
+    let token = authenticate(&server, &owner).await;
+    (server, token)
 }
 
 #[allow(dead_code)]

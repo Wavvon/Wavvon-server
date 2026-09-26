@@ -28,7 +28,29 @@ pub struct FarmState {
     /// Map server_id → bounded sender for the agent's WebSocket write half.
     /// Only present while the agent is connected.
     pub agent_senders: Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
+    /// One HTTP client per remote node, keyed by address and TLS settings.
+    /// A pinned node needs a client whose verifier trusts that certificate and
+    /// no other, so the shared client above cannot serve them; building one per
+    /// request would mean a handshake and a fresh pool on every call.
+    pub node_clients: Arc<RwLock<HashMap<String, reqwest::Client>>>,
 }
+
+/// The agent that hosts a server could not be handed a command.
+///
+/// Deliberately empty. It replaced a `Result<(), ()>`, which clippy rightly
+/// refuses (`result_unit_err`): a unit error tells a reader nothing about what
+/// went wrong, and both callers here only ever ask `is_err()`. A name is the
+/// smallest thing that fixes that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentUnreachable;
+
+impl std::fmt::Display for AgentUnreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the agent hosting that server is not reachable")
+    }
+}
+
+impl std::error::Error for AgentUnreachable {}
 
 impl FarmState {
     pub fn new(
@@ -47,6 +69,7 @@ impl FarmState {
             http_client: reqwest::Client::new(),
             hubs_dir,
             agent_senders: Arc::new(RwLock::new(HashMap::new())),
+            node_clients: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -58,9 +81,11 @@ impl FarmState {
 
     /// Send a `restart_hub` command to the agent hosting `server_id`.
     ///
-    /// Returns `Err(())` if that agent isn't currently connected (its sender
-    /// isn't in `agent_senders`) or its send channel is full — callers should
-    /// treat this as "agent offline" (503).
+    /// Fails when that agent is not currently connected (no sender in
+    /// `agent_senders`) or its send channel is full. Both mean the same thing to
+    /// a caller — "agent offline", answered as a 503 — which is why
+    /// [`AgentUnreachable`] carries nothing: a richer error here would be
+    /// information nobody acts on.
     pub async fn send_restart_to_agent(
         &self,
         server_id: &str,
@@ -69,12 +94,12 @@ impl FarmState {
         port: u16,
         voice_port: u16,
         owner_pubkey: Option<&str>,
-    ) -> Result<(), ()> {
+    ) -> Result<(), AgentUnreachable> {
         let sender = {
             let map = self.agent_senders.read().await;
             map.get(server_id).cloned()
         };
-        let sender = sender.ok_or(())?;
+        let sender = sender.ok_or(AgentUnreachable)?;
         let cmd = serde_json::json!({
             "type": "restart_hub",
             "hub_id": hub_id,
@@ -84,7 +109,9 @@ impl FarmState {
             "owner_pubkey": owner_pubkey,
             "farm_url": self.farm_url,
         });
-        sender.try_send(cmd.to_string()).map_err(|_| ())
+        sender
+            .try_send(cmd.to_string())
+            .map_err(|_| AgentUnreachable)
     }
 
     /// Return `existing` if set, else allocate a fresh voice port and persist

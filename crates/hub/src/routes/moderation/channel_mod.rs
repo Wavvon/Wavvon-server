@@ -6,7 +6,7 @@ use axum::Json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN, BAN_MEMBERS, MUTE_MEMBERS};
+use crate::permissions::{self, CHANNELS_MANAGE, MODERATION_BAN_PERMANENT, MODERATION_MUTE};
 use crate::routes::moderation_models::*;
 use crate::state::AppState;
 
@@ -23,7 +23,7 @@ pub async fn voice_mute(
         &state,
         &user.public_key,
         &req.target_public_key,
-        MUTE_MEMBERS,
+        MODERATION_MUTE,
     )
     .await?;
 
@@ -58,7 +58,7 @@ pub async fn voice_unmute(
     Path(target_key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     sqlx::query("DELETE FROM voice_mutes WHERE target_public_key = $1")
         .bind(&target_key)
@@ -74,7 +74,7 @@ pub async fn list_voice_mutes(
     user: AuthUser,
 ) -> Result<Json<Vec<VoiceMuteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     let rows = sqlx::query_as::<_, VoiceMuteRow>(
         "SELECT target_public_key, muted_by, reason, created_at FROM voice_mutes ORDER BY created_at DESC",
@@ -104,7 +104,7 @@ pub async fn set_talk_power(
     Json(req): Json<SetTalkPowerRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(ADMIN)?;
+    perms.require(CHANNELS_MANAGE)?;
 
     sqlx::query(
         "INSERT INTO channel_settings (channel_id, min_talk_power) VALUES ($1, $2)
@@ -147,7 +147,13 @@ pub async fn channel_ban(
     Path(channel_id): Path<String>,
     Json(req): Json<ChannelBanByPubkeyRequest>,
 ) -> Result<(StatusCode, Json<ChannelBanByPubkeyResponse>), (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.pubkey, BAN_MEMBERS).await?;
+    require_can_moderate(
+        &state,
+        &user.public_key,
+        &req.pubkey,
+        MODERATION_BAN_PERMANENT,
+    )
+    .await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -182,7 +188,7 @@ pub async fn channel_unban(
     Path((channel_id, pubkey)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(BAN_MEMBERS)?;
+    perms.require(MODERATION_BAN_PERMANENT)?;
 
     sqlx::query("DELETE FROM channel_bans WHERE channel_id = $1 AND target_public_key = $2")
         .bind(&channel_id)
@@ -200,7 +206,7 @@ pub async fn list_channel_bans(
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<ChannelBanByPubkeyResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(BAN_MEMBERS)?;
+    perms.require(MODERATION_BAN_PERMANENT)?;
 
     let rows = sqlx::query_as::<_, ChannelBanRow>(
         "SELECT channel_id, target_public_key, banned_by, reason, created_at
@@ -232,7 +238,7 @@ pub async fn channel_voice_mute(
     Path(channel_id): Path<String>,
     Json(req): Json<ChannelVoiceMuteRequest>,
 ) -> Result<(StatusCode, Json<ChannelVoiceMuteResponse>), (StatusCode, String)> {
-    require_can_moderate(&state, &user.public_key, &req.pubkey, MUTE_MEMBERS).await?;
+    require_can_moderate(&state, &user.public_key, &req.pubkey, MODERATION_MUTE).await?;
 
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -265,7 +271,7 @@ pub async fn channel_voice_unmute(
     Path((channel_id, pubkey)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     sqlx::query("DELETE FROM channel_voice_mutes WHERE channel_id = $1 AND pubkey = $2")
         .bind(&channel_id)
@@ -283,7 +289,7 @@ pub async fn list_channel_voice_mutes(
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<ChannelVoiceMuteResponse>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MUTE_MEMBERS)?;
+    perms.require(MODERATION_MUTE)?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -315,6 +321,12 @@ pub async fn list_channel_voice_mutes(
 
 // --- Raise-hand ---
 
+/// POST /channels/{channel_id}/raise-hand
+///
+/// A **request** for the floor, and only that. It used to clear the channel's
+/// `min_talk_power` on its own, so any member granted themselves the floor
+/// with one call and the refusal helpfully named the call to make. Answering
+/// it is `grant_talk`, which needs `moderation.mute`.
 pub async fn raise_hand(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -346,6 +358,52 @@ pub async fn raise_hand(
     ))
 }
 
+/// POST /channels/{channel_id}/talk-grants/{pubkey}
+///
+/// Hands a member the floor in a channel whose `min_talk_power` they do not
+/// meet — TeamSpeak's "talker granted", the way round it was always meant to
+/// be: the member asks with `raise_hand`, someone holding `moderation.mute`
+/// answers. Granting is that permission's other direction, which is why no
+/// `voice.speak` exists to hold (permissions.md, "Talk power is not this").
+///
+/// The grant lasts one voice session. It is the removal of an in-memory entry
+/// and nothing else, so leaving, disconnecting or restarting the hub takes it
+/// back — there is no row to revoke and none to forget.
+pub async fn grant_talk(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, pubkey)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    require_can_moderate(&state, &user.public_key, &pubkey, MODERATION_MUTE).await?;
+
+    // The floor is permission to speak *now*: granted to someone who is not in
+    // the room it would have nowhere to live and nothing to mean.
+    let present = {
+        let vc = state.voice_channels.read().await;
+        vc.get(&channel_id)
+            .is_some_and(|participants| participants.contains_key(&pubkey))
+    };
+    if !present {
+        return Err((
+            StatusCode::CONFLICT,
+            "That member is not in this voice channel.".to_string(),
+        ));
+    }
+
+    state.voice_talk_blocked.write().await.remove(&pubkey);
+
+    // The request has been answered; left queued it would sit on every
+    // moderator's list for the rest of the channel's life.
+    sqlx::query("DELETE FROM raise_hand_requests WHERE channel_id = $1 AND pubkey = $2")
+        .bind(&channel_id)
+        .bind(&pubkey)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn lower_hand(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -354,7 +412,7 @@ pub async fn lower_hand(
     // User can lower their own hand; admin can lower anyone's
     if pubkey != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(MUTE_MEMBERS)?;
+        perms.require(MODERATION_MUTE)?;
     }
 
     sqlx::query("DELETE FROM raise_hand_requests WHERE channel_id = $1 AND pubkey = $2")

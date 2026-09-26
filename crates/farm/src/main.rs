@@ -167,6 +167,46 @@ async fn main() -> Result<()> {
     .execute(&db)
     .await?;
 
+    // Seed the admin on first start, exactly as the hub seeds its owner.
+    //
+    // `COALESCE` rather than a plain UPDATE: this only ever fills a NULL, so
+    // an operator cannot take over a farm that already has an admin by
+    // restarting it with the variable set.
+    if let Some(admin) = cfg.farm_admin_pubkey.as_deref() {
+        let admin = admin.trim();
+        let looks_like_a_key = admin.len() == 64 && admin.chars().all(|c| c.is_ascii_hexdigit());
+        if !looks_like_a_key {
+            anyhow::bail!(
+                "WAVVON_FARM_ADMIN_PUBKEY must be 64 hex characters (an Ed25519 public key), got {} character(s)",
+                admin.len()
+            );
+        }
+        let updated =
+            sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1 AND admin_pubkey IS NULL")
+                .bind(admin)
+                .execute(&db)
+                .await?
+                .rows_affected();
+        if updated > 0 {
+            tracing::info!(admin = %admin, "Seeded farm admin from WAVVON_FARM_ADMIN_PUBKEY");
+        }
+    }
+
+    // A farm with no admin cannot create a hub and cannot appoint one, so say
+    // so loudly rather than letting every request answer `admin_only`.
+    let admin_exists: Option<String> =
+        sqlx::query_scalar::<_, Option<String>>("SELECT admin_pubkey FROM farms WHERE id = 1")
+            .fetch_optional(&db)
+            .await?
+            .flatten();
+    if admin_exists.is_none() {
+        tracing::warn!(
+            "This farm has no admin. `creation_policy` defaults to 'admin_only', so every \
+             hub creation will be refused and there is no route to appoint an admin. Set \
+             WAVVON_FARM_ADMIN_PUBKEY to your own user pubkey and restart."
+        );
+    }
+
     // Resolve the hub binary path: use settings value if provided, else fall back
     // to a sibling of the current executable.
     let hub_bin = if let Some(path) = cfg.hub_bin {
@@ -213,7 +253,7 @@ async fn main() -> Result<()> {
 
     wavvon_farm::monitor::spawn(state.clone());
 
-    let app = server::create_router(state);
+    let app = server::create_router_with_cors(state, &cfg.cors_origins);
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
     tracing::info!(
         "Farm server listening on http://0.0.0.0:{http_port} (set WAVVON_FARM_URL for the external URL)"

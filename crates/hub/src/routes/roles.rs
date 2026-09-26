@@ -6,7 +6,7 @@ use axum::Json;
 use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, MANAGE_ROLES};
+use crate::permissions::{self, ROLES_MANAGE};
 use crate::routes::role_models::{
     is_valid_color, is_valid_icon, CreateRoleRequest, RoleResponse, UpdateRoleRequest,
 };
@@ -92,7 +92,7 @@ pub async fn create_role(
     Json(req): Json<CreateRoleRequest>,
 ) -> Result<(StatusCode, Json<RoleResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     if req.priority >= perms.max_priority {
         return Err((
@@ -100,6 +100,9 @@ pub async fn create_role(
             "Cannot create role with priority >= your own".to_string(),
         ));
     }
+
+    permissions::validate_permissions(req.permissions.iter().map(String::as_str))?;
+    perms.require_can_grant(req.permissions.iter().map(String::as_str))?;
 
     validate_appearance(
         &state.db,
@@ -168,7 +171,7 @@ pub async fn update_role(
     require_not_builtin(&role_id)?;
 
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     let existing = get_role(&state.db, &role_id).await?;
     if existing.priority >= perms.max_priority {
@@ -176,6 +179,11 @@ pub async fn update_role(
             StatusCode::FORBIDDEN,
             "Cannot modify role with priority >= your own".to_string(),
         ));
+    }
+
+    if let Some(ref new_perms) = req.permissions {
+        permissions::validate_permissions(new_perms.iter().map(String::as_str))?;
+        perms.require_can_grant(new_perms.iter().map(String::as_str))?;
     }
 
     let appearance_touched = req.color.is_some() || req.icon.is_some() || req.category_id.is_some();
@@ -275,7 +283,7 @@ pub async fn update_role(
         let icon = updated.icon.clone();
         let category_id = updated.category_id.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "role.appearance_updated",
                 Some(&actor),
@@ -313,7 +321,7 @@ pub async fn delete_role(
     require_not_builtin(&role_id)?;
 
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     let existing = get_role(&state.db, &role_id).await?;
     if existing.priority >= perms.max_priority {
@@ -350,7 +358,7 @@ pub async fn assign_role(
     Path((public_key, role_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     let role = get_role(&state.db, &role_id).await?;
     if role.priority >= perms.max_priority {
@@ -359,6 +367,12 @@ pub async fn assign_role(
             "Cannot assign role with priority >= your own".to_string(),
         ));
     }
+
+    // The other half of the escalation the priority guard above does not
+    // cover: a role *beneath* your rank can still carry permissions above it,
+    // and handing it to yourself is one call. Assigning is granting.
+    let carried = role_permissions(&state.db, &role_id).await?;
+    perms.require_can_grant(carried.iter().map(String::as_str))?;
 
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
@@ -388,7 +402,7 @@ pub async fn remove_role(
     }
 
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     let role = get_role(&state.db, &role_id).await?;
     if role.priority >= perms.max_priority {
@@ -440,7 +454,7 @@ pub async fn list_role_members(
     Path(role_id): Path<String>,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(ROLES_MANAGE)?;
 
     let members: Vec<String> =
         sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")

@@ -1,5 +1,6 @@
 mod agent;
 mod hub_manager;
+mod provision;
 mod settings;
 
 use hub_manager::HubManager;

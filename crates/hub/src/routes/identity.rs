@@ -156,9 +156,24 @@ pub async fn post_device(
     cert.verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
-    let fallback_json = serde_json::to_string(&cert.fallback_hubs)
-        .map_err(|e| db_err(format!("serialize fallback_hubs: {e}")))?;
+    upsert_subkey_cert(&state.db, &cert)
+        .await
+        .map_err(|e| db_err(e.to_string()))?;
 
+    Ok(StatusCode::OK)
+}
+
+/// Record a device cert in the registry, replacing whatever was there for the
+/// same (master, subkey) — renaming a device re-issues its cert rather than
+/// editing the row.
+///
+/// The caller must have verified the signature: this writes what it is handed.
+/// Auth calls it too, so a device that presents a cert shows up in its owner's
+/// device list without a second round trip. Nothing else made that true — auth
+/// recorded only the master on the user row, so a device that never POSTed
+/// here was linked and still invisible on the Devices screen.
+pub async fn upsert_subkey_cert(db: &sqlx::PgPool, cert: &SubkeyCert) -> Result<(), sqlx::Error> {
+    let fallback_json = serde_json::to_string(&cert.fallback_hubs).unwrap_or_else(|_| "[]".into());
     let home_hub_url = cert.fallback_hubs.first().cloned().unwrap_or_default();
 
     sqlx::query(
@@ -183,11 +198,10 @@ pub async fn post_device(
     .bind(&home_hub_url)
     .bind(&cert.signature)
     .bind(now_secs())
-    .execute(&state.db)
-    .await
-    .map_err(db_err)?;
+    .execute(db)
+    .await?;
 
-    Ok(StatusCode::OK)
+    Ok(())
 }
 
 // --- Revocations ---

@@ -573,3 +573,79 @@ struct RoleRow {
     icon: Option<String>,
     category_id: Option<String>,
 }
+
+/// Leave this hub: `DELETE /me`.
+///
+/// Removes what the hub was holding on this person's behalf — their profile
+/// and their membership — and nothing else. The `users` row itself stays as a
+/// bare pubkey, because twenty-two tables have a foreign key to it, including
+/// `bans`, `mutes` and `message_reports`: a departure that erased the ban on
+/// the departing person would not be a feature. Messages, reactions and RSVPs
+/// are the community's record and are untouched; the author simply becomes a
+/// pubkey with no name (decisions.md, "Leaving a hub clears the profile and
+/// the membership, and keeps the pubkey as an anchor").
+///
+/// Self only. Removing *someone else* is moderation's job and means something
+/// different.
+///
+/// Note that dropping the roles re-arms the invite gate — it is
+/// `has_roles == 0` — so on an invite-only hub this makes the return that is
+/// free today require a new invite. That is intended, and the client says so
+/// before asking.
+pub async fn leave_hub(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let pk = &user.public_key;
+    let db_err = |e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+
+    // The owner cannot leave: the hub would have nobody who can administer it,
+    // and unlike every other member there is no one left to let them back in.
+    // Transferring ownership first is the documented path.
+    let is_owner: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_roles WHERE user_public_key = $1 AND role_id = 'builtin-owner'",
+    )
+    .bind(pk)
+    .fetch_one(&state.db)
+    .await
+    .map_err(db_err)?;
+    if is_owner > 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            "The owner cannot leave; transfer ownership first".to_string(),
+        ));
+    }
+
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+
+    sqlx::query(
+        "UPDATE users SET
+            display_name = NULL, avatar = NULL, bio = NULL, pronouns = NULL,
+            interests = NULL, status_message = NULL, activities = NULL,
+            accent_color = NULL, cover = NULL, favorite_hubs = NULL,
+            show_hubs = NULL, birthday = NULL, name_color = NULL,
+            presence_status = NULL, presence_custom = NULL,
+            approval_status = 'left'
+         WHERE public_key = $1",
+    )
+    .bind(pk)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    sqlx::query("DELETE FROM user_roles WHERE user_public_key = $1")
+        .bind(pk)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+    sqlx::query("DELETE FROM sessions WHERE public_key = $1")
+        .bind(pk)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+    tx.commit().await.map_err(db_err)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}

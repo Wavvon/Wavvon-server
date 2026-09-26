@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::routes::dm_models::*;
+use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
 use super::models::{ensure_user_stub, find_existing_dm, load_members, ConvRow};
@@ -99,18 +100,27 @@ pub async fn create_conversation(
     ))
 }
 
+// Paged because the loop below runs two queries per conversation — members and
+// last activity. Unbounded, that is 2N round-trips for someone with years of
+// DM partners; the page size is what bounds it.
 pub async fn list_conversations(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<ConversationResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ConvRow>(
         "SELECT c.id, c.conv_type, c.created_at
          FROM conversations c
          INNER JOIN conversation_members cm ON c.id = cm.conversation_id
          WHERE cm.public_key = $1
-         ORDER BY c.created_at DESC",
+           AND ($2::text IS NULL OR (c.created_at, c.id) <
+                ((SELECT created_at FROM conversations WHERE id = $2), $2))
+         ORDER BY c.created_at DESC, c.id DESC
+         LIMIT $3",
     )
     .bind(&user.public_key)
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

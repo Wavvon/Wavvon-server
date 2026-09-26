@@ -243,7 +243,16 @@ async fn list_hubs_unauthenticated_returns_public_when_directory_public() {
     let hubs = body["hubs"].as_array().unwrap();
     assert_eq!(hubs.len(), 1);
     assert_eq!(hubs[0]["id"], "hubpub");
-    assert!(hubs[0]["hub_url"].as_str().unwrap().contains("hubpub"));
+    // `hub_url` used to be asserted to contain the hub *id*, which was true
+    // and useless: `{farm}/hub/{hub_id}` resolves to nothing, because the proxy
+    // resolves a 64-hex pubkey or a slug and an id is neither. Nothing checked
+    // that the URL worked. It is now absent until the hub has claimed its row,
+    // which this fixture's hub never does.
+    assert!(
+        hubs[0].get("hub_url").is_none() || hubs[0]["hub_url"].is_null(),
+        "a hub that has never heartbeated has no address to advertise, got {:?}",
+        hubs[0]["hub_url"]
+    );
 }
 
 #[tokio::test]
@@ -396,10 +405,14 @@ async fn create_hub_happy_path() {
     let body: Value = resp.json();
     let hub_id = body["id"].as_str().unwrap();
     assert!(!hub_id.is_empty());
-    let hub_url = body["hub_url"].as_str().unwrap();
+    // No address at creation time on purpose: the hub has not started, let
+    // alone claimed its row, so there is nothing routable to hand back. An
+    // absent field a client must handle beats a present one that 404s — which
+    // is what `{farm}/hub/{hub_id}` did to every client that followed it.
     assert!(
-        hub_url.contains(hub_id),
-        "hub_url should contain hub_id: {hub_url}"
+        body.get("hub_url").is_none() || body["hub_url"].is_null(),
+        "a freshly created hub is not routable yet, got {:?}",
+        body["hub_url"]
     );
 
     // Verify the hub exists in the DB.
@@ -435,7 +448,11 @@ async fn get_hub_returns_correct_info() {
     assert_eq!(body["id"], "hub123");
     assert_eq!(body["name"], "Test Hub");
     assert_eq!(body["visibility"], "public");
-    assert!(body["hub_url"].as_str().unwrap().contains("hub123"));
+    assert!(
+        body.get("hub_url").is_none() || body["hub_url"].is_null(),
+        "this fixture's hub has no pubkey and no slug, so no address, got {:?}",
+        body["hub_url"]
+    );
 }
 
 #[tokio::test]
@@ -811,4 +828,37 @@ async fn delete_hub_returns_404_for_unknown() {
         )
         .await;
     resp.assert_status_not_found();
+}
+
+/// The assertion nothing made: that the address the farm advertises is one the
+/// proxy can resolve.
+///
+/// `hub_url` was `{farm}/hub/{hub_id}`, and three tests asserted it contained
+/// the id — true, and no evidence at all. `proxy::resolve_hub` accepts a 64-hex
+/// pubkey or a slug; an 8-hex id is neither, so every client that followed the
+/// farm's own URL got a 404, the web client's farm admin view among them.
+#[tokio::test]
+async fn an_advertised_hub_url_uses_the_serial_the_proxy_resolves() {
+    let (server, state, _guard) = setup().await;
+
+    let hub_pubkey = "a".repeat(64);
+    sqlx::query(
+        "INSERT INTO hubs (id, name, visibility, created_at, owner_pubkey, db_path, hub_pubkey)
+         VALUES ('routable', 'Routable Hub', 'public', 1, 'owner', 'unused', $1)",
+    )
+    .bind(&hub_pubkey)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let resp = server.get("/farm/hubs/routable").await;
+    resp.assert_status_ok();
+    let body: Value = resp.json();
+    let url = body["hub_url"]
+        .as_str()
+        .expect("a hub that has claimed its row must advertise an address");
+    assert!(
+        url.ends_with(&format!("/hub/{hub_pubkey}")),
+        "the advertised address must be the pubkey serial the proxy resolves, got {url}"
+    );
 }

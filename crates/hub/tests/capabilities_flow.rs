@@ -40,6 +40,7 @@ async fn known_capabilities_keep_their_spelling() {
 
     for expected in [
         "list.cursor",
+        "list.cursor.lists",
         "pairing.subkey",
         "recovery.attestation",
         "screenshare.v2",

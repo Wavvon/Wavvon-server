@@ -8,10 +8,10 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
-use crate::routes::bot_models::{Embed, GameLaunchCard};
+use crate::routes::app_models::{Embed, GameLaunchCard};
 use crate::routes::chat_models::{
     Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
-    ReactionSummary, ReplyContext, SendMessageRequest, MAX_ATTACHMENTS_BYTES,
+    ReactionSummary, ReplyContext, SendMessageRequest,
 };
 use crate::state::AppState;
 
@@ -53,7 +53,7 @@ pub async fn send_message(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::SEND_MESSAGES)?;
+    perms.require(permissions::MESSAGES_SEND)?;
 
     if crate::routes::moderation::is_muted(&state.db, &user.public_key).await? {
         return Err((StatusCode::FORBIDDEN, "You are muted".to_string()));
@@ -88,14 +88,18 @@ pub async fn send_message(
 
     // Cap attachments size. The base64 payload is what counts toward the
     // limit since that's what travels over WS and lands in the DB.
-    let attach_total: usize = req.attachments.iter().map(|a| a.data_b64.len()).sum();
-    if attach_total > MAX_ATTACHMENTS_BYTES {
+    // Operator-configurable since 2026-08-21 (hub_settings
+    // `max_attachment_bytes`); the old constant is now only the default.
+    let cap = crate::routes::hub::read_attachment_cap(&state.db).await;
+    let attach_total: u64 = req
+        .attachments
+        .iter()
+        .map(|a| a.data_b64.len() as u64)
+        .sum();
+    if attach_total > cap {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
-            format!(
-                "Attachments exceed {}MB cap",
-                MAX_ATTACHMENTS_BYTES / 1024 / 1024
-            ),
+            format!("Attachments exceed {}MB cap", cap / 1024 / 1024),
         ));
     }
 
@@ -111,21 +115,15 @@ pub async fn send_message(
         )
     };
 
-    // Game-modal launch card (bot-capability-layer.md §2): bot authors only,
+    // Game-modal launch card (apps.md §2): bot authors only,
     // same rule as embeds/components elsewhere in the bot wire surface
-    // (bots.md §11, §15 "rejected on messages authored by non-bots").
+    // (apps.md§15 "rejected on messages authored by non-bots").
     let game_json = if req.game.is_some() {
-        let is_bot: Option<bool> =
-            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
-                .bind(&user.public_key)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-                .flatten();
-        if is_bot != Some(true) {
+        let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
+        if !perms.has(crate::permissions::APPS_REGISTER) {
             return Err((
                 StatusCode::FORBIDDEN,
-                "game launch card is bot-authored only".to_string(),
+                "game launch cards require apps.register".to_string(),
             ));
         }
         Some(
@@ -163,11 +161,11 @@ pub async fn send_message(
     }
 
     // Slash command dispatch (external bot system): if the message starts with
-    // '/' and a registered bot handles the command, the bot responds via its
+    // '/' and a registered app handles the command, the app responds via its
     // webhook. We do NOT store the original slash message by default — the bot
     // decides what to post. Only store the message if no bot matched.
     if req.content.starts_with('/') {
-        let ephemeral_err = crate::bots::dispatch::dispatch_slash(
+        let ephemeral_err = crate::apps::dispatch::dispatch_slash(
             &state,
             &channel_id,
             &user.public_key,
@@ -178,7 +176,7 @@ pub async fn send_message(
         match ephemeral_err {
             Some(err_text) => {
                 // Command matched but errored — insert ephemeral error and return.
-                crate::bots::dispatch::insert_ephemeral_error(
+                crate::apps::dispatch::insert_ephemeral_error(
                     &state,
                     &channel_id,
                     &user.public_key,
@@ -439,7 +437,7 @@ pub async fn send_message(
         let ch = channel_id.clone();
         let msg_c = message.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "message.created",
                 Some(&msg_c.sender),
@@ -489,20 +487,14 @@ pub async fn edit_message(
         ));
     }
 
-    // Result embed on edit (bot-capability-layer.md §7 step 5): bot authors
+    // Result embed on edit (apps.md §7 step 5): bot authors
     // only, same rule as `SendMessageRequest.game` in `send_message` above.
     let embeds_json = if req.embeds.is_some() {
-        let is_bot: Option<bool> =
-            sqlx::query_scalar("SELECT is_bot FROM users WHERE public_key = $1")
-                .bind(&user.public_key)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-                .flatten();
-        if is_bot != Some(true) {
+        let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
+        if !perms.has(crate::permissions::APPS_REGISTER) {
             return Err((
                 StatusCode::FORBIDDEN,
-                "embeds are bot-authored only".to_string(),
+                "embeds require apps.register".to_string(),
             ));
         }
         Some(
@@ -576,7 +568,7 @@ pub async fn delete_message(
     // Author can always delete their own. Others need manage_messages.
     if sender != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(permissions::MANAGE_MESSAGES)?;
+        perms.require(permissions::MESSAGES_MANAGE)?;
     }
 
     sqlx::query("DELETE FROM messages WHERE id = $1")
@@ -680,7 +672,7 @@ pub async fn get_messages(
     // Read-gating (§3.5): message history is rejected outright for a
     // channel the caller can't effectively read.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::READ_MESSAGES)?;
+    perms.require(permissions::MESSAGES_READ)?;
 
     let limit = params.limit.unwrap_or(50).min(100);
     let search = params
@@ -1005,7 +997,7 @@ pub async fn add_reaction(
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::SEND_MESSAGES)?;
+    perms.require(permissions::MESSAGES_SEND)?;
 
     let emoji = req.emoji.trim();
     if emoji.is_empty() || emoji.chars().count() > 16 {

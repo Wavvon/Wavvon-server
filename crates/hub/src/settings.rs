@@ -79,16 +79,10 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "Bootstrap template URL applied on first boot when the channels table is empty",
     ),
     (
-        "WAVVON_BOOTSTRAP_TOKEN",
-        "(unset)",
-        "Bootstrap token redeemed from the discovery service to fetch a template",
-    ),
-    (
         "WAVVON_TEMPLATE_FILE",
         "(unset)",
         "Path to a local bootstrap template JSON file, applied on first boot when the \
-         channels table is empty. Third in precedence, behind WAVVON_BOOTSTRAP_TOKEN and \
-         WAVVON_TEMPLATE_URL. No signature verification — local files are already trusted \
+         channels table is empty. Second in precedence, behind \n         WAVVON_TEMPLATE_URL. No signature verification — local files are already trusted \
          by the operator who placed them on disk.",
     ),
     (
@@ -148,6 +142,21 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          would allow limiter bypass.",
     ),
     (
+        wavvon_hub_env::AUTH_RATE_BURST,
+        "10",
+        "Per-IP burst for the auth handshake. Raise it when your users share an address \
+         (an office, a school, CGNAT): the limiter keys on IP and one login spends TWO \
+         tokens (/auth/challenge then /auth/verify), so the default is a handful of people \
+         opening the app at once, and a rate-limited arrival looks to them like a hub that \
+         will not have them.",
+    ),
+    (
+        wavvon_hub_env::AUTH_RATE_PER_SEC,
+        "1",
+        "Tokens refilled per second for the auth handshake — the sustained rate, where the \
+         burst above is the allowance for a crowd arriving together.",
+    ),
+    (
         "WAVVON_WEB_CLIENT_DIR",
         "(unset)",
         "Path to a directory of pre-built web-client assets. When set, the hub serves the \
@@ -156,7 +165,7 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          this to /web-client automatically.",
     ),
     (
-        "WAVVON_BOTS_ALLOW_CAMERA",
+        "WAVVON_APPS_ALLOW_CAMERA",
         "false",
         "Set to `true` to allow bot mini-apps that declare `requires_camera: true` to \
          receive camera access in the client webview/iframe sandbox. Defaults to false; \
@@ -166,15 +175,15 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "WAVVON_BOTS_ALLOW_VIDEO",
         "false",
         "Set to `true` to allow bots granted `can_inject_video` to push frames into the \
-         screen-share relay via `screen_share_start` (bot-capability-layer.md §6 Phase 2). \
+         screen-share relay via `screen_share_start` (apps.md §6 Phase 2). \
          Defaults to false; a per-bot capability grant is necessary but not sufficient -- \
          this operator-level flag must also be on.",
     ),
     (
-        "WAVVON_BOT_VIDEO_STREAM_BUDGET",
+        "WAVVON_HTTP_VIDEO_STREAM_BUDGET",
         "2",
         "Max number of concurrent bot-initiated video streams across the whole hub \
-         (bot-capability-layer.md §4 media budget). `screen_share_start` is rejected once \
+         (apps.md §4 media budget). `screen_share_start` is rejected once \
          this many bot streams are already active; human screen shares are never counted.",
     ),
     (
@@ -261,11 +270,8 @@ pub struct Settings {
     /// Bootstrap template URL applied on first boot when channels table is empty.
     /// Env: WAVVON_TEMPLATE_URL
     pub template_url: Option<String>,
-    /// Bootstrap token redeemed from the discovery service to fetch a template.
-    /// Env: WAVVON_BOOTSTRAP_TOKEN
-    pub bootstrap_token: Option<String>,
     /// Path to a local bootstrap template JSON file applied on first boot.
-    /// Third in precedence, behind bootstrap_token and template_url.
+    /// Second in precedence, behind template_url.
     /// Env: WAVVON_TEMPLATE_FILE
     pub template_file: Option<String>,
     /// Built-in bootstrap template preset: "gaming", "community", or "minimal".
@@ -313,14 +319,12 @@ pub struct Settings {
     /// Allow bot mini-apps that declare `requires_camera: true` to receive
     /// camera access in client webview/iframe sandboxes.
     ///
-    /// Env: WAVVON_BOTS_ALLOW_CAMERA
-    pub bots_allow_camera: bool,
+    /// Env: WAVVON_APPS_ALLOW_CAMERA
+    pub apps_allow_camera: bool,
     /// Operator kill-switch for `can_inject_video` bot video streams.
-    /// Env: WAVVON_BOTS_ALLOW_VIDEO
-    pub bots_allow_video: bool,
-    /// Max concurrent bot-initiated video streams hub-wide.
-    /// Env: WAVVON_BOT_VIDEO_STREAM_BUDGET
-    pub bot_video_stream_budget: u32,
+    /// Max concurrent video streams started over HTTP, hub-wide.
+    /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
+    pub http_video_stream_budget: u32,
     /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
     /// Env: WAVVON_PUBLIC_URL
     pub public_url: Option<String>,
@@ -386,16 +390,22 @@ pub fn load() -> Result<Settings> {
         .set_default("log_format", "text")?
         .set_default("discovery_url", "https://discovery.wavvon.io")?
         .set_default("trusted_proxy", false)?
-        .set_default("bots_allow_camera", false)?
-        .set_default("bots_allow_video", false)?
-        .set_default("bot_video_stream_budget", 2u32)?
+        .set_default("apps_allow_camera", false)?
+        .set_default("http_video_stream_budget", 2u32)?
         .set_default("device_token_ttl_days", 30u64)?
         .set_default("db_max_connections", 5u32)?
         .set_default("lan_mode", false)?
         .set_default("lan_tls_mode", "self")?
         .set_default("lan_mdns", true)?
         .add_source(config::File::with_name("hub").required(false))
-        .add_source(config::Environment::with_prefix("WAVVON"))
+        // `ignore_empty` because in a container an empty value is the *only*
+        // way to clear a baked-in `ENV`. The hub image sets
+        // `WAVVON_WEB_CLIENT_DIR=/web-client` and its own Dockerfile documents
+        // `-e WAVVON_WEB_CLIENT_DIR=` as how to run API-only — which failed
+        // with `'' does not exist`, because without this an empty variable
+        // deserialises as `Some("")` rather than `None`. No setting here wants
+        // an empty string to mean something other than "unset".
+        .add_source(config::Environment::with_prefix("WAVVON").ignore_empty(true))
         .build()?
         .try_deserialize::<Settings>()?;
     Ok(settings)
@@ -564,6 +574,23 @@ mod tests {
         for key in wavvon_hub_env::SPAWNABLE {
             std::env::remove_var(key);
         }
+    }
+
+    /// An empty variable means "unset", because in a container that is the only
+    /// way to clear a baked-in `ENV`. The hub image ships
+    /// `WAVVON_WEB_CLIENT_DIR=/web-client` and its Dockerfile documents
+    /// `-e WAVVON_WEB_CLIENT_DIR=` as the API-only switch; that exited with
+    /// "WAVVON_WEB_CLIENT_DIR '' does not exist" instead, so the documented
+    /// escape hatch did not exist.
+    #[test]
+    fn load_treats_an_empty_env_var_as_unset() {
+        std::env::set_var("WAVVON_WEB_CLIENT_DIR", "");
+        let s = load().expect("an empty variable must not fail the load");
+        assert_eq!(
+            s.web_client_dir, None,
+            "empty WAVVON_WEB_CLIENT_DIR must mean API-only, not a path called ''"
+        );
+        std::env::remove_var("WAVVON_WEB_CLIENT_DIR");
     }
 
     /// `config::Environment::with_prefix("WAVVON")` maps `WAVVON_FOO_BAR` to

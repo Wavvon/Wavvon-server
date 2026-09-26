@@ -3,15 +3,11 @@ resolver = "2"
 members = [
     "crates/hub",
     "crates/hub-env",
-    "crates/seed",
     "crates/identity",
     "crates/farm",
     "crates/agent",
     "crates/store",
     "crates/demo-seed",
-    "crates/discord-import",
-    "crates/ttt-bot",
-    "crates/bot-kit",
 ]
 
 [workspace.dependencies]

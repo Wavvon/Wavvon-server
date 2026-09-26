@@ -2,12 +2,60 @@ use std::sync::Arc;
 
 use axum::routing::{any, delete, get, patch, post};
 use axum::Router;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::routes;
 use crate::state::FarmState;
 
+/// Mirrors the hub's `build_cors_layer` — same setting name, same shape.
+/// Duplicated rather than shared because the alternative is the farm
+/// depending on the whole hub crate for one layer.
+fn build_cors_layer(cors_origins: &str) -> CorsLayer {
+    let allow_methods = AllowMethods::list([
+        axum::http::Method::GET,
+        axum::http::Method::POST,
+        axum::http::Method::PUT,
+        axum::http::Method::PATCH,
+        axum::http::Method::DELETE,
+        axum::http::Method::OPTIONS,
+    ]);
+    let allow_headers = AllowHeaders::list([
+        axum::http::header::AUTHORIZATION,
+        axum::http::header::CONTENT_TYPE,
+    ]);
+    let layer = CorsLayer::new()
+        .allow_methods(allow_methods)
+        .allow_headers(allow_headers)
+        .max_age(std::time::Duration::from_secs(86400));
+    if cors_origins.trim() == "*" {
+        return layer.allow_origin(AllowOrigin::any());
+    }
+    let mut origins: Vec<axum::http::HeaderValue> = Vec::new();
+    for raw in cors_origins
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        match raw.parse::<axum::http::HeaderValue>() {
+            Ok(v) => origins.push(v),
+            Err(_) => tracing::warn!(origin = raw, "CORS: invalid origin string ignored"),
+        }
+    }
+    if origins.is_empty() {
+        tracing::warn!(
+            cors_origins,
+            "CORS: no valid origins parsed — all browser cross-origin requests will be blocked"
+        );
+    }
+    layer.allow_origin(AllowOrigin::list(origins))
+}
+
 pub fn create_router(state: Arc<FarmState>) -> Router {
+    create_router_with_cors(state, "*")
+}
+
+pub fn create_router_with_cors(state: Arc<FarmState>, cors_origins: &str) -> Router {
     Router::new()
         // Public probe endpoint — the hub fetches this on startup to cache the pubkey.
         .route("/farm/info", get(routes::health::farm_info))
@@ -94,7 +142,6 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
             post(routes::admin::revoke_user_sessions),
         )
         // Phase 3 — public discovery probe (unauthenticated).
-        .route("/farm/public-info", get(routes::admin::public_info))
         // Hub heartbeat — pushed by each hub every 60 s.
         .route(
             "/farm/heartbeat",
@@ -102,10 +149,15 @@ pub fn create_router(state: Arc<FarmState>) -> Router {
         )
         // Farm admin fleet view — requires farm admin auth.
         .route("/farm/admin/fleet", get(routes::heartbeat::get_fleet))
+        // CORS on the farm's own routes only. The proxied hub answers with
+        // its *own* CORS headers, and a second set added here would arrive as
+        // a duplicate Access-Control-Allow-Origin, which a browser rejects
+        // outright — so the proxy route is merged in after this layer.
+        .layer(build_cors_layer(cors_origins))
         // Proxy catch-all — must be last (fallback for all /hub/<serial>/...
         // requests). Routed by the hub's pubkey ("serial"), not the opaque
         // `hubs.id` PK — see farm-impl.md "Serial routing — first slice".
-        .route("/hub/{serial}/{*path}", any(crate::proxy::proxy_handler))
+        .merge(Router::new().route("/hub/{serial}/{*path}", any(crate::proxy::proxy_handler)))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

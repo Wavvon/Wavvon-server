@@ -73,14 +73,39 @@ pub struct HubEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub visibility: String,
-    pub hub_url: String,
+    /// Absent until the hub has claimed its row on first heartbeat — see
+    /// `hub_url`. Clients must treat absence as "not routable yet", never
+    /// concatenate it blindly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub_url: Option<String>,
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suspended_at: Option<i64>,
 }
 
-fn hub_url(farm_url: &str, hub_id: &str) -> String {
-    format!("{}/hub/{}", farm_url.trim_end_matches('/'), hub_id)
+/// The address a client can actually reach this hub on.
+///
+/// This used to be `{farm}/hub/{hub_id}`, which resolves to nothing: the proxy
+/// resolves a segment as either a 64-hex pubkey or a slug, and a hub id is 8 hex
+/// characters, so it is neither. Every client that followed the URL the farm
+/// handed it got a 404 — including the web client's farm admin view, which
+/// fetches `{hub_url}/info` directly.
+///
+/// The same rule `slugs::hub_address_by_pubkey` already applied: canonical slug
+/// if the hub has one, otherwise its pubkey. `None` before the hub's first
+/// heartbeat, because until it claims its row there is no address to give — and
+/// an absent field a client must handle beats a present one that 404s.
+async fn hub_url(
+    db: &sqlx::PgPool,
+    farm_url: &str,
+    hub_id: &str,
+    hub_pubkey: Option<&str>,
+) -> Option<String> {
+    let base = farm_url.trim_end_matches('/');
+    if let Some(slug) = crate::routes::slugs::canonical_slug(db, hub_id).await {
+        return Some(format!("{base}/hub/{slug}"));
+    }
+    hub_pubkey.map(|pk| format!("{base}/hub/{pk}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -108,10 +133,12 @@ pub async fn list_hubs(
         i64,
         Option<i64>,
         String,
+        Option<String>,
     )> = if let Some(ref sub) = authed_sub {
         // Authenticated: return public hubs + hubs the user owns.
         sqlx::query_as(
-            "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey
+            "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey,
+                        hub_pubkey
                  FROM hubs
                  WHERE deleted_at IS NULL
                    AND (visibility = 'public' OR owner_pubkey = $1)",
@@ -134,7 +161,8 @@ pub async fn list_hubs(
         }
 
         sqlx::query_as(
-            "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey
+            "SELECT id, name, description, visibility, created_at, suspended_at, owner_pubkey,
+                        hub_pubkey
                  FROM hubs
                  WHERE deleted_at IS NULL AND visibility = 'public'",
         )
@@ -148,20 +176,18 @@ pub async fn list_hubs(
         )
     })?;
 
-    let hubs = rows
-        .into_iter()
-        .map(
-            |(id, name, description, visibility, created_at, suspended_at, _owner)| HubEntry {
-                hub_url: hub_url(&state.farm_url, &id),
-                id,
-                name,
-                description,
-                visibility,
-                created_at,
-                suspended_at,
-            },
-        )
-        .collect();
+    let mut hubs = Vec::with_capacity(rows.len());
+    for (id, name, description, visibility, created_at, suspended_at, _owner, hub_pubkey) in rows {
+        hubs.push(HubEntry {
+            hub_url: hub_url(&state.db, &state.farm_url, &id, hub_pubkey.as_deref()).await,
+            id,
+            name,
+            description,
+            visibility,
+            created_at,
+            suspended_at,
+        });
+    }
 
     Ok(Json(ListHubsResponse { hubs }))
 }
@@ -185,7 +211,8 @@ pub struct CreateHubRequest {
 #[derive(Serialize)]
 pub struct CreateHubResponse {
     pub id: String,
-    pub hub_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub_url: Option<String>,
 }
 
 pub async fn create_hub(
@@ -425,10 +452,24 @@ pub async fn create_hub(
         };
         let port = state.hub_manager.allocate_port(&state.db).await;
         let voice_port = state.hub_manager.allocate_voice_port(&state.db).await;
+        // The node may hold its own PostgreSQL (farm-model.md, "per-node
+        // PostgreSQL"), in which case `db_url` — provisioned on the farm's
+        // server — is the wrong machine. Send the database *name* and this
+        // server's template alongside it and let the agent decide: its own
+        // template first, so a node's credentials never have to reach us.
+        let db_url_template: Option<String> =
+            sqlx::query_scalar("SELECT db_url_template FROM servers WHERE id = $1")
+                .bind(&server_id)
+                .fetch_optional(&state.db)
+                .await
+                .ok()
+                .flatten();
         let cmd = serde_json::json!({
             "type": "spawn_hub",
             "hub_id": hub_id,
             "db_url": db_url,
+            "db_name": crate::db::provision::database_name(&hub_id),
+            "db_url_template": db_url_template,
             "port": port,
             "voice_port": voice_port,
             "owner_pubkey": payload.sub,
@@ -459,7 +500,9 @@ pub async fn create_hub(
         }
     }
 
-    let url = hub_url(&state.farm_url, &hub_id);
+    // Freshly created: no heartbeat yet, so there is no address to hand back.
+    // The caller polls `GET /farm/hubs/{id}` (or the fleet view) until there is.
+    let url = hub_url(&state.db, &state.farm_url, &hub_id, None).await;
     Ok((
         StatusCode::CREATED,
         Json(CreateHubResponse {
@@ -478,8 +521,15 @@ pub async fn get_hub(
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<HubEntry>, (StatusCode, Json<serde_json::Value>)> {
     #[allow(clippy::type_complexity)]
-    let row: Option<(String, Option<String>, String, i64, Option<i64>)> = sqlx::query_as(
-        "SELECT name, description, visibility, created_at, suspended_at
+    let row: Option<(
+        String,
+        Option<String>,
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT name, description, visibility, created_at, suspended_at, hub_pubkey
          FROM hubs WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(&hub_id)
@@ -492,15 +542,16 @@ pub async fn get_hub(
         )
     })?;
 
-    let (name, description, visibility, created_at, suspended_at) = row.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "hub_not_found"})),
-        )
-    })?;
+    let (name, description, visibility, created_at, suspended_at, hub_pubkey) =
+        row.ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "hub_not_found"})),
+            )
+        })?;
 
     Ok(Json(HubEntry {
-        hub_url: hub_url(&state.farm_url, &hub_id),
+        hub_url: hub_url(&state.db, &state.farm_url, &hub_id, hub_pubkey.as_deref()).await,
         id: hub_id,
         name,
         description,

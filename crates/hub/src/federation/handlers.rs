@@ -19,7 +19,7 @@ pub async fn add_peer(
     Json(req): Json<AddPeerRequest>,
 ) -> Result<(StatusCode, Json<PeerInfo>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ADMIN)?;
+    perms.require(permissions::ALLIANCES_PEERS)?;
 
     let url = req.url.trim_end_matches('/').to_string();
 

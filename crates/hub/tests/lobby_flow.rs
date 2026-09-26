@@ -159,7 +159,7 @@ async fn verify_response_includes_scope_field() {
 // ---------------------------------------------------------------------------
 // Regression coverage for the live 2026-07-06 bug: /auth/verify used to
 // hard-403 any sub-level join once min_security_level > 0, instead of
-// admitting the user into scope="lobby". See lobby-bot-survey.md Feature 1.
+// admitting the user into scope="lobby". See lobby-survey.md Feature 1.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

@@ -1,11 +1,11 @@
-//! Tests for H2 (presence refcount) and H3 (bot_sessions per-session).
+//! Tests for H2 (presence refcount) and H3 (app_sessions per-session).
 //!
 //! H2: `online_users` is now a refcount map (`HashMap<String, usize>`).
 //!     A second session's connect increments the count; the first disconnect
 //!     decrements it but must not remove the key until the count reaches zero.
 //!
-//! H3: `bot_sessions` is now nested: `HashMap<pubkey, HashMap<session_id, Sender>>`.
-//!     A newer bot WS session no longer overwrites the older sender; the first
+//! H3: `app_sessions` is now nested: `HashMap<pubkey, HashMap<session_id, Sender>>`.
+//!     A newer app WS session no longer overwrites the older sender; the first
 //!     disconnect removes only its own entry, leaving the surviving session intact.
 
 use std::collections::HashMap;
@@ -40,6 +40,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -58,7 +59,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(std::collections::HashMap::new()),
+        app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: Arc::new(RwLock::new(None)),
@@ -68,7 +69,9 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: RwLock::new(HashMap::new()),
         whisper_optouts: RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
@@ -76,9 +79,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -323,14 +325,14 @@ async fn h2_users_endpoint_reflects_refcount() {
 }
 
 // ---------------------------------------------------------------------------
-// H3 — bot_sessions per-session discriminator
+// H3 — app_sessions per-session discriminator
 // ---------------------------------------------------------------------------
 
-/// Simulate two concurrent bot WS sessions via direct state manipulation.
+/// Simulate two concurrent app WS sessions via direct state manipulation.
 /// When the "first" session is dropped (its entry removed), the second
 /// session's sender must still be present and functional.
 #[tokio::test]
-async fn h3_bot_sessions_second_session_survives_first_disconnect() {
+async fn h3_app_sessions_second_session_survives_first_disconnect() {
     let (base, state, _guard) = start_hub().await;
     let _ = base; // not needed for this state-level test
 
@@ -344,15 +346,15 @@ async fn h3_bot_sessions_second_session_survives_first_disconnect() {
 
     // Register both sessions under the same pubkey.
     {
-        let mut sessions = state.bot_sessions.write().await;
-        let per_bot = sessions.entry(pk.clone()).or_default();
-        per_bot.insert(session_a.clone(), tx_a);
-        per_bot.insert(session_b.clone(), tx_b);
+        let mut sessions = state.app_sessions.write().await;
+        let per_app = sessions.entry(pk.clone()).or_default();
+        per_app.insert(session_a.clone(), tx_a);
+        per_app.insert(session_b.clone(), tx_b);
     }
 
     assert_eq!(
         state
-            .bot_sessions
+            .app_sessions
             .read()
             .await
             .get(&pk)
@@ -364,10 +366,10 @@ async fn h3_bot_sessions_second_session_survives_first_disconnect() {
 
     // Simulate session A disconnecting: remove only session A's entry.
     {
-        let mut sessions = state.bot_sessions.write().await;
-        if let Some(per_bot) = sessions.get_mut(&pk) {
-            per_bot.remove(&session_a);
-            if per_bot.is_empty() {
+        let mut sessions = state.app_sessions.write().await;
+        if let Some(per_app) = sessions.get_mut(&pk) {
+            per_app.remove(&session_a);
+            if per_app.is_empty() {
                 sessions.remove(&pk);
             }
         }
@@ -375,12 +377,12 @@ async fn h3_bot_sessions_second_session_survives_first_disconnect() {
 
     // Session B's sender must still be alive.
     assert!(
-        state.bot_sessions.read().await.contains_key(&pk),
+        state.app_sessions.read().await.contains_key(&pk),
         "pubkey entry should still exist after session A disconnects"
     );
     assert_eq!(
         state
-            .bot_sessions
+            .app_sessions
             .read()
             .await
             .get(&pk)
@@ -392,9 +394,9 @@ async fn h3_bot_sessions_second_session_survives_first_disconnect() {
 
     // Push a message through the surviving session's sender.
     {
-        let sessions = state.bot_sessions.read().await;
-        let per_bot = sessions.get(&pk).unwrap();
-        let tx = per_bot.get(&session_b).unwrap();
+        let sessions = state.app_sessions.read().await;
+        let per_app = sessions.get(&pk).unwrap();
+        let tx = per_app.get(&session_b).unwrap();
         tx.try_send("test-push".to_string()).unwrap();
     }
 
@@ -410,20 +412,20 @@ async fn h3_bot_sessions_second_session_survives_first_disconnect() {
     );
 }
 
-/// publish_hub_event delivers to all active sessions for a bot, not just one.
+/// publish_hub_event delivers to every active session for an identity, not just one.
 #[tokio::test]
 async fn h3_publish_hub_event_reaches_all_sessions() {
     let (base, state, _guard) = start_hub().await;
     let _ = base;
 
-    // Insert a real bot user row (publish_hub_event queries the DB for
-    // subscriptions, so we need valid bot_subscriptions rows).
+    // A real users row: publish_hub_event reads subscriptions from the DB,
+    // so the app_subscriptions row below needs an identity to point at.
     let pk = Identity::generate().public_key_hex();
     let now = wavvon_hub::auth::handlers::unix_timestamp();
 
     sqlx::query(
-        "INSERT INTO users (public_key, display_name, is_bot, first_seen_at, last_seen_at)
-         VALUES ($1, 'testbot', TRUE, $2, $3)",
+        "INSERT INTO users (public_key, display_name, first_seen_at, last_seen_at)
+         VALUES ($1, 'logger-app', $2, $3)",
     )
     .bind(&pk)
     .bind(now)
@@ -434,7 +436,7 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
 
     // Subscribe to message.created hub-wide.
     sqlx::query(
-        "INSERT INTO bot_subscriptions (bot_pubkey, event_type, channel_id)
+        "INSERT INTO app_subscriptions (app_pubkey, event_type, channel_id)
          VALUES ($1, 'message.created', '')",
     )
     .bind(&pk)
@@ -455,14 +457,14 @@ async fn h3_publish_hub_event_reaches_all_sessions() {
     let (tx_b, mut rx_b) = mpsc::channel::<String>(8);
 
     {
-        let mut sessions = state.bot_sessions.write().await;
-        let per_bot = sessions.entry(pk.clone()).or_default();
-        per_bot.insert(session_a.clone(), tx_a);
-        per_bot.insert(session_b.clone(), tx_b);
+        let mut sessions = state.app_sessions.write().await;
+        let per_app = sessions.entry(pk.clone()).or_default();
+        per_app.insert(session_a.clone(), tx_a);
+        per_app.insert(session_b.clone(), tx_b);
     }
 
     // Publish an event — should be delivered to both sessions.
-    wavvon_hub::bots::events::publish_hub_event(
+    wavvon_hub::apps::events::publish_hub_event(
         &state,
         "message.created",
         Some(&pk),

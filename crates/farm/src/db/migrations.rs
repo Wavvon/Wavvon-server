@@ -18,7 +18,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
                                         CHECK(creation_policy IN ('open', 'admin_only', 'disabled')),
             max_hubs_per_user       BIGINT NOT NULL DEFAULT 0,
             max_hubs_total          BIGINT NOT NULL DEFAULT 0,
-            allow_discovery_listing BOOLEAN NOT NULL DEFAULT FALSE,
             languages               TEXT NOT NULL DEFAULT '[\"en\"]',
             tags                    TEXT NOT NULL DEFAULT '[]',
             country                 TEXT,
@@ -233,6 +232,31 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Where a node actually is, and how to trust it (farm-model.md,
+    // "Multi-node data plane"). Before these the control plane was multi-node
+    // and the data plane was not: the proxy dialed `127.0.0.1:<port>` for
+    // every hub, so a hub the farm had spawned on another machine was
+    // unreachable through the farm's own domain.
+    //
+    // All nullable or defaulted: a row with no host is a hub on this machine,
+    // which is every row that exists today.
+    for sql in [
+        "ALTER TABLE servers ADD COLUMN host TEXT",
+        // `ca` — ordinary certificate validation, for a node that already
+        // terminates TLS. `pin` — the agent advertises its self-signed cert's
+        // SHA-256 and the farm refuses anything else, the same primitive voice
+        // uses for its relay certificate.
+        "ALTER TABLE servers ADD COLUMN tls_mode TEXT NOT NULL DEFAULT 'ca'
+             CHECK (tls_mode IN ('ca', 'pin'))",
+        "ALTER TABLE servers ADD COLUMN cert_sha256 TEXT",
+        // The farm never holds a node's database credentials: it holds a
+        // template, and the agent substitutes the per-hub database name where
+        // the data actually lives.
+        "ALTER TABLE servers ADD COLUMN db_url_template TEXT",
+    ] {
+        let _ = sqlx::query(sql).execute(pool).await;
+    }
+
     // How hubs' data is separated: `database` (one each, needs CREATEDB) or
     // `schema` (one each inside the farm's own database). See db/provision.rs.
     //
@@ -242,6 +266,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     let _ = sqlx::query(
         "ALTER TABLE farms ADD COLUMN hub_isolation TEXT NOT NULL DEFAULT 'database'
              CHECK (hub_isolation IN ('database', 'schema'))",
+    )
+    .execute(pool)
+    .await;
+
+    // Orthogonal to the layout above, and for the threat the layout does not
+    // address: a database or a schema each stops hubs colliding, not one hub
+    // reading another's data, because every hub connects as the farm's own
+    // role. `per_hub` gives each hub a login role granted only its own space.
+    // Default `shared` — it needs CREATEROLE, which the managed plans `schema`
+    // exists for do not hand out, and a farm that cannot start is worse than
+    // one whose hubs it already owns.
+    let _ = sqlx::query(
+        "ALTER TABLE farms ADD COLUMN hub_db_role TEXT NOT NULL DEFAULT 'shared'
+             CHECK (hub_db_role IN ('shared', 'per_hub'))",
     )
     .execute(pool)
     .await;

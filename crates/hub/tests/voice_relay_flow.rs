@@ -39,6 +39,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -57,7 +58,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: Arc::new(RwLock::new(None)),
@@ -67,7 +68,9 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: RwLock::new(HashMap::new()),
         whisper_optouts: RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),
@@ -75,9 +78,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             std::sync::Arc::new(
@@ -588,4 +590,175 @@ async fn invisible_user_hidden_from_others_voice_participant_lists() {
             .unwrap_or(false),
         "invisible user must still see their own entry in /voice/participants"
     );
+}
+
+/// Two clients on the SAME identity (the multi-device case) each join a
+/// different voice channel. `voice_channels` is keyed by pubkey, so before the
+/// fix both entries survived and the user showed up in two rooms of the same
+/// hub at once. Latest join wins.
+#[tokio::test]
+async fn second_device_join_evicts_the_first_channel() {
+    let (base, state, _guard) = start_hub().await;
+
+    let user = Identity::generate();
+    let token = authenticate_http(&base, &user).await;
+    let a = create_channel(&base, &token, "room-a").await;
+    let b = create_channel(&base, &token, "room-b").await;
+    let pk = user.public_key_hex();
+
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token).await;
+    send_ws(
+        &mut tx_a,
+        json!({ "type": "voice_join", "channel_id": a.id }),
+    )
+    .await;
+    let _ = drain_until_voice_joined(&mut rx_a).await;
+
+    let (mut tx_b, mut rx_b) = connect_ws(&base, &token).await;
+    send_ws(
+        &mut tx_b,
+        json!({ "type": "voice_join", "channel_id": b.id }),
+    )
+    .await;
+    let _ = drain_until_voice_joined(&mut rx_b).await;
+
+    let rooms: Vec<String> = {
+        let vc = state.voice_channels.read().await;
+        vc.iter()
+            .filter(|(_, participants)| participants.contains_key(&pk))
+            .map(|(ch, _)| ch.clone())
+            .collect()
+    };
+    assert_eq!(
+        rooms,
+        vec![b.id.clone()],
+        "one identity must occupy exactly the last-joined voice channel"
+    );
+
+    let _ = tx_a.send(TsMessage::Close(None)).await;
+    let _ = tx_b.send(TsMessage::Close(None)).await;
+}
+
+// ---------------------------------------------------------------------------
+// Outbound packet loss reported on `pong` (voice_loss.rs)
+// ---------------------------------------------------------------------------
+
+/// Reads frames until a `pong` arrives, and returns it.
+async fn wait_for_pong(
+    rx: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+) -> Value {
+    loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(10), rx.next())
+            .await
+            .expect("pong timeout")
+            .unwrap()
+            .unwrap();
+        if let TsMessage::Text(t) = msg {
+            let v: Value = serde_json::from_str(&t).unwrap();
+            if v["type"] == "pong" {
+                return v;
+            }
+        }
+    }
+}
+
+/// Not in voice, or in voice and having sent almost nothing, means there is no
+/// figure to give — and the field must then be **absent**, not zero.
+///
+/// This is the whole reason the field is optional. The client cannot tell
+/// "this hub does not measure outbound loss" from "your outbound loss is 0.0%"
+/// if the hub answers 0.0 either way, and a reassuring zero on a hub that
+/// measures nothing is worse than an em dash.
+#[tokio::test]
+async fn pong_omits_outbound_loss_when_there_is_nothing_to_report() {
+    let (base, _state, _guard) = start_hub().await;
+    let id = Identity::generate();
+    let token = authenticate_http(&base, &id).await;
+    let (mut tx, mut rx) = connect_ws(&base, &token).await;
+
+    send_ws(&mut tx, json!({ "type": "ping", "nonce": 1234 })).await;
+    let pong = wait_for_pong(&mut rx).await;
+
+    assert_eq!(pong["nonce"], 1234, "the nonce must come back untouched");
+    assert!(
+        pong.get("outbound_loss_pct").is_none(),
+        "no voice traffic means no loss figure, not a zero: {pong}"
+    );
+
+    let _ = tx.send(TsMessage::Close(None)).await;
+}
+
+/// The relay's counter-gap measurement reaches the sender that it is about,
+/// on the probe the client is already sending every two seconds.
+#[tokio::test]
+async fn pong_carries_the_outbound_loss_the_relay_measured() {
+    let (base, state, _guard) = start_hub().await;
+    let id = Identity::generate();
+    let pk = id.public_key_hex();
+    let token = authenticate_http(&base, &id).await;
+    let (mut tx, mut rx) = connect_ws(&base, &token).await;
+
+    // What the relay would have accumulated after a span of 100 counters with
+    // 10 of them missing. Injected rather than driven through a real
+    // WebTransport session: the arithmetic has its own unit tests, and what is
+    // untested is whether the number reaches this socket at all.
+    {
+        let mut losses = state.voice_outbound_loss.write().await;
+        losses.insert(
+            pk.clone(),
+            wavvon_hub::voice_loss::SenderLoss {
+                first_ctr: 0,
+                highest_ctr: 99,
+                received: 90,
+            },
+        );
+    }
+
+    send_ws(&mut tx, json!({ "type": "ping", "nonce": 99 })).await;
+    let pong = wait_for_pong(&mut rx).await;
+
+    assert_eq!(
+        pong["outbound_loss_pct"].as_f64(),
+        Some(10.0),
+        "the relay saw 10 of 100 counters missing: {pong}"
+    );
+
+    let _ = tx.send(TsMessage::Close(None)).await;
+}
+
+/// Another participant's uplink is nobody else's business: the figure is keyed
+/// by pubkey and only ever answers the socket it belongs to.
+#[tokio::test]
+async fn one_participants_outbound_loss_is_not_reported_to_another() {
+    let (base, state, _guard) = start_hub().await;
+    let noisy = Identity::generate();
+    let quiet = Identity::generate();
+    let quiet_token = authenticate_http(&base, &quiet).await;
+
+    {
+        let mut losses = state.voice_outbound_loss.write().await;
+        losses.insert(
+            noisy.public_key_hex(),
+            wavvon_hub::voice_loss::SenderLoss {
+                first_ctr: 0,
+                highest_ctr: 99,
+                received: 50,
+            },
+        );
+    }
+
+    let (mut tx, mut rx) = connect_ws(&base, &quiet_token).await;
+    send_ws(&mut tx, json!({ "type": "ping", "nonce": 7 })).await;
+    let pong = wait_for_pong(&mut rx).await;
+
+    assert!(
+        pong.get("outbound_loss_pct").is_none(),
+        "a socket must only ever hear about its own uplink: {pong}"
+    );
+
+    let _ = tx.send(TsMessage::Close(None)).await;
 }

@@ -76,28 +76,23 @@ pub async fn voice_channel_participants(
 
     struct UserInfo {
         display_name: Option<String>,
-        is_bot: bool,
+        visiting_from: Option<String>,
     }
     let mut info_by_key: HashMap<String, UserInfo> = HashMap::new();
     if !all_keys.is_empty() {
         // sqlx doesn't have great IN-clause helpers; this loop is cheap and
         // bounded by hub size. The lookup itself is one indexed PK fetch.
         for key in &all_keys {
-            let row: Option<(Option<String>, bool)> =
-                sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
-                    .bind(key)
-                    .fetch_optional(&state.db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-            let (display_name, is_bot) = match row {
-                Some((dn, b)) => (dn, b),
-                None => (None, false),
-            };
+            // Same resolution as the WS roster, visitors included — a client
+            // that refetches the roster must not lose the hub a visitor is
+            // vouched by (alliances.md).
+            let (display_name, visiting_from) =
+                crate::routes::ws::voice_identity(&state, key).await;
             info_by_key.insert(
                 key.clone(),
                 UserInfo {
                     display_name,
-                    is_bot,
+                    visiting_from,
                 },
             );
         }
@@ -113,7 +108,7 @@ pub async fn voice_channel_participants(
                 VoiceParticipantInfo {
                     public_key: pk.clone(),
                     display_name: info.and_then(|i| i.display_name.clone()),
-                    is_bot: info.map(|i| i.is_bot).unwrap_or(false),
+                    visiting_from: info.and_then(|i| i.visiting_from.clone()),
                 }
             })
             .collect();
@@ -128,7 +123,9 @@ pub async fn voice_channel_participants(
 pub struct VoiceParticipantInfo {
     pub public_key: String,
     pub display_name: Option<String>,
-    pub is_bot: bool,
+    /// The hub vouching for an alliance-voice visitor; absent for members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visiting_from: Option<String>,
 }
 
 /// Returns the set of public keys currently in any voice channel on this
@@ -162,7 +159,7 @@ pub async fn create_channel(
 ) -> Result<(StatusCode, Json<ChannelResponse>), (StatusCode, String)> {
     // Creating a channel under a parent category is "acting on" that
     // existing channel, so it's gated by the parent's cascaded
-    // MANAGE_CHANNELS. Root-level creation has no channel to cascade
+    // CHANNELS_MANAGE. Root-level creation has no channel to cascade
     // through, so it stays on the hub-wide check.
     let perms = match &req.parent_id {
         Some(parent_id) => {
@@ -170,7 +167,7 @@ pub async fn create_channel(
         }
         None => permissions::user_permissions(&state.db, &user.public_key).await?,
     };
-    perms.require(permissions::MANAGE_CHANNELS)?;
+    perms.require(permissions::CHANNELS_MANAGE)?;
 
     // Validate parent if specified
     if let Some(parent_id) = &req.parent_id {
@@ -297,7 +294,16 @@ pub async fn create_channel(
         }
     })?;
 
+    // A channel this fresh carries no overwrites, so this is the creator own
+    // hub-wide answer — but it is computed, not assumed, so the field means the
+    // same thing here as in the list.
+    let can_move_members = permissions::channel_permissions(&state.db, &user.public_key, &id)
+        .await
+        .map(|p| p.has(permissions::VOICE_MOVE_MEMBERS))
+        .unwrap_or(false);
+
     let resp = ChannelResponse {
+        can_move_members,
         id: id.clone(),
         name: req.name.clone(),
         created_by: user.public_key.clone(),
@@ -327,7 +333,7 @@ pub async fn create_channel(
         let ch_name = req.name.clone();
         let creator = user.public_key.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.created",
                 Some(&creator),
@@ -381,7 +387,7 @@ pub async fn update_channel(
     let changing_forum_require_tag = req.forum_require_tag.is_some();
 
     // Owner powers, v1: rename only (temp-voice-channels.md §3). A temp
-    // channel's owner may change its name without MANAGE_CHANNELS, but any
+    // channel's owner may change its name without CHANNELS_MANAGE, but any
     // other structural field in the same request still requires it.
     let owner_rename_only = is_temporary
         && owner_pubkey.as_deref() == Some(user.public_key.as_str())
@@ -393,13 +399,13 @@ pub async fn update_channel(
         && req.nsfw.is_none();
 
     if changing_structure && !owner_rename_only {
-        perms.require(permissions::MANAGE_CHANNELS)?;
+        perms.require(permissions::CHANNELS_MANAGE)?;
     }
     if changing_appearance {
-        perms.require(permissions::MANAGE_CHANNEL_ICONS)?;
+        perms.require(permissions::CHANNELS_APPEARANCE)?;
     }
     if changing_talk_power || changing_retention {
-        perms.require(permissions::ADMIN)?;
+        perms.require(permissions::CHANNELS_MANAGE)?;
     }
     if changing_forum_require_tag {
         if existing_type != "forum" {
@@ -408,7 +414,7 @@ pub async fn update_channel(
                 "forum_require_tag is only valid for forum channels".to_string(),
             ));
         }
-        perms.require(permissions::MANAGE_POSTS)?;
+        perms.require(permissions::FORUM_POSTS_MANAGE)?;
     }
 
     if let Some(Some(parent_id)) = &req.parent_id {
@@ -631,21 +637,43 @@ pub async fn list_channels(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Read-gating (§3.5): drop any channel where the caller lacks effective
-    // READ_MESSAGES once the ancestor-chain overwrite cascade is applied.
-    // Hidden channels never reach the client -- no client-side
-    // secret-keeping needed.
+    // Visibility gating (§3.5): drop any channel the caller can neither read
+    // nor join, once the ancestor-chain overwrite cascade is applied. Hidden
+    // channels never reach the client -- no client-side secret-keeping
+    // needed.
+    //
+    // **read OR voice-join, and only here** (permissions.md §3, "the split
+    // that must not be got wrong"). A channel you may only talk in has to
+    // reach the client or the permission is inert and nothing renders. The
+    // WS auto-subscribe in `ws/connection.rs` asks the opposite question --
+    // read *only* -- because a channel arriving on the voice-join condition
+    // alone must never be subscribed, or its messages, edits, typing and
+    // reactions ride the socket into a client that may not read them. Those
+    // two call sites had one meaning before this; conflating them again is a
+    // data leak rather than a UI bug.
     let readable = permissions::channels_with_permission(
         &state.db,
         &user.public_key,
-        permissions::READ_MESSAGES,
+        permissions::MESSAGES_READ,
+    )
+    .await?;
+    let joinable =
+        permissions::channels_with_permission(&state.db, &user.public_key, permissions::VOICE_JOIN)
+            .await?;
+    // events.md §7.1: which channels the caller may move members *into*, so a
+    // destination picker can offer only those.
+    let movable = permissions::channels_with_permission(
+        &state.db,
+        &user.public_key,
+        permissions::VOICE_MOVE_MEMBERS,
     )
     .await?;
 
     let channels = rows
         .into_iter()
-        .filter(|r| readable.contains(&r.id))
+        .filter(|r| readable.contains(&r.id) || joinable.contains(&r.id))
         .map(|r| ChannelResponse {
+            can_move_members: movable.contains(&r.id),
             id: r.id,
             name: r.name,
             created_by: r.created_by,
@@ -684,7 +712,7 @@ pub async fn reorder_channels(
     Json(req): Json<ReorderRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::MANAGE_CHANNELS)?;
+    perms.require(permissions::CHANNELS_MANAGE)?;
 
     // Assign sequential display_order values
     for (index, channel_id) in req.channel_ids.iter().enumerate() {
@@ -713,7 +741,7 @@ pub async fn delete_channel(
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Acting on a specific existing channel -- cascade through it.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MANAGE_CHANNELS)?;
+    perms.require(permissions::CHANNELS_MANAGE)?;
 
     // Check if channel exists
     let exists: Option<bool> = sqlx::query_scalar("SELECT is_category FROM channels WHERE id = $1")
@@ -772,7 +800,7 @@ pub async fn delete_channel(
         let ch_id = channel_id.clone();
         let actor = user.public_key.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.deleted",
                 Some(&actor),

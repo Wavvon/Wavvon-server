@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::Json;
 
 use crate::auth::middleware::AuthUser;
-use crate::permissions::{self, ADMIN, ALL_PERMISSIONS, MANAGE_ROLES};
+use crate::permissions::{self, CHANNELS_PERMISSIONS};
 use crate::state::AppState;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -137,9 +137,11 @@ pub struct MyChannelPermissionsResponse {
     /// The caller's resolved effective permission set on this channel
     /// (hub-wide baseline + ancestor-chain overwrite cascade), sorted.
     pub permissions: Vec<String>,
-    /// Convenience flag: `admin` short-circuits every permission check, so
-    /// clients should treat everything as allowed when this is true.
-    pub is_admin: bool,
+    /// Convenience flag: the owner short-circuits every permission check, so
+    /// clients should treat everything as allowed when this is true. Was
+    /// `is_admin` against the wildcard; ownership is a property now
+    /// (permissions.md §1.1) and the field says which.
+    pub is_owner: bool,
 }
 
 /// GET /channels/:id/my-permissions
@@ -157,14 +159,14 @@ pub async fn get_my_channel_permissions(
     require_channel_exists(&state.db, &channel_id).await?;
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    let is_admin = perms.effective.contains(ADMIN);
+    let is_owner = perms.is_owner;
     let mut permissions: Vec<String> = perms.effective.into_iter().collect();
     permissions.sort();
 
     Ok(Json(MyChannelPermissionsResponse {
         channel_id,
         permissions,
-        is_admin,
+        is_owner,
     }))
 }
 
@@ -175,7 +177,7 @@ pub async fn get_channel_permissions(
     Path(channel_id): Path<String>,
 ) -> Result<Json<ChannelPermissionsResponse>, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(CHANNELS_PERMISSIONS)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
 
@@ -204,7 +206,7 @@ pub async fn put_channel_permissions(
     Json(req): Json<OverwriteSet>,
 ) -> Result<Json<RolePermissionsView>, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(CHANNELS_PERMISSIONS)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
     let (role_name, role_priority) = require_role(&state.db, &role_id).await?;
@@ -218,11 +220,9 @@ pub async fn put_channel_permissions(
         ));
     }
 
-    for p in req.allow.iter().chain(req.deny.iter()) {
-        if !ALL_PERMISSIONS.contains(&p.as_str()) {
-            return Err((StatusCode::BAD_REQUEST, format!("unknown permission: {p}")));
-        }
-    }
+    permissions::validate_channel_overwrite(
+        req.allow.iter().chain(req.deny.iter()).map(String::as_str),
+    )?;
     for p in &req.allow {
         if req.deny.contains(p) {
             return Err((
@@ -232,25 +232,18 @@ pub async fn put_channel_permissions(
         }
     }
 
-    // `admin` immunity is code-not-data: it must never be grantable through
-    // an overwrite, regardless of the caller's own permissions.
-    if req.allow.iter().any(|p| p == ADMIN) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "Cannot grant 'admin' via a channel permission overwrite".to_string(),
-        ));
-    }
+    // The `admin` special case that used to live here is gone with the
+    // string (permissions.md §1.6): there is no permission left that is
+    // immune to a deny, and the subset check below is the only ceiling.
 
     // Self-grant guard: a caller can only allow permissions they themselves
     // effectively hold on this channel -- prevents delegating powers the
     // caller doesn't have. Denies are unrestricted (removing power is safe).
-    for p in &req.allow {
-        if !perms.has(p) {
-            return Err((
-                StatusCode::FORBIDDEN,
-                format!("Cannot grant permission '{p}' you do not hold on this channel"),
-            ));
-        }
+    if let Some(p) = perms.first_not_held(req.allow.iter().map(String::as_str)) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Cannot grant permission '{p}' you do not hold on this channel"),
+        ));
     }
 
     let before: Vec<(String, bool)> = sqlx::query_as(
@@ -321,7 +314,7 @@ pub async fn put_channel_permissions(
             .chain(req.deny.iter().map(|p| (p.clone(), false)))
             .collect();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.permission_overwrite.set",
                 Some(&actor),
@@ -349,7 +342,7 @@ pub async fn delete_channel_permissions(
     Path((channel_id, role_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(MANAGE_ROLES)?;
+    perms.require(CHANNELS_PERMISSIONS)?;
 
     require_channel_exists(&state.db, &channel_id).await?;
     let (_, role_priority) = require_role(&state.db, &role_id).await?;
@@ -387,7 +380,7 @@ pub async fn delete_channel_permissions(
         let actor = user.public_key.clone();
         let before_map: HashMap<String, bool> = before.into_iter().collect();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "channel.permission_overwrite.cleared",
                 Some(&actor),

@@ -26,7 +26,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         _ => return DispatchResult::Continue,
     };
 
-    // Mini-app-scoped sessions (bot-mini-apps.md "Scoped session token")
+    // Mini-app-scoped sessions (mini-apps.md "Scoped session token")
     // never had voice in scope — same block the now-deleted `/voice/ws`
     // endpoint enforced (voice-transport-v2.md), re-applied here since the
     // unified `voice_join` handler is now the only voice-join code path.
@@ -41,21 +41,30 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         return DispatchResult::Continue;
     }
 
-    // Bot audio injection (soundboard.md §2) requires the effective
-    // `can_speak_voice` capability grant — same gate the now-deleted
-    // `/voice/ws` endpoint enforced for bot joins (voice-transport-v2.md).
-    if cs.is_bot
-        && !crate::bots::capabilities::has_capability(&state.db, &cs.public_key, "can_speak_voice")
-            .await
-    {
-        let err = WsServerMessage::Error {
-            context: "voice_join".to_string(),
-            message: "This bot does not have voice permission.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+    // An alliance-voice visitor was admitted to *one* shared channel
+    // (alliances.md). The grant is a ticket to a room, not to the hub, so the
+    // channel it named is re-checked here rather than trusted from the join —
+    // otherwise a visitor could walk from the room they were invited into to
+    // any other channel on this hub.
+    if let Some(admitted) = cs.alliance_voice_channel.clone() {
+        // Checked against the id as requested, before any later rewrite of
+        // `channel_id` (temp/spawner rooms) can move the target.
+        if channel_id != admitted {
+            tracing::info!(
+                visitor = %&cs.public_key[..16.min(cs.public_key.len())],
+                requested = %channel_id,
+                admitted = %admitted,
+                "Alliance voice visitor tried to join a channel outside its grant"
+            );
+            let err = WsServerMessage::Error {
+                context: "voice_join".to_string(),
+                message: "This visit is scoped to one channel.".to_string(),
+            };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .await;
+            return DispatchResult::Continue;
+        }
     }
 
     // Hub-wide voice mute check.
@@ -89,16 +98,20 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         return DispatchResult::Continue;
     }
 
-    // Channel visibility gate (§3.4/§3.5): a channel the caller can't
-    // effectively READ_MESSAGES isn't visible to them at all, so voice join
-    // is rejected the same way message history and the channel list are --
-    // UNLESS a voice-only presence grant (events.md §7.4) covers this exact
-    // (pubkey, channel) pair, in which case the organizer's consented move
-    // is the authorization and the join proceeds without READ_MESSAGES.
-    // This is the single enforcement point that bypasses read-gating; the
-    // grant is never consulted anywhere else.
+    // Voice admission gate (permissions.md §3, Voice). This used to ask for
+    // MESSAGES_READ, which made voice admission *be* read admission: the only
+    // way to keep someone out of a call was to hide the channel, and that took
+    // the text with it. VOICE_JOIN is the separate question, and it is
+    // independent in both directions -- a channel you may read but not join,
+    // and a lobby you may join but not read.
+    //
+    // The exception is unchanged in shape: a voice-only presence grant
+    // (events.md §7.4) covering this exact (pubkey, channel) pair means
+    // somebody with the authority to move people put this one here, and that
+    // move is the authorization. Still the single enforcement point that
+    // bypasses the gate; the grant is never consulted anywhere else.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
-        Ok(perms) if !perms.has(crate::permissions::READ_MESSAGES) => {
+        Ok(perms) if !perms.has(crate::permissions::VOICE_JOIN) => {
             let has_grant = state
                 .staging_voice_grants
                 .read()
@@ -248,7 +261,26 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         min_talk_power
     };
 
-    if min_talk_power > 0 {
+    // Talk power gates **speaking**, not entering (permissions.md, "Talk power
+    // is not this"). A member below the threshold joins and listens; their
+    // datagrams are dropped at the relay until a moderator hands them the
+    // floor. Refusing the join instead meant the quiet half of a moderated
+    // channel could not even hear it, and `chat_models.rs` had documented the
+    // other verb all along.
+    //
+    // Role priority no longer stands in: `talk_power.max(priority)` let one
+    // number answer for two jobs, so raising someone's rank silently handed
+    // them the floor in every threshold channel on the hub. The owner still
+    // passes, but as the property they already are rather than as a large
+    // number that happened to clear every threshold — `builtin-owner` is
+    // seeded with no `talk_power` at all, so reading the column alone would
+    // have silenced them in their own channel.
+    let may_speak = if min_talk_power > 0 {
+        let is_owner = crate::permissions::user_permissions(&state.db, &cs.public_key)
+            .await
+            .map(|p| p.is_owner)
+            .unwrap_or(false);
+
         let user_talk_power: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(r.talk_power), 0)
              FROM roles r
@@ -262,31 +294,28 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .flatten()
         .unwrap_or(0);
 
-        let user_priority = crate::permissions::user_permissions(&state.db, &cs.public_key)
-            .await
-            .as_ref()
-            .map(|p| p.max_priority)
-            .unwrap_or(0);
+        is_owner || user_talk_power >= min_talk_power
+    } else {
+        true
+    };
 
-        let effective_power = user_talk_power.max(user_priority);
-
-        let hand_raised =
-            crate::routes::moderation::has_raised_hand(&state.db, &channel_id, &cs.public_key)
-                .await;
-
-        if effective_power < min_talk_power && !hand_raised {
-            let err = WsServerMessage::Error {
-                context: "voice_join".to_string(),
-                message: format!(
-                    "This channel requires talk priority {}; you have {}. Raise your hand to request access.",
-                    min_talk_power, effective_power
-                ),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
-        }
+    // One voice session per identity. `voice_channels` and every pubkey-keyed
+    // side table (sender ids, whisper defs, relay slot, last-active stamp) assume
+    // a pubkey is in at most one room, but nothing enforced it: a second device
+    // -- or a re-join whose predecessor never sent `voice_leave` -- left the
+    // pubkey listed in both rooms at once. Latest join wins: tear down every
+    // prior membership through the shared leave path so the old room roster, WT
+    // session, zone positions, whisper session and staging grant all clear.
+    // Placed after every gate above so a rejected join never evicts.
+    let stale_channels: Vec<String> = {
+        let vc = state.voice_channels.read().await;
+        vc.iter()
+            .filter(|(_, participants)| participants.contains_key(&cs.public_key))
+            .map(|(ch, _)| ch.clone())
+            .collect()
+    };
+    for stale in stale_channels {
+        crate::routes::ws::connection::leave_voice(state, &cs.public_key, &stale).await;
     }
 
     // --- Token-gated WebTransport session bind (voice-transport-v2.md) ---
@@ -345,6 +374,24 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .write()
         .await
         .insert(cs.public_key.clone());
+    // The talk-power answer, computed above, parked where the relay can read
+    // it without touching the database. A grant is the removal of this entry,
+    // and the shared teardown drops it, so the floor lasts one session.
+    {
+        let mut blocked = state.voice_talk_blocked.write().await;
+        if may_speak {
+            blocked.remove(&cs.public_key);
+        } else {
+            blocked.insert(cs.public_key.clone());
+        }
+    }
+    // A fresh join starts a fresh loss measurement: carrying a counter span
+    // across sessions would report an old call's bad patch as this one's.
+    state
+        .voice_outbound_loss
+        .write()
+        .await
+        .remove(&cs.public_key);
 
     cs.voice_channel = Some(channel_id.clone());
 
@@ -378,23 +425,13 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         voice_token,
         voice_wt_url,
         voice_cert_hash,
+        may_speak,
     };
     let json = serde_json::to_string(&reply).unwrap();
     let _ = ws_tx.send(Message::Text(json.into())).await;
 
-    let (display_name, is_bot): (Option<String>, bool) = {
-        let row: Option<(Option<String>, bool)> =
-            sqlx::query_as("SELECT display_name, is_bot FROM users WHERE public_key = $1")
-                .bind(&cs.public_key)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-        match row {
-            Some((dn, b)) => (dn, b),
-            None => (None, false),
-        }
-    };
+    let (display_name, visiting_from) =
+        crate::routes::ws::voice_identity(state, &cs.public_key).await;
 
     // An invisible joiner is announced to no one (decisions.md 2026-07-12:
     // shown offline to everyone else). Their own client already got the
@@ -407,8 +444,8 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                 participant: VoiceParticipantInfo {
                     public_key: cs.public_key.clone(),
                     display_name: display_name.clone(),
-                    is_bot,
                     sender_id: Some(sender_id),
+                    visiting_from,
                 },
             },
         ));
@@ -444,11 +481,8 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             new_sender_id: sender_id,
             new_pubkey: cs.public_key.clone(),
         };
-        let senders = state.ws_key_senders.read().await;
         for pk in &existing_pubkeys {
-            if let Some(tx) = senders.get(pk) {
-                let _ = tx.send(req.clone());
-            }
+            state.send_to_user(pk, req.clone()).await;
         }
     }
 
@@ -506,7 +540,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         let ch = channel_id.clone();
         let dn = display_name;
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.joined",
                 Some(&pk),
@@ -547,7 +581,7 @@ pub(in crate::routes::ws) async fn handle_voice_leave(
         let pk = cs.public_key.clone();
         let ch = channel_id.clone();
         tokio::spawn(async move {
-            crate::bots::events::publish_hub_event(
+            crate::apps::events::publish_hub_event(
                 &state_c,
                 "member.left",
                 Some(&pk),
@@ -733,7 +767,7 @@ async fn send_voice_move_error(ws_tx: &mut WsTx, message: impl Into<String>) -> 
 ///   `event_move_assignments` row instead of rejected (§7.3); with no
 ///   `event_id` the Phase 1 rejection still applies (no event context to
 ///   apply it against later).
-/// - Target **lacks `READ_MESSAGES`** on the destination + `event_id`
+/// - Target **lacks `MESSAGES_READ`** on the destination + `event_id`
 ///   present → a voice-only presence grant is created (§7.4) and the move
 ///   proceeds instead of being rejected; with no `event_id` the Phase 1
 ///   rejection still applies (a generic mod-tool move must not reveal a
@@ -753,12 +787,12 @@ pub(in crate::routes::ws) async fn handle_voice_move(
         _ => return DispatchResult::Continue,
     };
 
-    // Authorize the mover: MOVE_MEMBERS resolved channel-scoped against the
+    // Authorize the mover: VOICE_MOVE_MEMBERS resolved channel-scoped against the
     // destination channel.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &target_channel_id)
         .await
     {
-        Ok(perms) if perms.has(crate::permissions::MOVE_MEMBERS) => {}
+        Ok(perms) if perms.has(crate::permissions::VOICE_MOVE_MEMBERS) => {}
         Ok(_) => {
             return send_voice_move_error(
                 ws_tx,
@@ -843,32 +877,38 @@ pub(in crate::routes::ws) async fn handle_voice_move(
         }
     };
 
-    // Does the target already hold effective READ_MESSAGES on the
-    // destination?
-    let target_can_read = match crate::permissions::channel_permissions(
+    // Does the target already hold effective VOICE_JOIN on the destination?
+    // Not asked in order to refuse -- the mover holding `move_members` on the
+    // destination *is* the authorization (permissions.md §3, Voice). Asking
+    // the target's own admission defeats the feature: the case a move exists
+    // for is pulling in someone who does not hold the role yet.
+    let target_can_join = match crate::permissions::channel_permissions(
         &state.db,
         &target_pubkey,
         &target_channel_id,
     )
     .await
     {
-        Ok(perms) => perms.has(crate::permissions::READ_MESSAGES),
+        Ok(perms) => perms.has(crate::permissions::VOICE_JOIN),
         Err(_) => {
             return send_voice_move_error(ws_tx, "Unable to verify target's channel access.").await;
         }
     };
 
-    if !target_can_read {
-        if event_id.is_none() {
-            // No event context => Phase 1's rejection still applies: a
-            // generic mod-tool move must not reveal a hidden channel.
-            return send_voice_move_error(ws_tx, "Target cannot read the destination channel.")
-                .await;
-        }
-        // §7.4: the organizer's consented, event-scoped move is the
-        // authorization for voice-only presence. Insert the grant BEFORE
-        // the push below so the target's imminent join passes the
-        // voice-join read gate.
+    if !target_can_join {
+        // The voice-only presence grant **widens** here rather than shrinking
+        // (permissions.md §3, Voice). It used to be minted only on the event
+        // path, while a generic mod-tool move refused outright to avoid
+        // revealing a hidden channel. With voice admission its own question,
+        // that refusal was answering the wrong one: the target is not being
+        // shown the channel, they are being put in the call, and a grant
+        // carries exactly that and nothing else -- it is consulted at the
+        // voice-join gate and nowhere else, so no text follows it.
+        //
+        // So it is now the single mechanism for "I am here because someone
+        // with the authority put me here", minted on any move where the
+        // target lacks VOICE_JOIN. Inserted BEFORE the push below so the
+        // target's imminent join passes the gate.
         state
             .staging_voice_grants
             .write()
@@ -948,7 +988,7 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
     let can_create = {
         let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
         perms
-            .map(|p| p.has("manage_voice") || p.has("admin"))
+            .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
             .unwrap_or(false)
     };
     if !can_create {
@@ -1044,7 +1084,7 @@ pub(in crate::routes::ws) async fn handle_voice_zone_destroy(
     let can_destroy = can_destroy || {
         let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
         perms
-            .map(|p| p.has("manage_voice") || p.has("admin"))
+            .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
             .unwrap_or(false)
     };
     if !can_destroy {
@@ -1312,19 +1352,18 @@ pub(in crate::routes::ws) async fn handle_voice_key_offer(
         .copied()
         .unwrap_or(0);
 
-    let senders = state.ws_key_senders.read().await;
     for bundle in bundles {
-        if let Some(tx) = senders.get(&bundle.recipient_pubkey) {
-            let delivery = WsServerMessage::VoiceKeyReceived {
-                channel_id: channel_id.clone(),
-                from_sender_id,
-                from_pubkey: cs.public_key.clone(),
-                ciphertext_hex: bundle.ciphertext_hex,
-                nonce_hex: bundle.nonce_hex,
-            };
-            let _ = tx.send(delivery);
-        }
-        // Unknown recipients are silently dropped — not an error.
+        let delivery = WsServerMessage::VoiceKeyReceived {
+            channel_id: channel_id.clone(),
+            from_sender_id,
+            from_pubkey: cs.public_key.clone(),
+            ciphertext_hex: bundle.ciphertext_hex,
+            nonce_hex: bundle.nonce_hex,
+        };
+        // Every session that pubkey has open: the hub cannot tell which
+        // socket is the one in voice. Unknown recipients are silently
+        // dropped — not an error.
+        state.send_to_user(&bundle.recipient_pubkey, delivery).await;
     }
     DispatchResult::Continue
 }

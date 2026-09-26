@@ -6,7 +6,6 @@
 /// - GET  /farm/me/hub-quota     (authenticated)
 /// - GET  /farm/users            (admin-only, pagination)
 /// - POST /farm/users/:pk/revoke-sessions (admin-only)
-/// - GET  /farm/public-info      (unauthenticated; respects allow_discovery_listing)
 /// - POST /farm/hubs creation policy enforcement
 #[path = "common.rs"]
 mod common;
@@ -154,7 +153,6 @@ async fn get_settings_returns_full_row_for_admin() {
     assert_eq!(body["creation_policy"], "open");
     assert_eq!(body["max_hubs_per_user"], 0);
     assert_eq!(body["max_hubs_total"], 0);
-    assert_eq!(body["allow_discovery_listing"], false);
     assert!(body["languages"].is_array());
     assert!(body["tags"].is_array());
 }
@@ -194,7 +192,6 @@ async fn patch_settings_updates_fields() {
             "creation_policy": "admin_only",
             "max_hubs_per_user": 3,
             "max_hubs_total": 100,
-            "allow_discovery_listing": true,
             "languages": ["it", "en"],
             "tags": ["gaming", "community"]
         }))
@@ -205,7 +202,6 @@ async fn patch_settings_updates_fields() {
     assert_eq!(body["creation_policy"], "admin_only");
     assert_eq!(body["max_hubs_per_user"], 3);
     assert_eq!(body["max_hubs_total"], 100);
-    assert_eq!(body["allow_discovery_listing"], true);
     let langs = body["languages"].as_array().unwrap();
     assert!(langs.iter().any(|v| v == "it"));
     let tags = body["tags"].as_array().unwrap();
@@ -651,89 +647,4 @@ async fn revoke_sessions_marks_active_sessions_revoked() {
     .await
     .unwrap();
     assert!(count >= 2, "expected ≥2 manually-revoked rows, got {count}");
-}
-
-// ---------------------------------------------------------------------------
-// GET /farm/public-info
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn public_info_returns_404_when_discovery_disabled() {
-    let (server, _state, _guard) = setup().await;
-    // allow_discovery_listing defaults to 0.
-    let resp = server.get("/farm/public-info").await;
-    resp.assert_status_not_found();
-    assert_eq!(resp.json::<Value>()["error"], "discovery_disabled");
-}
-
-#[tokio::test]
-async fn public_info_returns_body_when_discovery_enabled() {
-    let (server, state, _guard) = setup().await;
-    sqlx::query(
-        "UPDATE farms SET allow_discovery_listing = TRUE, name = 'Test Farm',
-         languages = '[\"it\",\"en\"]', tags = '[\"gaming\"]' WHERE id = 1",
-    )
-    .execute(&state.db)
-    .await
-    .unwrap();
-
-    let resp = server.get("/farm/public-info").await;
-    resp.assert_status_ok();
-    let body: Value = resp.json();
-    assert_eq!(body["kind"], "wavvon-farm-public");
-    assert_eq!(body["name"], "Test Farm");
-    assert_eq!(body["allow_discovery_listing"], true);
-    assert_eq!(body["creation_policy"], "open");
-    let langs = body["languages"].as_array().unwrap();
-    assert!(langs.iter().any(|v| v == "it"));
-    let tags = body["tags"].as_array().unwrap();
-    assert!(tags.iter().any(|v| v == "gaming"));
-    assert!(body["hub_count"].is_number());
-}
-
-#[tokio::test]
-async fn public_info_does_not_expose_admin_pubkey() {
-    let (server, state, _guard) = setup().await;
-    let admin = Identity::generate();
-    set_admin(&state, &admin.public_key_hex()).await;
-    sqlx::query("UPDATE farms SET allow_discovery_listing = TRUE WHERE id = 1")
-        .execute(&state.db)
-        .await
-        .unwrap();
-
-    let resp = server.get("/farm/public-info").await;
-    resp.assert_status_ok();
-    let body: Value = resp.json();
-    assert!(
-        body.get("admin_pubkey").is_none(),
-        "admin_pubkey must not be exposed"
-    );
-}
-
-#[tokio::test]
-async fn public_info_exposes_farm_public_key() {
-    let (server, state, _guard) = setup().await;
-    sqlx::query("UPDATE farms SET allow_discovery_listing = TRUE WHERE id = 1")
-        .execute(&state.db)
-        .await
-        .unwrap();
-
-    let resp = server.get("/farm/public-info").await;
-    resp.assert_status_ok();
-    let body: Value = resp.json();
-    let pk = body["public_key"]
-        .as_str()
-        .expect("public_key must be present");
-    // Must be 64-char lowercase hex (32-byte Ed25519 pubkey).
-    assert_eq!(pk.len(), 64, "public_key must be 64 hex chars");
-    assert!(
-        pk.chars().all(|c| c.is_ascii_hexdigit()),
-        "public_key must be hex"
-    );
-    // Must match the farm's actual keypair.
-    assert_eq!(
-        pk,
-        state.public_key_hex(),
-        "public_key must match farm keypair"
-    );
 }

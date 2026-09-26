@@ -49,6 +49,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         db_read: None,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -67,7 +68,7 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: Arc::new(RwLock::new(None)),
@@ -77,7 +78,9 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         whisper_target_defs: RwLock::new(HashMap::new()),
         whisper_optouts: RwLock::new(std::collections::HashSet::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
+        voice_talk_blocked: Default::default(),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
@@ -85,9 +88,8 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         search: Arc::new(wavvon_hub::search::null_search::NullSearch),
         reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
-        bots_allow_camera: false,
-        bots_allow_video: false,
-        bot_video_stream_budget: 2,
+        apps_allow_camera: false,
+        http_video_stream_budget: 2,
         webauthn: {
             let origin = url::Url::parse("http://localhost:3000").unwrap();
             Arc::new(
@@ -189,6 +191,26 @@ async fn connect_ws(base: &str, token: &str) -> (WsSink, WsStream) {
 
 async fn send_ws(tx: &mut WsSink, msg: Value) {
     tx.send(TsMessage::Text(msg.to_string())).await.unwrap();
+}
+
+/// Drains WS frames until one of type `msg_type`, discarding the rest.
+async fn next_msg_of_type(rx: &mut WsStream, msg_type: &str) -> Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match rx.next().await {
+                Some(Ok(TsMessage::Text(raw))) => {
+                    let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+                    if v.get("type").and_then(|t| t.as_str()) == Some(msg_type) {
+                        return v;
+                    }
+                }
+                Some(Ok(_)) => continue,
+                _ => panic!("WS stream closed before receiving {msg_type}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{msg_type} not received within 5 s"))
 }
 
 /// Drains WS frames until `voice_joined`, returning
@@ -322,6 +344,232 @@ async fn datagram_relays_with_sender_prefix_and_no_self_echo() {
         self_echo.is_err(),
         "sender must not receive its own datagram echoed back"
     );
+}
+
+/// A member below the channel's `min_talk_power` is heard only once someone
+/// grants them the floor.
+///
+/// Read at the relay, because that is the only place the guarantee lives: the
+/// threshold used to refuse the *join*, which is a different promise and one
+/// a WebSocket assertion can make. Transmitting is decided per datagram, so a
+/// test that stops at `voice_joined` would pass whether the audio reached the
+/// room or not — exactly the shape that hid two complete voice failures on
+/// 2026-09-10.
+///
+/// The second half matters as much as the first: a threshold nobody can ever
+/// be let through is a broken channel rather than a moderated one.
+#[tokio::test]
+async fn below_the_threshold_is_heard_only_after_a_grant() {
+    let (base, _state, _guard) = start_hub().await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let member = Identity::generate();
+    let owner_token = authenticate_http(&base, &owner).await;
+    let member_token = authenticate_http(&base, &member).await;
+    let ch = create_channel(&base, &owner_token, "wt-talk-power-ch").await;
+
+    // Only a role carrying talk_power 100 may transmit here. The member holds
+    // @everyone, which carries none.
+    let set_tp = client
+        .post(format!("{base}/channels/{}/talk-power", ch.id))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "min_talk_power": 100 }))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        set_tp.status().is_success(),
+        "talk power should be settable"
+    );
+
+    let (mut tx_o, mut rx_o) = connect_ws(&base, &owner_token).await;
+    let (vt_o, url_o, hash_o) = join_voice(&mut tx_o, &mut rx_o, &ch.id).await;
+
+    // The join is not gated — that is the whole point of the fix.
+    let (mut tx_m, mut rx_m) = connect_ws(&base, &member_token).await;
+    let (vt_m, url_m, hash_m) = join_voice(&mut tx_m, &mut rx_m, &ch.id).await;
+
+    let conn_o = wt_connect(&url_o, &vt_o, &hash_o).await;
+    let conn_m = wt_connect(&url_m, &vt_m, &hash_m).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let payload: &[u8] = b"opus-frame-from-a-silenced-member";
+    conn_m.send_datagram(payload).expect("the client may send");
+
+    let heard = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        conn_o.receive_datagram(),
+    )
+    .await;
+    assert!(
+        heard.is_err(),
+        "below the threshold, the relay must drop what the member sends"
+    );
+
+    // Raising a hand asks; it does not answer.
+    client
+        .post(format!("{base}/channels/{}/raise-hand", ch.id))
+        .bearer_auth(&member_token)
+        .send()
+        .await
+        .unwrap();
+    conn_m.send_datagram(payload).expect("the client may send");
+    let still_silent = tokio::time::timeout(
+        std::time::Duration::from_millis(700),
+        conn_o.receive_datagram(),
+    )
+    .await;
+    assert!(
+        still_silent.is_err(),
+        "a raised hand is a request, not the floor"
+    );
+
+    // The owner answers it.
+    let granted = client
+        .post(format!(
+            "{base}/channels/{}/talk-grants/{}",
+            ch.id,
+            member.public_key_hex()
+        ))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(granted.status(), 204);
+
+    conn_m.send_datagram(payload).expect("the client may send");
+    let received =
+        tokio::time::timeout(std::time::Duration::from_secs(5), conn_o.receive_datagram())
+            .await
+            .expect("after the grant the room hears them")
+            .expect("datagram read ok");
+    assert_eq!(
+        &received[3..],
+        payload,
+        "and the hub still forwards the payload verbatim"
+    );
+}
+
+/// A whisper reaches its target and **nobody else in the room**.
+///
+/// This is a confidentiality guarantee and nothing exercised it end to end.
+/// The client suite's whisper spec asserts badges, banners and the inbox —
+/// all state the hub pushes over the WebSocket, so it passes whether the
+/// audio went to one person or to everyone, which is the difference the
+/// feature exists to make. The same shape hid two complete voice failures on
+/// 2026-09-10 (docs shipped log); here the failure it would hide is private
+/// audio arriving in a room.
+///
+/// Read at the relay, because that is where the guarantee lives: three real
+/// WT sessions, A whispering to B only, and the assertion is that C's
+/// receive times out. The confinement lifting again matters too — a whisper
+/// that permanently silences you to the room would be its own bug — so the
+/// second half stops the whisper and watches C start hearing A.
+#[tokio::test]
+async fn a_whisper_reaches_its_target_and_nobody_else() {
+    let (base, _state, _guard) = start_hub().await;
+
+    let id_a = Identity::generate();
+    let id_b = Identity::generate();
+    let id_c = Identity::generate();
+    let token_a = authenticate_http(&base, &id_a).await;
+    let token_b = authenticate_http(&base, &id_b).await;
+    let token_c = authenticate_http(&base, &id_c).await;
+    let ch = create_channel(&base, &token_a, "wt-whisper-ch").await;
+
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token_a).await;
+    let (join_a, url, hash) = join_voice(&mut tx_a, &mut rx_a, &ch.id).await;
+    let (mut tx_b, mut rx_b) = connect_ws(&base, &token_b).await;
+    let (join_b, _, _) = join_voice(&mut tx_b, &mut rx_b, &ch.id).await;
+    let (mut tx_c, mut rx_c) = connect_ws(&base, &token_c).await;
+    let (join_c, _, _) = join_voice(&mut tx_c, &mut rx_c, &ch.id).await;
+
+    let conn_a = wt_connect(&url, &join_a, &hash).await;
+    let conn_b = wt_connect(&url, &join_b, &hash).await;
+    let conn_c = wt_connect(&url, &join_c, &hash).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Baseline: with no whisper open, C hears A. Without this the negative
+    // assertion below would also pass on a relay that delivers nothing at
+    // all, which is the mistake worth guarding against in a test whose whole
+    // point is that something does *not* arrive.
+    conn_a.send_datagram(b"open-room").expect("A can send");
+    let heard = tokio::time::timeout(std::time::Duration::from_secs(5), conn_c.receive_datagram())
+        .await
+        .expect("C must hear A in an open room")
+        .expect("datagram read ok");
+    assert_eq!(&heard[3..], b"open-room");
+    assert_eq!(heard[2], 0x00, "an open-room packet is not a whisper");
+    // Drain B's copy of the same datagram so the assertions below cannot read
+    // it by mistake.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), conn_b.receive_datagram())
+        .await
+        .expect("B must hear A in an open room too");
+
+    // A whispers to B alone.
+    send_ws(
+        &mut tx_a,
+        json!({
+            "type": "voice_whisper_start",
+            "targets": [{ "type": "user", "id": id_b.public_key_hex() }],
+        }),
+    )
+    .await;
+    // The notification goes to the resolved target set only — which is itself
+    // part of the confinement — so B is where it lands, and waiting for it is
+    // what proves the whisper is open before anything is sent rather than
+    // sleeping and hoping.
+    let started = next_msg_of_type(&mut rx_b, "voice_whisper_started").await;
+    assert_eq!(
+        started["sender_pubkey"].as_str().unwrap(),
+        id_a.public_key_hex(),
+        "the notification must name the whisperer"
+    );
+
+    conn_a.send_datagram(b"for-b-only").expect("A can whisper");
+
+    let whispered =
+        tokio::time::timeout(std::time::Duration::from_secs(5), conn_b.receive_datagram())
+            .await
+            .expect("the target must receive the whisper")
+            .expect("datagram read ok");
+    assert_eq!(&whispered[3..], b"for-b-only");
+    assert_eq!(
+        whispered[2], 0x01,
+        "a whisper must be marked as one so the client can show it"
+    );
+
+    // The point of the feature.
+    let leaked = tokio::time::timeout(
+        std::time::Duration::from_millis(800),
+        conn_c.receive_datagram(),
+    )
+    .await;
+    assert!(
+        leaked.is_err(),
+        "a whisper must not reach the rest of the room, got {:?}",
+        leaked.map(|d| d.map(|d| d.payload().len()))
+    );
+
+    // And it lifts.
+    send_ws(&mut tx_a, json!({ "type": "voice_whisper_stop" })).await;
+    // Again on B: `voice_whisper_stopped` is delivered to the target set, not
+    // to the room, so C is told nothing about a whisper it was never in.
+    let _ = next_msg_of_type(&mut rx_b, "voice_whisper_stopped").await;
+    conn_a.send_datagram(b"room-again").expect("A can send");
+    let reheard =
+        tokio::time::timeout(std::time::Duration::from_secs(5), conn_c.receive_datagram())
+            .await
+            .expect("stopping a whisper must give the room its audio back")
+            .expect("datagram read ok");
+    assert_eq!(&reheard[3..], b"room-again");
+    assert_eq!(reheard[2], 0x00);
+
+    // Nothing here reads C's WS, so keep the sinks alive to the end: dropping
+    // one closes the socket, and a closed socket takes the participant out of
+    // the roster the relay routes on.
+    drop((tx_b, tx_c, rx_a, rx_b, rx_c));
 }
 
 /// A session request carrying an unknown/garbage token is rejected — no WT

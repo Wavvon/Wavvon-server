@@ -196,6 +196,9 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
 
     // First frame must be {"type":"hello","token":"<hex>",...}.
     // Validating here keeps the token out of the HTTP request URL (and logs).
+    // Filled inside the block below, which only falls through once the hello
+    // frame has been parsed; every other path returns.
+    let hello: serde_json::Value;
     let server_id = {
         let first = match ws_receiver.next().await {
             Some(Ok(Message::Text(txt))) => txt,
@@ -225,6 +228,7 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
                 .await;
             return;
         }
+        hello = val.clone();
         let token = match val.get("token").and_then(|v| v.as_str()) {
             Some(t) => t.to_string(),
             None => {
@@ -278,6 +282,44 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
             }
         }
     };
+
+    // What the agent advertised about itself. Recorded on every connect
+    // rather than at registration: a node that moves, gains a certificate or
+    // rotates one corrects the farm by reconnecting, and there is no second
+    // place for an operator to keep in step by hand.
+    //
+    // A hello with no host clears the column, which is the honest answer — the
+    // agent is telling us it is the farm's own machine, and a stale host left
+    // behind would send the proxy somewhere nothing answers.
+    {
+        let host = hello
+            .get("host")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|h| !h.is_empty());
+        let tls_mode = hello
+            .get("tls_mode")
+            .and_then(|v| v.as_str())
+            .filter(|m| *m == "pin")
+            .unwrap_or("ca");
+        let cert_sha256 = hello
+            .get("cert_sha256")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|d| !d.is_empty());
+        if let Err(e) = sqlx::query(
+            "UPDATE servers SET host = $1, tls_mode = $2, cert_sha256 = $3 WHERE id = $4",
+        )
+        .bind(host)
+        .bind(tls_mode)
+        .bind(cert_sha256)
+        .bind(&server_id)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(server_id, error = %e, "Could not record the node's address");
+        }
+    }
 
     tracing::info!(server_id, "Agent connected");
 

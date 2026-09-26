@@ -7,7 +7,6 @@ use sqlx::postgres::PgPoolOptions;
 use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
-use wavvon_hub::bots::token_expiry;
 use wavvon_hub::cert_worker;
 use wavvon_hub::db;
 use wavvon_hub::dm_worker;
@@ -32,6 +31,10 @@ fn print_help() {
     println!("  restore FILE [--force]");
     println!("                   Restore a backup archive. Refuses a non-empty");
     println!("                   destination unless --force.");
+    println!("  db move --to URL | --from URL [--force]");
+    println!("                   Copy this hub's database to (or from) another");
+    println!("                   PostgreSQL. Copies only: it does not switch");
+    println!("                   modes, and leaves the source untouched.");
     println!("  rotate-key       Generate a new hub keypair and sign a rotation payload");
     println!("  update [--check] Self-update binary from GitHub releases (Linux x86_64 only)");
     println!("  admin <cmd>      Admin CLI (stats|users|channels|tokens|backup|restore)\n");
@@ -256,10 +259,65 @@ async fn run_doctor() -> bool {
     // `--doctor` before the hub's first real launch is enough to get the
     // link — it's safe to call repeatedly and a no-op once a user exists.
     println!();
-    let db_url = settings
-        .database_url
-        .clone()
-        .unwrap_or_else(|| wavvon_hub::settings::DEFAULT_DATABASE_URL.to_string());
+    // Which database this hub would use, in the words an operator needs: the
+    // embedded one is invisible otherwise — no port they chose, no directory
+    // they named — and "where is my data" is the first question a backup
+    // raises.
+    let embedded_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let db_url = match settings.database_url.clone() {
+        Some(url) => {
+            println!(
+                "INFO  database: external, from {}",
+                wavvon_hub_env::DATABASE_URL
+            );
+            url
+        }
+        None => {
+            let data_dir = embedded_root.join("pgdata");
+            // Say it here rather than letting the operator find out at first
+            // boot: with no WAVVON_DATABASE_URL this build has no database it
+            // can reach, and doctor exists precisely to answer that before
+            // anything runs.
+            if !wavvon_hub::embedded_pg::BUNDLED_AVAILABLE {
+                println!(
+                    "FAIL  database: none — {} is unset and {}",
+                    wavvon_hub_env::DATABASE_URL,
+                    wavvon_hub::embedded_pg::unavailable_reason()
+                );
+                all_pass = false;
+            }
+            match wavvon_hub::embedded_pg::bundled_major() {
+                Some(major) => println!(
+                    "INFO  database: built-in PostgreSQL {major}, data in {}",
+                    data_dir.display()
+                ),
+                None => println!(
+                    "INFO  database: built-in PostgreSQL, data in {}",
+                    data_dir.display()
+                ),
+            }
+            match wavvon_hub::embedded_pg::compatibility(
+                wavvon_hub::embedded_pg::data_dir_major(&data_dir),
+                wavvon_hub::embedded_pg::bundled_major(),
+            ) {
+                wavvon_hub::embedded_pg::Compatibility::Start => {}
+                wavvon_hub::embedded_pg::Compatibility::NeedsUpgrade { from, to } => println!(
+                    "WARN  the data directory was written by PostgreSQL {from} and this hub \
+                     carries {to} — back up with the previous binary and restore with this one"
+                ),
+                wavvon_hub::embedded_pg::Compatibility::Downgraded { from, to } => println!(
+                    "FAIL  the data directory was written by PostgreSQL {from} and this hub \
+                     carries {to} — an older server cannot read it; run the newer hub"
+                ),
+            }
+            // doctor does not start a server: it reports. Whatever is already
+            // running answers the connection below; a hub that has never
+            // booted has nothing to connect to yet, which is reported as INFO
+            // like every other pre-first-boot state here.
+            wavvon_hub::embedded_pg::running_url(&embedded_root)
+                .unwrap_or_else(|| wavvon_hub::settings::DEFAULT_DATABASE_URL.to_string())
+        }
+    };
     match PgPoolOptions::new()
         .max_connections(1)
         .connect(&db_url)
@@ -428,7 +486,7 @@ async fn main() -> Result<()> {
     // are handled above before settings are loaded.
     let subcommand = std::env::args().nth(1);
     if subcommand.as_deref() == Some("migrate") {
-        let db_url = cli_database_url();
+        let (db_url, started) = cli_database_url().await;
         let db = PgPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
@@ -438,6 +496,10 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         db::migrations::run(&db).await?;
         println!("Migrations applied");
+        db.close().await;
+        if let Some(pg) = started {
+            pg.stop().await?;
+        }
         return Ok(());
     }
 
@@ -449,8 +511,12 @@ async fn main() -> Result<()> {
                 .as_secs();
             format!("hub-backup-{ts}.tar.gz")
         });
-        backup(&out_path, &cli_database_url()).await?;
+        let (db_url, started) = cli_database_url().await;
+        backup(&out_path, &db_url).await?;
         println!("Backup written to {out_path}");
+        if let Some(pg) = started {
+            pg.stop().await?;
+        }
         return Ok(());
     }
 
@@ -462,8 +528,52 @@ async fn main() -> Result<()> {
                 anyhow::anyhow!("Usage: wavvon-hub restore <backup.tar.gz> [--force]")
             })?;
         let force = std::env::args().any(|a| a == "--force");
-        restore(&src, &cli_database_url(), force).await?;
+        let (db_url, started) = cli_database_url().await;
+        restore(&src, &db_url, force).await?;
+        if let Some(pg) = started {
+            pg.stop().await?;
+        }
         println!("Restore complete. Restart the hub to apply.");
+        return Ok(());
+    }
+
+    if subcommand.as_deref() == Some("db") && std::env::args().nth(2).as_deref() == Some("move") {
+        let args: Vec<String> = std::env::args().collect();
+        let value_after = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .filter(|v| !v.starts_with("--"))
+                .cloned()
+        };
+        let to = value_after("--to");
+        let from = value_after("--from");
+        let force = args.iter().any(|a| a == "--force");
+
+        // One direction per invocation. "Both" has no meaning and "neither"
+        // would silently do nothing, so both are refused rather than guessed.
+        let (source_label, target_label, other) = match (&to, &from) {
+            (Some(url), None) => ("this hub", "the other database", url.clone()),
+            (None, Some(url)) => ("the other database", "this hub", url.clone()),
+            _ => anyhow::bail!(
+                "Usage: wavvon-hub db move --to <url> | --from <url> [--force]\n\
+                 Exactly one direction, and the URL is the *other* database — this hub's own \
+                 comes from {} (or the built-in PostgreSQL when that is unset).",
+                wavvon_hub_env::DATABASE_URL
+            ),
+        };
+
+        let (mine, started) = cli_database_url().await;
+        let (source_url, target_url) = if to.is_some() {
+            (mine, other)
+        } else {
+            (other, mine)
+        };
+
+        db_move(&source_url, &target_url, source_label, target_label, force).await?;
+        if let Some(pg) = started {
+            pg.stop().await?;
+        }
         return Ok(());
     }
 
@@ -486,7 +596,7 @@ async fn main() -> Result<()> {
 
     if subcommand.as_deref() == Some("admin") {
         let admin_cmd = std::env::args().nth(2).unwrap_or_default();
-        let db_url = cli_database_url();
+        let (db_url, _started) = cli_database_url().await;
         let db = PgPoolOptions::new()
             .max_connections(1)
             .connect(&db_url)
@@ -827,21 +937,49 @@ async fn main() -> Result<()> {
         );
     }
 
-    let db_url = settings.database_url.as_deref().unwrap_or_else(|| {
-        // Provisional: an unset URL is going to mean "start the embedded
-        // PostgreSQL" (decisions.md). Until then, say which database we
-        // guessed rather than connecting to localhost silently.
-        eprintln!(
-            "WARN  {} is not set — using the built-in default {}",
-            wavvon_hub_env::DATABASE_URL,
-            wavvon_hub::settings::DEFAULT_DATABASE_URL,
-        );
-        wavvon_hub::settings::DEFAULT_DATABASE_URL
-    });
+    // Mode is chosen by the absence of configuration (decisions.md, "The hub
+    // bundles PostgreSQL, and never touches one it did not create"): no URL
+    // means the hub starts and supervises its own server, a URL means it is a
+    // plain client that runs migrations and manages nothing.
+    //
+    // Held for the life of the process: dropping the handle does not stop the
+    // server, but keeping it is what lets shutdown stop it deliberately.
+    let embedded = match settings.database_url.as_deref() {
+        Some(_) => None,
+        None => {
+            let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            match wavvon_hub::embedded_pg::start(&root).await {
+                Ok(pg) => {
+                    tracing::info!(
+                        "database: embedded PostgreSQL, data in {}",
+                        pg.data_dir().display()
+                    );
+                    Some(pg)
+                }
+                Err(e) => {
+                    // Never a fallback to the old localhost guess: connecting
+                    // to whatever answers on 5432 is how a hub came to operate
+                    // on a database nobody meant.
+                    eprintln!("FATAL could not start the built-in PostgreSQL: {e:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    let db_url = match (&embedded, settings.database_url.as_deref()) {
+        (Some(pg), _) => pg.url().to_string(),
+        (None, Some(url)) => {
+            tracing::info!("database: external, as configured");
+            url.to_string()
+        }
+        // Unreachable: no URL took the embedded branch above, which either
+        // produced a handle or exited.
+        (None, None) => unreachable!("no database URL and no embedded server"),
+    };
 
     let write_pool = PgPoolOptions::new()
         .max_connections(settings.db_max_connections)
-        .connect(db_url)
+        .connect(&db_url)
         .await
         .expect("Failed to connect to database");
 
@@ -885,8 +1023,6 @@ async fn main() -> Result<()> {
             &bootstrap_client,
             &wavvon_hub::bootstrap::BootstrapConfig {
                 template_url: settings.template_url.clone(),
-                bootstrap_token: settings.bootstrap_token.clone(),
-                discovery_url: settings.discovery_url.clone(),
                 template_file: settings.template_file.clone(),
                 preset: settings.template.clone(),
             },
@@ -1128,6 +1264,7 @@ async fn main() -> Result<()> {
         db_read,
         store,
         pending_challenges: RwLock::new(HashMap::new()),
+        cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
         peer_tokens: RwLock::new(HashMap::new()),
@@ -1148,7 +1285,7 @@ async fn main() -> Result<()> {
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
         screen_share_tx,
-        bot_sessions: RwLock::new(HashMap::new()),
+        app_sessions: RwLock::new(HashMap::new()),
         farm_url,
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
@@ -1159,7 +1296,9 @@ async fn main() -> Result<()> {
         whisper_optouts: RwLock::new(std::collections::HashSet::new()),
         whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_relay_active: RwLock::new(std::collections::HashSet::new()),
+        voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: RwLock::new(HashMap::new()),
+        voice_talk_blocked: RwLock::new(std::collections::HashSet::new()),
         voice_pending_binds: RwLock::new(HashMap::new()),
         ws_key_senders: RwLock::new(HashMap::new()),
         rate_limiters: Default::default(),
@@ -1167,9 +1306,8 @@ async fn main() -> Result<()> {
         search,
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
-        bots_allow_camera: settings.bots_allow_camera,
-        bots_allow_video: settings.bots_allow_video,
-        bot_video_stream_budget: settings.bot_video_stream_budget as usize,
+        apps_allow_camera: settings.apps_allow_camera,
+        http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
@@ -1239,9 +1377,6 @@ async fn main() -> Result<()> {
 
     // Retry undelivered federated DMs in the background.
     dm_worker::spawn(state.clone());
-
-    // Warn bots about expiring tokens.
-    token_expiry::spawn(state.clone());
 
     // Issue certifications to eligible members daily.
     cert_worker::spawn(state.clone());
@@ -1381,34 +1516,75 @@ async fn main() -> Result<()> {
     );
     let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
 
-    if let (Some(cert), Some(key)) = (effective_tls_cert.as_deref(), effective_tls_key.as_deref()) {
-        let cert_path = PathBuf::from(cert);
-        let key_path = PathBuf::from(key);
-        let rustls_config =
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-                .await
-                .with_context(|| format!("Failed to load TLS cert/key from {cert:?} / {key:?}"))?;
-        tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
-        axum_server::bind_rustls(addr, rustls_config)
-            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+    let serve = async {
+        if let (Some(cert), Some(key)) =
+            (effective_tls_cert.as_deref(), effective_tls_key.as_deref())
+        {
+            let cert_path = PathBuf::from(cert);
+            let key_path = PathBuf::from(key);
+            let rustls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
+                    .await
+                    .with_context(|| {
+                        format!("Failed to load TLS cert/key from {cert:?} / {key:?}")
+                    })?;
+            tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
+            axum_server::bind_rustls(addr, rustls_config)
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await?;
+        } else {
+            tracing::info!(
+                "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
+            );
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
             .await?;
-    } else {
-        tracing::info!(
-            "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
-        );
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await?;
-    }
+        }
+        Ok::<(), anyhow::Error>(())
+    };
+
+    // Whichever comes first — the listener giving up, or the operator asking
+    // us to stop. The signal arm is what makes `stop_embedded` reachable at
+    // all; see its doc comment for why an orphaned postmaster matters.
+    let result = tokio::select! {
+        r = serve => r,
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Shutdown requested");
+            Ok(())
+        }
+    };
+
+    stop_embedded(embedded).await;
 
     if let Some(provider) = otlp_provider {
         let _ = provider.shutdown();
     }
 
-    Ok(())
+    result
+}
+
+/// Stop the PostgreSQL this process started, if it started one.
+///
+/// The handle above says it is held so "shutdown can stop it deliberately",
+/// and until now nothing did: the serve future never returned, so an
+/// operator's Ctrl-C left the postmaster running with the data directory
+/// open. Adopting an orphan on the next start is handled (embedded_pg
+/// `already_running`) — the hazard is the *upgrade* path, where the hub's own
+/// refusal tells the operator to move `pgdata` aside. On Windows that fails
+/// while a postmaster holds it; on Linux it succeeds and the live postmaster
+/// keeps writing to the moved directory, which is the half-migration the
+/// version check exists to prevent.
+async fn stop_embedded(embedded: Option<wavvon_hub::embedded_pg::EmbeddedPostgres>) {
+    let Some(pg) = embedded else { return };
+    match pg.stop().await {
+        Ok(()) => tracing::info!("Stopped the embedded PostgreSQL"),
+        // Worth a line and not a failure: the process is going away either
+        // way, and the next start adopts a server that is still up.
+        Err(e) => tracing::warn!("Could not stop the embedded PostgreSQL: {e:#}"),
+    }
 }
 
 fn self_update_asset_name() -> Option<&'static str> {
@@ -1524,18 +1700,37 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
 /// Falling back to the built-in default is *announced*. These subcommands
 /// mutate ownership and schema, and "it said OK" against a database the
 /// operator did not mean is the failure this whole function exists to stop.
-fn cli_database_url() -> String {
-    std::env::var(wavvon_hub_env::DATABASE_URL)
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| {
-            eprintln!(
-                "WARN  {} is not set — using the built-in default {}. \
-                 Set it explicitly to be sure which database you are operating on.",
-                wavvon_hub_env::DATABASE_URL,
-                wavvon_hub::settings::DEFAULT_DATABASE_URL,
-            );
-            wavvon_hub::settings::DEFAULT_DATABASE_URL.to_string()
-        })
+async fn cli_database_url() -> (String, Option<wavvon_hub::embedded_pg::EmbeddedPostgres>) {
+    if let Ok(url) =
+        std::env::var(wavvon_hub_env::DATABASE_URL).or_else(|_| std::env::var("DATABASE_URL"))
+    {
+        return (url, None);
+    }
+
+    // No URL means the hub's own PostgreSQL (decisions.md), and a CLI command
+    // has to reach the same one the server would — `backup` against a
+    // different database is a backup of nothing, reported as success.
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(url) = wavvon_hub::embedded_pg::running_url(&root) {
+        // Adopting, not starting — so nothing has pointed the dump tools at
+        // the bundled install yet, and `pg_dump` is not on PATH on the setup
+        // that owns this branch.
+        wavvon_hub::embedded_pg::point_tools_at_bundled(&root);
+        return (url, None);
+    }
+    // Not running: start it for the length of this command. It is the hub's
+    // own server in the hub's own directory, so this is not "managing a
+    // database we did not create" — it is opening the one we did.
+    match wavvon_hub::embedded_pg::start(&root).await {
+        Ok(pg) => {
+            let url = pg.url().to_string();
+            (url, Some(pg))
+        }
+        Err(e) => {
+            eprintln!("FATAL could not open the hub's built-in PostgreSQL: {e:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Everything a hub is, in one file: the database, the identity key, and the
@@ -1628,6 +1823,28 @@ async fn backup(out_path: &str, db_url: &str) -> anyhow::Result<()> {
 /// empty, and its major must be at least the source's. `--force` waives only
 /// the emptiness check — the version rule is not the operator's to overrule,
 /// because past it `pg_restore` simply cannot parse the archive.
+/// Printing wrapper over [`db::dump::move_database`] — the mechanism lives in
+/// the library so it can be tested against two real databases.
+async fn db_move(
+    source_url: &str,
+    target_url: &str,
+    source_label: &str,
+    target_label: &str,
+    force: bool,
+) -> anyhow::Result<()> {
+    println!("Moving from {source_label} to {target_label}…");
+    let report = db::dump::move_database(source_url, target_url, force).await?;
+    println!(
+        "Moved {} rows across {} tables. {source_label} is untouched.",
+        report.rows, report.tables
+    );
+    println!(
+        "Nothing has switched over: set (or unset) {} and restart the hub when you are ready.",
+        wavvon_hub_env::DATABASE_URL
+    );
+    Ok(())
+}
+
 async fn restore(src_path: &str, db_url: &str, force: bool) -> anyhow::Result<()> {
     let file = std::fs::File::open(src_path)
         .with_context(|| format!("Cannot open backup archive {src_path}"))?;

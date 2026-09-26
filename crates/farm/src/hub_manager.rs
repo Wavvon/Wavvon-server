@@ -96,6 +96,31 @@ impl HubManager {
             .await
             .with_context(|| format!("could not give hub {hub_id} a place of its own"))?;
 
+        // A place of its own is not the same as credentials of its own: with
+        // `hub_db_role = 'shared'` every hub still connects as the farm, so a
+        // compromised one can reach its siblings under either layout. Failure
+        // refuses the hub for the same reason provisioning does — falling back
+        // to the shared role would silently hand out the access the setting
+        // was turned on to remove.
+        let role_mode: String = sqlx::query_scalar("SELECT hub_db_role FROM farms WHERE id = 1")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| "shared".to_string());
+        let url = match crate::db::provision::RoleMode::from_setting(&role_mode) {
+            crate::db::provision::RoleMode::Shared => url,
+            crate::db::provision::RoleMode::PerHub => crate::db::provision::provision_hub_role(
+                db,
+                &self.db_base_url,
+                &url,
+                hub_id,
+                isolation,
+            )
+            .await
+            .with_context(|| format!("could not give hub {hub_id} a role of its own"))?,
+        };
+
         sqlx::query("UPDATE hubs SET db_url = $1 WHERE id = $2")
             .bind(&url)
             .bind(hub_id)

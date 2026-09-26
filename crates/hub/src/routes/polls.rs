@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
 use crate::routes::chat_models::{ChatEvent, MessageResponse, WsServerMessage};
+use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -183,7 +184,7 @@ pub async fn create_poll(
     Json(req): Json<CreatePollRequest>,
 ) -> Result<(StatusCode, Json<PollResponse>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::SEND_MESSAGES)?;
+    perms.require(permissions::MESSAGES_SEND)?;
 
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
@@ -257,11 +258,12 @@ pub async fn create_poll(
 /// Returns every poll on the channel, newest first, in the flattened shape
 /// the web client's `getPolls()` expects (vote totals and the caller's own
 /// vote already merged into each option). Gated behind the same effective
-/// READ_MESSAGES permission as message history and pinned messages (§3.5).
+/// MESSAGES_READ permission as message history and pinned messages (§3.5).
 pub async fn list_polls(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(channel_id): Path<String>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<PollListItem>>, (StatusCode, String)> {
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
@@ -273,14 +275,19 @@ pub async fn list_polls(
     }
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::READ_MESSAGES)?;
+    perms.require(permissions::MESSAGES_READ)?;
 
     let polls: Vec<PollResponse> = sqlx::query_as(
         "SELECT id, channel_id, creator_pubkey, question, options, ends_at, max_choices, created_at
          FROM polls WHERE channel_id = $1
-         ORDER BY created_at DESC, id DESC",
+           AND ($2::text IS NULL OR (created_at, id) <
+                ((SELECT created_at FROM polls WHERE id = $2), $2))
+         ORDER BY created_at DESC, id DESC
+         LIMIT $3",
     )
     .bind(&channel_id)
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -453,7 +460,7 @@ pub async fn delete_poll(
 
     if creator != user.public_key {
         let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(permissions::ADMIN)?;
+        perms.require(permissions::MESSAGES_MANAGE)?;
     }
 
     sqlx::query("DELETE FROM polls WHERE id = $1")

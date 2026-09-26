@@ -24,12 +24,12 @@ pub(in crate::routes::ws) async fn handle_subscribe(
 
     // Read-gating (§3.5): mirror the auto-subscribe gate in
     // ws/connection.rs -- a channel the caller can't effectively
-    // READ_MESSAGES must never be inserted into `subscribed`, or its live
+    // MESSAGES_READ must never be inserted into `subscribed`, or its live
     // messages/edits/typing/reactions/pins would leak over this connection.
     let can_read =
         match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await
         {
-            Ok(perms) => perms.has(crate::permissions::READ_MESSAGES),
+            Ok(perms) => perms.has(crate::permissions::MESSAGES_READ),
             Err(_) => false,
         };
     if !can_read {
@@ -167,71 +167,18 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
         _ => return DispatchResult::Continue,
     };
 
-    // Bot video injection (bot-capability-layer.md §3/§6 Phase 2): a bot
-    // pushes frames into this same screen-share relay, gated the same shape
-    // as the shipped `can_speak_voice` voice capability. Human sharers are
-    // unaffected by this branch entirely.
-    if cs.is_bot {
-        // Gate 1: admin grant. Reads the *effective* capability set
-        // (requested ∩ granted, bot-capability-layer.md §1) so a revoked
-        // bot is rejected immediately, same as voice/mini-app.
-        if !crate::bots::capabilities::has_capability(&state.db, &cs.public_key, "can_inject_video")
-            .await
-        {
+    // Channel-scoped VOICE_JOIN: a screen share is something you do once
+    // present in the call, so it follows admission to the call and not
+    // admission to the text (permissions.md §3, Voice). This used to sit
+    // inside an `if cs.is_bot` branch and so applied to nobody else — the
+    // one check on this path was reachable only by the callers the hub had
+    // labelled. There is no label now, and the rule was never about one.
+    match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
+        Ok(perms) if perms.has(crate::permissions::VOICE_JOIN) => {}
+        _ => {
             let err = WsServerMessage::Error {
                 context: "screen_share_start".to_string(),
-                message: "Bot lacks the can_inject_video capability grant.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
-        }
-
-        // Gate 2: operator kill-switch. A grant alone is never sufficient --
-        // the hub-wide flag must also be on (bot-capability-layer.md §4).
-        if !state.bots_allow_video {
-            let err = WsServerMessage::Error {
-                context: "screen_share_start".to_string(),
-                message: "Bot video is disabled on this hub (bots_allow_video).".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
-        }
-
-        // Gate 3: channel-scoped READ_MESSAGES, same rule as voice join.
-        match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await
-        {
-            Ok(perms) if perms.has(crate::permissions::READ_MESSAGES) => {}
-            _ => {
-                let err = WsServerMessage::Error {
-                    context: "screen_share_start".to_string(),
-                    message: "Bot cannot read this channel.".to_string(),
-                };
-                let _ = ws_tx
-                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                    .await;
-                return DispatchResult::Continue;
-            }
-        }
-
-        // Gate 4: media budget (bot-capability-layer.md §4). Coarse per-hub
-        // cap on concurrent bot video streams; frames beyond it are refused
-        // outright rather than queued.
-        let active_bot_streams = state
-            .screen_shares
-            .read()
-            .await
-            .values()
-            .flat_map(|active| active.streams.values())
-            .filter(|meta| meta.is_bot)
-            .count();
-        if active_bot_streams >= state.bot_video_stream_budget {
-            let err = WsServerMessage::Error {
-                context: "screen_share_start".to_string(),
-                message: "Hub-wide bot video stream budget exceeded.".to_string(),
+                message: "You cannot share into this channel.".to_string(),
             };
             let _ = ws_tx
                 .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
@@ -256,7 +203,7 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
                 mime: mime.clone(),
                 has_audio,
                 sharer_pubkey: cs.public_key.clone(),
-                is_bot: cs.is_bot,
+                via_http: false,
                 session_id: cs.session_id.clone(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),

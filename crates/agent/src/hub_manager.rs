@@ -35,9 +35,13 @@ impl HubManager {
     ) -> Result<()> {
         // See the same block in farm/src/hub_manager.rs: these names used to
         // be literals, and WAVVON_HUB_HTTP_PORT was one the hub never reads,
-        // so the assigned port was silently ignored. `db_url` is likewise
-        // still a SQLite-era file path with no PostgreSQL provisioning behind
-        // it, so no database var is passed and the hub uses its own default.
+        // so the assigned port was silently ignored.
+        //
+        // `db_url` used to be dropped here too, with a warning, so every hub
+        // this agent spawned fell back to the hub's own default URL and they
+        // all shared one database — reading and writing each other's
+        // communities. The caller resolves it now (provision.rs) and refuses
+        // the spawn rather than starting a hub with nowhere of its own.
         let bin = std::env::var(wavvon_hub_env::HUB_BIN).unwrap_or_else(|_| self.hub_bin.clone());
         let mut cmd = tokio::process::Command::new(&bin);
         // Tokio does NOT kill a child when its `Child` is dropped — it detaches
@@ -53,13 +57,8 @@ impl HubManager {
             // The farm's row id for this hub, forwarded from the spawn command.
             // The hub reports it back on its heartbeat so the farm can bind the
             // row to the hub's pubkey and route to it.
-            .env(wavvon_hub_env::FARM_HUB_ID, hub_id);
-        tracing::warn!(
-            hub_id,
-            db_url,
-            "no per-hub database provisioning: this hub will use the default \
-             WAVVON_DATABASE_URL and share it with every other spawned hub"
-        );
+            .env(wavvon_hub_env::FARM_HUB_ID, hub_id)
+            .env(wavvon_hub_env::DATABASE_URL, db_url);
         if let Some(pk) = owner_pubkey {
             cmd.env(wavvon_hub_env::OWNER_PUBKEY, pk);
         }
