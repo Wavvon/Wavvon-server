@@ -17,7 +17,7 @@ constraints. Read it; don't duplicate it here. This file is about how you work.
 - `crates/store/` — the `HubStore` trait split. Prefer it over raw `sqlx::query` in new hub code.
 - `crates/hub-env/` — names of `WAVVON_*` env keys that cross a process boundary. Never spell one as a string literal on either side.
 - `crates/farm/`, `agent/` — fleet control plane and worker node.
-- `crates/bot-kit/`, `ttt-bot/`, `demo-seed/` — bot SDK, example bot, demo content seeder.
+- `crates/demo-seed/` — demo content seeder.
 
 ## How you work
 
