@@ -11,6 +11,15 @@ use uuid::Uuid;
 
 use crate::state::AppState;
 
+/// How far back `Resume` can replay. The audit log is the source, and this is
+/// the window a client may be away for and still catch up rather than being
+/// told to resync from scratch.
+const REPLAY_WINDOW_SECS: i64 = 72 * 3600;
+
+/// Rows pushed before yielding to the runtime. A long replay is a tight loop
+/// otherwise, and it starves everything else on this thread.
+const REPLAY_BATCH_SIZE: usize = 100;
+
 /// Publish a hub event.
 ///
 /// - Writes a row to `hub_audit_log`.
@@ -157,7 +166,7 @@ pub async fn replay_events_for_app(
     tx: &tokio::sync::mpsc::Sender<String>,
 ) -> ReplayResult {
     let now = crate::auth::handlers::unix_timestamp();
-    let window_start = now - 72 * 3600;
+    let window_start = now - REPLAY_WINDOW_SECS;
 
     // Find the earliest seq still in the window.
     let earliest: Option<(i64, i64)> =
@@ -224,7 +233,7 @@ pub async fn replay_events_for_app(
 
     let hub_url = crate::apps::dispatch::hub_url_public(state).await;
     let mut replayed = 0usize;
-    let batch_size = 100usize;
+    let batch_size = REPLAY_BATCH_SIZE;
     let mut batch_count = 0usize;
 
     for row in &rows {
