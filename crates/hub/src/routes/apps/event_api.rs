@@ -10,6 +10,11 @@ use axum::Json;
 
 use crate::state::AppState;
 
+/// One poll hands back at most this many events. A client that finds the
+/// page full asks again with `since`; the cap is what stops one long-absent
+/// subscriber pulling the whole queue into memory at once.
+const MAX_EVENTS_PER_POLL: i64 = 100;
+
 use super::models::{AckRequest, EventInfo, EventRow, PollQuery};
 use crate::auth::middleware::AuthUser;
 
@@ -23,19 +28,21 @@ pub async fn poll_events(
         sqlx::query_as::<_, EventRow>(
             "SELECT id, event_type, payload, created_at FROM app_event_queue
              WHERE app_pubkey = $1 AND delivered = FALSE AND created_at > $2
-             ORDER BY created_at ASC LIMIT 100",
+             ORDER BY created_at ASC LIMIT $3",
         )
         .bind(&user.public_key)
         .bind(since)
+        .bind(MAX_EVENTS_PER_POLL)
         .fetch_all(&state.db)
         .await
     } else {
         sqlx::query_as::<_, EventRow>(
             "SELECT id, event_type, payload, created_at FROM app_event_queue
              WHERE app_pubkey = $1 AND delivered = FALSE
-             ORDER BY created_at ASC LIMIT 100",
+             ORDER BY created_at ASC LIMIT $2",
         )
         .bind(&user.public_key)
+        .bind(MAX_EVENTS_PER_POLL)
         .fetch_all(&state.db)
         .await
     }

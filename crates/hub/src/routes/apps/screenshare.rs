@@ -8,6 +8,11 @@ use uuid::Uuid;
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
 use crate::state::{ActiveShare, AppState, ScreenStreamMeta};
 
+/// Stands in for the WS session id on a stream started over HTTP, where there
+/// is no socket to name. Session-scoped teardown matches on it, so it has to
+/// be a value no real session id can collide with.
+const HTTP_SESSION_ID: &str = "http";
+
 use crate::auth::middleware::AuthUser;
 
 #[derive(Deserialize)]
@@ -110,7 +115,7 @@ pub async fn screenshare_start(
                 has_audio: req.has_audio,
                 sharer_pubkey: sharer.clone(),
                 via_http: true,
-                session_id: "http".to_string(),
+                session_id: HTTP_SESSION_ID.to_string(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),
             },
