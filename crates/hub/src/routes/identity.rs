@@ -55,6 +55,60 @@ pub async fn get_designation(
     }))
 }
 
+/// Has this hub met the identity behind `master`?
+///
+/// The inverse of `dms::messages::master_of`, which is the only thing that
+/// ever reads a designation: it resolves a *member's* roster pubkey to a
+/// master and looks the row up by that. So the two must agree about what a
+/// link is, and both halves of it are here — stricter in one place, see below:
+///
+/// - a `users` row carrying that master, which auth writes when a device
+///   presents its cert; or
+/// - a device cert for that master whose subkey is itself a member here. The
+///   join onto `users` is where this is stricter than `master_of`, and it is
+///   load-bearing: `POST /identity/{master}/devices` is unauthenticated too,
+///   so a cert alone would let a stranger seed the very row that vouches for
+///   them. `master_of` can afford the looser form because it is only ever
+///   asked about somebody who is already a member.
+///
+/// The first write a fresh web client makes lands through the second branch:
+/// it authenticates without a cert (it has none yet), registers one, and
+/// publishes the designation before any auth has carried that cert, so
+/// `users.master_pubkey` is still NULL at that moment.
+async fn master_is_known_here(
+    db: &sqlx::PgPool,
+    master: &str,
+) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1 FROM users WHERE master_pubkey = $1
+            UNION ALL
+            SELECT 1 FROM subkey_certs c
+              JOIN users u ON u.public_key = c.subkey_pubkey
+             WHERE c.master_pubkey = $1
+         )",
+    )
+    .bind(master)
+    .fetch_one(db)
+    .await
+    .map_err(db_err)
+}
+
+/// Store a master-signed `HomeHubList`.
+///
+/// Deliberately **unauthenticated**, which is why the gate below exists
+/// instead. The desktop client publishes one designation to *every* hub in the
+/// list it just signed (`home_hub.rs::publish_designation`), and it holds a
+/// session with at most the hub it is currently on — requiring `AuthUser` here
+/// would silently reduce "my home hubs" to "the hub I happen to be signed in
+/// to". The signature already makes this unspoofable: you can only write your
+/// own designation, one row per master, and only forward.
+///
+/// What it did not bound was *volume*. One keypair is free to mint, so any hub
+/// on the internet would store a designation for a master it had never seen,
+/// belonging to a person who is not a member, and nothing prunes it. That row
+/// can never be read — the lookup starts from a member — so it was dead weight
+/// at best (Wavvon-server#59).
 pub async fn put_designation(
     State(state): State<Arc<AppState>>,
     Path(master): Path<String>,
@@ -65,6 +119,13 @@ pub async fn put_designation(
     }
     body.verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
+
+    if !master_is_known_here(&state.db, &master).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub has no member linked to that master key".to_string(),
+        ));
+    }
 
     let current: Option<i64> =
         sqlx::query_scalar("SELECT sequence FROM home_hub_designations WHERE master_pubkey = $1")

@@ -45,6 +45,31 @@ fn signed_cert(
     }
 }
 
+/// Make the hub know an identity's master, the way a web client does on its
+/// first join: the device authenticates (no cert yet — it has none), then
+/// registers the cert that links its roster pubkey to the master a designation
+/// is stored under. `PUT`ting a designation for a master the hub has never met
+/// is refused, so every designation test has to arrive the way a client does.
+async fn join_and_link(
+    server: &axum_test::TestServer,
+    identity: &Identity,
+) -> wavvon_identity::MasterIdentity {
+    let master = identity.master().unwrap();
+    common::authenticate(server, identity).await;
+    let cert = signed_cert(
+        &master,
+        &identity.public_key_hex(),
+        "Test device",
+        1_700_000_000,
+    );
+    server
+        .post(&format!("/identity/{}/devices", master.public_key_hex()))
+        .json(&cert)
+        .await
+        .assert_status_ok();
+    master
+}
+
 fn signed_revocation(
     master: &wavvon_identity::MasterIdentity,
     subkey_pubkey: &str,
@@ -80,7 +105,8 @@ fn signed_prefs(
 #[tokio::test]
 async fn designation_roundtrip() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let designation = signed_designation(
@@ -109,7 +135,8 @@ async fn designation_roundtrip() {
 #[tokio::test]
 async fn designation_rejects_stale_sequence() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let d1 = signed_designation(&master, vec!["https://a.example".into()], 1, 5);
@@ -131,7 +158,8 @@ async fn designation_rejects_stale_sequence() {
 #[tokio::test]
 async fn designation_rejects_url_body_mismatch() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let other = Identity::generate().master().unwrap();
 
     let d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
@@ -145,7 +173,8 @@ async fn designation_rejects_url_body_mismatch() {
 #[tokio::test]
 async fn designation_rejects_bad_signature() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let mut d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
@@ -155,6 +184,61 @@ async fn designation_rejects_bad_signature() {
         .json(&d)
         .await;
     assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+}
+
+/// The write stays unauthenticated — the desktop publishes to every hub in the
+/// list and holds a session with at most one of them — so what bounds it is
+/// that the hub has met the identity. A signature proves who signed, not that
+/// anybody here has any reason to keep the row.
+#[tokio::test]
+async fn designation_refuses_a_master_the_hub_has_never_met() {
+    let server = common::setup().await;
+    let master = Identity::generate().master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    let d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
+    let resp = server
+        .post(&format!("/identity/{master_pubkey}/designation"))
+        .json(&d)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    // And nothing was stored: the refusal is a refusal, not a slower write.
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/designation"))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+}
+
+/// Registering a device cert is unauthenticated too, so a stranger can write
+/// one for a subkey that is nobody here. It must not become the thing that
+/// vouches for them — which is why the gate joins the cert onto `users`.
+#[tokio::test]
+async fn designation_refuses_a_cert_that_vouches_for_nobody() {
+    let server = common::setup().await;
+    let stranger = Identity::generate();
+    let master = stranger.master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    // A real, correctly signed cert — for a subkey that never joined.
+    let cert = signed_cert(
+        &master,
+        &stranger.public_key_hex(),
+        "Nobody's device",
+        1_700_000_000,
+    );
+    server
+        .post(&format!("/identity/{master_pubkey}/devices"))
+        .json(&cert)
+        .await
+        .assert_status_ok();
+
+    let d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
+    let resp = server
+        .post(&format!("/identity/{master_pubkey}/designation"))
+        .json(&d)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
