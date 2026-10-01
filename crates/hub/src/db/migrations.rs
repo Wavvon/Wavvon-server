@@ -1817,6 +1817,15 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Pubkey-bound invites (pubkey-bound-invites.md). NULL = a bearer code,
+    // which is every invite that existed before this column. When set, only
+    // the identity it names may redeem it, and redeeming it also satisfies
+    // the admission challenge -- an admin naming one key is already the human
+    // act the challenge asks about. See routes::invites::redeemable_by.
+    let _ = sqlx::query("ALTER TABLE invites ADD COLUMN bound_pubkey TEXT")
+        .execute(pool)
+        .await;
+
     // Queued voice-move assignments fire when the event starts (events.md
     // §7.3), and this column is what makes that happen once: NULL = the
     // start-time sweep hasn't run for this event, set by the reminder worker

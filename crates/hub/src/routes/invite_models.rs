@@ -8,6 +8,11 @@ pub struct CreateInviteRequest {
     /// (task #34). Must exist and must be strictly below the creator's own
     /// max role priority — see `routes::invites::create_invite`.
     pub grant_role_id: Option<String>,
+    /// Admit exactly this identity and nobody else (pubkey-bound-invites.md).
+    /// 64 hex characters. Forces `max_uses` to 1: a code that names its
+    /// recipient and admits several people is a contradiction, and honouring
+    /// a larger number silently would be the worse reading of the two.
+    pub bound_pubkey: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -19,6 +24,11 @@ pub struct InviteResponse {
     pub expires_at: Option<i64>,
     pub created_at: i64,
     pub grant_role_id: Option<String>,
+    /// The identity this invite admits, or `None` for a bearer code. An admin
+    /// screen that cannot show this has a list of codes with no owners, which
+    /// is exactly the ambiguity binding was meant to remove. Advertised as
+    /// the `invites.bound` capability.
+    pub bound_pubkey: Option<String>,
     /// `"live"`, `"expired"` or `"used_up"`, computed from the two columns
     /// that can retire an invite. An operator reading the list wants to know
     /// which way in is open, and working that out row by row from `uses`,
