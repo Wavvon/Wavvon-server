@@ -538,17 +538,36 @@ pub async fn verify(
     // suite, which builds `AppState` directly and never writes the
     // `invite_only` setting, so `is_invite_only` answered false there. Found
     // by driving two real hub binaries (e2e-topology).
+    // Set by a *bound* invite only: an admin named this exact key by hand, so
+    // the admission challenge below has already been answered. See
+    // `InviteRedemption::was_bound` and the wiki's `pubkey-bound-invites.md`.
+    let mut admitted_by_named_invite = false;
+
     if has_roles == 0 && req.is_hub != Some(true) {
-        // New user — check if hub requires an invite
-        if crate::routes::invites::is_invite_only(&state.db).await? {
-            match &req.invite_code {
-                Some(code) => {
-                    let (created_by, grant_role_id) =
-                        crate::routes::invites::validate_and_use_invite(&state.db, code).await?;
-                    invite_created_by = Some(created_by);
-                    invite_grant_role_id = grant_role_id;
+        // A code that is presented is a code that is spent, whether or not
+        // this hub demanded one. It used to be read only when `invite_only`
+        // was on, which meant an open hub ignored the role grant the invite
+        // carried — and, now that it matters more, left a program holding a
+        // perfectly good bound invite facing the challenge anyway.
+        //
+        // The three keys are the ones a bound invite may name: the presented
+        // key, the canonical identity it resolves to, and the master its cert
+        // names (`routes::invites::redeemable_by`).
+        match &req.invite_code {
+            Some(code) => {
+                let mut candidates = vec![req.public_key.as_str(), canonical_pubkey.as_str()];
+                if let Some(master) = master_pubkey.as_deref() {
+                    candidates.push(master);
                 }
-                None => {
+                let redemption =
+                    crate::routes::invites::validate_and_use_invite(&state.db, code, &candidates)
+                        .await?;
+                admitted_by_named_invite = redemption.was_bound;
+                invite_created_by = Some(redemption.created_by);
+                invite_grant_role_id = redemption.grant_role_id;
+            }
+            None => {
+                if crate::routes::invites::is_invite_only(&state.db).await? {
                     return Err((
                         StatusCode::FORBIDDEN,
                         "This hub requires an invite code".to_string(),
@@ -612,7 +631,17 @@ pub async fn verify(
     .flatten()
     .unwrap_or_else(|| "off".to_string());
 
-    if challenge_mode != "off" {
+    // A pubkey-bound invite is the challenge, already answered. The puzzle
+    // asks whether a human did something a script cannot do cheaply at scale;
+    // an admin pasting one public key and minting one single-use invite for
+    // it is that act, performed by the person who runs the hub. Asking the
+    // recipient to also read an SVG adds no answer and excludes every
+    // recipient with nobody watching the screen — which is the hole left open
+    // when the bot distinction went (decisions.md).
+    //
+    // A *bearer* invite gets no exemption. A bulk code leaking is exactly the
+    // case the puzzle is still here for.
+    if challenge_mode != "off" && !admitted_by_named_invite {
         match &req.challenge_token {
             None => {
                 return Err((

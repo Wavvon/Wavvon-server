@@ -55,6 +55,13 @@ pub const CAPABILITIES: &[&str] = &[
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // `POST /invites` accepts `bound_pubkey`: the invite admits that identity
+    // and nobody else, and redeeming it also satisfies the admission
+    // challenge. A client that cannot see this string must not offer the
+    // field — the hub would ignore it and mint an ordinary bearer code while
+    // the admin believed they had named someone, which is the one failure
+    // this feature exists to prevent.
+    "invites.bound",
     // `GET /invites` hides the invites that can no longer admit anyone and
     // carries `status` (`live`, `expired`, `used_up`) on the ones it shows;
     // `?include_inactive=true` asks for the history. A client that cannot see

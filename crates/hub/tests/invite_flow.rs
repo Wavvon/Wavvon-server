@@ -1286,3 +1286,212 @@ async fn list_hides_dead_invites_and_marks_the_rest() {
     assert_eq!(status_of(&expired.code), "expired");
     assert_eq!(status_of(&live.code), "live");
 }
+
+// ---------------------------------------------------------------------------
+// Pubkey-bound invites (the wiki's pubkey-bound-invites.md, server #31)
+// ---------------------------------------------------------------------------
+
+/// Like `authenticate_with_invite`, but hands back the raw response so a test
+/// can assert on a refusal instead of unwrapping a token that is not there.
+/// `subkey_cert` is how a paired device arrives: it signs with its own key and
+/// names the master it belongs to.
+async fn verify_raw(
+    server: &TestServer,
+    identity: &Identity,
+    invite_code: Option<&str>,
+    subkey_cert: Option<serde_json::Value>,
+) -> axum_test::TestResponse {
+    let pub_key = identity.public_key_hex();
+    let resp = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await;
+    let challenge: ChallengeResponse = resp.json();
+    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+
+    let mut body = json!({
+        "public_key": pub_key,
+        "challenge": challenge.challenge,
+        "signature": hex::encode(signature.to_bytes()),
+    });
+    if let Some(code) = invite_code {
+        body["invite_code"] = json!(code);
+    }
+    if let Some(cert) = subkey_cert {
+        body["subkey_cert"] = cert;
+    }
+    server.post("/auth/verify").json(&body).await
+}
+
+async fn mint_invite(server: &TestServer, token: &str, body: serde_json::Value) -> InviteResponse {
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(token)
+        .json(&body)
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    resp.json()
+}
+
+#[tokio::test]
+async fn bound_invite_admits_only_the_key_it_names() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let invited = Identity::generate();
+    let stranger = Identity::generate();
+    let invite = mint_invite(
+        &server,
+        &owner_token,
+        json!({ "bound_pubkey": invited.public_key_hex() }),
+    )
+    .await;
+    assert_eq!(invite.bound_pubkey, Some(invited.public_key_hex()));
+
+    // The wrong holder is refused — and refused *before* the increment, so
+    // they cannot burn the single use the right one is waiting for.
+    let refused = verify_raw(&server, &stranger, Some(&invite.code), None).await;
+    refused.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    let after: Vec<InviteResponse> = server
+        .get("/invites")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert_eq!(
+        after.iter().find(|i| i.code == invite.code).unwrap().uses,
+        0
+    );
+
+    // The named one gets in.
+    verify_raw(&server, &invited, Some(&invite.code), None)
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn bound_invite_is_forced_single_use() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let invite = mint_invite(
+        &server,
+        &owner_token,
+        json!({ "bound_pubkey": Identity::generate().public_key_hex(), "max_uses": 5 }),
+    )
+    .await;
+    assert_eq!(invite.max_uses, Some(1));
+}
+
+#[tokio::test]
+async fn bound_invite_rejects_something_that_is_not_a_key() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "bound_pubkey": "nope" }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
+
+/// The point of the feature. An admin naming one key is the human act the
+/// admission challenge exists to ask about, so the named holder joins without
+/// solving anything — which is what makes an unattended client admissible at
+/// all (decisions.md, "A bot is a client like any other", the open tradeoff).
+#[tokio::test]
+async fn a_named_invite_answers_the_admission_challenge() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    server
+        .put("/hub/settings/challenge")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "challenge_mode": "click", "challenge_difficulty": "easy" }))
+        .await
+        .assert_status_ok();
+
+    let program = Identity::generate();
+    let invite = mint_invite(
+        &server,
+        &owner_token,
+        json!({ "bound_pubkey": program.public_key_hex() }),
+    )
+    .await;
+
+    verify_raw(&server, &program, Some(&invite.code), None)
+        .await
+        .assert_status_ok();
+}
+
+/// And the other half: a bearer code leaking is exactly the case the puzzle is
+/// still there for, so it buys no exemption.
+#[tokio::test]
+async fn a_bearer_invite_does_not_answer_the_admission_challenge() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    server
+        .put("/hub/settings/challenge")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "challenge_mode": "click", "challenge_difficulty": "easy" }))
+        .await
+        .assert_status_ok();
+
+    let invite = mint_invite(&server, &owner_token, json!({})).await;
+
+    let refused = verify_raw(&server, &Identity::generate(), Some(&invite.code), None).await;
+    refused.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
+/// The subtlety the design turns on: an admin binds the key they were handed,
+/// and a paired device arrives as a *subkey*. A bound invite answers to the
+/// master its cert names as well as to the key it presents — binding to one
+/// of the three would refuse a legitimate holder for a reason nobody could
+/// see.
+#[tokio::test]
+async fn bound_invite_admits_a_paired_device_by_the_master_it_names() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    // One identity, two keys: the master a listing would name, and the device
+    // key that actually signs the challenge.
+    let device = Identity::generate();
+    let master = device.master().unwrap();
+    let master_pubkey = master.public_key_hex();
+    let subkey_pubkey = device.public_key_hex();
+    assert_ne!(master_pubkey, subkey_pubkey);
+
+    let invite = mint_invite(
+        &server,
+        &owner_token,
+        json!({ "bound_pubkey": master_pubkey }),
+    )
+    .await;
+
+    let issued_at = 1_700_000_000u64;
+    let bytes = wavvon_identity::SubkeyCert::signing_bytes(
+        &master_pubkey,
+        &subkey_pubkey,
+        "Paired device",
+        issued_at,
+        None,
+        &[],
+    );
+    let cert = json!({
+        "master_pubkey": master_pubkey,
+        "subkey_pubkey": subkey_pubkey,
+        "device_label": "Paired device",
+        "issued_at": issued_at,
+        "not_after": null,
+        "fallback_hubs": [],
+        "signature": hex::encode(master.sign(&bytes).to_bytes()),
+    });
+
+    verify_raw(&server, &device, Some(&invite.code), Some(cert))
+        .await
+        .assert_status_ok();
+}
