@@ -1,0 +1,38 @@
+# What `docker build .` must not send to the daemon.
+#
+# Both Dockerfiles use `COPY . .` with the workspace root as context, and the
+# hub's own header documents a local build as a supported flow. Without this
+# file that flow sends the whole working directory — a Rust `target/` reaches
+# hundreds of gigabytes on a machine that has run the test suite a few times,
+# and the transfer never finishes. CI never noticed because a fresh checkout
+# has no target/.
+#
+# The builder stage runs `cargo build` itself, so nothing here is needed inside
+# the image. Keeping it out also stops a host-built artifact from being mistaken
+# for a fresh one.
+
+# Every cargo --target-dir, not just the default one: `target-pg17` (the
+# second PostgreSQL major the pgupgrade stage needs) and `target-test` are
+# each ~10GB on this machine, and `target-pg*` alone missed the second.
+target*/
+**/node_modules/
+
+# Hub runtime state, if someone has run a hub from the repo root.
+hub_identity.json
+hub.search/
+*.wavvon-backup
+pgdata/
+
+.git/
+.github/
+*.log
+
+# Local compose overrides and env files — never baked into an image.
+.env
+.env.*
+docker-compose.dev.yml
+
+# The web client source CI checks out at this path is the one exception: the
+# web-builder stage copies `web-client-src*` on purpose, so it must NOT be
+# ignored. Listed here so nobody adds it by reflex.
+!web-client-src/
