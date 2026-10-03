@@ -57,6 +57,12 @@ pub async fn get_designation(
 
 /// Has this hub met the identity behind `master`?
 ///
+/// The bound on all three unauthenticated personal-axis writes — the home-hub
+/// designation, a device revocation, and the encrypted prefs blob. Each is
+/// unauthenticated on purpose, because a client publishes them to every hub in
+/// its home-hub list while holding a session with at most one; the signature
+/// makes them unspoofable and this makes them finite.
+///
 /// The inverse of `dms::messages::master_of`, which is the only thing that
 /// ever reads a designation: it resolves a *member's* roster pubkey to a
 /// master and looks the row up by that. So the two must agree about what a
@@ -356,6 +362,17 @@ pub async fn list_revocations(
     Ok(Json(out))
 }
 
+/// Record that a master has revoked one of its devices.
+///
+/// Unauthenticated for the same reason `put_designation` is: a client
+/// publishes a revocation to *every* hub in its home-hub list and holds a
+/// session with at most one of them, so requiring `AuthUser` would quietly
+/// reduce "revoked everywhere" to "revoked where I am signed in" — which is
+/// the opposite of what revoking a device is for.
+///
+/// Bounded the same way instead. The signature already makes this unspoofable;
+/// what it did not bound is volume, and one keypair is free to mint
+/// (Wavvon-server#64).
 pub async fn post_revocation(
     State(state): State<Arc<AppState>>,
     Path(master): Path<String>,
@@ -367,6 +384,13 @@ pub async fn post_revocation(
     entry
         .verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
+
+    if !master_is_known_here(&state.db, &master).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub has no member linked to that master key".to_string(),
+        ));
+    }
 
     sqlx::query(
         "INSERT INTO subkey_revocations
@@ -410,6 +434,15 @@ pub async fn get_prefs(
     }))
 }
 
+/// Store the master's encrypted prefs blob. The hub holds ciphertext only.
+///
+/// Unauthenticated for the same reason as the designation and the revocation —
+/// personal-axis state is published to every home hub, not just the one with a
+/// live session.
+///
+/// The one that most needed bounding, because it stores an opaque blob rather
+/// than a few columns: the bytes a free keypair could park here were whatever
+/// the sender felt like sending (Wavvon-server#64).
 pub async fn put_prefs(
     State(state): State<Arc<AppState>>,
     Path(master): Path<String>,
@@ -420,6 +453,13 @@ pub async fn put_prefs(
     }
     blob.verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
+
+    if !master_is_known_here(&state.db, &master).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub has no member linked to that master key".to_string(),
+        ));
+    }
 
     let current: Option<i64> =
         sqlx::query_scalar("SELECT blob_version FROM prefs_blobs WHERE master_pubkey = $1")
