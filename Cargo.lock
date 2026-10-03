@@ -4877,19 +4877,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
-name = "store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "futures",
- "serde",
- "sqlx 0.8.6",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
 name = "stringprep"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6069,7 +6056,6 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx 0.8.6",
- "store",
  "tantivy",
  "tar",
  "tempfile",

@@ -2,30 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::http::StatusCode;
 use bytes::Bytes;
 use sqlx::PgPool;
-use store::StoreError;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_identity::Identity;
 use webauthn_rs::prelude::{PasskeyAuthentication, PasskeyRegistration, Webauthn};
 
 use crate::federation::client::FederationClient;
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
-
-/// Map a `StoreError` to an HTTP status + plain-text body.
-///
-/// Replaces the ad-hoc `.map_err(|_| (StatusCode::..., "...".into()))` and
-/// `"UNIQUE"` string-sniffing that was scattered across route handlers.
-/// Route handlers call `store_error_to_http(e)` or `.map_err(store_error_to_http)`.
-pub fn store_error_to_http(e: StoreError) -> (StatusCode, String) {
-    match e {
-        StoreError::NotFound => (StatusCode::NOT_FOUND, "not found".into()),
-        StoreError::Conflict(msg) => (StatusCode::CONFLICT, msg),
-        StoreError::PermissionDenied => (StatusCode::FORBIDDEN, "permission denied".into()),
-        StoreError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
-    }
-}
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -249,10 +233,6 @@ pub struct AppState {
     /// Read-replica pool, if configured. Route handlers that do only reads
     /// may use this via `state.db_read.as_ref().unwrap_or(&state.db)`.
     pub db_read: Option<PgPool>,
-    /// Abstracted store handle — use this for new code; existing handlers
-    /// may still use `state.db` directly while the per-handler migration
-    /// proceeds incrementally.
-    pub store: Arc<dyn store::HubStore>,
     /// Outstanding auth challenges, keyed by the challenge hex (NOT the
     /// pubkey) so concurrent auth flows for the same key don't stomp each
     /// other's challenge — e.g. two simultaneous federated DM deliveries to

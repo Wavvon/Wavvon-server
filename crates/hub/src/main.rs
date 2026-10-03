@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
-use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
 use wavvon_hub::cert_worker;
@@ -1180,8 +1179,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
-
     // Publicly-reachable host for the voice WebTransport endpoint
     // (voice-transport-v2.md). Voice is dialled directly, never through the
     // farm's HTTP proxy — a datagram carries no path to route on — so only
@@ -1262,7 +1259,6 @@ async fn main() -> Result<()> {
         hub_identity,
         db,
         db_read,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

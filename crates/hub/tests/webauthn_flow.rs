@@ -16,7 +16,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum_test::TestServer;
 use serde_json::json;
-use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
 use wavvon_hub::federation::client::FederationClient;
@@ -53,7 +52,6 @@ fn gen_token() -> String {
 
 async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let webauthn = Arc::new(
         WebauthnBuilder::new("localhost", &Url::parse("http://localhost:3000").unwrap())
@@ -67,7 +65,6 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

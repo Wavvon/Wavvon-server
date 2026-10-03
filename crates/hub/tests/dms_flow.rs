@@ -21,7 +21,6 @@ mod common;
 async fn setup_with_pool() -> (common::TestHarness, PgPool) {
     let (db, guard) = crate::common::create_test_db().await;
     let pool_handle = db.clone();
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -30,7 +29,6 @@ async fn setup_with_pool() -> (common::TestHarness, PgPool) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
@@ -415,7 +413,6 @@ async fn wait_for_federated_dms(
 /// outbox worker instead of waiting on the spawned delivery.
 async fn start_real_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -424,7 +421,6 @@ async fn start_real_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGua
         hub_identity: Identity::generate(),
         db,
         db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
@@ -616,8 +612,6 @@ async fn dm_retries_when_recipient_hub_comes_online() {
 
     // Bring Hub B up on the previously-chosen port.
     let (hub_b_db, _hub_b_guard) = crate::common::create_test_db().await;
-    let hub_b_store: Arc<dyn store::HubStore> =
-        Arc::new(store::PostgresStore::new(hub_b_db.clone()));
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);
     let hub_b_state = Arc::new(AppState {
@@ -625,7 +619,6 @@ async fn dm_retries_when_recipient_hub_comes_online() {
         hub_identity: Identity::generate(),
         db: hub_b_db,
         db_read: None,
-        store: hub_b_store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx: chat_tx_b,

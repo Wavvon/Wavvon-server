@@ -132,15 +132,6 @@ from an Ed25519 seed for E2E DMs, AES-256-GCM, PoW helpers.
 (TypeScript and desktop Rust), each asserting the same vectors. Changing an
 envelope is a cross-repo operation — use the **`wire-format-change`** skill.
 
-### `store` — database abstraction
-
-Entry: `crates/store/src/lib.rs`. Trait-based: `HubStore` = `AuthStore +
-UserStore + ChannelStore + MessageStore + RoleStore + DmStore + FederationStore +
-...`. The hub holds `Arc<dyn HubStore>`. PostgreSQL is the one and
-only backend (`crates/store/src/impls/`). The trait split's value today is error
-normalization and keeping SQL out of route handlers — prefer it over raw
-`sqlx::query` in new hub code.
-
 ### `hub-env` — cross-process config keys
 
 Entry: `crates/hub-env/src/lib.rs`. Dependency-free; holds only the **names** of
