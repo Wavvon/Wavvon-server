@@ -1551,8 +1551,8 @@ async fn main() -> Result<()> {
     // all; see its doc comment for why an orphaned postmaster matters.
     let result = tokio::select! {
         r = serve => r,
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Shutdown requested");
+        reason = shutdown_signal() => {
+            tracing::info!("Shutdown requested ({reason})");
             Ok(())
         }
     };
@@ -1564,6 +1564,70 @@ async fn main() -> Result<()> {
     }
 
     result
+}
+
+/// Resolve when the operator asks this process to stop, naming which signal
+/// did it.
+///
+/// `tokio::signal::ctrl_c()` is SIGINT alone on Unix, and SIGINT is the
+/// interactive stop. Every documented production deployment uses SIGTERM —
+/// `systemctl stop`, `docker stop` and a plain `kill` all send it — so waiting
+/// on SIGINT only meant the process was terminated without ever reaching
+/// `stop_embedded`, leaving a postmaster holding the data directory on a
+/// normal, documented stop. See `stop_embedded` for why that matters on the
+/// upgrade path.
+///
+/// A force kill (SIGKILL, `Stop-Process -Force`) stays uncatchable here and
+/// everywhere; adopting the orphan on the next start is what covers it.
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // Failing to install a handler is not worth refusing to serve over —
+        // the other signal still works, and the worst case is the behaviour
+        // this function was written to fix.
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Could not listen for SIGTERM: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return "SIGINT";
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = term.recv() => "SIGTERM",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // The Windows equivalents of a service stop. `ctrl_close` is the
+        // console window closing and `ctrl_shutdown` is the machine going
+        // down; both give a short grace period, which is enough to stop a
+        // postmaster.
+        use tokio::signal::windows;
+        let mut close = match windows::ctrl_close() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Could not listen for CTRL_CLOSE: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return "Ctrl-C";
+            }
+        };
+        let mut shutdown = match windows::ctrl_shutdown() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Could not listen for CTRL_SHUTDOWN: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return "Ctrl-C";
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "Ctrl-C",
+            _ = close.recv() => "CTRL_CLOSE",
+            _ = shutdown.recv() => "CTRL_SHUTDOWN",
+        }
+    }
 }
 
 /// Stop the PostgreSQL this process started, if it started one.
