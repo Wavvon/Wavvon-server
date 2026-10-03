@@ -441,12 +441,7 @@ pub struct AppState {
 
     /// In-memory link preview cache: url → (result, inserted_at).
     /// Entries expire after 30 minutes.
-    pub preview_cache: std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            (crate::routes::preview::LinkPreview, std::time::Instant),
-        >,
-    >,
+    pub preview_cache: crate::routes::preview::PreviewCache,
 
     /// Full-text search backend. Either TantivySearch or NullSearch.
     pub search: Arc<dyn crate::search::MessageSearch>,
