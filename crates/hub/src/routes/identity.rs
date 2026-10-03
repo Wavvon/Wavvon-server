@@ -65,11 +65,16 @@ pub async fn get_designation(
 /// - a `users` row carrying that master, which auth writes when a device
 ///   presents its cert; or
 /// - a device cert for that master whose subkey is itself a member here. The
-///   join onto `users` is where this is stricter than `master_of`, and it is
-///   load-bearing: `POST /identity/{master}/devices` is unauthenticated too,
-///   so a cert alone would let a stranger seed the very row that vouches for
-///   them. `master_of` can afford the looser form because it is only ever
-///   asked about somebody who is already a member.
+///   join onto `users` is where this is stricter than `master_of`, which can
+///   afford the looser form because it is only ever asked about somebody who
+///   is already a member.
+///
+/// That join used to be described here as load-bearing against a stranger
+/// seeding the row that vouches for them, on the reasoning that the cert
+/// registration is unauthenticated. It never did that job: the attacker names
+/// *somebody else's* member key as their subkey, and the join is satisfied by
+/// the victim's own `users` row. `post_device` now requires a session as the
+/// subkey, which is what actually closes it (Wavvon-server#75).
 ///
 /// The first write a fresh web client makes lands through the second branch:
 /// it authenticates without a cert (it has none yet), registers one, and
@@ -206,16 +211,67 @@ pub async fn list_devices(
     Ok(Json(out))
 }
 
+/// Register a device cert, **as the device it names**.
+///
+/// `SubkeyCert::verify` checks exactly one signature — the master's, over
+/// bytes in which `subkey_pubkey` is an opaque string. So the cert alone says
+/// "some master claims this subkey", and a master keypair is free to mint. It
+/// proves nothing about who is holding the subkey, or whether the subkey is a
+/// key at all.
+///
+/// That is why the session has to be the subkey's. Without it, a stranger
+/// could name an existing member's roster pubkey as their device and the hub
+/// would record the link — and `dms::messages::master_of` reads exactly that
+/// link, falling back to this table whenever `users.master_pubkey` is NULL,
+/// which is the normal state for anyone who authenticated without a cert. The
+/// attacker would therefore choose which home hub another member's direct
+/// messages were delivered to: ciphertext and correspondence metadata for a
+/// recipient with a published DH key, cleartext for one without.
+///
+/// Requiring the session costs the real clients nothing, because both places
+/// that POST here already hold one as that very key: `ensureSelfDeviceCert`
+/// runs immediately after a hub auth, and renaming a device in Settings
+/// re-issues its cert from the device being renamed. A *paired* device never
+/// POSTs at all — its cert arrives at auth, which calls `upsert_subkey_cert`
+/// directly and has already proved possession by then.
 pub async fn post_device(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path(master): Path<String>,
     Json(cert): Json<SubkeyCert>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if cert.master_pubkey != master {
         return Err(bad("master_pubkey mismatch between URL and body"));
     }
+    if cert.subkey_pubkey != user.public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Can only register a device cert for your own key".to_string(),
+        ));
+    }
     cert.verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
+
+    // A device belongs to one identity. The session above already stops a
+    // stranger claiming somebody else's key, but a key that was claimed before
+    // this gate existed would still be sitting in the table, and the holder
+    // re-registering under their real master must not end up with the subkey
+    // named by two masters at once — `master_of` picks a row, not an identity.
+    let other_master: Option<String> = sqlx::query_scalar(
+        "SELECT master_pubkey FROM subkey_certs
+          WHERE subkey_pubkey = $1 AND master_pubkey <> $2",
+    )
+    .bind(&cert.subkey_pubkey)
+    .bind(&cert.master_pubkey)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_err)?;
+    if other_master.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "That key is already registered as a device of another identity".to_string(),
+        ));
+    }
 
     upsert_subkey_cert(&state.db, &cert)
         .await

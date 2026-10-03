@@ -1780,16 +1780,19 @@ async fn an_accepting_hub_mirrors_a_dm_to_the_other_home_hubs() {
     let bob_master = Identity::generate();
     let alice_token = authenticate_http(&hub_a, &alice).await;
     let bob_token_c = authenticate_http(&hub_c, &bob).await;
-    authenticate_http(&hub_b, &bob).await;
+    let bob_token_b = authenticate_http(&hub_b, &bob).await;
 
     // Bob's home hubs are B and C, and both hubs learn which master he is —
-    // the designation is signed by, and stored under, that key.
-    for hub in [&hub_b, &hub_c] {
+    // the designation is signed by, and stored under, that key. Registering
+    // the cert needs Bob's session on each hub: it is the device proving it
+    // holds the subkey the cert names.
+    for (hub, bob_token) in [(&hub_b, &bob_token_b), (&hub_c, &bob_token_c)] {
         let resp = client
             .post(format!(
                 "{hub}/identity/{}/devices",
                 bob_master.public_key_hex()
             ))
+            .bearer_auth(bob_token)
             .json(&self_cert(&bob_master, &bob.public_key_hex(), hub))
             .send()
             .await
