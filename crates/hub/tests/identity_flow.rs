@@ -55,7 +55,7 @@ async fn join_and_link(
     identity: &Identity,
 ) -> wavvon_identity::MasterIdentity {
     let master = identity.master().unwrap();
-    common::authenticate(server, identity).await;
+    let token = common::authenticate(server, identity).await;
     let cert = signed_cert(
         &master,
         &identity.public_key_hex(),
@@ -64,6 +64,7 @@ async fn join_and_link(
     );
     server
         .post(&format!("/identity/{}/devices", master.public_key_hex()))
+        .authorization_bearer(&token)
         .json(&cert)
         .await
         .assert_status_ok();
@@ -210,35 +211,122 @@ async fn designation_refuses_a_master_the_hub_has_never_met() {
     assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
 }
 
-/// Registering a device cert is unauthenticated too, so a stranger can write
-/// one for a subkey that is nobody here. It must not become the thing that
-/// vouches for them — which is why the gate joins the cert onto `users`.
+/// Authenticate as a bare device subkey, the way a paired device does on a hub
+/// that has not met it yet: challenge, sign, no cert presented.
+async fn auth_as_subkey(server: &axum_test::TestServer, subkey: &DeviceSubkey) -> String {
+    let pub_key = subkey.public_key_hex();
+    let resp = server
+        .post("/auth/challenge")
+        .json(&serde_json::json!({ "public_key": pub_key }))
+        .await;
+    let challenge = resp.json::<serde_json::Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let signature = subkey.sign(&hex::decode(&challenge).unwrap());
+    let resp = server
+        .post("/auth/verify")
+        .json(&serde_json::json!({
+            "public_key": pub_key,
+            "challenge": challenge,
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .await;
+    resp.assert_status_ok();
+    resp.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 #[tokio::test]
-async fn designation_refuses_a_cert_that_vouches_for_nobody() {
+async fn device_cert_refuses_an_unauthenticated_caller() {
     let server = common::setup().await;
-    let stranger = Identity::generate();
-    let master = stranger.master().unwrap();
+    let identity = Identity::generate();
+    let master = identity.master().unwrap();
     let master_pubkey = master.public_key_hex();
 
-    // A real, correctly signed cert — for a subkey that never joined.
-    let cert = signed_cert(
-        &master,
-        &stranger.public_key_hex(),
-        "Nobody's device",
-        1_700_000_000,
-    );
-    server
+    let cert = signed_cert(&master, &identity.public_key_hex(), "desktop", 1);
+    let resp = server
         .post(&format!("/identity/{master_pubkey}/devices"))
         .json(&cert)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::UNAUTHORIZED);
+}
+
+/// The attack the session gate exists for. `SubkeyCert::verify` checks the
+/// master's signature over bytes in which `subkey_pubkey` is an opaque string,
+/// so a throwaway master can name *anybody* as its device. Mallory names
+/// Alice's roster pubkey; `master_of` would then resolve Alice to Mallory's
+/// master and deliver Alice's direct messages wherever Mallory says.
+#[tokio::test]
+async fn device_cert_refuses_a_subkey_the_caller_does_not_hold() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let mallory = Identity::generate();
+    common::authenticate(&server, &alice).await;
+    let mallory_token = common::authenticate(&server, &mallory).await;
+
+    // Free to mint, correctly signed, and about somebody else entirely.
+    let mallory_master = mallory.master().unwrap();
+    let mallory_master_pubkey = mallory_master.public_key_hex();
+    let cert = signed_cert(
+        &mallory_master,
+        &alice.public_key_hex(),
+        "Alice's phone, allegedly",
+        1,
+    );
+
+    let resp = server
+        .post(&format!("/identity/{mallory_master_pubkey}/devices"))
+        .authorization_bearer(&mallory_token)
+        .json(&cert)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    // The refusal is a refusal, not a slower write.
+    let resp = server
+        .get(&format!("/identity/{mallory_master_pubkey}/devices"))
+        .await;
+    resp.assert_status_ok();
+    assert!(resp.json::<Vec<SubkeyCert>>().is_empty());
+}
+
+/// A device belongs to one identity. The session gate already stops a stranger
+/// claiming somebody else's key, but the holder re-registering under a second
+/// master would leave the subkey named by two — and `master_of` picks a row,
+/// not an identity.
+#[tokio::test]
+async fn device_cert_refuses_a_key_already_claimed_by_another_master() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let first = identity.master().unwrap();
+
+    server
+        .post(&format!("/identity/{}/devices", first.public_key_hex()))
+        .authorization_bearer(&token)
+        .json(&signed_cert(
+            &first,
+            &identity.public_key_hex(),
+            "desktop",
+            1,
+        ))
         .await
         .assert_status_ok();
 
-    let d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
+    let second = Identity::generate().master().unwrap();
     let resp = server
-        .post(&format!("/identity/{master_pubkey}/designation"))
-        .json(&d)
+        .post(&format!("/identity/{}/devices", second.public_key_hex()))
+        .authorization_bearer(&token)
+        .json(&signed_cert(
+            &second,
+            &identity.public_key_hex(),
+            "desktop",
+            2,
+        ))
         .await;
-    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+    assert_eq!(resp.status_code(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -254,13 +342,21 @@ async fn devices_post_and_list() {
     let cert0 = signed_cert(&master, &subkey_zero.public_key_hex(), "desktop", 1);
     let cert1 = signed_cert(&master, &phone.public_key_hex(), "phone", 2);
 
+    // Each device registers its own cert, under its own session — which is the
+    // only way the certs get here now, and matches what the clients do: the
+    // first device at its first auth, the phone at its own.
+    let desktop_token = common::authenticate(&server, &identity).await;
     server
         .post(&format!("/identity/{master_pubkey}/devices"))
+        .authorization_bearer(&desktop_token)
         .json(&cert0)
         .await
         .assert_status_ok();
+
+    let phone_token = auth_as_subkey(&server, &phone).await;
     server
         .post(&format!("/identity/{master_pubkey}/devices"))
+        .authorization_bearer(&phone_token)
         .json(&cert1)
         .await
         .assert_status_ok();
