@@ -6,7 +6,6 @@ use axum_test::TestServer;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
@@ -324,7 +323,6 @@ async fn build_harness_with_web_client(
     guard: TestDbGuard,
     web_client: Option<Arc<wavvon_hub::web_client::WebClientConfig>>,
 ) -> TestHarness {
-    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
@@ -333,7 +331,6 @@ async fn build_harness_with_web_client(
         hub_identity: Identity::generate(),
         db,
         db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

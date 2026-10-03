@@ -19,7 +19,6 @@ mod common;
 /// Returns the TempDir too — drop it after the test to clean up.
 async fn setup_with_search() -> (common::TestHarness, tempfile::TempDir) {
     let (db, guard) = crate::common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
     let tmp = tempfile::tempdir().unwrap();
@@ -30,7 +29,6 @@ async fn setup_with_search() -> (common::TestHarness, tempfile::TempDir) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

@@ -11,7 +11,6 @@ use std::time::Duration;
 use axum::routing::get;
 use axum::Router;
 use serde_json::json;
-use store::PostgresStore;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
@@ -30,7 +29,6 @@ mod common;
 
 async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
     let (chat_tx, _) = broadcast::channel(256);
     let webauthn = Arc::new(
         WebauthnBuilder::new("localhost", &Url::parse("http://localhost:3000").unwrap())
@@ -44,7 +42,6 @@ async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
         hub_identity: Identity::generate(),
         db,
         db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

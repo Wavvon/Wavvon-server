@@ -268,13 +268,11 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 /// Spin up a real listener so we can connect a WebSocket client to it.
 async fn spawn_real_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
     let state = Arc::new(AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
         db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx: broadcast::channel(256).0,
