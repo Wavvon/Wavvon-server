@@ -175,10 +175,6 @@ pub fn create_router_full(
             get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
         )
         .route(
-            "/admin/settings/channel-depth",
-            get(routes::hub::get_channel_depth).patch(routes::hub::patch_channel_depth),
-        )
-        .route(
             "/admin/settings/moderation",
             get(routes::hub::get_moderation_settings).patch(routes::hub::patch_moderation_settings),
         )
