@@ -4,74 +4,6 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
-// ---- Admin settings endpoints ----
-
-#[tokio::test]
-async fn get_channel_depth_defaults_to_zero() {
-    let server = common::setup().await;
-    let owner = Identity::generate();
-    let token = common::authenticate(&server, &owner).await;
-
-    let resp = server
-        .get("/admin/settings/channel-depth")
-        .authorization_bearer(&token)
-        .await;
-    resp.assert_status_ok();
-    let body = resp.json::<serde_json::Value>();
-    assert_eq!(body["max_channel_depth"], 0);
-}
-
-#[tokio::test]
-async fn patch_and_get_channel_depth() {
-    let server = common::setup().await;
-    let owner = Identity::generate();
-    let token = common::authenticate(&server, &owner).await;
-
-    server
-        .patch("/admin/settings/channel-depth")
-        .authorization_bearer(&token)
-        .json(&json!({ "max_channel_depth": 4 }))
-        .await
-        .assert_status_ok();
-
-    let resp = server
-        .get("/admin/settings/channel-depth")
-        .authorization_bearer(&token)
-        .await;
-    resp.assert_status_ok();
-    let body = resp.json::<serde_json::Value>();
-    assert_eq!(body["max_channel_depth"], 4);
-}
-
-#[tokio::test]
-async fn channel_depth_admin_routes_reject_non_admin() {
-    let server = common::setup().await;
-    let non_admin = Identity::generate();
-    let token = common::authenticate(&server, &non_admin).await;
-
-    // The first user is auto-promoted to owner, so we need a second user who is
-    // not the owner/admin.
-    let second = Identity::generate();
-    let second_token = common::authenticate(&server, &second).await;
-
-    // second user should get 403
-    server
-        .get("/admin/settings/channel-depth")
-        .authorization_bearer(&second_token)
-        .await
-        .assert_status(axum::http::StatusCode::FORBIDDEN);
-
-    server
-        .patch("/admin/settings/channel-depth")
-        .authorization_bearer(&second_token)
-        .json(&json!({ "max_channel_depth": 2 }))
-        .await
-        .assert_status(axum::http::StatusCode::FORBIDDEN);
-
-    let _ = non_admin;
-    let _ = token;
-}
-
 // ---- Depth enforcement on channel create ----
 
 #[tokio::test]
@@ -109,7 +41,7 @@ async fn depth_enforcement_create_channel() {
     // so depth_exceeded must fire (not category_at_max_depth, since the new item
     // is NOT a category).
     server
-        .patch("/admin/settings/channel-depth")
+        .patch("/hub")
         .authorization_bearer(&token)
         .json(&json!({ "max_channel_depth": 2 }))
         .await
@@ -135,7 +67,7 @@ async fn depth_enforcement_category_at_max_depth() {
     // — actually the rule is: category depth must be < (max_depth - 1).
     // With max_depth=2, category can be at depth 0 only (depth < 1).
     server
-        .patch("/admin/settings/channel-depth")
+        .patch("/hub")
         .authorization_bearer(&token)
         .json(&json!({ "max_channel_depth": 2 }))
         .await
@@ -236,7 +168,7 @@ async fn depth_enforcement_move_channel() {
     // Now restrict to max_depth=2. Moving roaming-channel under mid-cat
     // would put it at depth 2 which exceeds max_code_depth=1 → depth_exceeded.
     server
-        .patch("/admin/settings/channel-depth")
+        .patch("/hub")
         .authorization_bearer(&token)
         .json(&json!({ "max_channel_depth": 2 }))
         .await
