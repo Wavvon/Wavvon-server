@@ -374,7 +374,10 @@ async fn devices_post_and_list() {
 #[tokio::test]
 async fn revocation_post_and_list() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    // The hub has to have met the master: a revocation is bounded the same way
+    // a designation is, and for the same reason.
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let compromised = DeviceSubkey::generate("phone".into()).public_key_hex();
@@ -405,7 +408,8 @@ async fn revocation_post_and_list() {
 #[tokio::test]
 async fn prefs_blob_roundtrip_with_version_check() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let v1 = signed_prefs(&master, 1, b"first version");
@@ -475,4 +479,51 @@ async fn empty_resources_return_404_or_empty() {
     resp.assert_status_ok();
     let v: Vec<RevocationEntry> = resp.json();
     assert!(v.is_empty());
+}
+
+/// The designation was bounded in #59; the revocation and the prefs blob are
+/// the same shape and were not. Each stores rows for a master this hub has
+/// never met, from a keypair that costs nothing to mint — and the prefs blob
+/// stores an opaque ciphertext, so the bytes were whatever the sender chose.
+#[tokio::test]
+async fn revocation_refuses_a_master_the_hub_has_never_met() {
+    let server = common::setup().await;
+    let master = Identity::generate().master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    let entry = signed_revocation(
+        &master,
+        &DeviceSubkey::generate("phone".into()).public_key_hex(),
+        42,
+    );
+    let resp = server
+        .post(&format!("/identity/{master_pubkey}/revocations"))
+        .json(&entry)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    // A refusal, not a slower write.
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/revocations"))
+        .await;
+    resp.assert_status_ok();
+    assert!(resp.json::<Vec<RevocationEntry>>().is_empty());
+}
+
+#[tokio::test]
+async fn prefs_refuses_a_master_the_hub_has_never_met() {
+    let server = common::setup().await;
+    let master = Identity::generate().master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    let resp = server
+        .put(&format!("/identity/{master_pubkey}/prefs"))
+        .json(&signed_prefs(&master, 1, b"a blob nobody here asked for"))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/prefs"))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
 }
