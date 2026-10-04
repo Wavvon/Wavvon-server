@@ -319,3 +319,56 @@ async fn event_rsvp_rejects_invalid_status() {
         .await;
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
 }
+
+/// A client must be able to show "you are going" after a reload, so both the
+/// detail and the list carry the caller's own RSVP — and only the caller's.
+#[tokio::test]
+async fn events_carry_the_callers_own_rsvp() {
+    let server = common::setup().await;
+    let me = common::authenticate(&server, &Identity::generate()).await;
+    let other = common::authenticate(&server, &Identity::generate()).await;
+    let channel_id = create_channel(&server, &me).await;
+
+    let resp = server
+        .post("/events")
+        .add_header("Authorization", format!("Bearer {me}"))
+        .json(&json!({ "channel_id": channel_id, "title": "Raid", "starts_at": 9_999_999_999i64 }))
+        .await;
+    let event_id = resp.json::<Value>()["id"].as_str().unwrap().to_string();
+
+    let detail = |token: String| {
+        let server = &server;
+        let event_id = event_id.clone();
+        async move {
+            server
+                .get(&format!("/events/{event_id}"))
+                .add_header("Authorization", format!("Bearer {token}"))
+                .await
+                .json::<Value>()
+        }
+    };
+    assert!(detail(me.clone()).await.get("my_rsvp").is_none());
+
+    server
+        .post(&format!("/events/{event_id}/rsvp"))
+        .add_header("Authorization", format!("Bearer {me}"))
+        .json(&json!({ "status": "maybe" }))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    assert_eq!(detail(me.clone()).await["my_rsvp"], "maybe");
+    assert!(detail(other.clone()).await.get("my_rsvp").is_none());
+
+    let list: Value = server
+        .get("/events?upcoming=true&limit=10")
+        .add_header("Authorization", format!("Bearer {me}"))
+        .await
+        .json();
+    let mine = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["id"] == event_id)
+        .unwrap();
+    assert_eq!(mine["my_rsvp"], "maybe");
+}
