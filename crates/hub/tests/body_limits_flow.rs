@@ -121,3 +121,59 @@ async fn an_attachment_at_the_ceiling_gets_the_hubs_message() {
         resp.text()
     );
 }
+
+#[tokio::test]
+async fn an_operator_lowered_upload_cap_is_the_one_enforced() {
+    let server = common::setup().await;
+    let token = common::authenticate(&server, &Identity::generate()).await;
+    let channel_id = channel(&server, &token).await;
+
+    let settings: Value = server
+        .get("/hub/settings")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    assert_eq!(settings["max_upload_bytes"], 25 * MB);
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({ "max_upload_bytes": 2 * MB }))
+        .await
+        .assert_status_ok();
+
+    let form = MultipartForm::new().add_part(
+        "file",
+        Part::bytes(vec![0u8; 3 * MB])
+            .file_name("big.png")
+            .mime_type("image/png"),
+    );
+    let resp = server
+        .post(&format!("/channels/{channel_id}/upload"))
+        .authorization_bearer(&token)
+        .multipart(form)
+        .await;
+    resp.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(resp.text().contains("2MB"), "got {:?}", resp.text());
+}
+
+#[tokio::test]
+async fn the_upload_cap_rejects_values_outside_its_bounds() {
+    let server = common::setup().await;
+    let token = common::authenticate(&server, &Identity::generate()).await;
+
+    for bytes in [1024, 26 * MB] {
+        server
+            .patch("/hub")
+            .authorization_bearer(&token)
+            .json(&json!({ "max_upload_bytes": bytes }))
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+    }
+    let settings: Value = server
+        .get("/hub/settings")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    assert_eq!(settings["max_upload_bytes"], 25 * MB);
+}
