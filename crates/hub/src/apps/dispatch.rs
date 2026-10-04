@@ -66,9 +66,6 @@ pub async fn dispatch_slash(
         app_name: String,
         webhook_url: Option<String>,
         privileged: bool,
-        // Reserved for per-user cooldown enforcement (spec §6). Not yet
-        // wired into the in-memory cooldown store.
-        #[allow(dead_code)]
         cooldown_seconds: i64,
     }
 
@@ -81,7 +78,6 @@ pub async fn dispatch_slash(
          LIMIT 1",
     )
     .bind(&command_name)
-    .bind(channel_id)
     .fetch_optional(&state.db)
     .await
     .ok()
@@ -104,6 +100,17 @@ pub async fn dispatch_slash(
             return None;
         }
     };
+
+    if let Some(left) = state.rate_limiters.check_app_cooldown(
+        &matched.app_pubkey,
+        &command_name,
+        invoker_pubkey,
+        matched.cooldown_seconds,
+    ) {
+        return Some(format!(
+            "/{command_name} is on cooldown. Try again in {left}s."
+        ));
+    }
 
     let message_id_hint = Uuid::new_v4().to_string();
 
