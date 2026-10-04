@@ -109,14 +109,9 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "PostgreSQL connection URL (required). Example: postgres://user:pass@host/dbname",
     ),
     (
-        wavvon_hub_env::DATABASE_READ_URL,
-        "(unset)",
-        "Read-replica URL (PostgreSQL only). All queries go to the primary when unset",
-    ),
-    (
         wavvon_hub_env::DB_MAX_CONNECTIONS,
         "5",
-        "Size of the PostgreSQL connection pool (applies to the read-replica pool too). \
+        "Size of the PostgreSQL connection pool. \
          Every request borrows a connection for the duration of a query and returns it, \
          so this caps concurrent database work, not concurrent users. Raise it for a busy \
          hub — but keep the total across all hubs sharing one PostgreSQL server under that \
@@ -284,11 +279,7 @@ pub struct Settings {
     /// when unset — with a warning, and only until embedded PostgreSQL lands.
     /// Env: WAVVON_DATABASE_URL
     pub database_url: Option<String>,
-    /// Read-replica URL. Only used when database_url is PostgreSQL.
-    /// If unset, all queries go to the primary.
-    pub database_read_url: Option<String>,
-    /// PostgreSQL connection-pool size, for the primary and the read replica
-    /// alike. Env: WAVVON_DB_MAX_CONNECTIONS
+    /// PostgreSQL connection-pool size. Env: WAVVON_DB_MAX_CONNECTIONS
     pub db_max_connections: u32,
     /// Enable trusted-proxy mode for the rate limiter.
     ///

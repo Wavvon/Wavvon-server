@@ -29,7 +29,6 @@ async fn start_hub() -> (String, common::TestDbGuard) {
         hub_name: "hub-updated-test".to_string(),
         hub_identity: Identity::generate(),
         db,
-        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

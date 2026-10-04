@@ -982,20 +982,7 @@ async fn main() -> Result<()> {
         .await
         .expect("Failed to connect to database");
 
-    let read_pool = if let Some(read_url) = settings.database_read_url.as_deref() {
-        Some(
-            PgPoolOptions::new()
-                .max_connections(settings.db_max_connections)
-                .connect(read_url)
-                .await
-                .expect("Failed to connect to read-replica database"),
-        )
-    } else {
-        None
-    };
-
     let db = write_pool;
-    let db_read = read_pool;
 
     // Before migrations: a server below the floor otherwise fails partway
     // through applying the schema, and the operator sees a CREATE TABLE
@@ -1258,7 +1245,6 @@ async fn main() -> Result<()> {
         hub_name: "my-hub".to_string(),
         hub_identity,
         db,
-        db_read,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

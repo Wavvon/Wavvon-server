@@ -230,9 +230,6 @@ pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
     pub db: PgPool,
-    /// Read-replica pool, if configured. Route handlers that do only reads
-    /// may use this via `state.db_read.as_ref().unwrap_or(&state.db)`.
-    pub db_read: Option<PgPool>,
     /// Outstanding auth challenges, keyed by the challenge hex (NOT the
     /// pubkey) so concurrent auth flows for the same key don't stomp each
     /// other's challenge — e.g. two simultaneous federated DM deliveries to
