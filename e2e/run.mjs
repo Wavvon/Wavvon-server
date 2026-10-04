@@ -2288,6 +2288,36 @@ try {
         `following the farm's own hub_url (${advertised}) must reach the hub`,
       );
     });
+
+    await scenario("an invite-only farm-hosted hub refuses a farm user without an invite", async () => {
+      // A fresh hub is invite_only. The farm token is a credential, not an
+      // invitation: the hub must run the same gate /auth/verify does (#101).
+      const hubUrl = `${farmA.url}/hub/${state.farmHubPubkey}`;
+      const as = async (id) => ({ Authorization: `Bearer ${await farmToken(farmA.url, id)}` });
+
+      const owner = await json(`${hubUrl}/me`, { headers: await as(admin) });
+      checkEq(owner.status, 200, `the farm admin must still be seated as owner: ${JSON.stringify(owner.body)}`);
+
+      const stranger = identity();
+      const refused = await json(`${hubUrl}/me`, { headers: await as(stranger) });
+      checkEq(refused.status, 403, `a farm user with no invite: ${JSON.stringify(refused.body)}`);
+
+      const inv = await json(`${hubUrl}/invites`, {
+        method: "POST",
+        headers: await as(admin),
+        body: JSON.stringify({}),
+      });
+      check(inv.status === 200 || inv.status === 201, `owner mints an invite: ${JSON.stringify(inv.body)}`);
+
+      const joined = await json(`${hubUrl}/join/${inv.body.code}`, {
+        method: "POST",
+        headers: await as(stranger),
+      });
+      checkEq(joined.status, 204, `redeeming the invite with a farm token: ${JSON.stringify(joined.body)}`);
+
+      const after = await json(`${hubUrl}/me`, { headers: await as(stranger) });
+      checkEq(after.status, 200, `a redeemed farm user is a member: ${JSON.stringify(after.body)}`);
+    });
   }
 
   // ── two farms, and an alliance across the boundary ──────────────────────

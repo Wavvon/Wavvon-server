@@ -642,6 +642,12 @@ pub async fn join_with_invite(
         ));
     }
 
+    // A farm-token caller who is not yet a member reaches this route past the
+    // invite gate (the invite in the path is the gate), so the admission that
+    // `/auth/verify` performs for a presented code happens here. A no-op for a
+    // member.
+    crate::auth::handlers::admit_member(&state.db, &user.public_key).await?;
+
     // Increment use count
     sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1")
         .bind(&code)
@@ -681,6 +687,19 @@ pub async fn is_invite_only(db: &sqlx::PgPool) -> Result<bool, (StatusCode, Stri
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(value.as_deref() == Some("true"))
+}
+
+/// The refusal a first-contact identity gets on a closed hub when it presents
+/// no invite. One copy, shared by `/auth/verify` and the farm-token path in
+/// `AuthUser`, so the two doors cannot disagree about what "closed" means.
+pub async fn refuse_if_invite_only(db: &sqlx::PgPool) -> Result<(), (StatusCode, String)> {
+    if is_invite_only(db).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub requires an invite code".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn generate_invite_code() -> String {

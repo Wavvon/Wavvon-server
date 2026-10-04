@@ -502,8 +502,17 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 
             // After the ban checks: admitting first would hand a banned key the
             // everyone floor in the same breath as refusing it.
+            // The same gate `/auth/verify` applies to a first-contact identity.
+            // The farm token carries no invite, so a closed hub is entered by
+            // redeeming one at `POST /join/{code}`, which admits after
+            // validating it — that one route is let through here.
             if !checks.is_member {
-                crate::auth::handlers::admit_member(&state.db, &public_key).await?;
+                let redeeming = parts.method == axum::http::Method::POST
+                    && parts.uri.path().starts_with("/join/");
+                if !redeeming {
+                    crate::routes::invites::refuse_if_invite_only(&state.db).await?;
+                    crate::auth::handlers::admit_member(&state.db, &public_key).await?;
+                }
             }
 
             if checks.approval_status == "pending" {

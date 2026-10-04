@@ -565,14 +565,7 @@ pub async fn verify(
                 invite_created_by = Some(redemption.created_by);
                 invite_grant_role_id = redemption.grant_role_id;
             }
-            None => {
-                if crate::routes::invites::is_invite_only(&state.db).await? {
-                    return Err((
-                        StatusCode::FORBIDDEN,
-                        "This hub requires an invite code".to_string(),
-                    ));
-                }
-            }
+            None => crate::routes::invites::refuse_if_invite_only(&state.db).await?,
         }
     }
 
