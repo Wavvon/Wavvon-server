@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -7,28 +6,15 @@ use axum::Json;
 use sqlx::Row;
 use wavvon_identity::{PairingClaim, PairingComplete, PairingOffer, PairingStatus, SubkeyCert};
 
+use crate::auth::handlers::unix_timestamp;
+use crate::routes::identity::{bad, db_err};
 use crate::state::AppState;
 
 const MAX_OFFER_LIFETIME_SECS: u64 = 300;
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn bad(msg: impl Into<String>) -> (StatusCode, String) {
-    (StatusCode::BAD_REQUEST, msg.into())
-}
-
-fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-}
-
 async fn prune_expired(pool: &sqlx::PgPool) {
     let _ = sqlx::query("DELETE FROM pairing_offers WHERE expires_at < $1")
-        .bind(now_secs())
+        .bind(unix_timestamp())
         .execute(pool)
         .await;
 }
@@ -47,7 +33,7 @@ pub async fn post_offer(
     if offer.expires_at.saturating_sub(offer.issued_at) > MAX_OFFER_LIFETIME_SECS {
         return Err(bad("offer lifetime exceeds 5 minutes"));
     }
-    let now = now_secs() as u64;
+    let now = unix_timestamp() as u64;
     if offer.expires_at <= now {
         return Err(bad("offer is already expired"));
     }
@@ -73,8 +59,8 @@ pub async fn post_offer(
     .bind(offer.issued_at as i64)
     .bind(offer.expires_at as i64)
     .bind(&offer.signature)
-    .bind(now_secs())
-    .bind(now_secs())
+    .bind(unix_timestamp())
+    .bind(unix_timestamp())
     .execute(&state.db)
     .await
     .map_err(db_err)?;
@@ -102,7 +88,7 @@ pub async fn post_claim(
 
     let current_state: String = row.get("state");
     let expires_at: i64 = row.get("expires_at");
-    if expires_at < now_secs() {
+    if expires_at < unix_timestamp() {
         return Err((StatusCode::GONE, "Token expired".to_string()));
     }
     if current_state != "pending" {
@@ -124,7 +110,7 @@ pub async fn post_claim(
     .bind(&claim.subkey_pubkey)
     .bind(&claim.device_label)
     .bind(&claim.proof)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .bind(&claim.pairing_token)
     .execute(&state.db)
     .await
@@ -162,7 +148,7 @@ pub async fn post_complete(
     let claimed_subkey: Option<String> = row.get("subkey_pubkey");
     let expires_at: i64 = row.get("expires_at");
 
-    if expires_at < now_secs() {
+    if expires_at < unix_timestamp() {
         return Err((StatusCode::GONE, "Token expired".to_string()));
     }
     if current_state != "claimed" {
@@ -205,7 +191,7 @@ pub async fn post_complete(
     .bind(complete.cert.not_after.map(|t| t as i64))
     .bind(&fallback_json)
     .bind(&complete.cert.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(&mut *tx)
     .await
     .map_err(db_err)?;
@@ -222,7 +208,7 @@ pub async fn post_complete(
     .bind(&cert_json)
     .bind(&complete.wrapped_blob_key_hex)
     .bind(&complete.wrapped_dh_seed_hex)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .bind(&complete.pairing_token)
     .execute(&mut *tx)
     .await
@@ -250,7 +236,7 @@ pub async fn get_status(
     let row = row.ok_or((StatusCode::NOT_FOUND, "Unknown token".to_string()))?;
 
     let expires_at: i64 = row.get("expires_at");
-    if expires_at < now_secs() {
+    if expires_at < unix_timestamp() {
         return Ok(Json(PairingStatus::Expired));
     }
 

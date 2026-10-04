@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, CERTS_ISSUE, CERTS_REVOKE, CERTS_SETTINGS};
+use crate::routes::hub::load_hub_url;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -1004,15 +1005,6 @@ pub async fn load_cert_requirement(state: &AppState) -> Option<CertRequirement> 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async fn load_hub_url(state: &AppState) -> String {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_url'")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-}
 
 async fn setting_i64(state: &AppState, key: &str, default: i64) -> i64 {
     sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")

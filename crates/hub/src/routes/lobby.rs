@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, HUB_SETTINGS};
+use crate::routes::hub::{read_setting, upsert_setting};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -54,33 +55,6 @@ pub struct UpdateLobbySettingsRequest {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
-        .bind(key)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-}
-
-async fn upsert_setting(
-    db: &sqlx::PgPool,
-    key: &str,
-    value: &str,
-) -> Result<(), (StatusCode, String)> {
-    sqlx::query(
-        "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
-         ON CONFLICT(key) DO UPDATE SET value = $3",
-    )
-    .bind(key)
-    .bind(value)
-    .bind(value)
-    .execute(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Handlers

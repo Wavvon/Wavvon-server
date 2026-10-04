@@ -17,10 +17,8 @@ use crate::state::AppState;
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn sha256_hex(data: &[u8]) -> String {
-    let mut h = Sha256::new();
-    h.update(data);
-    hex::encode(h.finalize())
+pub(crate) fn sha256_hex(data: impl AsRef<[u8]>) -> String {
+    hex::encode(Sha256::digest(data))
 }
 
 /// Constant-time byte comparison to avoid timing attacks on token comparison.
@@ -133,7 +131,7 @@ pub async fn create_webhook(
         rand::thread_rng().fill_bytes(&mut bytes);
         hex::encode(bytes)
     };
-    let token_hash = sha256_hex(secret_token.as_bytes());
+    let token_hash = sha256_hex(&secret_token);
 
     sqlx::query(
         "INSERT INTO webhooks(id, channel_id, secret_token_hash, display_name, avatar_url, created_by_pubkey, rate_limit, active, created_at)
@@ -247,7 +245,7 @@ pub async fn regenerate_webhook(
     perms.require(permissions::WEBHOOKS_INCOMING_MANAGE)?;
 
     let secret_token = new_secret_token();
-    let token_hash = sha256_hex(secret_token.as_bytes());
+    let token_hash = sha256_hex(&secret_token);
 
     let display_name: Option<String> = sqlx::query_scalar(
         "UPDATE webhooks SET secret_token_hash = $1, active = TRUE
@@ -329,7 +327,7 @@ pub async fn post_webhook_message(
     ))?;
 
     // Constant-time hash comparison.
-    let presented_hash = sha256_hex(token.as_bytes());
+    let presented_hash = sha256_hex(token);
     if !constant_time_eq(
         presented_hash.as_bytes(),
         webhook.secret_token_hash.as_bytes(),

@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::handlers::civil_from_unix;
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, DIRECTORY_PUBLISH};
 use crate::state::AppState;
@@ -18,36 +19,15 @@ fn current_nonce() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    nonce_at(secs)
+}
 
+fn nonce_at(secs: u64) -> String {
     // Round down to the nearest minute.
     let secs = (secs / 60) * 60;
 
-    // Decompose into date/time components without external crates.
-    let days_since_epoch = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hour = time_of_day / 3600;
-    let minute = (time_of_day % 3600) / 60;
-
-    // Gregorian calendar from a Julian Day Number approach.
-    // days_since_epoch is relative to 1970-01-01.
-    let jdn = days_since_epoch + 2_440_588; // JDN of 1970-01-01 is 2440588
-
-    // Algorithm from https://en.wikipedia.org/wiki/Julian_day#Julian_day_number_calculation
-    let l = jdn + 68_569;
-    let n = (4 * l) / 146_097;
-    let l = l - (146_097 * n).div_ceil(4);
-    let year_i = (4_000 * (l + 1)) / 1_461_001;
-    let l = l - (1_461 * year_i) / 4 + 31;
-    let month_i = (80 * l) / 2_447;
-    let day = l - (2_447 * month_i) / 80;
-    let l = month_i / 11;
-    let month = month_i + 2 - 12 * l;
-    let year = 100 * (n - 49) + year_i + l;
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}Z",
-        year, month, day, hour, minute
-    )
+    let (y, mo, d, h, mi, _) = civil_from_unix(secs);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}Z")
 }
 
 /// Build the canonical JSON payload exactly as the discovery API expects.
@@ -136,6 +116,22 @@ pub async fn sign_for_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nonce_at_pins_format() {
+        let cases: [(u64, &str); 7] = [
+            (0, "1970-01-01T00:00Z"),
+            (86_399, "1970-01-01T23:59Z"),
+            (951_868_800, "2000-03-01T00:00Z"),
+            (1_700_000_000, "2023-11-14T22:13Z"),
+            (1_709_251_199, "2024-02-29T23:59Z"),
+            (1_709_251_200, "2024-03-01T00:00Z"),
+            (4_107_542_400, "2100-03-01T00:00Z"),
+        ];
+        for (secs, want) in cases {
+            assert_eq!(nonce_at(secs), want, "secs={secs}");
+        }
+    }
 
     #[test]
     fn canonical_payload_key_order_and_tag_sort() {

@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use uuid::Uuid;
 
+use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::{AuthUser, PeerHub};
 use crate::permissions;
 use crate::routes::chat_models::ChatEvent;
@@ -87,10 +88,6 @@ async fn require_reply(
         return Err((StatusCode::NOT_FOUND, "reply_not_found".to_string()));
     }
     Ok(row)
-}
-
-fn unix_now() -> i64 {
-    crate::auth::handlers::unix_timestamp()
 }
 
 /// Broadcast a forum event over the chat channel so WS subscribers receive it.
@@ -443,7 +440,7 @@ pub async fn create_post(
     let tag_ids = validate_post_tags(&state.db, &channel_id, &requested_tags, require_tag).await?;
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
     let attachments_json = encode_attachments(&req.attachments);
 
     let mut tx = state
@@ -648,7 +645,7 @@ pub async fn edit_post(
         None => None,
     };
 
-    let now = unix_now();
+    let now = unix_timestamp();
     let mut tx = state
         .db
         .begin()
@@ -727,7 +724,7 @@ pub async fn delete_post(
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE posts SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&post_id)
@@ -793,7 +790,7 @@ pub async fn create_reply(
     }
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
     let attachments_json = encode_attachments(&req.attachments);
 
     sqlx::query(
@@ -867,7 +864,7 @@ pub async fn edit_reply(
         return Err((StatusCode::BAD_REQUEST, "body_required".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE post_replies SET body = $1, edited_at = $2 WHERE id = $3")
         .bind(&body)
         .bind(now)
@@ -914,7 +911,7 @@ pub async fn delete_reply(
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE post_replies SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&reply_id)
@@ -1098,7 +1095,7 @@ pub async fn mark_post_read(
     // Ensure the post exists and belongs to this channel.
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO post_reads (user_pubkey, post_id, read_at) VALUES ($1, $2, $3)
          ON CONFLICT (user_pubkey, post_id) DO UPDATE SET read_at = EXCLUDED.read_at",
@@ -1137,7 +1134,7 @@ pub async fn add_post_reaction(
         ));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO post_reactions (post_id, emoji, user_key, created_at)
          VALUES ($1, $2, $3, $4) ON CONFLICT (post_id, emoji, user_key) DO NOTHING",
@@ -1215,7 +1212,7 @@ pub async fn add_reply_reaction(
         ));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO reply_reactions (reply_id, emoji, user_key, created_at)
          VALUES ($1, $2, $3, $4) ON CONFLICT (reply_id, emoji, user_key) DO NOTHING",
@@ -1391,7 +1388,7 @@ pub async fn create_tag(
     let position = req.position.unwrap_or(0);
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO forum_tags (id, channel_id, label, color, position, created_at)
          VALUES ($1, $2, $3, $4, $5, $6)",
@@ -1653,7 +1650,7 @@ pub async fn federated_create_post(
     }
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
 
     sqlx::query(
         "INSERT INTO posts (id, channel_id, author_pubkey, author_hub, title, body, created_at, last_activity_at)
@@ -1746,7 +1743,7 @@ pub async fn federated_create_reply(
     }
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
 
     sqlx::query(
         "INSERT INTO post_replies (id, post_id, author_pubkey, author_hub, body, created_at, reply_to_id)
@@ -1820,7 +1817,7 @@ pub async fn federated_add_post_reaction(
         ));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO post_reactions (post_id, emoji, user_key, created_at)
          VALUES ($1, $2, $3, $4) ON CONFLICT (post_id, emoji, user_key) DO NOTHING",
@@ -1880,7 +1877,7 @@ pub async fn federated_delete_post(
         return Err((StatusCode::FORBIDDEN, "not_your_content".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE posts SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&post_id)
@@ -1923,7 +1920,7 @@ pub async fn federated_delete_reply(
         return Err((StatusCode::FORBIDDEN, "not_your_content".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE post_replies SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&reply_id)
