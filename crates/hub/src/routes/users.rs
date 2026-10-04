@@ -211,11 +211,11 @@ pub async fn list_users(
         "SELECT u.public_key, u.display_name, u.avatar,
                 u.presence_status, u.presence_custom, u.birthday, u.name_color,
                 (SELECT r.name FROM roles r
-                 INNER JOIN user_roles ur ON r.id = ur.role_id
+                 INNER JOIN member_roles ur ON r.id = ur.role_id
                  WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
                  ORDER BY r.priority DESC LIMIT 1) AS group_role,
                 (SELECT r.color FROM roles r
-                 INNER JOIN user_roles ur ON r.id = ur.role_id
+                 INNER JOIN member_roles ur ON r.id = ur.role_id
                  WHERE ur.user_public_key = u.public_key AND r.color IS NOT NULL
                  ORDER BY r.priority DESC LIMIT 1) AS role_color
          FROM users u
@@ -225,7 +225,7 @@ pub async fn list_users(
                 ((SELECT COALESCE(display_name, '') FROM users WHERE public_key = $2), $2))
            AND NOT EXISTS (SELECT 1 FROM bans b WHERE b.target_public_key = u.public_key)
            AND EXISTS
-                (SELECT 1 FROM user_roles ur2 WHERE ur2.user_public_key = u.public_key)
+                (SELECT 1 FROM users um WHERE um.public_key = u.public_key AND um.is_member)
          ORDER BY COALESCE(u.display_name, ''), u.public_key
          LIMIT $3",
     )
@@ -397,7 +397,7 @@ pub async fn get_user_profile(
     let roles: Vec<RoleRow> = sqlx::query_as(
         "SELECT r.id, r.name, r.color, r.icon, r.category_id
          FROM roles r
-         INNER JOIN user_roles ur ON r.id = ur.role_id
+         INNER JOIN member_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )

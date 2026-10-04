@@ -49,7 +49,7 @@ async fn can_manage_alliance(
     sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM alliance_managers am
-             JOIN user_roles ur ON ur.role_id = am.role_id
+             JOIN member_roles ur ON ur.role_id = am.role_id
              WHERE am.alliance_id = $1 AND ur.user_public_key = $2
          )",
     )

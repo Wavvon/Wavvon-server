@@ -786,7 +786,7 @@ pub async fn list_members(
     )> = sqlx::query_as(
         "SELECT ur.user_public_key, r.id, r.name, r.priority, r.display_separately, r.created_at,
                 r.color, r.icon, r.category_id
-         FROM user_roles ur
+         FROM member_roles ur
          INNER JOIN roles r ON r.id = ur.role_id
          WHERE ur.user_public_key = ANY($1)
          ORDER BY ur.user_public_key, r.priority DESC",

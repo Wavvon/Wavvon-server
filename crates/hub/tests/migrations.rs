@@ -153,3 +153,47 @@ fn added_columns_never_require_a_value_an_older_binary_cannot_supply() {
         offenders.join("\n")
     );
 }
+
+#[tokio::test]
+async fn membership_column_backfills_from_roles_and_drops_explicit_everyone_rows() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    // Put the database back in its pre-`is_member` shape.
+    for sql in [
+        "DROP VIEW member_roles",
+        "ALTER TABLE users DROP COLUMN is_member",
+        "INSERT INTO users (public_key, first_seen_at) VALUES ('old-member', 1), ('old-granted', 1), ('old-stranger', 1)",
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES ('old-member', 'builtin-everyone', 1), ('old-granted', 'builtin-owner', 1)",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    let members: Vec<String> =
+        sqlx::query_scalar("SELECT public_key FROM users WHERE is_member ORDER BY public_key")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(members, vec!["old-granted", "old-member"]);
+
+    let everyone_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE role_id = 'builtin-everyone'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(everyone_rows, 0, "the floor is implicit now");
+
+    // A stranger handed a role later is not promoted by a restart.
+    sqlx::query("INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES ('old-stranger', 'builtin-owner', 2)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    db::migrations::run(&pool).await.unwrap();
+    let promoted: bool =
+        sqlx::query_scalar("SELECT is_member FROM users WHERE public_key = 'old-stranger'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!promoted);
+}

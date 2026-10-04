@@ -451,7 +451,7 @@ pub struct AppState {
     /// The operator-configured owner public key, if any (`WAVVON_OWNER_PUBKEY`).
     ///
     /// When set, startup seeding already inserted a `builtin-owner` row before
-    /// the server accepted connections.  `assign_initial_roles` checks this to
+    /// the server accepted connections.  `auth::handlers::verify` checks this to
     /// decide whether the first-registrant auto-grant should run: if it is
     /// `Some`, the auto-grant is skipped entirely.
     pub owner_pubkey: Option<String>,

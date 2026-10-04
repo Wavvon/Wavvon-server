@@ -15,16 +15,25 @@ use crate::state::AppState;
 
 use super::models::{require_can_moderate, BanRow, MuteRow};
 
-/// Membership ends on kick/ban: strip the target's roles (member = has
-/// roles; /users hides role-less non-bots) and tell connected clients to
+/// Membership ends on kick/ban: clear `is_member` and strip the target's
+/// roles in one transaction (a banned key must not keep the everyone floor;
+/// /users hides non-members) and tell connected clients to
 /// refresh their member list. The users row is deliberately kept so old
 /// messages stay attributed.
 async fn end_membership(state: &AppState, target: &str) -> Result<(), (StatusCode, String)> {
+    let db_err = |e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+    sqlx::query("UPDATE users SET is_member = FALSE WHERE public_key = $1")
+        .bind(target)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
     sqlx::query("DELETE FROM user_roles WHERE user_public_key = $1")
         .bind(target)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
 
     // MemberOffline prompts clients to drop/grey the row now; the next
     // /users refetch removes them entirely.

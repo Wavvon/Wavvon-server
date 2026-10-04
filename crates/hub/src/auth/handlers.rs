@@ -506,12 +506,11 @@ pub async fn verify(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Check invite requirement for new users
-    let has_roles: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = $1")
-            .bind(&canonical_pubkey)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let is_member: bool = sqlx::query_scalar("SELECT is_member FROM users WHERE public_key = $1")
+        .bind(&canonical_pubkey)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Role granted by a role-granting invite (task #34), if the joining
     // user presented one. Assigned alongside builtin-everyone below.
@@ -543,7 +542,7 @@ pub async fn verify(
     // `InviteRedemption::was_bound` and the wiki's `pubkey-bound-invites.md`.
     let mut admitted_by_named_invite = false;
 
-    if has_roles == 0 && req.is_hub != Some(true) {
+    if !is_member && req.is_hub != Some(true) {
         // A code that is presented is a code that is spent, whether or not
         // this hub demanded one. It used to be read only when `invite_only`
         // was on, which meant an open hub ignored the role grant the invite
@@ -577,16 +576,11 @@ pub async fn verify(
         }
     }
 
-    // Assign roles for new users
-    let has_roles: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM user_roles WHERE user_public_key = $1")
-            .bind(&canonical_pubkey)
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Admit a first-contact identity. `is_member` was read before the invite
+    // gate and nothing in between changes it.
 
-    if has_roles == 0 {
-        assign_initial_roles(&state.db, &canonical_pubkey, now).await?;
+    if !is_member {
+        admit_member(&state.db, &canonical_pubkey).await?;
         if existing_users == 0 {
             sqlx::query(
                 "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
@@ -895,26 +889,16 @@ pub async fn validate_ws_token(
     })
 }
 
-/// Assign builtin roles to a brand-new user who has none yet.
-///
-/// Grants `builtin-everyone` to a new user. The caller additionally grants
-/// `builtin-owner` when this is the first user on the hub.
+/// Admit a brand-new user: set `users.is_member`, which is what gives them the
+/// `builtin-everyone` floor (no `user_roles` row). The caller additionally
+/// grants `builtin-owner` when this is the first user on the hub.
 /// Returns an error only for genuine DB failures so callers can propagate it.
-pub async fn assign_initial_roles(
-    db: &PgPool,
-    public_key: &str,
-    now: i64,
-) -> Result<(), (StatusCode, String)> {
-    sqlx::query(
-        "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-         VALUES ($1, 'builtin-everyone', $2)
-         ON CONFLICT (user_public_key, role_id) DO NOTHING",
-    )
-    .bind(public_key)
-    .bind(now)
-    .execute(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+pub async fn admit_member(db: &PgPool, public_key: &str) -> Result<(), (StatusCode, String)> {
+    sqlx::query("UPDATE users SET is_member = TRUE WHERE public_key = $1")
+        .bind(public_key)
+        .execute(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(())
 }

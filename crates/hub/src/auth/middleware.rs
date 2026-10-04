@@ -473,7 +473,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             // One combined query collects most of what the admission checks
-            // below need (role_count, ban, approval_status) in a single
+            // below need (is_member, ban, approval_status) in a single
             // round-trip. The federated-ban decision is NOT inlined here: it
             // has override + per-source-policy rules that live in
             // moderation::is_federated_banned — duplicating them as SQL once
@@ -481,7 +481,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             let checks: FarmTokenChecks = sqlx::query_as(
                 "SELECT
                      u.approval_status,
-                     (SELECT COUNT(*) FROM user_roles      WHERE user_public_key  = $1) AS role_count,
+                     u.is_member,
                      (SELECT COUNT(*) FROM bans            WHERE target_public_key = $1
                           AND (expires_at IS NULL OR expires_at > $2)) AS ban_count
                  FROM users u WHERE u.public_key = $1",
@@ -492,16 +492,18 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            if checks.role_count == 0 {
-                crate::auth::handlers::assign_initial_roles(&state.db, &public_key, now).await?;
-            }
-
             if checks.ban_count > 0 {
                 return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
             }
 
             if crate::routes::moderation::is_federated_banned(&state.db, &public_key).await? {
                 return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+            }
+
+            // After the ban checks: admitting first would hand a banned key the
+            // everyone floor in the same breath as refusing it.
+            if !checks.is_member {
+                crate::auth::handlers::admit_member(&state.db, &public_key).await?;
             }
 
             if checks.approval_status == "pending" {
@@ -573,6 +575,6 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 #[derive(sqlx::FromRow)]
 struct FarmTokenChecks {
     approval_status: String,
-    role_count: i64,
+    is_member: bool,
     ban_count: i64,
 }

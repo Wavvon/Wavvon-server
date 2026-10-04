@@ -326,7 +326,7 @@ pub async fn user_permissions(
     let roles = sqlx::query_as::<_, RoleRow>(
         "SELECT r.id, r.name, r.priority, r.created_at
          FROM roles r
-         INNER JOIN user_roles ur ON r.id = ur.role_id
+         INNER JOIN member_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1",
     )
     .bind(public_key)

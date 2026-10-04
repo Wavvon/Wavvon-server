@@ -455,7 +455,7 @@ async fn fetch_user_roles(
         "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at,
                 r.color, r.icon, r.category_id
          FROM roles r
-         INNER JOIN user_roles ur ON r.id = ur.role_id
+         INNER JOIN member_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )
@@ -588,8 +588,8 @@ struct RoleRow {
 /// Self only. Removing *someone else* is moderation's job and means something
 /// different.
 ///
-/// Note that dropping the roles re-arms the invite gate — it is
-/// `has_roles == 0` — so on an invite-only hub this makes the return that is
+/// Note that clearing `is_member` (in the same transaction that drops the
+/// roles) re-arms the invite gate, so on an invite-only hub this makes the return that is
 /// free today require a new invite. That is intended, and the client says so
 /// before asking.
 pub async fn leave_hub(
@@ -625,7 +625,8 @@ pub async fn leave_hub(
             accent_color = NULL, cover = NULL, favorite_hubs = NULL,
             show_hubs = NULL, birthday = NULL, name_color = NULL,
             presence_status = NULL, presence_custom = NULL,
-            approval_status = 'left'
+            approval_status = 'left',
+            is_member = FALSE
          WHERE public_key = $1",
     )
     .bind(pk)

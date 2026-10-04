@@ -72,7 +72,8 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             favorite_hubs      TEXT, -- JSON [{url,name,icon}]; show_hubs gates visibility
             show_hubs          BOOLEAN, -- NULL = false
             birthday           TEXT, -- MM-DD, never a year; validated in routes/me.rs
-            name_color         TEXT -- per-user override; hub name_color_mode picks the winner
+            name_color         TEXT, -- per-user override; hub name_color_mode picks the winner
+            is_member          BOOLEAN NOT NULL DEFAULT FALSE -- the one answer to: is this identity in the community
         )",
     )
     .execute(pool)
@@ -409,6 +410,47 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             assigned_at     BIGINT NOT NULL,
             PRIMARY KEY (user_public_key, role_id)
         )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Membership is `users.is_member`; `builtin-everyone` is the floor every
+    // member gets without a `user_roles` row. A database that predates the
+    // column has no way to say who is a member except "holds any role", so
+    // that is the backfill, and the now-implicit everyone rows go. Gated on
+    // the column's absence so it runs once: a stranger handed a role later
+    // must not be promoted to member by a restart.
+    let has_member_col: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'is_member')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_member_col {
+        let mut tx = pool.begin().await?;
+        sqlx::query("ALTER TABLE users ADD COLUMN is_member BOOLEAN NOT NULL DEFAULT FALSE")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE users SET is_member = TRUE
+             WHERE EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_public_key = users.public_key)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM user_roles WHERE role_id = 'builtin-everyone'")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+
+    // The effective role set: explicit grants plus the everyone floor for
+    // members. Read paths use this instead of `user_roles`; writes stay on
+    // `user_roles`, which holds only what is added on top of the floor.
+    sqlx::query(
+        "CREATE OR REPLACE VIEW member_roles (user_public_key, role_id) AS
+         SELECT user_public_key, role_id FROM user_roles
+         UNION
+         SELECT public_key, 'builtin-everyone' FROM users WHERE is_member",
     )
     .execute(pool)
     .await?;

@@ -457,7 +457,7 @@ pub async fn list_role_members(
     perms.require(ROLES_MANAGE)?;
 
     let members: Vec<String> =
-        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+        sqlx::query_scalar("SELECT user_public_key FROM member_roles WHERE role_id = $1")
             .bind(&role_id)
             .fetch_all(&state.db)
             .await
@@ -510,7 +510,7 @@ async fn fetch_user_roles_response(
         "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at,
                 r.color, r.icon, r.category_id
          FROM roles r
-         INNER JOIN user_roles ur ON r.id = ur.role_id
+         INNER JOIN member_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )
