@@ -1475,3 +1475,61 @@ async fn alliance_forum_retraction_rejects_wrong_origin_hub() {
     let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
     assert!(!r.is_deleted);
 }
+
+/// `created_at` has one-second resolution, so a busy thread has many replies
+/// sharing a second. A cursor on `created_at` alone skipped every one that
+/// shared the boundary row's second.
+#[tokio::test]
+async fn forum_reply_paging_returns_every_reply_once_within_one_second() {
+    let server = common::setup().await;
+    let token = common::authenticate(&server, &Identity::generate()).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "Busy", "body": "Body" }))
+        .await;
+    let post_id = resp.json::<PostDetail>().summary.id;
+
+    let mut created = Vec::new();
+    for i in 0..7 {
+        let resp = server
+            .post(&format!("/channels/{channel_id}/posts/{post_id}/replies"))
+            .add_header("Authorization", format!("Bearer {token}"))
+            .json(&json!({ "body": format!("reply {i}") }))
+            .await;
+        created.push(resp.json::<Value>()["id"].as_str().unwrap().to_string());
+    }
+    sqlx::query("UPDATE post_replies SET created_at = 1700000000 WHERE post_id = $1")
+        .bind(&post_id)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let url = match &after {
+            Some(a) => format!("/channels/{channel_id}/posts/{post_id}?limit=2&after={a}"),
+            None => format!("/channels/{channel_id}/posts/{post_id}?limit=2"),
+        };
+        let page: PostDetail = server
+            .get(&url)
+            .add_header("Authorization", format!("Bearer {token}"))
+            .await
+            .json();
+        seen.extend(page.replies.iter().map(|r| r.id.clone()));
+        match page.reply_cursor {
+            Some(c) => after = Some(c),
+            None => break,
+        }
+        assert!(seen.len() <= created.len(), "paging never ends: {seen:?}");
+    }
+
+    let mut expected = created.clone();
+    expected.sort();
+    let mut got = seen.clone();
+    got.sort();
+    assert_eq!(got, expected, "every reply exactly once");
+}
