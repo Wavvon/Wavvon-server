@@ -197,3 +197,48 @@ async fn membership_column_backfills_from_roles_and_drops_explicit_everyone_rows
             .unwrap();
     assert!(!promoted);
 }
+
+#[tokio::test]
+async fn peers_admitted_as_members_are_demoted_once_and_people_are_spared() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    for sql in [
+        "INSERT INTO users (public_key, first_seen_at, is_member, display_name) VALUES
+            ('hub-only', 1, TRUE, NULL), ('hub-person', 1, TRUE, 'Alice'), ('hub-owner', 1, TRUE, NULL),
+            ('plain-member', 1, TRUE, NULL)",
+        "INSERT INTO peers (public_key, name, url, added_at) VALUES
+            ('hub-only', 'x', '', 1), ('hub-person', 'y', '', 1), ('hub-owner', 'z', '', 1)",
+        "INSERT INTO user_roles (user_public_key, role_id, assigned_at) VALUES ('hub-owner', 'builtin-owner', 1)",
+        "INSERT INTO sessions (token, public_key, created_at, scope) VALUES ('t1', 'hub-only', 1, 'member')",
+        "DELETE FROM hub_settings WHERE key = 'peer_membership_cleanup_v1'",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    let members: Vec<String> =
+        sqlx::query_scalar("SELECT public_key FROM users WHERE is_member ORDER BY public_key")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(members, vec!["hub-owner", "hub-person", "plain-member"]);
+    let scope: String = sqlx::query_scalar("SELECT scope FROM sessions WHERE token = 't1'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(scope, "peer");
+
+    // Once only: a later admission is not undone by a restart.
+    sqlx::query("UPDATE users SET is_member = TRUE WHERE public_key = 'hub-only'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    db::migrations::run(&pool).await.unwrap();
+    let again: bool =
+        sqlx::query_scalar("SELECT is_member FROM users WHERE public_key = 'hub-only'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(again);
+}

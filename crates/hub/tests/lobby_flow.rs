@@ -354,10 +354,10 @@ async fn hub_peer_join_is_never_lobby_confined_even_below_level() {
     assert_eq!(regular_body["scope"], "lobby");
 
     // A federating peer hub authenticating with is_hub=true, same level 0
-    // (< 8), must be exempt from the lobby gate and land at scope="member" —
-    // it's a machine proxying federation traffic, not a human doing PoW, and
-    // a lobby-confined peer session would opaquely fail every
-    // /federation/* call (not on the lobby allowlist). See
+    // (< 8), must be exempt from the lobby gate and land at scope="peer"
+    // (never "lobby") — it's a machine proxying federation traffic, not a
+    // human doing PoW, and a lobby-confined peer session would opaquely fail
+    // every /federation/* call (not on the lobby allowlist). See
     // auth::handlers::verify's `owner_exempt` computation.
     let peer_hub = Identity::generate();
     let peer_pub_key = peer_hub.public_key_hex();
@@ -379,16 +379,16 @@ async fn hub_peer_join_is_never_lobby_confined_even_below_level() {
     resp.assert_status_ok();
     let peer_body: Value = resp.json();
     assert_eq!(
-        peer_body["scope"], "member",
+        peer_body["scope"], "peer",
         "a federating hub peer must never be lobby-confined regardless of PoW level"
     );
 
     // Confirm the exemption is real (not just a scope-string coincidence):
-    // the resulting session is unconfined on a member-only surface, unlike
-    // the regular sub-level newcomer's lobby-scoped token.
+    // the session reaches the peer surface, which the lobby allowlist would
+    // refuse.
     let peer_token = peer_body["token"].as_str().unwrap().to_string();
     server
-        .get("/channels")
+        .get("/alliances")
         .authorization_bearer(&peer_token)
         .await
         .assert_status_ok();

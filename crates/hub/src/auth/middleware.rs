@@ -143,6 +143,32 @@ fn alliance_voice_prefix_allowed(path: &str) -> bool {
     path.starts_with("/identity/") && path.ends_with("/dh-key")
 }
 
+/// Whether a `scope: "peer"` session may reach `method path`.
+///
+/// A peer hub is not a member of this hub: it holds no `is_member`, no role and
+/// no everyone floor, so permission checks alone would leave every route that
+/// only asks for *some* session (`/users`, profiles, `/channels`) open to any
+/// key that claims `is_hub`. This is the allowlist of what the federation
+/// client actually calls on a remote hub; each route behind it still decides
+/// for itself (alliance membership, the shared channel, the write policy).
+fn peer_path_allowed(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (method, seg.as_slice()) {
+        (&Method::GET, ["alliances"]) => true,
+        (&Method::GET, ["alliances", id]) => *id != "pending-invites",
+        (&Method::POST, ["alliances", _, "join"]) => true,
+        (&Method::GET, ["alliances", _, "channels"]) => true,
+        (&Method::GET | &Method::POST, ["alliances", _, "channels", _, "messages"]) => true,
+        (&Method::GET, ["alliances", _, "channels", _, "posts"]) => true,
+        (&Method::GET, ["alliances", _, "channels", _, "posts", _]) => true,
+        (&Method::POST, ["federation", "dm"]) => true,
+        (&Method::DELETE, ["federation", "alliance-member"]) => true,
+        (_, ["federation", "forum", ..]) => true,
+        _ => false,
+    }
+}
+
 /// Minimum seconds between farm pubkey re-fetch attempts (handles key rotation
 /// without hammering the farm on every bad-token request).
 const FARM_REFETCH_COOLDOWN: i64 = 60;
@@ -547,6 +573,11 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             if !MINI_APP_ALLOWED_PATHS.contains(&path) {
                 return Err((StatusCode::FORBIDDEN, "mini_app_scope_confined".to_string()));
             }
+        }
+
+        // Peer-hub confinement: see `peer_path_allowed`.
+        if scope == "peer" && !peer_path_allowed(&parts.method, parts.uri.path()) {
+            return Err((StatusCode::FORBIDDEN, "peer_scope_confined".to_string()));
         }
 
         // Alliance-voice confinement (alliances.md). A visitor is not a member

@@ -167,6 +167,7 @@ permission_catalogue! {
 /// is why §1.1 could move "can do everything" onto it without inventing a new
 /// place for ownership to live.
 pub const BUILTIN_OWNER_ROLE_ID: &str = "builtin-owner";
+pub const BUILTIN_EVERYONE_ROLE_ID: &str = "builtin-everyone";
 
 /// The scope of `id`, or `None` if the server does not know it.
 pub fn scope_of(id: &str) -> Option<Scope> {
@@ -540,6 +541,29 @@ pub async fn channel_permissions(
         max_priority: baseline.max_priority,
         // A channel overwrite cannot revoke ownership.
         is_owner: baseline.is_owner,
+    })
+}
+
+/// What a hub that is *not* a member of this one may do in `channel_id`: the
+/// `builtin-everyone` floor, adjusted by that role's overwrites on the channel
+/// and its ancestors, and nothing else. A federating peer holds no role of its
+/// own, so this is the ceiling for an act done on the strength of an alliance
+/// share (a message posted into a channel the alliance shares) — it can never
+/// exceed what an ordinary member could do there, and a channel locked for
+/// `everyone` stays locked.
+pub async fn everyone_channel_permissions(
+    db: &PgPool,
+    channel_id: &str,
+) -> Result<UserPermissions, (StatusCode, String)> {
+    let floor = [BUILTIN_EVERYONE_ROLE_ID.to_string()];
+    let baseline = fetch_permissions(db, &[BUILTIN_EVERYONE_ROLE_ID]).await?;
+    let chain = ancestor_chain(db, channel_id).await?;
+    let rows = fetch_overwrites(db, &chain, &floor).await?;
+    Ok(UserPermissions {
+        roles: Vec::new(),
+        effective: fold_overwrites(&baseline, &chain, &rows),
+        max_priority: 0,
+        is_owner: false,
     })
 }
 

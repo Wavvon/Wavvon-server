@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::federation::models::{
-    FederatedChannelResponse, FederatedMessageResponse, PeerInfo,
-};
+use wavvon_hub::federation::models::PeerInfo;
 use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
@@ -75,8 +73,8 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
 }
 
 #[tokio::test]
-async fn two_hubs_federate() {
-    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+async fn two_hubs_peer_without_gaining_membership() {
+    let (hub_a_url, hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
     let (hub_b_url, hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 
@@ -133,65 +131,28 @@ async fn two_hubs_federate() {
         .unwrap();
     assert_eq!(peers.len(), 1);
 
-    // Hub A: fetch channels from Hub B
-    let fed_channels: Vec<FederatedChannelResponse> = client
-        .get(format!(
-            "{hub_a_url}/federation/peers/{}/channels",
-            peer.public_key
-        ))
-        .bearer_auth(&token_a)
-        .send()
-        .await
-        .unwrap()
-        .json()
+    // Peering is not membership: Hub A's session on Hub B reaches neither
+    // Hub B's channel list nor its messages. What a peer may read is what an
+    // alliance shares with it (alliance_flow, peer_session_flow).
+    let peer_token = hub_a_state
+        .federation_client
+        .authenticate(&hub_b_url, &hub_a_state.hub_identity)
         .await
         .unwrap();
-    assert_eq!(fed_channels.len(), 1);
-    assert_eq!(fed_channels[0].name, "hub-b-general");
-
-    // Hub A: fetch messages from the federated channel
-    let fed_messages: Vec<FederatedMessageResponse> = client
-        .get(format!(
-            "{hub_a_url}/federation/channels/{}/messages",
-            fed_channels[0].id
-        ))
-        .bearer_auth(&token_a)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(fed_messages.len(), 1);
-    assert_eq!(fed_messages[0].content, "hello from hub B!");
-    assert_eq!(fed_messages[0].sender, user_b.public_key_hex());
-
-    // Hub A: send a message TO Hub B's channel via federation
-    let resp = client
-        .post(format!(
-            "{hub_a_url}/federation/channels/{}/messages",
-            fed_channels[0].id
-        ))
-        .bearer_auth(&token_a)
-        .json(&json!({ "content": "hello from hub A!" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let sent: FederatedMessageResponse = resp.json().await.unwrap();
-    assert_eq!(sent.content, "hello from hub A!");
-
-    // Verify the message appears on Hub B
-    let messages: Vec<wavvon_hub::routes::chat_models::MessageResponse> = client
-        .get(format!("{hub_b_url}/channels/{}/messages", channel.id))
-        .bearer_auth(&token_b)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(messages.len(), 2);
-    assert!(messages.iter().any(|m| m.content == "hello from hub A!"));
-    assert!(messages.iter().any(|m| m.content == "hello from hub B!"));
+    for path in [
+        "/channels".to_string(),
+        format!("/channels/{}/messages", channel.id),
+    ] {
+        let resp = client
+            .get(format!("{hub_b_url}{path}"))
+            .bearer_auth(&peer_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            403,
+            "peer session must be refused GET {path}"
+        );
+    }
 }

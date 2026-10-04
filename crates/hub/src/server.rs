@@ -748,19 +748,6 @@ pub fn create_router_full(
         )
         .route("/federation/peers", get(federation::handlers::list_peers))
         .route("/federation/peers", post(federation::handlers::add_peer))
-        .route(
-            "/federation/peers/{peer_key}/channels",
-            get(federation::handlers::peer_channels),
-        )
-        .route(
-            "/federation/channels",
-            get(federation::handlers::all_federated_channels),
-        )
-        .route(
-            "/federation/channels/{fed_channel_id}/messages",
-            get(federation::handlers::federated_messages)
-                .post(federation::handlers::send_federated_message),
-        )
         // ---- Lobby ----
         .route("/lobby/status", get(routes::lobby::get_status))
         .route("/lobby/submit-pow", post(routes::lobby::submit_pow))
