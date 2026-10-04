@@ -545,7 +545,9 @@ pub async fn get_post(
                     COALESCE(attachments, '[]') AS attachments, author_hub
              FROM post_replies
              WHERE post_id = $1
-               AND created_at > (SELECT created_at FROM post_replies WHERE id = $2)
+               -- The cursor is the same tuple the page is ordered by: created_at
+               -- alone has one-second resolution and skipped same-second replies.
+               AND (created_at, id) > (SELECT created_at, id FROM post_replies WHERE id = $2)
              ORDER BY created_at ASC, id ASC
              LIMIT $3",
         )
