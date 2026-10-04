@@ -323,10 +323,23 @@ async fn build_harness_with_web_client(
     guard: TestDbGuard,
     web_client: Option<Arc<wavvon_hub::web_client::WebClientConfig>>,
 ) -> TestHarness {
+    let state = Arc::new(base_state(db));
+    let app = server::create_router_full(state.clone(), "*", false, web_client);
+    TestHarness {
+        server: TestServer::new(app),
+        _guard: guard,
+        state: Some(state),
+    }
+}
+
+/// The canonical test `AppState`. Tests that vary a field use struct-update:
+/// `AppState { cors_origins: x, ..common::base_state(db) }`.
+#[allow(dead_code)]
+pub fn base_state(db: PgPool) -> AppState {
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
-    let state = Arc::new(AppState {
+    AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
@@ -382,12 +395,6 @@ async fn build_harness_with_web_client(
         lan_mode: false,
         lan_tls_mode: None,
         lan_fingerprint: None,
-    });
-    let app = server::create_router_full(state.clone(), "*", false, web_client);
-    TestHarness {
-        server: TestServer::new(app),
-        _guard: guard,
-        state: Some(state),
     }
 }
 
