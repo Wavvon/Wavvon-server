@@ -1,0 +1,9 @@
+# CI gates on `cargo deny check advisories`. Each ignore says why the
+# advisory does not reach us; revisit when the crate that pulls it moves.
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack hits private-key ops; webauthn-rs only verifies signatures with public keys, and no patched rsa exists" },
+    { id = "RUSTSEC-2024-0384", reason = "instant is unmaintained; transitive via tantivy (measure_time)" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained; transitive via axum-server, so dropping the hub's own use would not clear it" },
+]

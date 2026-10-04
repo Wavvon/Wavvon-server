@@ -7,6 +7,16 @@ on:
     branches: [main, develop]
 
 jobs:
+  dependencies:
+    name: advisories + unused dependencies
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        with:
+          command: check advisories
+      - uses: bnjbvr/cargo-machete@ac30a525c0a8d163a92d727b3ff079ee3f6ecb08
+
   check:
     name: cargo check + test
     strategy:

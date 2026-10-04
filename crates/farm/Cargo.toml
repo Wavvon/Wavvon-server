@@ -29,7 +29,6 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 wavvon-identity = { path = "../identity" }
 wavvon-hub-env = { path = "../hub-env" }
-uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures-util = "0.3"
 hyper = "1"
@@ -49,6 +48,7 @@ config = { workspace = true }
 
 [dev-dependencies]
 axum-test = "19"
+uuid = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 # Multi-node TLS: a self-signed certificate to pin, and a real handshake to
