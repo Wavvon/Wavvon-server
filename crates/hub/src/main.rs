@@ -708,7 +708,8 @@ async fn main() -> Result<()> {
                         }
                         // Ensure a minimal user record exists
                         sqlx::query(
-                            "INSERT INTO users (public_key, first_seen_at) VALUES ($1, $2) ON CONFLICT (public_key) DO NOTHING",
+                            "INSERT INTO users (public_key, first_seen_at, is_member) VALUES ($1, $2, TRUE)
+                         ON CONFLICT (public_key) DO UPDATE SET is_member = TRUE",
                         )
                         .bind(&pubkey)
                         .bind(now)
@@ -1035,7 +1036,8 @@ async fn main() -> Result<()> {
                     .unwrap_or_default()
                     .as_secs() as i64;
                 sqlx::query(
-                    "INSERT INTO users (public_key, first_seen_at) VALUES ($1, $2) ON CONFLICT (public_key) DO NOTHING",
+                    "INSERT INTO users (public_key, first_seen_at, is_member) VALUES ($1, $2, TRUE)
+                         ON CONFLICT (public_key) DO UPDATE SET is_member = TRUE",
                 )
                 .bind(&owner_pk)
                 .bind(now)

@@ -597,6 +597,9 @@ pub async fn admin_approve(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    let db_err = |e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+
     // Transfer NON-OWNER roles from old key to new key. The owner role never
     // rides along a recovery transfer (identity-recovery.md: owner needs the
     // separate successor path) — otherwise K colluding contacts plus a fooled
@@ -611,9 +614,33 @@ pub async fn admin_approve(
     .bind(&row.new_pubkey)
     .bind(now)
     .bind(&row.old_pubkey)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    .map_err(db_err)?;
+
+    // Membership rides along with the roles, and is cleared on the old key in
+    // the same transaction. An owner key stays a member: the owner role is
+    // the one thing a recovery transfer never moves.
+    sqlx::query(
+        "UPDATE users SET is_member = is_member OR
+             COALESCE((SELECT is_member FROM users WHERE public_key = $2), FALSE)
+         WHERE public_key = $1",
+    )
+    .bind(&row.new_pubkey)
+    .bind(&row.old_pubkey)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    sqlx::query(
+        "UPDATE users SET is_member = FALSE
+         WHERE public_key = $1
+           AND NOT EXISTS (SELECT 1 FROM user_roles WHERE user_public_key = $1 AND role_id = 'builtin-owner')",
+    )
+    .bind(&row.old_pubkey)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
 
     // A transfer, not a copy: the lost/compromised old key keeps nothing but
     // owner (which only the successor path moves).
@@ -622,9 +649,11 @@ pub async fn admin_approve(
          WHERE user_public_key = $1 AND role_id != 'builtin-owner'",
     )
     .bind(&row.old_pubkey)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    .map_err(db_err)?;
+
+    tx.commit().await.map_err(db_err)?;
 
     // Revoke all sessions for the old key.
     sqlx::query("DELETE FROM sessions WHERE public_key = $1")

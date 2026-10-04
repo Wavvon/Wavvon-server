@@ -126,7 +126,7 @@ pub async fn get_voice_participants(
 /// bound yet) into their pubkeys.
 async fn resolve_role_pubkeys(state: &AppState, role_id: &str) -> HashSet<String> {
     let role_users: Vec<String> =
-        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+        sqlx::query_scalar("SELECT user_public_key FROM member_roles WHERE role_id = $1")
             .bind(role_id)
             .fetch_all(&state.db)
             .await
