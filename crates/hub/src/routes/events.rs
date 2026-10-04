@@ -139,6 +139,10 @@ pub struct EventWithRsvps {
     pub event: EventResponse,
     pub rsvp_counts: RsvpCounts,
     pub slots: Vec<SlotResponse>,
+    /// The caller's own RSVP status, absent when they have none. Without it a
+    /// client could not show "you are going" after a reload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub my_rsvp: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -215,6 +219,19 @@ pub struct ListEventsParams {
 fn format_unix_utc(ts: i64) -> String {
     let (y, mo, d, h, mi, _) = civil_from_unix(ts.max(0) as u64);
     format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02} UTC")
+}
+
+async fn load_my_rsvp(
+    db: &sqlx::PgPool,
+    event_id: &str,
+    user_pubkey: &str,
+) -> Result<Option<String>, (StatusCode, String)> {
+    sqlx::query_scalar("SELECT status FROM event_rsvps WHERE event_id = $1 AND user_pubkey = $2")
+        .bind(event_id)
+        .bind(user_pubkey)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
 }
 
 async fn load_rsvp_counts(
@@ -634,10 +651,12 @@ pub async fn list_events(
         }
         let rsvp_counts = load_rsvp_counts(&state.db, &event.id).await?;
         let slots = load_slots(&state.db, &event.id).await?;
+        let my_rsvp = load_my_rsvp(&state.db, &event.id, &user.public_key).await?;
         result.push(EventWithRsvps {
             event,
             rsvp_counts,
             slots,
+            my_rsvp,
         });
     }
     Ok(Json(result))
@@ -677,10 +696,12 @@ pub async fn get_event(
 
     let rsvp_counts = load_rsvp_counts(&state.db, &event_id).await?;
     let slots = load_slots(&state.db, &event_id).await?;
+    let my_rsvp = load_my_rsvp(&state.db, &event_id, &user.public_key).await?;
     Ok(Json(EventWithRsvps {
         event,
         rsvp_counts,
         slots,
+        my_rsvp,
     }))
 }
 
