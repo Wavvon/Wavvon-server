@@ -214,11 +214,13 @@ pub async fn verify(
     // as channels' created_by — otherwise a preset-seeded hub always has
     // one "user" and the real first joiner never becomes owner (found live
     // 2026-07-06).
-    let existing_users: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE public_key <> 'system'")
-            .fetch_one(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let existing_users: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users
+             WHERE public_key <> 'system' AND public_key NOT IN (SELECT public_key FROM peers)",
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // The hub owner (already holds builtin-owner) and the implicit first
     // user are never lobby-confined or hard-rejected by min_security_level
@@ -407,7 +409,7 @@ pub async fn verify(
 
     // `existing_users` was already computed above (before the
     // security-level gate) for the owner-exemption check; reused here.
-    let initial_status = if require_approval && existing_users > 0 {
+    let initial_status = if require_approval && existing_users > 0 && req.is_hub != Some(true) {
         "pending"
     } else {
         "approved"
@@ -479,7 +481,23 @@ pub async fn verify(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
 
-    let scope = if owner_exempt {
+    // Check invite requirement for new users
+    let is_member: bool = sqlx::query_scalar("SELECT is_member FROM users WHERE public_key = $1")
+        .bind(&canonical_pubkey)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // A federating peer hub: a machine, not a person joining. Self-asserted
+    // and unauthenticated beyond the key signature, so it buys *no* standing
+    // here: no admission, no roles, and a session confined to the peer
+    // allowlist (`PEER_ALLOWED` in middleware.rs). A key that is already a
+    // member is a person, whatever it claims.
+    let peer = req.is_hub == Some(true) && !is_member;
+
+    let scope = if peer {
+        "peer".to_string()
+    } else if owner_exempt {
         "member".to_string()
     } else if lobby_enabled && effective_pow_level < min_level {
         "lobby".to_string()
@@ -504,13 +522,6 @@ pub async fn verify(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    // Check invite requirement for new users
-    let is_member: bool = sqlx::query_scalar("SELECT is_member FROM users WHERE public_key = $1")
-        .bind(&canonical_pubkey)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Role granted by a role-granting invite (task #34), if the joining
     // user presented one. Assigned alongside builtin-everyone below.
@@ -542,7 +553,7 @@ pub async fn verify(
     // `InviteRedemption::was_bound` and the wiki's `pubkey-bound-invites.md`.
     let mut admitted_by_named_invite = false;
 
-    if !is_member && req.is_hub != Some(true) {
+    if !is_member && !peer {
         // A code that is presented is a code that is spent, whether or not
         // this hub demanded one. It used to be read only when `invite_only`
         // was on, which meant an open hub ignored the role grant the invite
@@ -572,7 +583,7 @@ pub async fn verify(
     // Admit a first-contact identity. `is_member` was read before the invite
     // gate and nothing in between changes it.
 
-    if !is_member {
+    if !is_member && !peer {
         admit_member(&state.db, &canonical_pubkey).await?;
         if existing_users == 0 {
             sqlx::query(
@@ -685,17 +696,17 @@ pub async fn verify(
         }
     }
 
-    // Hub federation path: when is_hub=true, register the caller in the
-    // `peers` table so the `PeerHub` extractor can route hub sessions
-    // separately from member sessions.  We still complete the full
-    // human-admission flow above (users row + roles) because the hub needs
-    // `send_messages` permission to proxy alliance messages.
+    // Hub federation path: register the caller in the `peers` table so the
+    // `PeerHub` extractor can route hub sessions separately from member
+    // sessions. A peer is not admitted as a member (no `is_member`, no
+    // roles); what it may reach is decided per route, from the alliance
+    // relationship, not from member permissions.
     //
     // NOTE: this self-registration is NOT a security boundary for DM
     // injection.  Any key can self-assert is_hub=true and land in `peers`.
     // The real anti-spoofing gate is the Ed25519 sender signature checked in
     // `receive_federated_dm`, which cannot be forged without the sender's key.
-    if req.is_hub == Some(true) {
+    if peer {
         let short_name = &canonical_pubkey[..16.min(canonical_pubkey.len())];
         let _ = sqlx::query(
             "INSERT INTO peers (public_key, name, url, added_at)
@@ -731,7 +742,7 @@ pub async fn verify(
 pub struct WsAuth {
     pub public_key: String,
     /// Session scope: `"member"`, `"mini_app"` or `"alliance_voice"`; a
-    /// legacy row reads as `"member"`. Never `"lobby"` — that scope is
+    /// legacy row reads as `"member"`. Never `"lobby"` or `"peer"` — that scope is
     /// rejected before this is constructed.
     pub scope: String,
     /// Set only when `scope == "mini_app"`: the single channel this
@@ -798,6 +809,9 @@ pub async fn validate_ws_token(
             }
             if scope == "lobby" {
                 return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
+            }
+            if scope == "peer" {
+                return Err((StatusCode::FORBIDDEN, "peer_scope_confined".to_string()));
             }
             (pk, status, scope, mini_app_channel_id)
         } else {

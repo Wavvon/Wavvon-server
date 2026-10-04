@@ -371,8 +371,13 @@ pub async fn post_alliance_channel_message(
     (StatusCode, String),
 > {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
-    let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(crate::permissions::MESSAGES_SEND)?;
+    // A peer hub holds no role here: it posts on the strength of the alliance
+    // share, capped by what `everyone` may do in that channel (below).
+    let peer = models::caller_is_peer(&state, &user.public_key).await?;
+    if !peer {
+        let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
+        perms.require(crate::permissions::MESSAGES_SEND)?;
+    }
 
     let hub_key = state.hub_identity.public_key_hex();
 
@@ -395,6 +400,18 @@ pub async fn post_alliance_channel_message(
                 ),
             ));
         }
+        if peer {
+            let perms =
+                crate::permissions::everyone_channel_permissions(&state.db, &channel_id).await?;
+            return crate::routes::messages::send_message_with(
+                State(state),
+                user,
+                channel_id,
+                req,
+                perms,
+            )
+            .await;
+        }
         return crate::routes::messages::send_message(
             State(state),
             user,
@@ -402,6 +419,15 @@ pub async fn post_alliance_channel_message(
             Json(req),
         )
         .await;
+    }
+
+    // A peer asking about a channel this hub does not own gets no further: it
+    // must not turn this hub into a relay that walks the alliance for it.
+    if peer {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found".to_string(),
+        ));
     }
 
     // Otherwise, find the peer that owns this channel and proxy.
@@ -468,7 +494,13 @@ pub async fn post_alliance_channel_message(
 
         return state
             .federation_client
-            .send_message(&member.hub_url, &token, &channel_id, &prefixed)
+            .send_message(
+                &member.hub_url,
+                &token,
+                &alliance_id,
+                &channel_id,
+                &prefixed,
+            )
             .await
             .map(|m| (StatusCode::CREATED, Json(m)))
             .map_err(|e| {
@@ -513,6 +545,12 @@ pub async fn get_alliance_forum_posts(
             Query(params),
         )
         .await;
+    }
+    if models::caller_is_peer(&state, &user.public_key).await? {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found".to_string(),
+        ));
     }
 
     let members = sqlx::query_as::<_, MemberRow>(
@@ -565,6 +603,7 @@ pub async fn get_alliance_forum_posts(
             .get_forum_posts(
                 &member.hub_url,
                 &token,
+                &alliance_id,
                 &channel_id,
                 params.cursor.as_deref(),
                 params.limit,
@@ -610,6 +649,12 @@ pub async fn get_alliance_forum_post(
             Query(params),
         )
         .await;
+    }
+    if models::caller_is_peer(&state, &user.public_key).await? {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found".to_string(),
+        ));
     }
 
     let members = sqlx::query_as::<_, MemberRow>(
@@ -662,6 +707,7 @@ pub async fn get_alliance_forum_post(
             .get_forum_post(
                 &member.hub_url,
                 &token,
+                &alliance_id,
                 &channel_id,
                 &post_id,
                 params.after.as_deref(),
@@ -1233,6 +1279,15 @@ pub async fn get_alliance_channel_messages(
         return Ok(Json(out));
     }
 
+    // A peer asking about a channel this hub does not own gets no further: it
+    // must not turn this hub into a relay that walks the alliance for it.
+    if models::caller_is_peer(&state, &user.public_key).await? {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found".to_string(),
+        ));
+    }
+
     // Otherwise the channel must belong to a peer member of this alliance.
     // Walk members and ask each one if they own this channel.
     let members = sqlx::query_as::<_, MemberRow>(
@@ -1265,7 +1320,7 @@ pub async fn get_alliance_channel_messages(
         // The peer owns it -- federate the message read.
         return state
             .federation_client
-            .get_messages(&member.hub_url, &token, &channel_id)
+            .get_messages(&member.hub_url, &token, &alliance_id, &channel_id)
             .await
             .map(Json)
             .map_err(|e| {

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::auth::models::{ChallengeResponse, VerifyResponse};
 use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelResponse};
-use crate::routes::chat_models::{ChannelResponse, MessageResponse};
+use crate::routes::chat_models::MessageResponse;
 use crate::routes::dm_models::FederatedDmRequest;
 use crate::routes::health::InfoResponse;
 use crate::routes::post_models::{PostDetail, PostListResponse, ReplyView};
@@ -73,27 +73,21 @@ impl FederationClient {
         Ok(verify.token)
     }
 
-    pub async fn get_channels(&self, base_url: &str, token: &str) -> Result<Vec<ChannelResponse>> {
-        self.http
-            .get(format!("{base_url}/channels"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("Failed to fetch channels from peer")?
-            .json()
-            .await
-            .context("Invalid channels response")
-    }
-
+    /// Posts into a channel the peer shares into `alliance_id`. Goes through the
+    /// alliance route, never `/channels/{id}/messages`: this hub is not a member
+    /// of the peer, so the peer authorises the call by the alliance share.
     pub async fn send_message(
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
         content: &str,
     ) -> Result<MessageResponse> {
         self.http
-            .post(format!("{base_url}/channels/{channel_id}/messages"))
+            .post(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/messages"
+            ))
             .bearer_auth(token)
             .json(&serde_json::json!({ "content": content }))
             .send()
@@ -108,10 +102,13 @@ impl FederationClient {
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
     ) -> Result<Vec<MessageResponse>> {
         self.http
-            .get(format!("{base_url}/channels/{channel_id}/messages"))
+            .get(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/messages"
+            ))
             .bearer_auth(token)
             .send()
             .await
@@ -130,6 +127,7 @@ impl FederationClient {
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
         cursor: Option<&str>,
         limit: Option<i64>,
@@ -146,7 +144,9 @@ impl FederationClient {
             query.push(("tag", t.to_string()));
         }
         self.http
-            .get(format!("{base_url}/channels/{channel_id}/posts"))
+            .get(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/posts"
+            ))
             .bearer_auth(token)
             .query(&query)
             .send()
@@ -159,10 +159,12 @@ impl FederationClient {
 
     /// Read-through fetch of a single forum post (with its reply page) from
     /// the peer that owns it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_forum_post(
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
         post_id: &str,
         after: Option<&str>,
@@ -176,7 +178,9 @@ impl FederationClient {
             query.push(("limit", l.to_string()));
         }
         self.http
-            .get(format!("{base_url}/channels/{channel_id}/posts/{post_id}"))
+            .get(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}"
+            ))
             .bearer_auth(token)
             .query(&query)
             .send()

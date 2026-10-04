@@ -1945,6 +1945,46 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // A federating peer used to be admitted as a full member: any key could
+    // claim `is_hub` at `/auth/verify`, skip the invite gate, and land with
+    // `is_member` and so the everyone floor. A peer is not a member now, so
+    // un-admit the rows that were. Once only (the marker): a person admitted
+    // later whose key also sits in `peers` must not be demoted by a restart.
+    //
+    // The criterion is "in `peers` and nothing a person acquires": no role
+    // granted beyond the floor (which also spares the owner), no display name,
+    // no master identity. A person who self-asserted `is_hub` and then did
+    // anything a person does keeps membership; a peer that only ever
+    // federated is demoted. Its existing sessions are re-scoped, since a
+    // session minted as `member` would otherwise outlive the demotion.
+    let first_run = sqlx::query(
+        "INSERT INTO hub_settings (key, value) VALUES ('peer_membership_cleanup_v1', '1')
+         ON CONFLICT (key) DO NOTHING",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1;
+    if first_run {
+        let mut tx = pool.begin().await?;
+        let demoted: Vec<String> = sqlx::query_scalar(
+            "UPDATE users SET is_member = FALSE
+             WHERE is_member
+               AND public_key IN (SELECT public_key FROM peers)
+               AND master_pubkey IS NULL
+               AND COALESCE(display_name, '') = ''
+               AND NOT EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_public_key = users.public_key)
+             RETURNING public_key",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE sessions SET scope = 'peer' WHERE public_key = ANY($1)")
+            .bind(&demoted)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+
     // Two capability backfills used to follow, seeding the grant tables that
     // gated what a bot could do. Both tables are gone: a client's authority
     // is its roles, resolved through the permission catalogue like everyone

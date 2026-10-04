@@ -21,6 +21,21 @@ pub async fn send_message(
     Path(channel_id): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, String)> {
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    send_message_with(State(state), user, channel_id, req, perms).await
+}
+
+/// `send_message` with the caller's effective permissions on the channel
+/// already resolved. A federating peer is not a member, so its permissions come
+/// from the alliance share (`permissions::everyone_channel_permissions`), not
+/// from roles.
+pub async fn send_message_with(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    channel_id: String,
+    req: SendMessageRequest,
+    perms: permissions::UserPermissions,
+) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, String)> {
     // 30 messages per 60 seconds per user
     {
         let mut map = state
@@ -52,7 +67,6 @@ pub async fn send_message(
         entry.0 += 1;
     }
 
-    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MESSAGES_SEND)?;
 
     if crate::routes::moderation::is_muted(&state.db, &user.public_key).await? {
