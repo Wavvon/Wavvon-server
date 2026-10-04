@@ -14,7 +14,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::delivery;
-use super::models::{OutgoingWebhook, WebhookEventEnvelope};
+use super::models::OutgoingWebhook;
+use crate::routes::app_models::HubEvent;
 use crate::state::AppState;
 
 /// Internal cross-webhook throughput cap (doc §5/§7): 50 events/s combined.
@@ -141,16 +142,9 @@ pub async fn dispatch_event(
 
         let (envelope_payload, truncated) = truncate_if_needed(payload.clone());
 
-        let envelope = WebhookEventEnvelope {
-            kind: "hub_event",
-            event: event_type.to_string(),
-            hub_url: hub_url.clone(),
-            webhook_id: webhook.id.clone(),
-            at: now,
-            seq: Some(seq),
-            payload: envelope_payload,
-            truncated,
-        };
+        let mut envelope = HubEvent::new(seq, event_type, hub_url.as_str(), now, envelope_payload);
+        envelope.webhook_id = Some(webhook.id.clone());
+        envelope.truncated = truncated;
 
         let state = state.clone();
         let hub_pubkey = hub_pubkey.clone();
@@ -183,7 +177,7 @@ async fn deliver_with_retries(
     state: &Arc<AppState>,
     hub_pubkey: &str,
     webhook: OutgoingWebhook,
-    envelope: WebhookEventEnvelope,
+    envelope: HubEvent,
     seq: i64,
     event_type: &str,
 ) {

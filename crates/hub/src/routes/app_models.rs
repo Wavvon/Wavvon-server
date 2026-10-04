@@ -254,8 +254,63 @@ pub struct ComponentResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Hub event push (hub → app WebSocket)
+// Hub event envelope: app WebSocket push, replay, and outgoing webhooks.
 // ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug)]
+pub struct HubEvent {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub seq: i64,
+    pub event: String,
+    pub hub_url: String,
+    pub at: i64,
+    /// Replay only: the audit-log row's actor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actor_pubkey: Option<String>,
+    /// Replay only: the audit-log row's target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_pubkey: Option<String>,
+    /// Replay only: the audit-log row's channel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
+    pub payload: serde_json::Value,
+    /// Replay only.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub replayed: bool,
+    /// Outgoing webhooks only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_id: Option<String>,
+    /// Outgoing webhooks only: the payload was cut to the size cap.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+}
+
+impl HubEvent {
+    /// A plain live envelope; callers set the optional fields they have.
+    pub fn new(
+        seq: i64,
+        event: impl Into<String>,
+        hub_url: impl Into<String>,
+        at: i64,
+        payload: serde_json::Value,
+    ) -> Self {
+        Self {
+            kind: "hub_event",
+            seq,
+            event: event.into(),
+            hub_url: hub_url.into(),
+            at,
+            actor_pubkey: None,
+            target_pubkey: None,
+            channel_id: None,
+            payload,
+            replayed: false,
+            webhook_id: None,
+            truncated: false,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle messages (hub → app WebSocket)

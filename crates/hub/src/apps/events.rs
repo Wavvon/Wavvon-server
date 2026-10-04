@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+use crate::routes::app_models::HubEvent;
 use crate::state::AppState;
 
 /// How far back `Resume` can replay. The audit log is the source, and this is
@@ -133,18 +134,14 @@ pub async fn publish_hub_event(
             }
         }
 
-        let envelope_payload = payload.clone();
-
-        let envelope = serde_json::json!({
-            "type": "hub_event",
-            "seq": seq,
-            "event": event_type,
-            "hub_url": hub_url,
-            "at": now,
-            "payload": envelope_payload,
-        });
-
-        let json = envelope.to_string();
+        let json = serde_json::to_string(&HubEvent::new(
+            seq,
+            event_type,
+            hub_url.as_str(),
+            now,
+            payload.clone(),
+        ))
+        .unwrap_or_default();
         // Deliver to every active session for this pubkey. Non-blocking
         // send; a full channel drops the event for that session only.
         for tx in per_app.values() {
@@ -258,20 +255,23 @@ pub async fn replay_events_for_app(
         let envelope_payload: serde_json::Value =
             serde_json::from_str(&row.payload_json).unwrap_or(serde_json::Value::Null);
 
-        let envelope = serde_json::json!({
-            "type": "hub_event",
-            "seq": row.seq,
-            "event": row.event_type,
-            "hub_url": hub_url,
-            "at": row.at,
-            "actor_pubkey": row.actor_pubkey,
-            "target_pubkey": row.target_pubkey,
-            "channel_id": row.channel_id,
-            "payload": envelope_payload,
-            "replayed": true,
-        });
+        let mut envelope = HubEvent::new(
+            row.seq,
+            row.event_type.as_str(),
+            hub_url.as_str(),
+            row.at,
+            envelope_payload,
+        );
+        envelope.actor_pubkey = row.actor_pubkey.clone();
+        envelope.target_pubkey = row.target_pubkey.clone();
+        envelope.channel_id = row.channel_id.clone();
+        envelope.replayed = true;
 
-        if tx.send(envelope.to_string()).await.is_err() {
+        if tx
+            .send(serde_json::to_string(&envelope).unwrap_or_default())
+            .await
+            .is_err()
+        {
             // App disconnected mid-replay.
             break;
         }

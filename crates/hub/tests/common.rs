@@ -287,6 +287,16 @@ impl TestHarness {
     }
 }
 
+impl TestHarness {
+    /// Same state as `state()`, as the `Arc` that dispatch-level code takes.
+    #[allow(dead_code)]
+    pub fn state_arc(&self) -> Arc<AppState> {
+        self.state
+            .clone()
+            .expect("TestHarness::state_arc() requires a harness built via setup()")
+    }
+}
+
 impl Deref for TestHarness {
     type Target = TestServer;
 

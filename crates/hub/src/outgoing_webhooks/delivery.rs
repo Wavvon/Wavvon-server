@@ -8,7 +8,8 @@ use sha2::Sha256;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::models::{OutgoingWebhook, WebhookEventEnvelope};
+use super::models::OutgoingWebhook;
+use crate::routes::app_models::HubEvent;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -43,7 +44,7 @@ pub async fn attempt_delivery(
     http_client: &reqwest::Client,
     hub_pubkey_hex: &str,
     webhook: &OutgoingWebhook,
-    envelope: &WebhookEventEnvelope,
+    envelope: &HubEvent,
 ) -> DeliveryResult {
     let body_json = match serde_json::to_string(envelope) {
         Ok(j) => j,

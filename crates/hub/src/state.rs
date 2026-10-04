@@ -195,6 +195,47 @@ pub struct RateLimiters {
     /// shape (fixed window, same eviction policy) at a cadence sized for
     /// chat-like content rather than the much rarer badge handshake.
     pub forum_federated_write: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Slash-command cooldowns: (app pubkey, command, invoker) -> when the
+    /// invoker last ran it. Per user, so one person's use never blocks another.
+    pub app_cooldowns: Mutex<HashMap<(String, String, String), Instant>>,
+}
+
+impl RateLimiters {
+    /// Record an invocation of an app command, or say how many whole seconds
+    /// remain if the invoker is still inside the command's cooldown window.
+    /// `cooldown_seconds <= 0` never blocks.
+    pub fn check_app_cooldown(
+        &self,
+        app_pubkey: &str,
+        command: &str,
+        invoker: &str,
+        cooldown_seconds: i64,
+    ) -> Option<u64> {
+        if cooldown_seconds <= 0 {
+            return None;
+        }
+        let window = std::time::Duration::from_secs(cooldown_seconds as u64);
+        let now = Instant::now();
+        let mut map = self.app_cooldowns.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (
+            app_pubkey.to_string(),
+            command.to_string(),
+            invoker.to_string(),
+        );
+        if let Some(last) = map.get(&key) {
+            let elapsed = now.duration_since(*last);
+            if elapsed < window {
+                return Some((window - elapsed).as_secs_f64().ceil() as u64);
+            }
+        }
+        // ponytail: past 10k entries drop anything older than a day (assumed
+        // ceiling on a sane cooldown); store the window per entry to be exact.
+        if map.len() > 10_000 {
+            map.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(86_400));
+        }
+        map.insert(key, now);
+        None
+    }
 }
 
 impl Default for RateLimiters {
@@ -204,6 +245,7 @@ impl Default for RateLimiters {
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
             forum_federated_write: Mutex::new(HashMap::new()),
+            app_cooldowns: Mutex::new(HashMap::new()),
         }
     }
 }

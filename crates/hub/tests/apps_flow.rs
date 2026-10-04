@@ -475,3 +475,124 @@ async fn an_identity_that_registered_nothing_is_not_in_the_listing() {
         .json();
     assert!(apps.as_array().unwrap().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Command cooldown and the hub_event envelope
+// ---------------------------------------------------------------------------
+
+/// Registers an app whose webhook URL cannot be called (fails instantly), with one command at
+/// the given cooldown. A dispatch that gets past the cooldown therefore ends
+/// in "failed to respond", which is distinct from the cooldown refusal.
+async fn app_with_command(server: &common::TestHarness, cooldown: i64) -> String {
+    let app = Identity::generate();
+    let token = common::authenticate(server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Cool", "webhook_url": "nonsense-not-a-url" }))
+        .await
+        .assert_status_success();
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&token)
+        .json(&json!({ "commands": [
+            { "name": "ping", "description": "p", "cooldown_seconds": cooldown }
+        ]}))
+        .await
+        .assert_status_success();
+    app.public_key_hex()
+}
+
+async fn invoke(server: &common::TestHarness, user: &str) -> Option<String> {
+    wavvon_hub::apps::dispatch::dispatch_slash(&server.state_arc(), "chan", user, "/ping").await
+}
+
+#[tokio::test]
+async fn a_command_inside_its_cooldown_is_refused_with_the_time_left() {
+    let server = common::setup().await;
+    app_with_command(&server, 1).await;
+
+    let first = invoke(&server, "alice").await.unwrap();
+    assert!(
+        first.contains("failed to respond"),
+        "first goes through: {first}"
+    );
+
+    let second = invoke(&server, "alice").await.unwrap();
+    assert!(
+        second.contains("cooldown") && second.contains("1s"),
+        "{second}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let third = invoke(&server, "alice").await.unwrap();
+    assert!(
+        third.contains("failed to respond"),
+        "window passed: {third}"
+    );
+}
+
+#[tokio::test]
+async fn a_cooldown_is_per_user() {
+    let server = common::setup().await;
+    app_with_command(&server, 30).await;
+
+    invoke(&server, "alice").await;
+    let bob = invoke(&server, "bob").await.unwrap();
+    assert!(
+        bob.contains("failed to respond"),
+        "bob is not alice's cooldown: {bob}"
+    );
+}
+
+#[tokio::test]
+async fn a_zero_cooldown_never_blocks() {
+    let server = common::setup().await;
+    app_with_command(&server, 0).await;
+
+    for _ in 0..3 {
+        let r = invoke(&server, "alice").await.unwrap();
+        assert!(r.contains("failed to respond"), "{r}");
+    }
+}
+
+#[test]
+fn the_hub_event_envelope_has_one_shape_with_optional_extras() {
+    use wavvon_hub::routes::app_models::HubEvent;
+
+    let live = serde_json::to_value(HubEvent::new(
+        7,
+        "member.joined",
+        "https://h",
+        5,
+        json!({"a":1}),
+    ))
+    .unwrap();
+    let mut keys: Vec<&str> = live
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["at", "event", "hub_url", "payload", "seq", "type"]);
+    assert_eq!(live["type"], "hub_event");
+
+    let mut replay = HubEvent::new(7, "member.joined", "https://h", 5, json!({}));
+    replay.actor_pubkey = Some("a".into());
+    replay.target_pubkey = Some("t".into());
+    replay.channel_id = Some("c".into());
+    replay.replayed = true;
+    let replay = serde_json::to_value(replay).unwrap();
+    for k in ["actor_pubkey", "target_pubkey", "channel_id", "replayed"] {
+        assert!(replay.get(k).is_some(), "replay carries {k}");
+    }
+    assert_eq!(replay["replayed"], true);
+
+    let mut hook = HubEvent::new(7, "member.joined", "https://h", 5, json!({}));
+    hook.webhook_id = Some("wh_1".into());
+    hook.truncated = true;
+    let hook = serde_json::to_value(hook).unwrap();
+    assert_eq!(hook["webhook_id"], "wh_1");
+    assert_eq!(hook["truncated"], true);
+}
