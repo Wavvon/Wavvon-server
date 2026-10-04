@@ -10,13 +10,12 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
 
-// Max upload size: 25 MB in raw bytes
-const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
-
-/// What the router lets this route's body reach: the file cap plus room for
-/// the multipart framing, so the check below is the one that answers. Left at
-/// axum's 2 MB default, a 3 MB file failed as a multipart parse error.
-pub const UPLOAD_BODY_LIMIT: usize = MAX_UPLOAD_BYTES + 1024 * 1024;
+/// What the router lets this route's body reach: the largest cap an operator
+/// can set plus room for the multipart framing, so the check below is the one
+/// that answers. Left at axum's 2 MB default, a 3 MB file failed as a
+/// multipart parse error.
+pub const UPLOAD_BODY_LIMIT: usize =
+    crate::routes::hub::MAX_MAX_UPLOAD_BYTES as usize + 1024 * 1024;
 const BANNER_MAX_UPLOAD_BYTES: usize = 512 * 1024;
 
 /// Allowed mime types for uploads.
@@ -80,7 +79,7 @@ pub async fn upload_file(
     let effective_max = if is_banner {
         BANNER_MAX_UPLOAD_BYTES
     } else {
-        MAX_UPLOAD_BYTES
+        crate::routes::hub::read_upload_cap(&state.db).await as usize
     };
 
     // Extract the "file" field from the multipart body.
@@ -119,7 +118,7 @@ pub async fn upload_file(
             }
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
-                format!("File exceeds {}MB limit", MAX_UPLOAD_BYTES / 1024 / 1024),
+                format!("File exceeds {}MB limit", effective_max / 1024 / 1024),
             ));
         }
 
