@@ -36,7 +36,6 @@ async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
         hub_name: "mini-app-scope-test".to_string(),
         hub_identity: Identity::generate(),
         db,
-        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

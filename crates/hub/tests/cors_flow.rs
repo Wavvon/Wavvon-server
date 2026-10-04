@@ -27,7 +27,6 @@ async fn setup_with_cors(cors_origins: &str) -> common::TestHarness {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
-        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

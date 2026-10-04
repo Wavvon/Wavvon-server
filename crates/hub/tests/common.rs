@@ -330,7 +330,6 @@ async fn build_harness_with_web_client(
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
-        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,

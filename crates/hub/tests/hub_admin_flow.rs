@@ -22,7 +22,6 @@ async fn setup(startup_name: &str) -> common::TestHarness {
         hub_name: startup_name.to_string(),
         hub_identity: Identity::generate(),
         db,
-        db_read: None,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
