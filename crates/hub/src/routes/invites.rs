@@ -556,7 +556,7 @@ pub async fn maybe_mint_first_boot_owner_invite(
 }
 
 /// GET /join/:code — public; returns hub info so a visitor can preview before joining.
-pub async fn get_join_info(
+async fn get_join_info(
     State(state): State<Arc<AppState>>,
     Path(code): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {

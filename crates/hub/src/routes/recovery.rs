@@ -103,12 +103,6 @@ pub struct PendingRequestAdmin {
     pub attestation_count: i64,
 }
 
-#[derive(Deserialize)]
-pub struct AdminDecideRequest {
-    /// "approve" or "deny"
-    pub decision: String,
-}
-
 // ---------------------------------------------------------------------------
 // Owner-side: manage recovery contacts
 // ---------------------------------------------------------------------------

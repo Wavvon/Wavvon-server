@@ -174,11 +174,6 @@ impl RateLimiter {
         })
     }
 
-    /// Whether trusted-proxy mode is active.  Used by the startup banner.
-    pub fn is_trusted_proxy(&self) -> bool {
-        self.trusted_proxy
-    }
-
     /// Returns `true` if the request is allowed; `false` if rate-limited.
     async fn check(&self, ip: IpAddr) -> bool {
         let key = canonicalize_ip(ip);

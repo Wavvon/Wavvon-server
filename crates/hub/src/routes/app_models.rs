@@ -54,21 +54,6 @@ pub struct AppCommandDef {
 // Directory / profile types
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct AppProfile {
-    pub pubkey: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub avatar_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub webhook_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub homepage_url: Option<String>,
-    pub capabilities: Vec<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Event subscription
 // ---------------------------------------------------------------------------
@@ -271,18 +256,6 @@ pub struct ComponentResponse {
 // ---------------------------------------------------------------------------
 // Hub event push (hub → app WebSocket)
 // ---------------------------------------------------------------------------
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct HubEvent {
-    #[serde(rename = "type")]
-    pub kind: String, // always "hub_event"
-    pub event: String,
-    pub hub_url: String,
-    pub at: i64,
-    pub payload: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub replayed: Option<bool>,
-}
 
 // ---------------------------------------------------------------------------
 // Lifecycle messages (hub → app WebSocket)

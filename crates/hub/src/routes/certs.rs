@@ -559,7 +559,7 @@ pub async fn issue_cert_for(
 }
 
 /// Build, sign, and record an achievement badge (a labelled cert) for a user.
-pub async fn issue_badge_for(
+async fn issue_badge_for(
     state: &AppState,
     subject_pubkey: &str,
     label: &str,
@@ -636,7 +636,7 @@ pub async fn issue_badge_for(
 }
 
 /// Re-issue with standing="revoked" and mark the old row revoked_at.
-pub async fn revoke_cert_for(
+async fn revoke_cert_for(
     state: &AppState,
     subject_pubkey: &str,
 ) -> Result<(), (StatusCode, String)> {
@@ -876,7 +876,7 @@ const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// issuer. An issuer with no URL is simply not pullable — its pushed certs
 /// still work — which is a better failure than a trust list that fails to
 /// parse.
-pub async fn load_issuer_urls(state: &AppState) -> std::collections::HashMap<String, String> {
+async fn load_issuer_urls(state: &AppState) -> std::collections::HashMap<String, String> {
     let json_str: String = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'cert_issuer_urls'",
     )

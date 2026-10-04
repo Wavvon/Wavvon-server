@@ -12,7 +12,7 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub use ecies::{unwrap_blob_key, wrap_blob_key};
 pub use master::MasterIdentity;
@@ -123,11 +123,6 @@ impl Identity {
         self.security_nonce = nonce;
         self.security_level = level;
         level
-    }
-
-    pub fn default_path() -> Result<PathBuf> {
-        let home = dirs::home_dir().context("Could not find home directory")?;
-        Ok(home.join(".wavvon").join("identity.json"))
     }
 
     /// Derive the master keypair from this identity's secret bytes.
