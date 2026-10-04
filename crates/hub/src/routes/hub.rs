@@ -406,11 +406,16 @@ pub const MIN_MAX_ATTACHMENT_BYTES: u64 = 64 * 1024;
 /// Ceiling, and it is not arbitrary. Attachments are stored **inline** — the
 /// `attachments` column is TEXT holding base64 — so the cap is really a cap on
 /// how large a single message row may get, and base64 inflates by a third
-/// on top. A reverse proxy in front will refuse the request first anyway:
-/// hosting.md's nginx vhost sets `client_max_body_size 10M`. Letting an
-/// operator raise this past that point would produce uploads that fail at the
-/// proxy with no explanation from the hub.
+/// on top. It also bounds `MESSAGE_BODY_LIMIT`, which a reverse proxy in
+/// front has to admit (hosting.md's nginx vhost is sized for it); a higher
+/// cap would produce uploads that fail at the proxy with no explanation from
+/// the hub.
 pub const MAX_MAX_ATTACHMENT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Body limit for the routes that carry attachments: the ceiling plus room
+/// for the rest of the message, so a body just past the cap is refused by the
+/// cap check, with its message, rather than by axum's 2 MB default.
+pub const MESSAGE_BODY_LIMIT: usize = MAX_MAX_ATTACHMENT_BYTES as usize + 2 * 1024 * 1024;
 
 /// The configured attachment cap, falling back to the default when unset or
 /// unparseable. Read per request: an operator raising the limit should not

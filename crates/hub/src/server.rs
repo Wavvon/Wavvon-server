@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{extract::Request, middleware::Next, response::Response, Router};
@@ -136,12 +137,14 @@ pub fn create_router_full(
         .route("/channels", post(routes::channels::create_channel))
         .route(
             "/channels/{channel_id}/messages",
-            post(routes::messages::send_message),
+            post(routes::messages::send_message)
+                .layer(DefaultBodyLimit::max(routes::hub::MESSAGE_BODY_LIMIT)),
         )
         .route("/conversations", post(routes::dms::create_conversation))
         .route(
             "/conversations/{conversation_id}/messages",
-            post(routes::dms::send_dm),
+            post(routes::dms::send_dm)
+                .layer(DefaultBodyLimit::max(routes::hub::MESSAGE_BODY_LIMIT)),
         )
         .layer(from_fn(move |req, next| {
             let l = write_limiter.clone();
@@ -939,7 +942,8 @@ pub fn create_router_full(
         // ---- File uploads ----
         .route(
             "/channels/{channel_id}/upload",
-            post(routes::uploads::upload_file),
+            post(routes::uploads::upload_file)
+                .layer(DefaultBodyLimit::max(routes::uploads::UPLOAD_BODY_LIMIT)),
         )
         .route("/uploads/{filename}", get(routes::uploads::serve_upload))
         // ---- Soundboard (soundboard.md §1) ----
