@@ -7,12 +7,9 @@ use serde_json::Value;
 use sqlx::Row;
 
 use crate::auth::middleware::AuthUser;
+use crate::routes::identity::db_err;
 use crate::state::AppState;
 use wavvon_identity::PublicHubProfile;
-
-fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
-}
 
 pub async fn get_profile(
     State(state): State<Arc<AppState>>,

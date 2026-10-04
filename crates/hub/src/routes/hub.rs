@@ -694,6 +694,11 @@ pub(crate) async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String>
         .flatten()
 }
 
+/// This hub's own public URL as the operator configured it; empty when unset.
+pub(crate) async fn load_hub_url(state: &AppState) -> String {
+    read_setting(&state.db, "hub_url").await.unwrap_or_default()
+}
+
 /// Admin-facing member listing with joined / last-seen / online + role summaries.
 pub async fn list_members(
     State(state): State<Arc<AppState>>,

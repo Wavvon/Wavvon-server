@@ -933,17 +933,14 @@ pub fn unix_timestamp_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Converts a Unix timestamp (seconds) to a compact ISO-8601 string
-/// (`YYYY-MM-DDTHH:MM:SSZ`). Used for badge payload timestamps.
-pub fn iso_from_unix(secs: i64) -> String {
-    let secs = secs as u64;
+/// Splits Unix seconds into UTC `(year, month, day, hour, minute, second)`
+/// without pulling in chrono. Julian Day Number arithmetic, valid for dates
+/// from 1970 onward.
+pub fn civil_from_unix(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
     let days = secs / 86400;
     let time_of_day = secs % 86400;
-    let hour = time_of_day / 3600;
-    let minute = (time_of_day % 3600) / 60;
-    let second = time_of_day % 60;
 
-    let jdn = days + 2_440_588;
+    let jdn = days + 2_440_588; // JDN of 1970-01-01
     let l = jdn + 68_569;
     let n = (4 * l) / 146_097;
     let l = l - (146_097 * n).div_ceil(4);
@@ -955,13 +952,46 @@ pub fn iso_from_unix(secs: i64) -> String {
     let month = month_i + 2 - 12 * l;
     let year = 100 * (n - 49) + year_i + l;
 
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, minute, second
+    (
+        year,
+        month,
+        day,
+        time_of_day / 3600,
+        (time_of_day % 3600) / 60,
+        time_of_day % 60,
     )
+}
+
+/// Converts a Unix timestamp (seconds) to a compact ISO-8601 string
+/// (`YYYY-MM-DDTHH:MM:SSZ`). Used for badge payload timestamps.
+pub fn iso_from_unix(secs: i64) -> String {
+    // Negative input wraps, as it always has; callers pass real clock values.
+    let (y, mo, d, h, mi, s) = civil_from_unix(secs as u64);
+    format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z")
 }
 
 /// Returns the current UTC time as a compact ISO-8601 string (`YYYY-MM-DDTHH:MM:SSZ`).
 pub fn unix_timestamp_iso() -> String {
     iso_from_unix(unix_timestamp())
+}
+
+#[cfg(test)]
+mod iso_tests {
+    use super::*;
+
+    #[test]
+    fn iso_from_unix_pins_format() {
+        let cases: [(i64, &str); 7] = [
+            (0, "1970-01-01T00:00:00Z"),
+            (86_399, "1970-01-01T23:59:59Z"),
+            (951_868_800, "2000-03-01T00:00:00Z"),
+            (1_700_000_000, "2023-11-14T22:13:20Z"),
+            (1_709_251_199, "2024-02-29T23:59:59Z"),
+            (1_709_251_200, "2024-03-01T00:00:00Z"),
+            (4_107_542_400, "2100-03-01T00:00:00Z"),
+        ];
+        for (secs, want) in cases {
+            assert_eq!(iso_from_unix(secs), want, "secs={secs}");
+        }
+    }
 }

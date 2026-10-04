@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -8,21 +7,15 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use wavvon_identity::{HomeHubList, RevocationEntry, SignedPrefsBlob, SubkeyCert};
 
+use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn bad(msg: impl Into<String>) -> (StatusCode, String) {
+pub(crate) fn bad(msg: impl Into<String>) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, msg.into())
 }
 
-fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
+pub(crate) fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
 }
 
@@ -173,7 +166,7 @@ pub async fn put_designation(
     .bind(body.issued_at as i64)
     .bind(body.sequence as i64)
     .bind(&body.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(&state.db)
     .await
     .map_err(db_err)?;
@@ -320,7 +313,7 @@ pub async fn upsert_subkey_cert(db: &sqlx::PgPool, cert: &SubkeyCert) -> Result<
     .bind(&fallback_json)
     .bind(&home_hub_url)
     .bind(&cert.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(db)
     .await?;
 
@@ -402,7 +395,7 @@ pub async fn post_revocation(
     .bind(&entry.subkey_pubkey)
     .bind(entry.revoked_at as i64)
     .bind(&entry.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(&state.db)
     .await
     .map_err(db_err)?;
@@ -491,7 +484,7 @@ pub async fn put_prefs(
     .bind(blob.blob_version as i64)
     .bind(&blob.ciphertext_hex)
     .bind(&blob.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(&state.db)
     .await
     .map_err(db_err)?;

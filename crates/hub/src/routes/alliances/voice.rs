@@ -26,6 +26,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
+use crate::routes::hub::load_hub_url;
 use crate::state::AppState;
 
 /// How long a minted grant is good for. A ticket to open one session, not a
@@ -84,18 +85,6 @@ pub struct MintGrantResponse {
 /// Why a grant was refused. Names rather than prose so the client can branch.
 fn forbid(code: &str) -> (StatusCode, String) {
     (StatusCode::FORBIDDEN, code.to_string())
-}
-
-/// This hub's own public URL, as the operator configured it. The visitor needs
-/// it to know where the grant came from, and the owner stores it so a roster can
-/// say which hub a visitor is from.
-async fn load_hub_url(state: &AppState) -> String {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_url'")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
 }
 
 /// `POST /alliances/:id/voice-grant` — mint a grant for one of *another*

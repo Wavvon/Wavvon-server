@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -7,8 +6,10 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::auth::handlers::civil_from_unix;
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
+use crate::routes::channels::channel_subtree_ids;
 use crate::routes::chat_models::{ChannelResponse, ChatEvent, MessageResponse, WsServerMessage};
 use crate::state::AppState;
 
@@ -212,31 +213,8 @@ pub struct ListEventsParams {
 
 /// Format a Unix timestamp as "YYYY-MM-DD HH:MM UTC" without external dependencies.
 fn format_unix_utc(ts: i64) -> String {
-    // Days since epoch arithmetic (Gregorian proleptic calendar).
-    const SECS_PER_MIN: i64 = 60;
-    const SECS_PER_HOUR: i64 = 3600;
-    const SECS_PER_DAY: i64 = 86400;
-
-    let ts = ts.max(0);
-    let time_of_day = ts % SECS_PER_DAY;
-    let days = ts / SECS_PER_DAY;
-
-    let h = time_of_day / SECS_PER_HOUR;
-    let m = (time_of_day % SECS_PER_HOUR) / SECS_PER_MIN;
-
-    // Civil date from days-since-1970-01-01 (algorithm from Howard Hinnant).
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
-    let yr = y + if mth <= 2 { 1 } else { 0 };
-
-    format!("{yr:04}-{mth:02}-{d:02} {h:02}:{m:02} UTC")
+    let (y, mo, d, h, mi, _) = civil_from_unix(ts.max(0) as u64);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02} UTC")
 }
 
 async fn load_rsvp_counts(
@@ -322,9 +300,7 @@ async fn post_card_message(
 
 /// Returns `channel_id` plus every descendant of it in the `channels` tree
 /// (any depth) when `propagate` is true; otherwise just `[channel_id]`
-/// (events.md §6). Mirrors the same BFS-over-`parent_id` shape
-/// `routes::channels::delete_channel` uses to collect a subtree, reused here
-/// for card fan-out rather than deletion.
+/// (events.md §6).
 async fn propagation_targets(
     db: &sqlx::PgPool,
     channel_id: &str,
@@ -334,22 +310,7 @@ async fn propagation_targets(
         return Ok(vec![channel_id.to_string()]);
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
-    seen.insert(channel_id.to_string());
-    let mut frontier: Vec<String> = vec![channel_id.to_string()];
-    while !frontier.is_empty() {
-        let children: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM channels WHERE parent_id = ANY($1)")
-                .bind(&frontier)
-                .fetch_all(db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        frontier = children
-            .into_iter()
-            .filter(|c| seen.insert(c.clone()))
-            .collect();
-    }
-    Ok(seen.into_iter().collect())
+    channel_subtree_ids(db, channel_id).await
 }
 
 /// "Event created" card: title + formatted start time. Fans out to every
@@ -1406,4 +1367,26 @@ pub async fn delete_slot(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_unix_utc_pins_format() {
+        let cases: [(i64, &str); 8] = [
+            (-5, "1970-01-01 00:00 UTC"),
+            (0, "1970-01-01 00:00 UTC"),
+            (86_399, "1970-01-01 23:59 UTC"),
+            (951_868_800, "2000-03-01 00:00 UTC"),
+            (1_700_000_000, "2023-11-14 22:13 UTC"),
+            (1_709_251_199, "2024-02-29 23:59 UTC"),
+            (1_709_251_200, "2024-03-01 00:00 UTC"),
+            (4_107_542_400, "2100-03-01 00:00 UTC"),
+        ];
+        for (ts, want) in cases {
+            assert_eq!(format_unix_utc(ts), want, "ts={ts}");
+        }
+    }
 }

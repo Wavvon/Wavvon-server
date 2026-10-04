@@ -734,6 +734,31 @@ pub async fn reorder_channels(
     Ok(StatusCode::OK)
 }
 
+/// `root` plus every descendant in the `channels` tree (any depth, any type),
+/// in no particular order. The `seen` set also guards against a malformed
+/// parent cycle.
+pub(crate) async fn channel_subtree_ids(
+    db: &sqlx::PgPool,
+    root: &str,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(root.to_string());
+    let mut frontier: Vec<String> = vec![root.to_string()];
+    while !frontier.is_empty() {
+        let children: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM channels WHERE parent_id = ANY($1)")
+                .bind(&frontier)
+                .fetch_all(db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        frontier = children
+            .into_iter()
+            .filter(|c| seen.insert(c.clone()))
+            .collect();
+    }
+    Ok(seen.into_iter().collect())
+}
+
 pub async fn delete_channel(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -754,25 +779,8 @@ pub async fn delete_channel(
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
-    // Collect the channel and every descendant (any depth, any type) so
-    // deleting a category/channel removes everything nested under it rather
-    // than refusing. The `seen` set also guards against a malformed cycle.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    seen.insert(channel_id.clone());
-    let mut frontier: Vec<String> = vec![channel_id.clone()];
-    while !frontier.is_empty() {
-        let children: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM channels WHERE parent_id = ANY($1)")
-                .bind(&frontier)
-                .fetch_all(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        frontier = children
-            .into_iter()
-            .filter(|c| seen.insert(c.clone()))
-            .collect();
-    }
-    let ids: Vec<String> = seen.into_iter().collect();
+    // Delete the channel and everything nested under it rather than refusing.
+    let ids = channel_subtree_ids(&state.db, &channel_id).await?;
 
     // Clean up related data for the whole subtree, then the channels.
     for table in [
