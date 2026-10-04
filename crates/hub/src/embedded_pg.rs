@@ -214,16 +214,16 @@ fn pick_port() -> Result<u16> {
 
 /// Say what a dynamic-link failure from the bundled binaries actually means.
 ///
-/// The archive is chosen by build target, and the **musl** one is the odd one
-/// out: measured 2026-09-05, its `initdb` declares `libicuuc.so.74` as a
-/// dynamic dependency (the glibc build links ICU statically and needs nothing
-/// but libc), and no current Alpine ships that soname — 3.24 has ICU 78, so
-/// even `apk add icu-libs` does not satisfy it. `libpq.so.5` there also wants
-/// `libgssapi_krb5.so.2`.
+/// The **musl** archive is not self-contained at all — measured 2026-09-05,
+/// its `initdb` wants `libicuuc.so.74`, which no current Alpine ships, and its
+/// `libpq.so.5` wants krb5 — so a musl build never gets here: it refuses
+/// bundled mode up front (`BUNDLED_AVAILABLE`). The glibc archive is not
+/// dependency-free either: its `postgres` needs `libxml2.so.2`, which slim
+/// Debian images do not ship. Which library is missing depends on the host,
+/// so the message names the one the loader reported.
 ///
-/// Left alone, the operator gets a wall of `symbol not found` relocations from
-/// a program they never ran, on the one path advertised as needing no
-/// prerequisites. This turns that into a sentence and a way out.
+/// Left alone, the operator gets a loader error from a program they never
+/// ran. This turns that into a sentence and a way out.
 fn explain_dynamic_link_failure(e: impl std::fmt::Display) -> anyhow::Error {
     let message = e.to_string();
     let looks_dynamic = message.contains("Error loading shared library")
@@ -232,12 +232,16 @@ fn explain_dynamic_link_failure(e: impl std::fmt::Display) -> anyhow::Error {
     if !looks_dynamic {
         return anyhow::anyhow!(message);
     }
+    let missing = message
+        .split(|c: char| c.is_whitespace() || c == ':')
+        .find(|word| word.contains(".so"))
+        .map(|soname| format!(" ({soname})"))
+        .unwrap_or_default();
     anyhow::anyhow!(
-        "{message}\n\nThe bundled PostgreSQL binaries could not be loaded by this system. \
-         The musl build of them is not self-contained: it needs ICU 74 (libicuuc.so.74) \
-         and krb5, which musl distributions do not ship at that version. Either run the \
-         glibc build of the hub, or point WAVVON_DATABASE_URL at a PostgreSQL you provide \
-         — a database you built is never touched by the bundled mode."
+        "{message}\n\nThe bundled PostgreSQL binaries need a shared library this system \
+         does not have{missing}. Install it with the system's package manager, or point \
+         WAVVON_DATABASE_URL at a PostgreSQL you provide — a database you built is never \
+         touched by the bundled mode."
     )
 }
 
@@ -497,25 +501,27 @@ mod tests {
 
     #[test]
     fn a_loader_failure_gets_an_explanation_and_nothing_else_does() {
-        // The real thing, from a musl container: initdb from the bundled
-        // archive against Alpine 3.24 (ICU 78).
-        let musl = explain_dynamic_link_failure(
-            "Command error: stdout=; stderr=Error loading shared library \
-             libicuuc.so.74: No such file or directory (needed by .../bin/initdb)",
+        // The real thing, from the Debian image before it shipped libxml2.
+        let glibc = explain_dynamic_link_failure(
+            "stderr=/data/pg/18.6.0/bin/postgres: error while loading shared libraries:              libxml2.so.2: cannot open shared object file: No such file or directory",
         )
         .to_string();
         assert!(
-            musl.contains("libicuuc.so.74"),
+            glibc.contains("cannot open shared object file"),
             "keeps the original message"
         );
         assert!(
-            musl.contains("WAVVON_DATABASE_URL"),
-            "names the way out: {musl}"
+            glibc.contains("does not have (libxml2.so.2)"),
+            "names the missing library: {glibc}"
+        );
+        assert!(
+            glibc.contains("WAVVON_DATABASE_URL"),
+            "names the way out: {glibc}"
         );
 
         // Everything else must pass through: a port clash or a corrupt data
         // directory has nothing to do with dynamic linking, and dressing it up
-        // as an ICU problem would send the operator the wrong way.
+        // as a missing library would send the operator the wrong way.
         let other = explain_dynamic_link_failure("could not bind to port 5432").to_string();
         assert_eq!(other, "could not bind to port 5432");
     }

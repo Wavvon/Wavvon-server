@@ -205,8 +205,12 @@ the data lives; `backup`/`restore` go through the bundled `pg_dump`.
 One live caveat: **bundled mode does not work on musl** (the archive's `initdb`
 wants `libicuuc.so.74`, which no current Alpine ships, and its `libpq.so.5` also
 wants krb5) even though the release still publishes musl targets advertising a
-no-prerequisites path. It is an open item in the wiki's `next-up.md`. The Docker
-image is unaffected: it is `debian:trixie-slim`, so it gets the glibc archive.
+no-prerequisites path; a musl build refuses bundled mode up front. The glibc
+archive is not dependency-free either — its `postgres` links `libxml2.so.2` —
+and `initdb` refuses to run as root, which is why the Docker image installs
+`libxml2` and runs as the unprivileged `wavvon` user (uid 10001). Every
+documented Docker path uses an external database, so nothing exercised the
+image's bundled mode until that was found by hand.
 
 The **major-upgrade path is walked end to end** as of 2026-09-10, across two
 real majors, by `e2e-topology`'s `pgupgrade` stage: a hub carrying PostgreSQL
