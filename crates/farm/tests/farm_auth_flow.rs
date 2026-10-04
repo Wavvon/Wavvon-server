@@ -56,13 +56,7 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
             .to_string_lossy()
             .to_string(),
     ));
-    let state = Arc::new(FarmState::new(
-        db,
-        keypair,
-        farm_url,
-        hub_manager,
-        "/tmp/hubs-test".to_string(),
-    ));
+    let state = Arc::new(FarmState::new(db, keypair, farm_url, hub_manager));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state, guard)
 }
@@ -417,8 +411,8 @@ async fn heartbeat_accepts_known_hub_pubkey() {
         .unwrap()
         .as_secs() as i64;
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at, hub_pubkey)
-         VALUES ('hbhub', 'aa', 'Heartbeat Hub', 'private', '/tmp/x.db', $1, $2)",
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at, hub_pubkey)
+         VALUES ('hbhub', 'aa', 'Heartbeat Hub', 'private', $1, $2)",
     )
     .bind(now)
     .bind(&hub_pubkey)

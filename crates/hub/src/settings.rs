@@ -69,11 +69,6 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "The farm's row id for this hub. Reported on heartbeat so the farm can route to it",
     ),
     (
-        "WAVVON_DISCOVERY_URL",
-        "https://discovery.wavvon.io",
-        "Discovery service base URL",
-    ),
-    (
         "WAVVON_TEMPLATE_URL",
         "(unset)",
         "Bootstrap template URL applied on first boot when the channels table is empty",
@@ -265,8 +260,6 @@ pub struct Settings {
     /// Owner's Ed25519 public key (64 hex chars). Seeded as builtin-owner on first boot.
     /// Env: WAVVON_OWNER_PUBKEY
     pub owner_pubkey: Option<String>,
-    /// Discovery service base URL. Env: WAVVON_DISCOVERY_URL
-    pub discovery_url: String,
     /// Bootstrap template URL applied on first boot when channels table is empty.
     /// Env: WAVVON_TEMPLATE_URL
     pub template_url: Option<String>,
@@ -388,7 +381,6 @@ pub fn load() -> Result<Settings> {
         .set_default("voice_udp_port", 3001)?
         .set_default("cors_origins", "*")?
         .set_default("log_format", "text")?
-        .set_default("discovery_url", "https://discovery.wavvon.io")?
         .set_default("trusted_proxy", false)?
         .set_default("apps_allow_camera", false)?
         .set_default("http_video_stream_budget", 2u32)?

@@ -11,7 +11,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Secret, TOTP};
 
-use crate::routes::admin::require_admin_pub;
+use crate::routes::admin::require_admin;
 use crate::state::FarmState;
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ pub async fn totp_setup(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<TotpSetupResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let admin_sub = require_admin_pub(&headers, &state).await?;
+    let admin_sub = require_admin(&headers, &state).await?;
 
     // Generate a fresh random TOTP secret (20 bytes = 160-bit, standard for SHA1 TOTP).
     let secret_bytes = {
@@ -107,7 +107,7 @@ pub async fn totp_confirm(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<TotpConfirmRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    require_admin_pub(&headers, &state).await?;
+    require_admin(&headers, &state).await?;
 
     if !verify_totp(&req.secret, &req.code) {
         return Err((
@@ -144,7 +144,7 @@ pub async fn totp_disable(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<TotpDisableRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    require_admin_pub(&headers, &state).await?;
+    require_admin(&headers, &state).await?;
 
     // Load current TOTP state.
     let row: Option<(Option<String>, bool)> =

@@ -27,11 +27,6 @@ voice_udp_port = 3001
 # Only set when this hub is spawned by wavvon-farm.
 # farm_url = "https://farm.example.com"
 
-# ── Discovery ────────────────────────────────────────────────────────────────
-
-# Discovery service base URL (hub directory).
-discovery_url = "https://discovery.wavvon.io"
-
 # ── First-boot bootstrap ─────────────────────────────────────────────────────
 
 # Apply a channel/role template on first boot (when channels table is empty).

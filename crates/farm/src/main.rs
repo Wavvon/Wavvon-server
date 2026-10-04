@@ -243,13 +243,7 @@ async fn main() -> Result<()> {
     ));
     hub_manager.spawn_all_from_db(&db).await?;
 
-    let state = Arc::new(FarmState::new(
-        db,
-        keypair,
-        farm_url,
-        hub_manager,
-        cfg.hubs_dir,
-    ));
+    let state = Arc::new(FarmState::new(db, keypair, farm_url, hub_manager));
 
     wavvon_farm::monitor::spawn(state.clone());
 

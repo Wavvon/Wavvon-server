@@ -12,58 +12,16 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::routes::hubs::{get_admin_pubkey, require_auth};
 use crate::state::FarmState;
-use crate::token::verify_token;
 use crate::unix_now;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Extract and verify a Bearer farm token. Returns the payload on success.
-fn require_auth(
-    headers: &HeaderMap,
-    farm_pubkey: &str,
-) -> Result<crate::token::FarmTokenPayload, (StatusCode, Json<serde_json::Value>)> {
-    let token_str = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .ok_or_else(|| {
-            (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "missing_token"})),
-            )
-        })?;
-
-    verify_token(farm_pubkey, token_str).map_err(|_| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "invalid_token"})),
-        )
-    })
-}
-
-/// Load the admin pubkey from the farms singleton row.
-async fn get_admin_pubkey(db: &sqlx::PgPool) -> Option<String> {
-    sqlx::query_scalar::<_, Option<String>>("SELECT admin_pubkey FROM farms WHERE id = 1")
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-        .flatten()
-}
-
 /// Require a valid farm session whose `sub` matches `farms.admin_pubkey`.
-/// Public alias used by other route modules (e.g. heartbeat).
-pub async fn require_admin_pub(
-    headers: &HeaderMap,
-    state: &FarmState,
-) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    require_admin(headers, state).await
-}
-
-async fn require_admin(
+pub(crate) async fn require_admin(
     headers: &HeaderMap,
     state: &FarmState,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {

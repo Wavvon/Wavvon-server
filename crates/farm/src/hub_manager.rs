@@ -292,16 +292,6 @@ impl HubManager {
         self.spawn_hub(hub_id, db_url, port, voice_port, None).await
     }
 
-    /// Whether a hub process is currently tracked as running.
-    pub async fn is_running(&self, hub_id: &str) -> bool {
-        self.hubs.read().await.contains_key(hub_id)
-    }
-
-    /// Return the port the named hub process is listening on, if running.
-    pub async fn port_of(&self, hub_id: &str) -> Option<u16> {
-        self.hubs.read().await.get(hub_id).map(|h| h.port)
-    }
-
     /// Re-spawn all non-suspended, non-deleted hubs from the DB.
     /// Called once at farm startup.
     ///
