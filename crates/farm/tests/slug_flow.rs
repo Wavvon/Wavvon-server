@@ -77,7 +77,6 @@ async fn setup() -> Harness {
         keypair,
         FARM_URL.to_string(),
         hub_manager,
-        "/tmp/wavvon-slug-tests".to_string(),
     ));
 
     let owner_pubkey = "1".repeat(64);
@@ -95,13 +94,12 @@ async fn setup() -> Harness {
 
 async fn insert_hub(h: &Harness, id: &str, pubkey: Option<&str>) {
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at,
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at,
                            hub_pubkey, process_port)
-         VALUES ($1, $2, 'Osteria di Pippo', 'private', $3, $4, $5, 4000)",
+         VALUES ($1, $2, 'Osteria di Pippo', 'private', $3, $4, 4000)",
     )
     .bind(id)
     .bind(&h.owner_pubkey)
-    .bind(format!("/tmp/{id}.db"))
     .bind(unix_now())
     .bind(pubkey)
     .execute(&h.state.db)

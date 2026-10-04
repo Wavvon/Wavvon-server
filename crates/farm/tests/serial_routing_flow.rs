@@ -64,7 +64,6 @@ async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
         keypair,
         farm_url.clone(),
         hub_manager,
-        "/tmp/wavvon-serial-routing-tests".to_string(),
     ));
 
     let app = server::create_router(state.clone());
@@ -121,12 +120,11 @@ async fn insert_hub_row(
     let now = unix_now();
     sqlx::query(
         "INSERT INTO hubs
-             (id, owner_pubkey, name, visibility, process_port, db_path, created_at, hub_pubkey, suspended_at)
-         VALUES ($1, 'owner', 'Test Hub', 'private', $2, $3, $4, $5, $6)",
+             (id, owner_pubkey, name, visibility, process_port, created_at, hub_pubkey, suspended_at)
+         VALUES ($1, 'owner', 'Test Hub', 'private', $2, $3, $4, $5)",
     )
     .bind(id)
     .bind(process_port.map(|p| p as i32))
-    .bind(format!("/tmp/{id}.db"))
     .bind(now)
     .bind(serial)
     .bind(if suspended { Some(now) } else { None })

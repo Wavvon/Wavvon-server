@@ -5,9 +5,6 @@ pub struct Settings {
     pub farm_url: String,
     pub server_token: String,
     pub hub_binary: String,
-    pub base_port: u16,
-    #[allow(dead_code)]
-    pub region: Option<String>,
     /// How the farm's proxy reaches the hubs on this node — the address the
     /// agent advertises in its `hello` (farm-model.md, "Multi-node data
     /// plane"). Unset means this node is the farm's own machine, and the
@@ -31,11 +28,6 @@ impl Settings {
         let server_token = std::env::var("WAVVON_SERVER_TOKEN").unwrap_or_else(|_| String::new());
         let hub_binary =
             std::env::var("WAVVON_HUB_BIN").unwrap_or_else(|_| "wavvon-hub".to_string());
-        let base_port = std::env::var("WAVVON_BASE_PORT")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8100);
-        let region = std::env::var("WAVVON_REGION").ok();
         let node_host = std::env::var("WAVVON_NODE_HOST")
             .ok()
             .map(|h| h.trim().to_string())
@@ -59,8 +51,6 @@ impl Settings {
             farm_url,
             server_token,
             hub_binary,
-            base_port,
-            region,
             node_host,
             node_tls,
             node_cert_sha256,

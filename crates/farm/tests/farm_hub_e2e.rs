@@ -134,7 +134,6 @@ async fn start_farm(
         keypair,
         farm_url.clone(),
         hub_manager,
-        hubs_dir,
     ));
 
     let app = server::create_router(state.clone());
