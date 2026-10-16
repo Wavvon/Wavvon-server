@@ -1495,3 +1495,41 @@ async fn bound_invite_admits_a_paired_device_by_the_master_it_names() {
         .await
         .assert_status_ok();
 }
+
+/// `invites.grant_role_id` references the role with no ON DELETE: deleting a
+/// role an invite grants used to strip it from every member, then fail.
+#[tokio::test]
+async fn a_role_an_invite_grants_can_still_be_deleted() {
+    let server = common::setup_raw().await;
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at)
+         VALUES ('ownercode', 'system', 1, 0, NULL, $1)",
+    )
+    .bind(now)
+    .execute(&server.state().db)
+    .await
+    .unwrap();
+    let owner = Identity::generate();
+    let owner_token = authenticate_with_invite(&server, &owner, Some("ownercode")).await;
+
+    let role_id = create_role(&server, &owner_token, "Trusted", 10).await;
+    server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "grant_role_id": role_id }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    server
+        .delete(&format!("/roles/{role_id}"))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM roles WHERE id = $1")
+        .bind(&role_id)
+        .fetch_one(&server.state().db)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
