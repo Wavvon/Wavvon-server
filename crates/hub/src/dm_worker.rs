@@ -63,7 +63,10 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
                 .bind(&row.recipient_hub_url)
                 .execute(&state.db)
                 .await?;
-                tracing::error!("DM {} bounced unsent: {why}", &row.message_id[..8]);
+                tracing::error!(
+                    "DM {} bounced unsent: {why}",
+                    row.message_id.get(..8).unwrap_or(&row.message_id)
+                );
                 continue;
             }
             Err(LoadEnvelopeError::Db(e)) => return Err(e),
@@ -98,7 +101,7 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
                 .await?;
                 tracing::info!(
                     "DM {} delivered to {} after {} retries",
-                    &row.message_id[..8],
+                    row.message_id.get(..8).unwrap_or(&row.message_id),
                     row.recipient_hub_url,
                     row.attempts
                 );
@@ -120,7 +123,7 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
                     .await?;
                     tracing::warn!(
                         "DM {} bounced after {} attempts: {err}",
-                        &row.message_id[..8],
+                        row.message_id.get(..8).unwrap_or(&row.message_id),
                         next_attempts
                     );
                 } else {
