@@ -759,6 +759,35 @@ pub(crate) async fn channel_subtree_ids(
     Ok(seen.into_iter().collect())
 }
 
+/// Deletes `ids` and every row that references them, in one transaction.
+///
+/// The tables listed reference `channels(id)` without `ON DELETE CASCADE`;
+/// missing one used to let the earlier deletes commit and the last one fail
+/// on the foreign key -- a 500, the channel still there, its history gone.
+/// The others cascade. Every path that deletes a channel goes through here.
+pub(crate) async fn delete_channels(db: &sqlx::PgPool, ids: &[String]) -> Result<(), sqlx::Error> {
+    let mut tx = db.begin().await?;
+    for table in [
+        "messages",
+        "polls",
+        "hub_events",
+        "webhooks",
+        "channel_bans",
+        "channel_settings",
+        "alliance_shared_channels",
+    ] {
+        sqlx::query(&format!("DELETE FROM {table} WHERE channel_id = ANY($1)"))
+            .bind(ids)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM channels WHERE id = ANY($1)")
+        .bind(ids)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await
+}
+
 pub async fn delete_channel(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -782,23 +811,7 @@ pub async fn delete_channel(
     // Delete the channel and everything nested under it rather than refusing.
     let ids = channel_subtree_ids(&state.db, &channel_id).await?;
 
-    // Clean up related data for the whole subtree, then the channels.
-    for table in [
-        "messages",
-        "channel_bans",
-        "channel_settings",
-        "alliance_shared_channels",
-    ] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE channel_id = ANY($1)"))
-            .bind(&ids)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    }
-
-    sqlx::query("DELETE FROM channels WHERE id = ANY($1)")
-        .bind(&ids)
-        .execute(&state.db)
+    delete_channels(&state.db, &ids)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 

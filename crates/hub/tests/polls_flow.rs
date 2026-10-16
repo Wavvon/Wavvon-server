@@ -359,3 +359,36 @@ async fn list_polls_empty_channel_returns_empty_array() {
     let polls: Value = resp.json();
     assert!(polls.as_array().unwrap().is_empty());
 }
+
+/// `polls` (like `webhooks` and `hub_events`) references the channel without
+/// a cascade. Deleting a channel holding one used to wipe its messages, then
+/// fail on the foreign key: a 500, the channel still listed, history gone.
+#[tokio::test]
+async fn deleting_a_channel_with_a_poll_deletes_it_whole() {
+    let server = common::setup().await;
+    let id = Identity::generate();
+    let token = common::authenticate(&server, &id).await;
+    let channel_id = create_channel(&server, &token).await;
+    server
+        .post(&format!("/channels/{channel_id}/polls"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "question": "Still here?",
+            "options": [{ "id": "y", "text": "Yes" }, { "id": "n", "text": "No" }],
+        }))
+        .await
+        .assert_status_success();
+
+    server
+        .delete(&format!("/channels/{channel_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM channels WHERE id = $1")
+        .bind(&channel_id)
+        .fetch_one(&server.state().db)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
+}
