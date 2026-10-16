@@ -220,21 +220,7 @@ async fn prune_ended_event_squad_rooms(state: &AppState, now: i64) -> Result<(),
         return Ok(());
     }
 
-    for table in [
-        "messages",
-        "channel_bans",
-        "channel_settings",
-        "alliance_shared_channels",
-    ] {
-        sqlx::query(&format!("DELETE FROM {table} WHERE channel_id = ANY($1)"))
-            .bind(&empty_ids)
-            .execute(&state.db)
-            .await?;
-    }
-    sqlx::query("DELETE FROM channels WHERE id = ANY($1)")
-        .bind(&empty_ids)
-        .execute(&state.db)
-        .await?;
+    crate::routes::channels::delete_channels(&state.db, &empty_ids).await?;
 
     let json: std::sync::Arc<str> = std::sync::Arc::from(
         serde_json::to_string(&WsServerMessage::ChannelsUpdated)

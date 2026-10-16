@@ -128,31 +128,8 @@ async fn delete_expired_temp_channels(state: &AppState, now: i64) -> Result<(), 
     Ok(())
 }
 
-/// Deletes a single temp channel and its dependents. Mirrors
-/// `routes::channels::delete_channel`'s manual cascade (messages,
-/// channel_bans, channel_settings, alliance_shared_channels) -- temp rooms
-/// are always leaves (nothing can be created under a non-category channel),
-/// so there's no child-channel check to make.
+/// Temp rooms are always leaves (nothing can be created under a
+/// non-category channel), so there is no subtree to collect.
 async fn delete_temp_channel(state: &AppState, channel_id: &str) -> Result<(), sqlx::Error> {
-    sqlx::query("DELETE FROM messages WHERE channel_id = $1")
-        .bind(channel_id)
-        .execute(&state.db)
-        .await?;
-    sqlx::query("DELETE FROM channel_bans WHERE channel_id = $1")
-        .bind(channel_id)
-        .execute(&state.db)
-        .await?;
-    sqlx::query("DELETE FROM channel_settings WHERE channel_id = $1")
-        .bind(channel_id)
-        .execute(&state.db)
-        .await?;
-    sqlx::query("DELETE FROM alliance_shared_channels WHERE channel_id = $1")
-        .bind(channel_id)
-        .execute(&state.db)
-        .await?;
-    sqlx::query("DELETE FROM channels WHERE id = $1")
-        .bind(channel_id)
-        .execute(&state.db)
-        .await?;
-    Ok(())
+    crate::routes::channels::delete_channels(&state.db, &[channel_id.to_string()]).await
 }
