@@ -1387,6 +1387,40 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
         reqwest::StatusCode::UNAUTHORIZED,
         "federated DM signed by wrong key must be rejected"
     );
+
+    // --- Case 3: properly signed, but the id is not a UUID ---
+    // It would reach dm_outbox through the mirror queue, where the worker
+    // logs a prefix of it; a short one used to panic the worker for good.
+    let content = "short id";
+    let sig = hex::encode(
+        attacker
+            .sign(&wavvon_identity::federated_plaintext_dm_signing_bytes(
+                conv_id, "dm", content,
+            ))
+            .to_bytes(),
+    );
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&attacker_token)
+        .json(&serde_json::json!({
+            "message_id": "x",
+            "conversation_id": conv_id,
+            "conv_type": "dm",
+            "sender": attacker.public_key_hex(),
+            "members": [attacker.public_key_hex(), victim.public_key_hex()],
+            "content": content,
+            "attachments": [],
+            "signature": sig,
+            "created_at": 1_700_000_002i64,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a federated DM id that is not a UUID must be rejected"
+    );
 }
 
 /// Correctly-signed plaintext DM posted directly to /federation/dm must be

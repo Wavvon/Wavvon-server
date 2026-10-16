@@ -592,6 +592,14 @@ pub async fn receive_federated_dm(
     _peer: PeerHub,
     Json(req): Json<FederatedDmRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // The id comes from another hub and ends up in `dm_outbox` via the mirror
+    // queue; anything but a UUID has no business there.
+    if Uuid::parse_str(&req.message_id).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message_id must be a UUID".to_string(),
+        ));
+    }
     let now = crate::auth::handlers::unix_timestamp();
 
     // Idempotent: if we've already stored this message, succeed without double-broadcast.
