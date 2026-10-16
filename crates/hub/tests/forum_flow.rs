@@ -1467,3 +1467,39 @@ async fn forum_reply_paging_returns_every_reply_once_within_one_second() {
     got.sort();
     assert_eq!(got, expected, "every reply exactly once");
 }
+
+/// A peer files reactions for its own members. One filed under a member of
+/// the owning hub would read as theirs, with nothing to tell it apart.
+#[tokio::test]
+async fn a_peer_cannot_react_as_a_member_of_the_owning_hub() {
+    let s = setup_forum_alliance(Some("posts_and_replies")).await;
+    let me: Value = s
+        .client
+        .get(format!("{}/me", s.hub_b_url))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let local_member = me["public_key"].as_str().unwrap().to_string();
+
+    let fed = wavvon_hub::federation::client::FederationClient::new();
+    let token = fed
+        .authenticate(&s.hub_b_url, &s.hub_a_state.hub_identity)
+        .await
+        .unwrap();
+    let resp = fed
+        .add_forum_post_reaction(
+            &s.hub_b_url,
+            &token,
+            &s.channel_id,
+            &s.post_id,
+            &local_member,
+            "👍",
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}

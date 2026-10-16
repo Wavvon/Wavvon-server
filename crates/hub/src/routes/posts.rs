@@ -1850,6 +1850,21 @@ pub async fn federated_add_post_reaction(
             "author_pubkey_required".to_string(),
         ));
     }
+    // A peer speaks for its own members. A reaction filed here under one of
+    // *ours* would read as theirs, with nothing to tell it apart.
+    let local_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_member)",
+    )
+    .bind(&author_pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if local_member {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "author is a member of this hub".to_string(),
+        ));
+    }
     let emoji = req.emoji.trim();
     if emoji.is_empty() || emoji.chars().count() > 8 {
         return Err((
