@@ -275,3 +275,41 @@ async fn auth_verify_succeeds_with_valid_challenge_token() {
     let body: Value = resp.json();
     assert!(body["token"].is_string());
 }
+
+#[tokio::test]
+async fn a_returning_member_signs_in_without_the_admission_challenge() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    admin_set_challenge_mode(&server, &owner_token, "puzzle").await;
+
+    // The owner's next sign-in: no challenge token, and none is owed.
+    common::authenticate(&server, &owner).await;
+}
+
+#[tokio::test]
+async fn a_federating_peer_hub_is_not_asked_for_the_admission_challenge() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    admin_set_challenge_mode(&server, &owner_token, "click").await;
+
+    let hub = Identity::generate();
+    let pub_key = hub.public_key_hex();
+    let challenge: ChallengeResponse = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pub_key }))
+        .await
+        .json();
+    let signature = hub.sign(&hex::decode(&challenge.challenge).unwrap());
+    server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pub_key,
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+            "is_hub": true,
+        }))
+        .await
+        .assert_status_ok();
+}

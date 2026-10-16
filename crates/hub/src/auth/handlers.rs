@@ -639,7 +639,14 @@ pub async fn verify(
     //
     // A *bearer* invite gets no exemption. A bulk code leaking is exactly the
     // case the puzzle is still here for.
-    if challenge_mode != "off" && !admitted_by_named_invite {
+    //
+    // And it is an *admission* challenge: it gates a key becoming a member,
+    // nothing else. A returning member was admitted already and the clients
+    // only offer the challenge when joining a hub, so gating every sign-in
+    // locked out the whole hub, its owner first, the moment the mode was
+    // switched on. A federating peer is not being admitted at all and cannot
+    // answer a puzzle, which kept two hubs from forming an alliance (#108).
+    if challenge_mode != "off" && !is_member && !peer && !admitted_by_named_invite {
         match &req.challenge_token {
             None => {
                 return Err((
