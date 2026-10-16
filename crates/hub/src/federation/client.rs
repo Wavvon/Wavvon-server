@@ -52,6 +52,19 @@ impl FederationClient {
 
         let challenge_bytes =
             hex::decode(&challenge.challenge).context("Invalid challenge hex from peer")?;
+        // The hub key also signs alliance invite tokens, voice grants,
+        // badges, certs and the ban list, none of them domain-separated, so
+        // signing whatever bytes a remote server hands over made this a
+        // signing oracle: a server we could be made to authenticate against
+        // could pick the bytes of an invite token and get it signed. A
+        // Wavvon hub issues exactly AUTH_CHALLENGE_LEN random bytes, and
+        // every structured object the hub signs is longer (each carries at
+        // least a hex key or a UUID), so that length is all we sign.
+        anyhow::ensure!(
+            challenge_bytes.len() == crate::auth::handlers::AUTH_CHALLENGE_LEN,
+            "Peer sent a {}-byte auth challenge; refusing to sign it",
+            challenge_bytes.len()
+        );
         let signature = identity.sign(&challenge_bytes);
 
         let verify: VerifyResponse = self
