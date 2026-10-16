@@ -279,17 +279,6 @@ pub struct InviteRedemption {
     pub created_by: String,
     /// The role (if any) to assign alongside `builtin-everyone` (task #34).
     pub grant_role_id: Option<String>,
-    /// This invite **named** the identity that just redeemed it, so an admin
-    /// admitted this exact key by hand. That is the human act the admission
-    /// challenge exists to ask about, so the caller may skip it
-    /// (`pubkey-bound-invites.md` §3).
-    ///
-    /// The exemption belongs to the invite and not to the identity: a row an
-    /// admin wrote, naming one key, with an expiry, spent on use. Nothing is
-    /// recorded on the user, so there is nothing to drift and nothing a later
-    /// read can be wrong about — which is precisely where `is_bot` went
-    /// wrong (decisions.md, "A bot is a client like any other").
-    pub was_bound: bool,
 }
 
 /// Called during auth to validate and consume an invite code, for the
@@ -359,7 +348,6 @@ pub async fn validate_and_use_invite(
     Ok(InviteRedemption {
         created_by: invite.created_by,
         grant_role_id: invite.grant_role_id,
-        was_bound: invite.bound_pubkey.is_some(),
     })
 }
 

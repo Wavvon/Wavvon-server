@@ -495,129 +495,29 @@ pub async fn verify(
     // member is a person, whatever it claims.
     let peer = req.is_hub == Some(true) && !is_member;
 
-    let scope = if peer {
-        "peer".to_string()
-    } else if owner_exempt {
-        "member".to_string()
-    } else if lobby_enabled && effective_pow_level < min_level {
-        "lobby".to_string()
-    } else {
-        "member".to_string()
-    };
-
-    let token = hex::encode({
-        let mut bytes = vec![0u8; 32];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        bytes
-    });
-
-    sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope) VALUES ($1, $2, $3, $4, $5)",
-    )
-    .bind(&token)
-    .bind(&canonical_pubkey)
-    .bind(now)
-    .bind(Option::<i64>::None)
-    .bind(&scope)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    // Role granted by a role-granting invite (task #34), if the joining
-    // user presented one. Assigned alongside builtin-everyone below.
-    let mut invite_grant_role_id: Option<String> = None;
-    let mut invite_created_by: Option<String> = None;
-
-    // One admission gate, and a program goes through it: a client running
-    // unattended presents an invite code like anybody else. The second gate
-    // that used to stand beside this one — a pubkey the admin had pre-seeded
-    // with `is_bot = TRUE` — is gone with the flag, and with it the hole
-    // where a stranger's pubkey could be flagged before its owner ever
-    // arrived (decisions.md, "A bot is a client like any other").
+    // The admission challenge is decided before anything is written. It used
+    // to run after the session row, the spent invite and admit_member: a
+    // failed answer returned an error with the caller already a member, and
+    // since a member is not challenged, the next attempt walked straight in.
     //
-    // A federating peer hub (is_hub=true) stays exempt, and that exemption is
-    // a different thing: it is not a person joining this community. It
-    // authenticates to deliver federation traffic, receives no human roles, and
-    // its token is tagged so `PeerHub` can tell it apart. An invite code is a
-    // thing a community gives a person; there is nobody here to give one to.
-    //
-    // Without this, two hubs with default settings could never form an
-    // alliance at all -- a fresh hub is invite_only, so hub B's federation
-    // client got "This hub requires an invite code" from hub A and the join
-    // failed with a 502 that blamed the network. Invisible to the integration
-    // suite, which builds `AppState` directly and never writes the
-    // `invite_only` setting, so `is_invite_only` answered false there. Found
-    // by driving two real hub binaries (e2e-topology).
-    // Set by a *bound* invite only: an admin named this exact key by hand, so
-    // the admission challenge below has already been answered. See
-    // `InviteRedemption::was_bound` and the wiki's `pubkey-bound-invites.md`.
-    let mut admitted_by_named_invite = false;
-
-    if !is_member && !peer {
-        // A code that is presented is a code that is spent, whether or not
-        // this hub demanded one. It used to be read only when `invite_only`
-        // was on, which meant an open hub ignored the role grant the invite
-        // carried — and, now that it matters more, left a program holding a
-        // perfectly good bound invite facing the challenge anyway.
-        //
-        // The three keys are the ones a bound invite may name: the presented
-        // key, the canonical identity it resolves to, and the master its cert
-        // names (`routes::invites::redeemable_by`).
-        match &req.invite_code {
-            Some(code) => {
-                let mut candidates = vec![req.public_key.as_str(), canonical_pubkey.as_str()];
-                if let Some(master) = master_pubkey.as_deref() {
-                    candidates.push(master);
-                }
-                let redemption =
-                    crate::routes::invites::validate_and_use_invite(&state.db, code, &candidates)
-                        .await?;
-                admitted_by_named_invite = redemption.was_bound;
-                invite_created_by = Some(redemption.created_by);
-                invite_grant_role_id = redemption.grant_role_id;
+    // Whether the presented invite is bound to this key is read here without
+    // spending it; the redemption below spends it.
+    let presents_named_invite = match &req.invite_code {
+        Some(code) => {
+            let bound: Option<Option<String>> =
+                sqlx::query_scalar("SELECT bound_pubkey FROM invites WHERE code = $1")
+                    .bind(code)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            let mut candidates = vec![req.public_key.as_str(), canonical_pubkey.as_str()];
+            if let Some(master) = master_pubkey.as_deref() {
+                candidates.push(master);
             }
-            None => crate::routes::invites::refuse_if_invite_only(&state.db).await?,
+            matches!(bound, Some(Some(ref b)) if crate::routes::invites::redeemable_by(Some(b), &candidates))
         }
-    }
-
-    // Admit a first-contact identity. `is_member` was read before the invite
-    // gate and nothing in between changes it.
-
-    if !is_member && !peer {
-        admit_member(&state.db, &canonical_pubkey).await?;
-        if existing_users == 0 {
-            sqlx::query(
-                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
-                 VALUES ($1, 'builtin-owner', $2)
-                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
-            )
-            .bind(&canonical_pubkey)
-            .bind(now)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        }
-        // Role-granting invite (task #34) — or, absent an explicit grant, the
-        // hub-level `default_invite_role_id` (invite role policies) — applied
-        // through the shared helper also used by the `/join/:code` redemption
-        // path (its ON CONFLICT DO NOTHING covers the rare, harmless case
-        // where this is also the same role granted above — e.g. the
-        // first-boot owner invite grants builtin-owner to the very first
-        // user, who already received it via existing_users == 0). Only
-        // consulted when an invite was actually redeemed this call
-        // (`invite_created_by` is `Some`) — registrations that didn't use an
-        // invite at all don't pick up the default.
-        if let Some(created_by) = &invite_created_by {
-            crate::routes::invites::apply_invite_role_grant(
-                &state.db,
-                created_by,
-                invite_grant_role_id.as_deref(),
-                &canonical_pubkey,
-                now,
-            )
-            .await?;
-        }
-    }
+        None => false,
+    };
 
     // Admission challenge gate: if challenge_mode != 'off', require a valid token.
     let challenge_mode: String = sqlx::query_scalar::<_, String>(
@@ -646,7 +546,7 @@ pub async fn verify(
     // locked out the whole hub, its owner first, the moment the mode was
     // switched on. A federating peer is not being admitted at all and cannot
     // answer a puzzle, which kept two hubs from forming an alliance (#108).
-    if challenge_mode != "off" && !is_member && !peer && !admitted_by_named_invite {
+    if challenge_mode != "off" && !is_member && !peer && !presents_named_invite {
         match &req.challenge_token {
             None => {
                 return Err((
@@ -700,6 +600,125 @@ pub async fn verify(
                     }
                 }
             }
+        }
+    }
+
+    let scope = if peer {
+        "peer".to_string()
+    } else if owner_exempt {
+        "member".to_string()
+    } else if lobby_enabled && effective_pow_level < min_level {
+        "lobby".to_string()
+    } else {
+        "member".to_string()
+    };
+
+    let token = hex::encode({
+        let mut bytes = vec![0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        bytes
+    });
+
+    sqlx::query(
+        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(&token)
+    .bind(&canonical_pubkey)
+    .bind(now)
+    .bind(Option::<i64>::None)
+    .bind(&scope)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Role granted by a role-granting invite (task #34), if the joining
+    // user presented one. Assigned alongside builtin-everyone below.
+    let mut invite_grant_role_id: Option<String> = None;
+    let mut invite_created_by: Option<String> = None;
+
+    // One admission gate, and a program goes through it: a client running
+    // unattended presents an invite code like anybody else. The second gate
+    // that used to stand beside this one — a pubkey the admin had pre-seeded
+    // with `is_bot = TRUE` — is gone with the flag, and with it the hole
+    // where a stranger's pubkey could be flagged before its owner ever
+    // arrived (decisions.md, "A bot is a client like any other").
+    //
+    // A federating peer hub (is_hub=true) stays exempt, and that exemption is
+    // a different thing: it is not a person joining this community. It
+    // authenticates to deliver federation traffic, receives no human roles, and
+    // its token is tagged so `PeerHub` can tell it apart. An invite code is a
+    // thing a community gives a person; there is nobody here to give one to.
+    //
+    // Without this, two hubs with default settings could never form an
+    // alliance at all -- a fresh hub is invite_only, so hub B's federation
+    // client got "This hub requires an invite code" from hub A and the join
+    // failed with a 502 that blamed the network. Invisible to the integration
+    // suite, which builds `AppState` directly and never writes the
+    // `invite_only` setting, so `is_invite_only` answered false there. Found
+    // by driving two real hub binaries (e2e-topology).
+
+    if !is_member && !peer {
+        // A code that is presented is a code that is spent, whether or not
+        // this hub demanded one. It used to be read only when `invite_only`
+        // was on, which meant an open hub ignored the role grant the invite
+        // carried — and, now that it matters more, left a program holding a
+        // perfectly good bound invite facing the challenge anyway.
+        //
+        // The three keys are the ones a bound invite may name: the presented
+        // key, the canonical identity it resolves to, and the master its cert
+        // names (`routes::invites::redeemable_by`).
+        match &req.invite_code {
+            Some(code) => {
+                let mut candidates = vec![req.public_key.as_str(), canonical_pubkey.as_str()];
+                if let Some(master) = master_pubkey.as_deref() {
+                    candidates.push(master);
+                }
+                let redemption =
+                    crate::routes::invites::validate_and_use_invite(&state.db, code, &candidates)
+                        .await?;
+                invite_created_by = Some(redemption.created_by);
+                invite_grant_role_id = redemption.grant_role_id;
+            }
+            None => crate::routes::invites::refuse_if_invite_only(&state.db).await?,
+        }
+    }
+
+    // Admit a first-contact identity. `is_member` was read before the invite
+    // gate and nothing in between changes it.
+
+    if !is_member && !peer {
+        admit_member(&state.db, &canonical_pubkey).await?;
+        if existing_users == 0 {
+            sqlx::query(
+                "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
+                 VALUES ($1, 'builtin-owner', $2)
+                 ON CONFLICT (user_public_key, role_id) DO NOTHING",
+            )
+            .bind(&canonical_pubkey)
+            .bind(now)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        }
+        // Role-granting invite (task #34) — or, absent an explicit grant, the
+        // hub-level `default_invite_role_id` (invite role policies) — applied
+        // through the shared helper also used by the `/join/:code` redemption
+        // path (its ON CONFLICT DO NOTHING covers the rare, harmless case
+        // where this is also the same role granted above — e.g. the
+        // first-boot owner invite grants builtin-owner to the very first
+        // user, who already received it via existing_users == 0). Only
+        // consulted when an invite was actually redeemed this call
+        // (`invite_created_by` is `Some`) — registrations that didn't use an
+        // invite at all don't pick up the default.
+        if let Some(created_by) = &invite_created_by {
+            crate::routes::invites::apply_invite_role_grant(
+                &state.db,
+                created_by,
+                invite_grant_role_id.as_deref(),
+                &canonical_pubkey,
+                now,
+            )
+            .await?;
         }
     }
 
