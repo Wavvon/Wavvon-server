@@ -25,17 +25,15 @@ pub async fn send_message(
     send_message_with(State(state), user, channel_id, req, perms).await
 }
 
-/// `send_message` with the caller's effective permissions on the channel
-/// already resolved. A federating peer is not a member, so its permissions come
-/// from the alliance share (`permissions::everyone_channel_permissions`), not
-/// from roles.
-pub async fn send_message_with(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    channel_id: String,
-    req: SendMessageRequest,
-    perms: permissions::UserPermissions,
-) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, String)> {
+/// What stands between a member who holds the permission and actually
+/// posting: the per-user rate limit, a mute, a ban from this channel, and a
+/// federated ban (whose session may predate it). Shared with forum posts and
+/// replies, which used to skip all four.
+pub(crate) async fn require_may_post(
+    state: &AppState,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<(), (StatusCode, String)> {
     // 30 messages per 60 seconds per user
     {
         let mut map = state
@@ -54,7 +52,7 @@ pub async fn send_message_with(
             map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
         }
 
-        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        let entry = map.entry(public_key.to_string()).or_insert((0, now));
         if now.duration_since(entry.1) > window {
             *entry = (0, now);
         }
@@ -67,15 +65,11 @@ pub async fn send_message_with(
         entry.0 += 1;
     }
 
-    perms.require(permissions::MESSAGES_SEND)?;
-
-    if crate::routes::moderation::is_muted(&state.db, &user.public_key).await? {
+    if crate::routes::moderation::is_muted(&state.db, public_key).await? {
         return Err((StatusCode::FORBIDDEN, "You are muted".to_string()));
     }
 
-    if crate::routes::moderation::is_channel_banned(&state.db, &channel_id, &user.public_key)
-        .await?
-    {
+    if crate::routes::moderation::is_channel_banned(&state.db, channel_id, public_key).await? {
         return Err((
             StatusCode::FORBIDDEN,
             "You are banned from this channel".to_string(),
@@ -86,9 +80,25 @@ pub async fn send_message_with(
     // master key is listed in federated_bans. Auth middleware already blocks
     // new sessions for these users, but an active session obtained before the
     // ban was applied can still reach here without this second check.
-    if crate::routes::moderation::is_federated_banned(&state.db, &user.public_key).await? {
+    if crate::routes::moderation::is_federated_banned(&state.db, public_key).await? {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
+    Ok(())
+}
+
+/// `send_message` with the caller's effective permissions on the channel
+/// already resolved. A federating peer is not a member, so its permissions come
+/// from the alliance share (`permissions::everyone_channel_permissions`), not
+/// from roles.
+pub async fn send_message_with(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    channel_id: String,
+    req: SendMessageRequest,
+    perms: permissions::UserPermissions,
+) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, String)> {
+    perms.require(permissions::MESSAGES_SEND)?;
+    require_may_post(&state, &user.public_key, &channel_id).await?;
 
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
@@ -1075,6 +1085,21 @@ pub async fn remove_reaction(
     user: AuthUser,
     Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // The summary below is broadcast to the path's channel, so the message
+    // has to be in it -- otherwise a private message's reactions go out to
+    // whoever can read the channel named.
+    let in_channel: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)",
+    )
+    .bind(&message_id)
+    .bind(&channel_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if !in_channel {
+        return Err((StatusCode::NOT_FOUND, "message not in channel".to_string()));
+    }
+
     sqlx::query(
         "DELETE FROM message_reactions WHERE message_id = $1 AND emoji = $2 AND user_key = $3",
     )

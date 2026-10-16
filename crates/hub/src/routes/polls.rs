@@ -183,7 +183,9 @@ pub async fn create_poll(
     Path(channel_id): Path<String>,
     Json(req): Json<CreatePollRequest>,
 ) -> Result<(StatusCode, Json<PollResponse>), (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    // A poll posts a card into the channel: the channel's own send
+    // permission applies, so a read-only channel stays read-only.
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MESSAGES_SEND)?;
 
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
@@ -352,6 +354,7 @@ pub async fn get_poll(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let poll = poll.ok_or((StatusCode::NOT_FOUND, "Poll not found".to_string()))?;
+    require_poll_readable(&state, &user.public_key, &poll.channel_id).await?;
 
     let totals = load_poll_totals(&state.db, &poll_id).await?;
 
@@ -373,6 +376,21 @@ pub async fn get_poll(
     }))
 }
 
+/// A poll in a channel the caller cannot read answers like one that does not
+/// exist: the id alone must not confirm it, nor carry a vote into it.
+async fn require_poll_readable(
+    state: &AppState,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let perms = permissions::channel_permissions(&state.db, public_key, channel_id).await?;
+    if perms.has(permissions::MESSAGES_READ) {
+        Ok(())
+    } else {
+        Err((StatusCode::NOT_FOUND, "Poll not found".to_string()))
+    }
+}
+
 /// POST /polls/:poll_id/vote
 pub async fn vote_poll(
     State(state): State<Arc<AppState>>,
@@ -389,6 +407,7 @@ pub async fn vote_poll(
 
     let (channel_id, max_choices, ends_at) =
         poll.ok_or((StatusCode::NOT_FOUND, "Poll not found".to_string()))?;
+    require_poll_readable(&state, &user.public_key, &channel_id).await?;
 
     // Closed poll check.
     if let Some(end) = ends_at {
@@ -450,16 +469,18 @@ pub async fn delete_poll(
     user: AuthUser,
     Path(poll_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT creator_pubkey FROM polls WHERE id = $1")
-        .bind(&poll_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT creator_pubkey, channel_id FROM polls WHERE id = $1")
+            .bind(&poll_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (creator,) = row.ok_or((StatusCode::NOT_FOUND, "Poll not found".to_string()))?;
+    let (creator, channel_id) = row.ok_or((StatusCode::NOT_FOUND, "Poll not found".to_string()))?;
 
     if creator != user.public_key {
-        let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+        let perms =
+            permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
         perms.require(permissions::MESSAGES_MANAGE)?;
     }
 
