@@ -647,6 +647,7 @@ pub async fn leave_hub(
         .map_err(db_err)?;
 
     tx.commit().await.map_err(db_err)?;
+    state.close_sessions_of(pk).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

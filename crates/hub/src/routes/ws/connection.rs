@@ -378,11 +378,13 @@ pub(super) async fn handle_socket(
 
             // ── V4 voice-key targeted delivery ───────────────────────────
             key_msg = key_rx.recv() => {
-                if let Some(msg) = key_msg {
-                    let json = serde_json::to_string(&msg).unwrap();
-                    if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                        break;
-                    }
+                // Every sender gone means the hub closed this session
+                // (`AppState::close_sessions_of`): ban, kick, leave, or a
+                // recovery that retired the key.
+                let Some(msg) = key_msg else { break };
+                let json = serde_json::to_string(&msg).unwrap();
+                if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                    break;
                 }
             }
 

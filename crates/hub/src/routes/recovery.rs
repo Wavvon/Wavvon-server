@@ -664,6 +664,7 @@ pub async fn admin_approve(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    state.close_sessions_of(&row.old_pubkey).await;
 
     // Mark request as approved.
     sqlx::query(

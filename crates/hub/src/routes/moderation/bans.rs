@@ -34,6 +34,7 @@ async fn end_membership(state: &AppState, target: &str) -> Result<(), (StatusCod
         .await
         .map_err(db_err)?;
     tx.commit().await.map_err(db_err)?;
+    state.close_sessions_of(target).await;
 
     // MemberOffline prompts clients to drop/grey the row now; the next
     // /users refetch removes them entirely.
