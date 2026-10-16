@@ -220,3 +220,51 @@ async fn search_respects_channel_ban() {
         "poster should still see their own message"
     );
 }
+
+/// A channel the caller cannot read is not searchable either: the hit
+/// carries a preview, the sender and the channel name.
+#[tokio::test]
+async fn search_skips_channels_the_caller_cannot_read() {
+    let (server, _tmp) = setup_with_search().await;
+    let owner = Identity::generate();
+    let owner_token = authenticate(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = authenticate(&server, &member).await;
+
+    let channel: ChannelResponse = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "staff" }))
+        .await
+        .json();
+    server
+        .put(&format!(
+            "/channels/{}/permissions/builtin-everyone",
+            channel.id
+        ))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "allow": [], "deny": ["messages.read"] }))
+        .await
+        .assert_status_ok();
+    server
+        .post(format!("/channels/{}/messages", channel.id).as_str())
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "content": "the stafftopsecret plan", "attachments": [] }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let hits = |token: String| {
+        let server = &server;
+        async move {
+            server
+                .get("/search")
+                .add_query_param("q", "stafftopsecret")
+                .authorization_bearer(&token)
+                .await
+                .json::<Vec<SearchResult>>()
+                .len()
+        }
+    };
+    assert_eq!(hits(owner_token.clone()).await, 1, "the owner reads #staff");
+    assert_eq!(hits(member_token.clone()).await, 0, "the member does not");
+}
