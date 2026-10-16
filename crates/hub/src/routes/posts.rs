@@ -41,6 +41,20 @@ async fn require_forum_channel(
     }
 }
 
+/// `require_forum_channel`, plus `messages.read` there (§3.5). For the
+/// routes that otherwise checked only the channel type: search, tags, read
+/// markers and reactions all expose or act on a forum's content.
+async fn require_forum_read(
+    db: &sqlx::PgPool,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    require_forum_channel(db, channel_id).await?;
+    permissions::channel_permissions(db, public_key, channel_id)
+        .await?
+        .require(permissions::MESSAGES_READ)
+}
+
 /// Load a post by id, verifying it belongs to the given channel.
 async fn require_post(
     db: &sqlx::PgPool,
@@ -430,6 +444,7 @@ pub async fn create_post(
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::FORUM_POSTS_CREATE)?;
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
 
     let title = req.title.trim().to_string();
     let body = req.body.trim().to_string();
@@ -786,6 +801,7 @@ pub async fn create_reply(
     // checks across two resolvers.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MESSAGES_SEND)?;
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     if row.deleted_at.is_some() {
@@ -1116,7 +1132,7 @@ pub async fn mark_post_read(
     user: AuthUser,
     Path((channel_id, post_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     // Ensure the post exists and belongs to this channel.
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
 
@@ -1148,7 +1164,7 @@ pub async fn add_post_reaction(
     Path((channel_id, post_id)): Path<(String, String)>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
 
     let emoji = req.emoji.trim();
@@ -1192,7 +1208,7 @@ pub async fn remove_post_reaction(
     user: AuthUser,
     Path((channel_id, post_id, emoji)): Path<(String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
 
     sqlx::query("DELETE FROM post_reactions WHERE post_id = $1 AND emoji = $2 AND user_key = $3")
@@ -1225,7 +1241,7 @@ pub async fn add_reply_reaction(
     Path((channel_id, post_id, reply_id)): Path<(String, String, String)>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
     let _ = require_reply(&state.db, &post_id, &reply_id).await?;
 
@@ -1271,7 +1287,7 @@ pub async fn remove_reply_reaction(
     user: AuthUser,
     Path((channel_id, post_id, reply_id, emoji)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
     let _ = require_reply(&state.db, &post_id, &reply_id).await?;
 
@@ -1301,11 +1317,11 @@ pub async fn remove_reply_reaction(
 
 pub async fn search_posts(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(channel_id): Path<String>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<PostSearchResponse>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
 
     let q = params
         .q
@@ -1371,10 +1387,10 @@ pub async fn search_posts(
 
 pub async fn list_tags(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<ForumTag>>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
 
     let rows = sqlx::query_as::<_, ForumTag>(
         "SELECT id, channel_id, label, color, position, created_at

@@ -74,6 +74,12 @@ pub async fn upload_file(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     let channel_type =
         channel_type.ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
+    // An upload is an attachment on its way into this channel: the channel's
+    // own send permission applies, so it cannot be used to fill the disk
+    // through a channel the caller could never post in.
+    crate::permissions::channel_permissions(&state.db, &user.public_key, &channel_id)
+        .await?
+        .require(crate::permissions::MESSAGES_SEND)?;
 
     let is_banner = channel_type == "banner";
     let effective_max = if is_banner {
