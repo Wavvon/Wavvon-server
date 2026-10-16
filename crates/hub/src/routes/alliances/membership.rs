@@ -13,7 +13,40 @@ use crate::state::AppState;
 
 use super::models::{AllianceRow, PendingInviteRow};
 
-// Invite: generate a signed token that another hub can use to join
+/// How long an alliance invite stays redeemable.
+const INVITE_TTL_SECS: i64 = 7 * 86_400;
+
+/// A fresh single-use invite for `alliance_id`: random, stored, expiring.
+async fn mint_invite(state: &AppState, alliance_id: &str) -> Result<String, (StatusCode, String)> {
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    let token = hex::encode(bytes);
+    let now = crate::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO alliance_invites (token, alliance_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(&token)
+    .bind(alliance_id)
+    .bind(now)
+    .bind(now + INVITE_TTL_SECS)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    Ok(token)
+}
+
+/// What an inviting hub signs to vouch that `member` joined `alliance_id`.
+/// Bound to the member's key and domain-tagged, so it can neither be
+/// presented by another hub nor mistaken for anything else the hub signs.
+fn member_voucher_bytes(alliance_id: &str, member: &str) -> Vec<u8> {
+    let mut b = b"wavvon/alliance-member/v1\0".to_vec();
+    b.extend_from_slice(alliance_id.as_bytes());
+    b.push(0);
+    b.extend_from_slice(member.as_bytes());
+    b
+}
+
+// Invite: generate a token that another hub can use to join
 pub async fn create_invite(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -33,9 +66,7 @@ pub async fn create_invite(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     .ok_or((StatusCode::NOT_FOUND, "Alliance not found".to_string()))?;
 
-    // Sign the alliance_id with the hub's identity as the invite token
-    let signature = state.hub_identity.sign(alliance_id.as_bytes());
-    let token = hex::encode(signature.to_bytes());
+    let token = mint_invite(&state, &alliance_id).await?;
 
     Ok(Json(AllianceInviteResponse {
         token,
@@ -125,6 +156,14 @@ pub(super) async fn do_join_alliance(
             msg,
         ));
     }
+
+    // An older inviter answers 200 with no body and no voucher; the join
+    // stands, only the announcements below will be refused.
+    let voucher = join_resp
+        .json::<JoinAllianceResponse>()
+        .await
+        .map(|r| r.voucher)
+        .unwrap_or_default();
 
     let detail = state
         .federation_client
@@ -256,12 +295,26 @@ pub(super) async fn do_join_alliance(
             alliance_id: detail.id.clone(),
             hub_url: own_hub_url.to_string(),
             inviter_public_key: inviter_key.clone().unwrap_or_default(),
-            invite_token: invite_token.to_string(),
+            voucher: voucher.clone(),
         };
         let target = member_url.trim_end_matches('/');
+        // Announced as ourselves: the member checks the voucher against the
+        // key that authenticated, not against a key the body names.
+        let member_token = match state
+            .federation_client
+            .authenticate(target, &state.hub_identity)
+            .await
+        {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!("Alliance member announcement to {target}: auth failed: {e}");
+                continue;
+            }
+        };
         match state
             .http_client
             .post(format!("{target}/federation/alliance-member"))
+            .bearer_auth(&member_token)
             .json(&announcement)
             .send()
             .await
@@ -307,9 +360,7 @@ pub async fn push_invite_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
         .unwrap_or_else(|| "Unknown".to_string());
 
-    // Generate invite token: sign alliance_id bytes, hex-encode
-    let signature = state.hub_identity.sign(alliance_id.as_bytes());
-    let invite_token = hex::encode(signature.to_bytes());
+    let invite_token = mint_invite(&state, &alliance_id).await?;
 
     let payload = crate::routes::alliance_models::FederationAllianceInvitePayload {
         id: Uuid::new_v4().to_string(),
@@ -487,32 +538,43 @@ pub async fn decline_pending_invite(
 // Join: a remote hub calls this with an invite token to join the alliance
 pub async fn join_alliance(
     State(state): State<Arc<AppState>>,
+    peer: PeerHub,
     Path(alliance_id): Path<String>,
     Json(req): Json<JoinAllianceRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    // Verify the invite token (signature of alliance_id by this hub)
-    let sig_bytes = hex::decode(&req.invite_token).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid invite token hex".to_string(),
-        )
-    })?;
+) -> Result<Json<JoinAllianceResponse>, (StatusCode, String)> {
+    let now = crate::auth::handlers::unix_timestamp();
 
-    wavvon_identity::verify_signature(
-        &state.hub_identity.public_key_hex(),
-        alliance_id.as_bytes(),
-        &sig_bytes,
+    // Spend the invite: it must exist for this alliance, be unexpired and
+    // unused. One statement, so two hubs cannot both redeem it.
+    let spent: Option<String> = sqlx::query_scalar(
+        "UPDATE alliance_invites SET used_at = $3
+          WHERE token = $1 AND alliance_id = $2 AND used_at IS NULL AND expires_at > $3
+          RETURNING token",
     )
-    .map_err(|_| (StatusCode::FORBIDDEN, "Invalid invite token".to_string()))?;
+    .bind(&req.invite_token)
+    .bind(&alliance_id)
+    .bind(now)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if spent.is_none() {
+        return Err((StatusCode::FORBIDDEN, "Invalid invite token".to_string()));
+    }
 
-    // Discover the joining hub's info
+    // The member is the hub that authenticated to make this call. The URL it
+    // gives has to answer for that same key, or we would record a key paired
+    // with an address someone else controls.
     let hub_info = state
         .federation_client
         .get_info(&req.hub_url)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Cannot reach hub: {e}")))?;
-
-    let now = crate::auth::handlers::unix_timestamp();
+    if hub_info.public_key != peer.public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "The hub URL does not answer for the joining hub's key".to_string(),
+        ));
+    }
 
     sqlx::query(
         "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at) VALUES ($1, $2, $3, $4, $5)
@@ -565,7 +627,12 @@ pub async fn join_alliance(
         &alliance_id[..8]
     );
 
-    Ok(StatusCode::OK)
+    let voucher = state
+        .hub_identity
+        .sign(&member_voucher_bytes(&alliance_id, &peer.public_key));
+    Ok(Json(JoinAllianceResponse {
+        voucher: hex::encode(voucher.to_bytes()),
+    }))
 }
 
 /// `POST /federation/alliance-member`
@@ -590,6 +657,7 @@ pub async fn join_alliance(
 /// existing member cannot use it to reach an alliance it is not in.
 pub async fn receive_alliance_member(
     State(state): State<Arc<AppState>>,
+    peer: PeerHub,
     Json(req): Json<crate::routes::alliance_models::AllianceMemberAnnouncement>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // We must be in this alliance ourselves. Answering otherwise would let any
@@ -622,22 +690,29 @@ pub async fn receive_alliance_member(
         ));
     }
 
-    let sig = hex::decode(&req.invite_token).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Invalid invite token hex".to_string(),
-        )
-    })?;
-    wavvon_identity::verify_signature(&req.inviter_public_key, req.alliance_id.as_bytes(), &sig)
-        .map_err(|_| (StatusCode::FORBIDDEN, "Invalid invite token".to_string()))?;
+    // The voucher names the hub presenting it: a voucher another member was
+    // given proves nothing about this caller.
+    let sig = hex::decode(&req.voucher)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid voucher hex".to_string()))?;
+    wavvon_identity::verify_signature(
+        &req.inviter_public_key,
+        &member_voucher_bytes(&req.alliance_id, &peer.public_key),
+        &sig,
+    )
+    .map_err(|_| (StatusCode::FORBIDDEN, "Invalid voucher".to_string()))?;
 
-    // Who is announcing, asked of the address rather than taken on trust: the
-    // pubkey has to be the one that answers at that URL.
+    // The address it gives has to answer for the key that authenticated.
     let hub_info = state
         .federation_client
         .get_info(&req.hub_url)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Cannot reach hub: {e}")))?;
+    if hub_info.public_key != peer.public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "The hub URL does not answer for the announcing hub's key".to_string(),
+        ));
+    }
 
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(

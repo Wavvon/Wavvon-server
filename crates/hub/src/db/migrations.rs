@@ -780,6 +780,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Alliance invites are rows: random, expiring, spent on use. They used
+    // to be a signature over the alliance id -- deterministic, so one token
+    // per alliance, valid forever and impossible to revoke.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS alliance_invites (
+            token       TEXT PRIMARY KEY,
+            alliance_id TEXT NOT NULL REFERENCES alliances(id) ON DELETE CASCADE,
+            created_at  BIGINT NOT NULL,
+            expires_at  BIGINT NOT NULL,
+            used_at     BIGINT
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS alliance_members (
             alliance_id    TEXT NOT NULL REFERENCES alliances(id),
