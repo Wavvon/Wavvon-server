@@ -1234,16 +1234,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS subkey_revocation_sync (
-            master_pubkey  TEXT NOT NULL,
-            home_hub_url   TEXT NOT NULL,
-            last_synced_at BIGINT NOT NULL DEFAULT 0,
-            PRIMARY KEY (master_pubkey, home_hub_url)
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // The subkey revocation worker fetches the whole list now; its cursor
+    // table is gone.
+    sqlx::query("DROP TABLE IF EXISTS subkey_revocation_sync")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS prefs_blobs (

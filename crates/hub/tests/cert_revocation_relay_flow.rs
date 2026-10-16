@@ -175,6 +175,36 @@ async fn sync_cursor_advances() {
     );
 }
 
+/// An empty answer leaves the cursor where it was. It used to jump to this
+/// hub's own clock, and any skew ahead of the issuer's then skipped a
+/// revocation the issuer recorded in between.
+#[tokio::test]
+async fn an_empty_answer_does_not_move_the_cursor() {
+    let (state, _guard) = make_state().await;
+    let issuer_pubkey = "e".repeat(64);
+    let issuer_url = start_mock_issuer(json!([])).await;
+    insert_user_cert(
+        &state.db,
+        "cert-3",
+        &"f".repeat(64),
+        &issuer_pubkey,
+        &issuer_url,
+        unix_now() + 86400,
+    )
+    .await;
+
+    cert_revocation_worker::tick(&state).await;
+
+    let cursor: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(last_synced_at), 0) FROM cert_revocation_sync WHERE issuer_pubkey = $1",
+    )
+    .bind(&issuer_pubkey)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(cursor, 0);
+}
+
 /// tick() is a no-op when user_certs is empty (no issuers to discover).
 #[tokio::test]
 async fn no_op_when_no_user_certs() {
