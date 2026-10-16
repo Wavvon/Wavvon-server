@@ -545,6 +545,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Close every WebSocket a pubkey has open, voice included.
+    ///
+    /// A socket is authenticated once, at the handshake, so deleting the
+    /// `sessions` rows logs nobody out of a tab that is already connected:
+    /// a banned member kept receiving every channel they could read and
+    /// stayed in voice. Dropping a pubkey's key senders ends each of its
+    /// connection loops, whose disconnect cleanup leaves voice as usual.
+    pub async fn close_sessions_of(&self, pubkey: &str) {
+        self.ws_key_senders.write().await.remove(pubkey);
+    }
+
     /// Deliver a targeted WS message to **every** session a pubkey has open,
     /// and report how many took it.
     ///
