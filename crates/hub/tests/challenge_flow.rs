@@ -313,3 +313,41 @@ async fn a_federating_peer_hub_is_not_asked_for_the_admission_challenge() {
         .await
         .assert_status_ok();
 }
+
+/// The challenge used to be checked after the session, the invite and the
+/// admission were already written. A failed answer left the key a member,
+/// and members are not challenged -- so the second attempt walked in.
+#[tokio::test]
+async fn a_failed_challenge_admits_nobody() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    admin_set_challenge_mode(&server, &owner_token, "click").await;
+
+    let stranger = Identity::generate();
+    let pub_key = stranger.public_key_hex();
+    for attempt in 1..=2 {
+        let challenge: ChallengeResponse = server
+            .post("/auth/challenge")
+            .json(&json!({ "public_key": pub_key }))
+            .await
+            .json();
+        let signature = stranger.sign(&hex::decode(&challenge.challenge).unwrap());
+        server
+            .post("/auth/verify")
+            .json(&json!({
+                "public_key": pub_key,
+                "challenge": challenge.challenge,
+                "signature": hex::encode(signature.to_bytes()),
+            }))
+            .await
+            .assert_status_forbidden();
+        let member: Option<bool> =
+            sqlx::query_scalar("SELECT is_member FROM users WHERE public_key = $1")
+                .bind(&pub_key)
+                .fetch_optional(&server.state().db)
+                .await
+                .unwrap();
+        assert_ne!(member, Some(true), "attempt {attempt} admitted the key");
+    }
+}
