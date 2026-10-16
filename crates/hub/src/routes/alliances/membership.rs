@@ -237,7 +237,7 @@ pub(super) async fn do_join_alliance(
             .peer_tokens
             .write()
             .await
-            .insert(pk.clone(), token.clone());
+            .insert(inviter_url.to_string(), token.clone());
 
         let exists: Option<String> =
             sqlx::query_scalar("SELECT public_key FROM peers WHERE public_key = $1")
@@ -606,19 +606,6 @@ pub async fn join_alliance(
             .execute(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-        // Authenticate to peer
-        if let Ok(token) = state
-            .federation_client
-            .authenticate(&req.hub_url, &state.hub_identity)
-            .await
-        {
-            state
-                .peer_tokens
-                .write()
-                .await
-                .insert(hub_info.public_key.clone(), token);
-        }
     }
 
     tracing::info!(
@@ -799,7 +786,7 @@ pub(super) async fn announce_departure(state: &Arc<AppState>, alliance_id: &str)
         if m.hub_url == "self" || m.hub_url.is_empty() {
             continue;
         }
-        let Some(token) = super::channels::peer_token(state, &m).await else {
+        let Some(token) = crate::federation::peer_token(state, &m.hub_url).await else {
             continue;
         };
         let target = m.hub_url.trim_end_matches('/');
@@ -850,7 +837,7 @@ pub(super) async fn reconcile_members(state: &Arc<AppState>, alliance_id: &str) 
         if m.hub_url == "self" || m.hub_url.is_empty() {
             continue;
         }
-        let Some(token) = super::channels::peer_token(state, m).await else {
+        let Some(token) = crate::federation::peer_token(state, &m.hub_url).await else {
             continue;
         };
         let Ok(detail) = state

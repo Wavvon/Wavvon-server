@@ -31,32 +31,45 @@ use super::models::{EffectiveChannelRow, LocalMessageRow, MemberRow};
 /// whenever the real parent is not itself part of the effective set.
 /// Order is depth-first-ish (depth, then display_order) so categories tend
 /// to precede their children.
-/// A federation token for one alliance peer, from the cache or freshly
-/// obtained. `None` means the peer could not be authenticated to and the caller
-/// should move on to the next one — every caller here is walking members
-/// looking for the one that owns a channel, and one unreachable hub must not
-/// fail the whole walk.
-pub(super) async fn peer_token(state: &AppState, member: &MemberRow) -> Option<String> {
-    if let Some(t) = state
-        .peer_tokens
-        .read()
-        .await
-        .get(&member.hub_public_key)
-        .cloned()
-    {
-        return Some(t);
+/// The member of `alliance_id` that owns `channel_id`, with a token for it.
+/// Walks the other members asking each for its shared channels; a cached
+/// token that is refused is dropped and that member asked once more.
+async fn owning_member(
+    state: &AppState,
+    alliance_id: &str,
+    channel_id: &str,
+) -> Result<Option<(MemberRow, String)>, (StatusCode, String)> {
+    let members = sqlx::query_as::<_, MemberRow>(
+        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for member in members {
+        for retry in [false, true] {
+            let Some(token) = crate::federation::peer_token(state, &member.hub_url).await else {
+                break;
+            };
+            match state
+                .federation_client
+                .get_alliance_shared_channels(&member.hub_url, &token, alliance_id)
+                .await
+            {
+                Ok(shared) if shared.iter().any(|s| s.channel_id == channel_id) => {
+                    return Ok(Some((member, token)));
+                }
+                Ok(_) => break,
+                Err(_) if !retry => {
+                    crate::federation::forget_peer_token(state, &member.hub_url).await
+                }
+                Err(_) => break,
+            }
+        }
     }
-    let t = state
-        .federation_client
-        .authenticate(&member.hub_url, &state.hub_identity)
-        .await
-        .ok()?;
-    state
-        .peer_tokens
-        .write()
-        .await
-        .insert(member.hub_public_key.clone(), t.clone());
-    Some(t)
+    Ok(None)
 }
 
 pub(super) async fn effective_shared_channels(
@@ -301,33 +314,12 @@ pub async fn list_shared_channels(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Skipping alliance peer {}: auth failed: {e}",
-                        &member.hub_public_key[..16.min(member.hub_public_key.len())]
-                    );
-                    continue;
-                }
-            },
+        let Some(token) = crate::federation::peer_token(&state, &member.hub_url).await else {
+            tracing::warn!(
+                "Skipping alliance peer {}: auth failed",
+                &member.hub_public_key[..16.min(member.hub_public_key.len())]
+            );
+            continue;
         };
 
         match state
@@ -344,6 +336,9 @@ pub async fn list_shared_channels(
                     "Skipping alliance peer {}: fetch failed: {e}",
                     &member.hub_public_key[..16.min(member.hub_public_key.len())]
                 );
+                // Re-authenticate on the next request rather than reuse a
+                // token the peer may have stopped honouring.
+                crate::federation::forget_peer_token(&state, &member.hub_url).await;
             }
         }
     }
@@ -378,8 +373,6 @@ pub async fn post_alliance_channel_message(
         let perms = crate::permissions::user_permissions(&state.db, &user.public_key).await?;
         perms.require(crate::permissions::MESSAGES_SEND)?;
     }
-
-    let hub_key = state.hub_identity.public_key_hex();
 
     // Locally-owned alliance channel (explicit share, or a descendant of an
     // include_descendants share)? Reuse the regular send path.
@@ -431,90 +424,46 @@ pub async fn post_alliance_channel_message(
     }
 
     // Otherwise, find the peer that owns this channel and proxy.
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(&hub_key)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
+    // Found the owner. Prefix the user's name so attribution survives the
+    // hub-as-sender hop. e.g. "[alice via wavvon.example] hello".
+    let user_label: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
+            .bind(&user.public_key)
+            .fetch_optional(&state.db)
             .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
+            .ok()
+            .flatten();
+    let local_hub_name = crate::routes::hub::current_hub_name(&state).await;
+    let prefix = match user_label {
+        Some(name) => format!("[{name} via {}] ", local_hub_name),
+        None => format!("[{} via {}] ", &user.public_key[..16], local_hub_name),
+    };
+    let prefixed = format!("{prefix}{}", req.content);
 
-        // Found the owner. Prefix the user's name so attribution survives the
-        // hub-as-sender hop. e.g. "[alice via wavvon.example] hello".
-        let user_label: Option<String> =
-            sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
-                .bind(&user.public_key)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
-        let local_hub_name = crate::routes::hub::current_hub_name(&state).await;
-        let prefix = match user_label {
-            Some(name) => format!("[{name} via {}] ", local_hub_name),
-            None => format!("[{} via {}] ", &user.public_key[..16], local_hub_name),
-        };
-        let prefixed = format!("{prefix}{}", req.content);
-
-        return state
-            .federation_client
-            .send_message(
-                &member.hub_url,
-                &token,
-                &alliance_id,
-                &channel_id,
-                &prefixed,
+    state
+        .federation_client
+        .send_message(
+            &member.hub_url,
+            &token,
+            &alliance_id,
+            &channel_id,
+            &prefixed,
+        )
+        .await
+        .map(|m| (StatusCode::CREATED, Json(m)))
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to deliver message to peer: {e}"),
             )
-            .await
-            .map(|m| (StatusCode::CREATED, Json(m)))
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to deliver message to peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+        })
 }
 
 /// List posts in an alliance-shared forum channel: read-through proxy to
@@ -531,7 +480,6 @@ pub async fn get_alliance_forum_posts(
     Query(params): Query<PostListParams>,
 ) -> Result<Json<PostListResponse>, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
-    let hub_key = state.hub_identity.public_key_hex();
 
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
@@ -548,76 +496,32 @@ pub async fn get_alliance_forum_posts(
         ));
     }
 
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(&hub_key)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        return state
-            .federation_client
-            .get_forum_posts(
-                &member.hub_url,
-                &token,
-                &alliance_id,
-                &channel_id,
-                params.cursor.as_deref(),
-                params.limit,
-                params.tag.as_deref(),
+    state
+        .federation_client
+        .get_forum_posts(
+            &member.hub_url,
+            &token,
+            &alliance_id,
+            &channel_id,
+            params.cursor.as_deref(),
+            params.limit,
+            params.tag.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to fetch forum posts from peer: {e}"),
             )
-            .await
-            .map(Json)
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to fetch forum posts from peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+        })
 }
 
 /// Get one post (with its reply page) from an alliance-shared forum
@@ -630,7 +534,6 @@ pub async fn get_alliance_forum_post(
     Query(params): Query<ReplyListParams>,
 ) -> Result<Json<PostDetail>, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
-    let hub_key = state.hub_identity.public_key_hex();
 
     let effective = effective_shared_channels(&state.db, &alliance_id)
         .await
@@ -650,76 +553,32 @@ pub async fn get_alliance_forum_post(
         ));
     }
 
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(&hub_key)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        return state
-            .federation_client
-            .get_forum_post(
-                &member.hub_url,
-                &token,
-                &alliance_id,
-                &channel_id,
-                &post_id,
-                params.after.as_deref(),
-                params.limit,
+    state
+        .federation_client
+        .get_forum_post(
+            &member.hub_url,
+            &token,
+            &alliance_id,
+            &channel_id,
+            &post_id,
+            params.after.as_deref(),
+            params.limit,
+        )
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to fetch forum post from peer: {e}"),
             )
-            .await
-            .map(Json)
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to fetch forum post from peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+        })
 }
 
 /// Create a post in an alliance-shared forum channel. Locally-owned
@@ -743,75 +602,31 @@ pub async fn post_alliance_forum_post(
             .await;
     }
 
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(state.hub_identity.public_key_hex())
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        return state
-            .federation_client
-            .create_forum_post(
-                &member.hub_url,
-                &token,
-                &channel_id,
-                &user.public_key,
-                &req.title,
-                &req.body,
+    state
+        .federation_client
+        .create_forum_post(
+            &member.hub_url,
+            &token,
+            &channel_id,
+            &user.public_key,
+            &req.title,
+            &req.body,
+        )
+        .await
+        .map(|d| (StatusCode::CREATED, Json(d)))
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to create forum post on peer: {e}"),
             )
-            .await
-            .map(|d| (StatusCode::CREATED, Json(d)))
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to create forum post on peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+        })
 }
 
 /// Create a reply in an alliance-shared forum channel's post. Same
@@ -836,76 +651,32 @@ pub async fn post_alliance_forum_reply(
         .await;
     }
 
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(state.hub_identity.public_key_hex())
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        return state
-            .federation_client
-            .create_forum_reply(
-                &member.hub_url,
-                &token,
-                &channel_id,
-                &post_id,
-                &user.public_key,
-                &req.body,
-                req.reply_to_id.as_deref(),
+    state
+        .federation_client
+        .create_forum_reply(
+            &member.hub_url,
+            &token,
+            &channel_id,
+            &post_id,
+            &user.public_key,
+            &req.body,
+            req.reply_to_id.as_deref(),
+        )
+        .await
+        .map(|v| (StatusCode::CREATED, Json(v)))
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to create forum reply on peer: {e}"),
             )
-            .await
-            .map(|v| (StatusCode::CREATED, Json(v)))
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to create forum reply on peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+        })
 }
 
 /// React to a post in an alliance-shared forum channel. Same local-vs-proxy
@@ -932,85 +703,41 @@ pub async fn react_alliance_forum(
         .await;
     }
 
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(state.hub_identity.public_key_hex())
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        let resp = state
-            .federation_client
-            .add_forum_post_reaction(
-                &member.hub_url,
-                &token,
-                &channel_id,
-                &post_id,
-                &user.public_key,
-                &req.emoji,
+    let resp = state
+        .federation_client
+        .add_forum_post_reaction(
+            &member.hub_url,
+            &token,
+            &channel_id,
+            &post_id,
+            &user.public_key,
+            &req.emoji,
+        )
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to add forum reaction on peer: {e}"),
             )
-            .await
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to add forum reaction on peer: {e}"),
-                )
-            })?;
+        })?;
 
-        return if resp.status().is_success() {
-            Ok(StatusCode::CREATED)
-        } else {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            Err((
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
-                body,
-            ))
-        };
+    if resp.status().is_success() {
+        Ok(StatusCode::CREATED)
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err((
+            StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY),
+            body,
+        ))
     }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
 }
 
 /// Retract (soft-delete) a post in an alliance-shared forum channel. Same
@@ -1036,74 +763,30 @@ pub async fn delete_alliance_forum_post(
             .await;
     }
 
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(state.hub_identity.public_key_hex())
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        return state
-            .federation_client
-            .delete_forum_post(
-                &member.hub_url,
-                &token,
-                &channel_id,
-                &post_id,
-                &user.public_key,
+    state
+        .federation_client
+        .delete_forum_post(
+            &member.hub_url,
+            &token,
+            &channel_id,
+            &post_id,
+            &user.public_key,
+        )
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to delete forum post on peer: {e}"),
             )
-            .await
-            .map(|_| StatusCode::NO_CONTENT)
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to delete forum post on peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+        })
 }
 
 /// Retract (soft-delete) a reply in an alliance-shared forum channel's post.
@@ -1126,75 +809,31 @@ pub async fn delete_alliance_forum_reply(
         .await;
     }
 
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(state.hub_identity.public_key_hex())
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let token = {
-            let map = state.peer_tokens.read().await;
-            map.get(&member.hub_public_key).cloned()
-        };
-        let token = match token {
-            Some(t) => t,
-            None => match state
-                .federation_client
-                .authenticate(&member.hub_url, &state.hub_identity)
-                .await
-            {
-                Ok(t) => {
-                    state
-                        .peer_tokens
-                        .write()
-                        .await
-                        .insert(member.hub_public_key.clone(), t.clone());
-                    t
-                }
-                Err(_) => continue,
-            },
-        };
-
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        return state
-            .federation_client
-            .delete_forum_reply(
-                &member.hub_url,
-                &token,
-                &channel_id,
-                &post_id,
-                &reply_id,
-                &user.public_key,
+    state
+        .federation_client
+        .delete_forum_reply(
+            &member.hub_url,
+            &token,
+            &channel_id,
+            &post_id,
+            &reply_id,
+            &user.public_key,
+        )
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to delete forum reply on peer: {e}"),
             )
-            .await
-            .map(|_| StatusCode::NO_CONTENT)
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to delete forum reply on peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+        })
 }
 
 /// What the caller may do in a channel this hub owns and shares: a member's
@@ -1219,7 +858,6 @@ pub async fn get_alliance_channel_messages(
     Path((alliance_id, channel_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<crate::routes::chat_models::MessageResponse>>, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
-    let hub_key = state.hub_identity.public_key_hex();
 
     // Locally-owned alliance channel (explicit share, or a descendant of an
     // include_descendants share)? Just read directly.
@@ -1302,49 +940,23 @@ pub async fn get_alliance_channel_messages(
 
     // Otherwise the channel must belong to a peer member of this alliance.
     // Walk members and ask each one if they own this channel.
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
-    )
-    .bind(&alliance_id)
-    .bind(&hub_key)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Alliance channel not found on any member hub".to_string(),
+        ));
+    };
 
-    for member in members {
-        let Some(token) = peer_token(&state, &member).await else {
-            continue;
-        };
-
-        // Check if this peer owns the channel by listing their shared channels.
-        let shared = match state
-            .federation_client
-            .get_alliance_shared_channels(&member.hub_url, &token, &alliance_id)
-            .await
-        {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if !shared.iter().any(|s| s.channel_id == channel_id) {
-            continue;
-        }
-
-        // The peer owns it -- federate the message read.
-        return state
-            .federation_client
-            .get_messages(&member.hub_url, &token, &alliance_id, &channel_id)
-            .await
-            .map(Json)
-            .map_err(|e| {
-                (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to fetch messages from peer: {e}"),
-                )
-            });
-    }
-
-    Err((
-        StatusCode::NOT_FOUND,
-        "Alliance channel not found on any member hub".to_string(),
-    ))
+    // The peer owns it -- federate the message read.
+    state
+        .federation_client
+        .get_messages(&member.hub_url, &token, &alliance_id, &channel_id)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to fetch messages from peer: {e}"),
+            )
+        })
 }
