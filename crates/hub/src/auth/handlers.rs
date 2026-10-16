@@ -72,11 +72,15 @@ pub async fn resolve_canonical_identity(
     Ok((master.clone(), Some(master)))
 }
 
+/// Length of an auth challenge. The federation client signs a peer's
+/// challenge only at exactly this length (see `FederationClient::authenticate`).
+pub const AUTH_CHALLENGE_LEN: usize = 32;
+
 pub async fn challenge(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<(StatusCode, Json<ChallengeResponse>), (StatusCode, String)> {
-    let mut challenge_bytes = vec![0u8; 32];
+    let mut challenge_bytes = vec![0u8; AUTH_CHALLENGE_LEN];
     rand::thread_rng().fill_bytes(&mut challenge_bytes);
     let challenge_hex = hex::encode(&challenge_bytes);
 

@@ -156,3 +156,34 @@ async fn two_hubs_peer_without_gaining_membership() {
         );
     }
 }
+
+/// The hub key signs alliance invite tokens (a signature over the alliance
+/// id) among other things, so signing whatever a peer sends as a challenge
+/// would hand that peer an invite token. Only a challenge of the length a
+/// Wavvon hub issues is signed.
+#[tokio::test]
+async fn the_hub_refuses_to_sign_a_challenge_shaped_like_anything_else() {
+    use axum::routing::post;
+    let alliance_id = "11111111-2222-3333-4444-555555555555";
+    let app = axum::Router::new()
+        .route(
+            "/auth/challenge",
+            post(
+                move || async move { axum::Json(json!({ "challenge": hex::encode(alliance_id) })) },
+            ),
+        )
+        .route(
+            "/auth/verify",
+            post(|| async { axum::Json(json!({ "token": "x" })) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let result = wavvon_hub::federation::client::FederationClient::new()
+        .authenticate(&url, &Identity::generate())
+        .await;
+    assert!(result.is_err(), "a 36-byte challenge must not be signed");
+}
