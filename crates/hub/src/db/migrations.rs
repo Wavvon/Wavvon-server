@@ -2015,6 +2015,26 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // `messages.created_at` is in milliseconds, but poll, event, webhook,
+    // app and welcome messages were stamped in seconds, so they sorted
+    // before all history and were never unread (#114). Once per database:
+    // a value below 1e11 is seconds -- as milliseconds it would be 1973.
+    let first_run = sqlx::query(
+        "INSERT INTO hub_settings (key, value) VALUES ('messages_created_at_ms_v1', '1')
+         ON CONFLICT (key) DO NOTHING",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1;
+    if first_run {
+        sqlx::query(
+            "UPDATE messages SET created_at = created_at * 1000 WHERE created_at < 100000000000",
+        )
+        .execute(pool)
+        .await?;
+    }
+
     tracing::info!("Database migrations complete");
 
     Ok(())

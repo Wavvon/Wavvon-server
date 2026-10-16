@@ -424,7 +424,7 @@ async fn apply_template(db: &PgPool, template: &serde_json::Value) -> Result<()>
                 .bind(&msg_id)
                 .bind(&channel_id)
                 .bind(msg)
-                .bind(now)
+                .bind(now * 1000)
                 .execute(db)
                 .await
                 .ok();

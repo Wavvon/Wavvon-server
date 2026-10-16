@@ -20,13 +20,15 @@ pub async fn run_sweep(state: &AppState) {
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // Delete old messages per channel retention policy.
+    // Delete old messages per channel retention policy. `messages.created_at`
+    // is in milliseconds; compared against seconds, no member message was
+    // ever old enough to go (#114).
     let _ = sqlx::query(
         "DELETE FROM messages WHERE id IN (
             SELECT m.id FROM messages m
             JOIN channels c ON c.id = m.channel_id
             WHERE c.retention_days IS NOT NULL
-              AND m.created_at < $1 - (c.retention_days * 86400)
+              AND m.created_at < ($1 - (c.retention_days * 86400)) * 1000
         )",
     )
     .bind(now)

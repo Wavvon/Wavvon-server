@@ -192,7 +192,7 @@ pub async fn dispatch_slash(
     if let Some(reply) = app_response.reply {
         let ephemeral = app_response.ephemeral.unwrap_or(false);
         let msg_id = Uuid::new_v4().to_string();
-        let now = crate::auth::handlers::unix_timestamp();
+        let now = crate::auth::handlers::unix_timestamp_ms();
 
         let visible_to: Option<&str> = if ephemeral {
             Some(invoker_pubkey)
@@ -292,7 +292,7 @@ pub async fn insert_ephemeral_error(
     error_text: &str,
 ) -> Result<(), (StatusCode, String)> {
     let err_id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp();
+    let now = crate::auth::handlers::unix_timestamp_ms();
 
     sqlx::query(
         "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey)
@@ -567,7 +567,7 @@ async fn apply_component_response(
     // ephemeral_reply: insert an ephemeral message visible only to the interacting user.
     if let Some(EphemeralReply { body }) = resp.ephemeral_reply {
         let msg_id = Uuid::new_v4().to_string();
-        let now = crate::auth::handlers::unix_timestamp();
+        let now = crate::auth::handlers::unix_timestamp_ms();
 
         let _ = sqlx::query(
             "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey)

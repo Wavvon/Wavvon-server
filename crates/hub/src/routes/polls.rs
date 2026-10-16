@@ -124,7 +124,7 @@ async fn post_poll_card(
 ) -> Result<(), (StatusCode, String)> {
     let content = format!("**Poll:** {}", poll.question);
     let msg_id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp();
+    let now = crate::auth::handlers::unix_timestamp_ms();
     let sender = &poll.creator_pubkey;
 
     sqlx::query(
