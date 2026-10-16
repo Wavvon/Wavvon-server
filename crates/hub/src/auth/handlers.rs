@@ -931,11 +931,23 @@ pub async fn validate_ws_token(
 /// grants `builtin-owner` when this is the first user on the hub.
 /// Returns an error only for genuine DB failures so callers can propagate it.
 pub async fn admit_member(db: &PgPool, public_key: &str) -> Result<(), (StatusCode, String)> {
-    sqlx::query("UPDATE users SET is_member = TRUE WHERE public_key = $1")
-        .bind(public_key)
-        .execute(db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Someone who left (DELETE /me) and comes back is a joiner again: 'left'
+    // used to stick, refusing them certs and alliance voice and skipping the
+    // approval queue on a hub that has one.
+    sqlx::query(
+        "UPDATE users SET is_member = TRUE,
+            approval_status = CASE
+                WHEN approval_status <> 'left' THEN approval_status
+                WHEN (SELECT value FROM hub_settings WHERE key = 'require_approval') = 'true'
+                    THEN 'pending'
+                ELSE 'approved'
+            END
+         WHERE public_key = $1",
+    )
+    .bind(public_key)
+    .execute(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(())
 }
