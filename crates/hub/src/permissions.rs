@@ -515,6 +515,24 @@ pub fn fold_overwrites(
     effective
 }
 
+/// The channels `public_key` is banned from. A channel ban means the channel
+/// grants that member nothing -- it was enforced only on sending and typing,
+/// so history, a WS subscribe and voice join all ignored it. Folding it into
+/// the resolvers is what makes every gate honour it. The owner is exempt, as
+/// from every other deny.
+async fn banned_channels(
+    db: &PgPool,
+    public_key: &str,
+) -> Result<HashSet<String>, (StatusCode, String)> {
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT channel_id FROM channel_bans WHERE target_public_key = $1")
+            .bind(public_key)
+            .fetch_all(db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    Ok(ids.into_iter().collect())
+}
+
 /// Channel-aware resolver: hub-wide baseline permissions, adjusted by the
 /// channel's ancestor-chain overwrite cascade for the roles the caller
 /// holds. `has` / `require` on the returned `UserPermissions` are unchanged
@@ -525,6 +543,12 @@ pub async fn channel_permissions(
     channel_id: &str,
 ) -> Result<UserPermissions, (StatusCode, String)> {
     let baseline = user_permissions(db, public_key).await?;
+    if !baseline.is_owner && banned_channels(db, public_key).await?.contains(channel_id) {
+        return Ok(UserPermissions {
+            effective: HashSet::new(),
+            ..baseline
+        });
+    }
     if baseline.roles.is_empty() {
         // Overwrites are role-scoped; a user with no roles can't match any.
         return Ok(baseline);
@@ -591,10 +615,11 @@ pub async fn channels_with_permission(
         return Ok(all.into_iter().map(|(id, _)| id).collect());
     }
 
+    let banned = banned_channels(db, public_key).await?;
     if baseline.roles.is_empty() {
         return Ok(all
             .into_iter()
-            .filter(|_| baseline.effective.contains(permission))
+            .filter(|(id, _)| baseline.effective.contains(permission) && !banned.contains(id))
             .map(|(id, _)| id)
             .collect());
     }
@@ -607,6 +632,9 @@ pub async fn channels_with_permission(
     Ok(all_ids
         .into_iter()
         .filter(|id| {
+            if banned.contains(id) {
+                return false;
+            }
             let chain = ancestor_chain_from_map(&parent_of, id);
             let effective = fold_overwrites(&baseline.effective, &chain, &overwrite_rows);
             effective.contains(permission)
