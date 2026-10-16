@@ -338,6 +338,11 @@ async fn banlist_publish_toggle() {
     resp.assert_status_ok();
     let settings: BanlistSettingsResponse = resp.json();
     assert!(!settings.publish_banlist);
+    // Off means off: who this hub banned is nobody else's business yet.
+    server
+        .get("/federation/banlist")
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
 
     // Enable.
     server
@@ -353,6 +358,7 @@ async fn banlist_publish_toggle() {
         .await;
     let settings: BanlistSettingsResponse = resp.json();
     assert!(settings.publish_banlist);
+    server.get("/federation/banlist").await.assert_status_ok();
 }
 
 // Whitelist override admits user even when they're in federated_bans

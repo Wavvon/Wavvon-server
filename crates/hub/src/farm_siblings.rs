@@ -4,7 +4,9 @@
 //! each sibling it has not seen before:
 //!
 //! - subscribes to that sibling's ban list in **`soft-flag`** — history a
-//!   moderator can read, never an admission block;
+//!   moderator can read, never an admission block. Entries arrive only once
+//!   the sibling's owner turns `publish_banlist` on: publishing stays opt-in
+//!   on every hub, farm or not;
 //! - adds that sibling to `cert_trusted_issuers`, so a member vouched for on
 //!   one hub of a farm is not a stranger on the next.
 //!
