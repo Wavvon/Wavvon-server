@@ -14,7 +14,7 @@
 // own `e2e-topology/`, which imports this file's `lib.mjs`.
 //
 // Usage:  node e2e/run.mjs [stage...]
-//         stages: hubs alliance voice certs permissions pgupgrade alliancesplit
+//         stages: hubs alliance voice certs permissions pgupgrade challenge alliancesplit
 //                 alliancedelegate alliancestress alliancechurn alliancedrift farm crossfarm
 //                 (default: all)
 //         E2E_VERBOSE=1 to stream every process's output.
@@ -28,7 +28,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFi
 import { join } from "node:path";
 
 const want = new Set(process.argv.slice(2).length ? process.argv.slice(2)
-  : ["hubs","alliance","voice","certs","permissions","pgupgrade","alliancesplit","alliancestress","alliancechurn","alliancedrift","farm","crossfarm"]);
+  : ["hubs","alliance","voice","certs","permissions","pgupgrade","challenge","alliancesplit","alliancestress","alliancechurn","alliancedrift","farm","crossfarm"]);
 
 if (!existsSync(hubBinary())) {
   console.error(`No hub binary at ${hubBinary()}\n  cargo build -p wavvon-hub`);
@@ -1039,6 +1039,57 @@ try {
   // nothing about which alliances it is in. Nothing in-process can pose that
   // question: the integration suite builds its own state and never mints a
   // second hub identity.
+  // ── challenge ───────────────────────────────────────────────────────────
+  // The admission challenge gates becoming a member, nothing else. It used to
+  // gate every sign-in: the owner who switched it on could not sign in again
+  // (the clients only offer the puzzle when joining a hub), and a federating
+  // peer, which cannot answer a puzzle at all, could not authenticate, so no
+  // alliance could form with a hub that had it on.
+  if (want.has("challenge")) {
+    const ownerA = identity();
+    const ownerB = identity();
+    const hubA = await hub("hub-challenge-a", ownerA);
+    const hubB = await hub("hub-challenge-b", ownerB);
+    const tokenA = (await authenticate(hubA.url, ownerA)).body.token;
+    const tokenB = (await authenticate(hubB.url, ownerB)).body.token;
+
+    await scenario("a hub with the admission challenge on still lets its owner back in", async () => {
+      const set = await json(`${hubA.url}/hub/settings/challenge`, {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${tokenA}` },
+        body: JSON.stringify({ challenge_mode: "puzzle", challenge_difficulty: "easy" }),
+      });
+      checkEq(set.status, 200, `turn the challenge on: ${JSON.stringify(set.body)}`);
+      const again = await authenticate(hubA.url, ownerA);
+      checkEq(again.status, 200, `owner signs in again: ${JSON.stringify(again.body)}`);
+    });
+
+    await scenario("a hub with the admission challenge on can still be joined in an alliance", async () => {
+      const al = await json(`${hubA.url}/alliances`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tokenA}` },
+        body: JSON.stringify({ name: "Puzzle Pact" }),
+      });
+      checkEq(al.status, 201, `create alliance: ${JSON.stringify(al.body)}`);
+      const inv = await json(`${hubA.url}/alliances/${al.body.id}/invite`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tokenA}` },
+      });
+      checkEq(inv.status, 200, `mint alliance invite: ${JSON.stringify(inv.body)}`);
+      const joined = await json(`${hubB.url}/alliances/join`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tokenB}` },
+        body: JSON.stringify({
+          inviter_hub_url: hubA.url,
+          alliance_id: al.body.id,
+          invite_token: inv.body.token,
+          own_hub_url: hubB.url,
+        }),
+      });
+      checkEq(joined.status, 200, `hub B joins: ${JSON.stringify(joined.body)}`);
+    });
+  }
+
   if (want.has("alliancesplit")) {
     const owner1 = identity();
     const owner2 = identity();
