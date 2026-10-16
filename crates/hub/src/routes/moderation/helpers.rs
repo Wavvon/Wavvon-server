@@ -176,6 +176,25 @@ pub async fn get_federation_banlist(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    // Publishing is opt-in (moderation-enhancements.md, "A hub never
+    // auto-publishes its own ban list"): who a hub banned, and why, stays
+    // private until the owner turns `publish_banlist` on.
+    let published: bool = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'publish_banlist'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|v| v == "true");
+    if !published {
+        return (
+            StatusCode::NOT_FOUND,
+            "This hub does not publish its ban list",
+        )
+            .into_response();
+    }
+
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
