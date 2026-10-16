@@ -691,31 +691,7 @@ pub async fn get_event(
     user: AuthUser,
     Path(event_id): Path<String>,
 ) -> Result<Json<EventWithRsvps>, (StatusCode, String)> {
-    let event: Option<EventResponse> = sqlx::query_as(
-        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
-         FROM hub_events WHERE id = $1",
-    )
-    .bind(&event_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let event = event.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
-
-    // Read-gating (§3.5): the event id itself doesn't reveal the channel, so
-    // a hidden-channel event 404s here rather than 403ing -- 403 would
-    // confirm the event's existence to a caller who can't see its channel.
-    // events.md §5: a `hub_wide` event bypasses this gate entirely -- it's
-    // public to the hub by construction, so an unreadable anchor never 404s
-    // it.
-    if !event.hub_wide {
-        let perms =
-            permissions::channel_permissions(&state.db, &user.public_key, &event.channel_id)
-                .await?;
-        if !perms.has(permissions::MESSAGES_READ) {
-            return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
-        }
-    }
+    let event = require_visible_event(&state, &user.public_key, &event_id).await?;
 
     let rsvp_counts = load_rsvp_counts(&state.db, &event_id).await?;
     let slots = load_slots(&state.db, &event_id).await?;
@@ -726,6 +702,36 @@ pub async fn get_event(
         slots,
         my_rsvp,
     }))
+}
+
+/// Loads an event the caller may see, or 404s. Read-gating (§3.5): the event
+/// id itself doesn't reveal the channel, so a hidden-channel event 404s
+/// rather than 403ing -- 403 would confirm the event's existence to a caller
+/// who can't see its channel. events.md §5: a `hub_wide` event bypasses the
+/// gate -- it's public to the hub by construction. Shared by every route that
+/// takes an event id from the caller; the RSVP routes used to skip it.
+async fn require_visible_event(
+    state: &AppState,
+    public_key: &str,
+    event_id: &str,
+) -> Result<EventResponse, (StatusCode, String)> {
+    let event: Option<EventResponse> = sqlx::query_as(
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
+         FROM hub_events WHERE id = $1",
+    )
+    .bind(event_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let event = event.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
+    if !event.hub_wide {
+        let perms =
+            permissions::channel_permissions(&state.db, public_key, &event.channel_id).await?;
+        if !perms.has(permissions::MESSAGES_READ) {
+            return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
+        }
+    }
+    Ok(event)
 }
 
 /// PUT /events/:id
@@ -932,14 +938,7 @@ pub async fn rsvp_event(
         }
     }
 
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = $1")
-        .bind(&event_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
-    }
+    require_visible_event(&state, &user.public_key, &event_id).await?;
 
     // events.md §2: a slot claim only exists alongside status == "going".
     // Any other status (or an RSVP with no slot_id) clears the claim.
@@ -1023,17 +1022,10 @@ pub async fn rsvp_event(
 /// GET /events/:id/rsvps
 pub async fn list_rsvps(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(event_id): Path<String>,
 ) -> Result<Json<Vec<RsvpEntry>>, (StatusCode, String)> {
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = $1")
-        .bind(&event_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
-    }
+    require_visible_event(&state, &user.public_key, &event_id).await?;
 
     let entries: Vec<RsvpEntry> =
         sqlx::query_as("SELECT user_pubkey, status FROM event_rsvps WHERE event_id = $1")
