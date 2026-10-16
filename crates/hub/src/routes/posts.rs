@@ -305,12 +305,23 @@ pub async fn list_posts(
     Path(channel_id): Path<String>,
     Query(params): Query<PostListParams>,
 ) -> Result<Json<PostListResponse>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    list_posts_with(state, user, channel_id, params, perms).await
+}
 
-    let can_moderate = {
-        let p = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-        p.has(permissions::FORUM_POSTS_MANAGE)
-    };
+/// `list_posts` with the caller's permissions supplied: a federating peer
+/// holds no role here, so the alliance route passes the `everyone` floor.
+pub async fn list_posts_with(
+    state: Arc<AppState>,
+    user: AuthUser,
+    channel_id: String,
+    params: PostListParams,
+    perms: permissions::UserPermissions,
+) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    // Read-gating (§3.5), same as message history.
+    perms.require(permissions::MESSAGES_READ)?;
+    let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
 
     let limit = params.limit.unwrap_or(50).min(100);
 
@@ -511,9 +522,21 @@ pub async fn get_post(
     Path((channel_id, post_id)): Path<(String, String)>,
     Query(params): Query<ReplyListParams>,
 ) -> Result<Json<PostDetail>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
-
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    get_post_with(state, user, channel_id, post_id, params, perms).await
+}
+
+/// `get_post` with the caller's permissions supplied; see `list_posts_with`.
+pub async fn get_post_with(
+    state: Arc<AppState>,
+    user: AuthUser,
+    channel_id: String,
+    post_id: String,
+    params: ReplyListParams,
+    perms: permissions::UserPermissions,
+) -> Result<Json<PostDetail>, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    perms.require(permissions::MESSAGES_READ)?;
     let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;

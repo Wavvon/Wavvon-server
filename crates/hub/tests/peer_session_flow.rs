@@ -175,3 +175,70 @@ async fn an_allied_peer_reaches_only_what_the_alliance_shares() {
         .await;
     assert!(r.status_code().is_client_error(), "got {}", r.status_code());
 }
+
+#[tokio::test]
+async fn a_shared_channel_locked_for_everyone_stops_reading_through_the_alliance() {
+    let (h, owner) = closed_hub().await;
+    let text = make_channel(&h, &owner, "text").await;
+    let forum: serde_json::Value = h
+        .post("/channels")
+        .authorization_bearer(&owner)
+        .json(&json!({ "name": "forum", "channel_type": "forum" }))
+        .await
+        .json();
+    let forum = forum["id"].as_str().unwrap().to_string();
+
+    let alliance: serde_json::Value = h
+        .post("/alliances")
+        .authorization_bearer(&owner)
+        .json(&json!({ "name": "A" }))
+        .await
+        .json();
+    let aid = alliance["id"].as_str().unwrap().to_string();
+    for ch in [&text, &forum] {
+        h.post(&format!("/alliances/{aid}/channels"))
+            .authorization_bearer(&owner)
+            .json(&json!({ "channel_id": ch }))
+            .await
+            .assert_status_success();
+    }
+
+    let hub = Identity::generate();
+    let token = authenticate_as_hub(&h, &hub).await;
+    sqlx::query(
+        "INSERT INTO alliance_members (alliance_id, hub_public_key, hub_name, hub_url, joined_at)
+         VALUES ($1, $2, 'peer', 'http://peer.invalid', 0)",
+    )
+    .bind(&aid)
+    .bind(hub.public_key_hex())
+    .execute(&h.state().db)
+    .await
+    .unwrap();
+
+    let reads = [
+        format!("/alliances/{aid}/channels/{text}/messages"),
+        format!("/alliances/{aid}/channels/{forum}/posts"),
+    ];
+    for path in &reads {
+        h.get(path)
+            .authorization_bearer(&token)
+            .await
+            .assert_status_ok();
+    }
+
+    for ch in [&text, &forum] {
+        h.put(&format!("/channels/{ch}/permissions/builtin-everyone"))
+            .authorization_bearer(&owner)
+            .json(&json!({ "allow": [], "deny": ["messages.read"] }))
+            .await
+            .assert_status_success();
+    }
+    for path in &reads {
+        let r = h.get(path).authorization_bearer(&token).await;
+        assert!(
+            r.status_code().is_client_error(),
+            "{path} -> {}",
+            r.status_code()
+        );
+    }
+}

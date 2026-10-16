@@ -538,13 +538,8 @@ pub async fn get_alliance_forum_posts(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if effective.iter().any(|c| c.id == channel_id) {
-        return crate::routes::posts::list_posts(
-            State(state),
-            user,
-            Path(channel_id),
-            Query(params),
-        )
-        .await;
+        let perms = shared_channel_permissions(&state, &user.public_key, &channel_id).await?;
+        return crate::routes::posts::list_posts_with(state, user, channel_id, params, perms).await;
     }
     if models::caller_is_peer(&state, &user.public_key).await? {
         return Err((
@@ -642,11 +637,9 @@ pub async fn get_alliance_forum_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if effective.iter().any(|c| c.id == channel_id) {
-        return crate::routes::posts::get_post(
-            State(state),
-            user,
-            Path((channel_id, post_id)),
-            Query(params),
+        let perms = shared_channel_permissions(&state, &user.public_key, &channel_id).await?;
+        return crate::routes::posts::get_post_with(
+            state, user, channel_id, post_id, params, perms,
         )
         .await;
     }
@@ -1204,6 +1197,22 @@ pub async fn delete_alliance_forum_reply(
     ))
 }
 
+/// What the caller may do in a channel this hub owns and shares: a member's
+/// own channel permissions, or, for a federating peer that holds no role
+/// here, the `everyone` floor. Sharing a channel never widens it, so one
+/// locked down after it was shared stops being readable through the alliance.
+async fn shared_channel_permissions(
+    state: &AppState,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<crate::permissions::UserPermissions, (StatusCode, String)> {
+    if models::caller_is_peer(state, public_key).await? {
+        crate::permissions::everyone_channel_permissions(&state.db, channel_id).await
+    } else {
+        crate::permissions::channel_permissions(&state.db, public_key, channel_id).await
+    }
+}
+
 pub async fn get_alliance_channel_messages(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -1226,6 +1235,9 @@ pub async fn get_alliance_channel_messages(
         if local.is_category || (local.channel_type != "text" && local.channel_type != "forum") {
             return Ok(Json(Vec::new()));
         }
+        shared_channel_permissions(&state, &user.public_key, &channel_id)
+            .await?
+            .require(crate::permissions::MESSAGES_READ)?;
 
         let rows = sqlx::query_as::<_, LocalMessageRow>(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
