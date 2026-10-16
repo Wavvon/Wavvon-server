@@ -209,6 +209,11 @@ pub struct CreateSquadRoomsRequest {
 pub struct ListEventsParams {
     pub upcoming: Option<bool>,
     pub limit: Option<i64>,
+    /// Only the events that belong to this channel's Events tab: anchored
+    /// there, `hub_wide`, or anchored on an ancestor with
+    /// `propagate_to_children`. Resolved here because the client cannot walk
+    /// the chain itself: `GET /channels` omits channels it cannot read.
+    pub channel_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -611,25 +616,43 @@ pub async fn list_events(
     let upcoming = params.upcoming.unwrap_or(false);
     let now = crate::auth::handlers::unix_timestamp();
 
-    let rows: Vec<EventResponse> = if upcoming {
-        sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
-             FROM hub_events WHERE starts_at >= $1 ORDER BY starts_at ASC LIMIT $2",
-        )
-        .bind(now)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
-    } else {
-        sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
-             FROM hub_events ORDER BY starts_at ASC LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
+    // The ancestors whose propagating events reach `channel_id`; the channel
+    // itself is matched on its own, propagating or not.
+    let channel_filter = match &params.channel_id {
+        Some(cid) => {
+            // Every event in a channel's tab is one its announcement card is
+            // posted into, so reading the channel is the whole gate -- the
+            // anchor may be a parent the caller cannot see.
+            permissions::channel_permissions(&state.db, &user.public_key, cid)
+                .await?
+                .require(permissions::MESSAGES_READ)?;
+            let mut chain = permissions::ancestor_chain(&state.db, cid).await?;
+            chain.pop();
+            Some((cid.clone(), chain))
+        }
+        None => None,
+    };
+
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
+         FROM hub_events WHERE TRUE",
+    );
+    if upcoming {
+        qb.push(" AND starts_at >= ").push_bind(now);
     }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some((cid, ancestors)) = &channel_filter {
+        qb.push(" AND (hub_wide OR channel_id = ")
+            .push_bind(cid.clone())
+            .push(" OR (propagate_to_children AND channel_id = ANY(")
+            .push_bind(ancestors.clone())
+            .push(")))");
+    }
+    qb.push(" ORDER BY starts_at ASC LIMIT ").push_bind(limit);
+    let rows: Vec<EventResponse> = qb
+        .build_query_as()
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Read-gating (§3.5): drop any event whose channel the caller lacks
     // effective MESSAGES_READ on, so title/description/location/channel_id
@@ -646,7 +669,7 @@ pub async fn list_events(
 
     let mut result = Vec::with_capacity(rows.len());
     for event in rows {
-        if !event.hub_wide && !readable.contains(&event.channel_id) {
+        if channel_filter.is_none() && !event.hub_wide && !readable.contains(&event.channel_id) {
             continue;
         }
         let rsvp_counts = load_rsvp_counts(&state.db, &event.id).await?;
