@@ -1848,3 +1848,74 @@ async fn an_alliance_manager_cannot_grant_the_list() {
         "a delegate handing the alliance to another role is exactly what roles.manage gates"
     );
 }
+
+/// An alliance invite used to be a signature over the alliance id: one token
+/// per alliance, valid forever, and `/alliances/{id}/join` took it from
+/// anyone. Now it is spent on use, and joining needs a peer session.
+#[tokio::test]
+async fn an_alliance_invite_is_spent_on_use_and_join_needs_a_peer() {
+    let (hub_a_url, _hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+    let token_a = authenticate_user(&hub_a_url, &Identity::generate()).await;
+    let token_b = authenticate_user(&hub_b_url, &Identity::generate()).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Spent" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let invite: AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // No session at all: refused before the token is even looked at.
+    let resp = client
+        .post(format!("{hub_a_url}/alliances/{}/join", alliance.id))
+        .json(&json!({ "invite_token": invite.token, "hub_url": hub_b_url }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error(), "got {}", resp.status());
+
+    let joined = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(joined.status(), 200);
+
+    // The same token again, from a third key: spent.
+    let fed = wavvon_hub::federation::client::FederationClient::new();
+    let third = Identity::generate();
+    let peer_token = fed.authenticate(&hub_a_url, &third).await.unwrap();
+    let again = fed
+        .post_alliance_join(
+            &hub_a_url,
+            &peer_token,
+            &alliance.id,
+            &invite.token,
+            "http://127.0.0.1:9",
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.status(), 403);
+}

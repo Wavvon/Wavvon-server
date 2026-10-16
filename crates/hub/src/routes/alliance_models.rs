@@ -161,7 +161,16 @@ pub struct AllianceMemberAnnouncement {
     /// trusted to state one.
     pub hub_url: String,
     pub inviter_public_key: String,
-    pub invite_token: String,
+    /// The inviter's signature over `member_voucher_bytes(alliance, announcer)`,
+    /// returned to the announcer when it joined.
+    pub voucher: String,
+}
+
+/// What the inviting hub answers a successful join with: a voucher the new
+/// member presents to the members who were already there.
+#[derive(Serialize, Deserialize)]
+pub struct JoinAllianceResponse {
+    pub voucher: String,
 }
 
 /// Sent by a hub leaving an alliance. It names only the alliance: which hub

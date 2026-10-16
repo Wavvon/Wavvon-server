@@ -163,7 +163,7 @@ fn peer_path_allowed(method: &axum::http::Method, path: &str) -> bool {
         (&Method::GET, ["alliances", _, "channels", _, "posts"]) => true,
         (&Method::GET, ["alliances", _, "channels", _, "posts", _]) => true,
         (&Method::POST, ["federation", "dm"]) => true,
-        (&Method::DELETE, ["federation", "alliance-member"]) => true,
+        (&Method::POST | &Method::DELETE, ["federation", "alliance-member"]) => true,
         (_, ["federation", "forum", ..]) => true,
         _ => false,
     }
