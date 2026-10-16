@@ -83,6 +83,40 @@ pub async fn sync_one_source(state: &AppState, source_url: &str) {
                         return;
                     }
 
+                    // The payload names its issuer, so the issuer has to have
+                    // signed it, and a source keeps the key it was first seen
+                    // (or subscribed) with. Without both, a source could claim
+                    // another source's key and replace that source's bans.
+                    let pinned: Option<String> = sqlx::query_scalar(
+                        "SELECT issuer_pubkey FROM federated_ban_sources WHERE url = $1",
+                    )
+                    .bind(source_url)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .filter(|k: &String| !k.is_empty());
+                    if pinned.as_ref().is_some_and(|k| *k != issuer) {
+                        tracing::warn!(
+                            "banlist_worker: {source_url} changed issuer key; ignoring its list"
+                        );
+                        return;
+                    }
+                    let signature = body
+                        .get("signature")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| hex::decode(s).ok())
+                        .unwrap_or_default();
+                    let signed = serde_json::to_string(payload).unwrap_or_default();
+                    if wavvon_identity::verify_signature(&issuer, signed.as_bytes(), &signature)
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "banlist_worker: {source_url} list is not signed by its issuer"
+                        );
+                        return;
+                    }
+
                     // Persist the issuer_pubkey on first successful sync.
                     let _ = sqlx::query(
                         "UPDATE federated_ban_sources SET issuer_pubkey = $1 WHERE url = $2",

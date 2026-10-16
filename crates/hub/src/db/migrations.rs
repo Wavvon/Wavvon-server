@@ -2005,6 +2005,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     // is its roles, resolved through the permission catalogue like everyone
     // else's, so there is no per-pubkey grant left to seed.
 
+    // Farm siblings were subscribed with the route already on the URL, and the
+    // ban list worker appends it again, so every sibling list 404ed. A source
+    // is a base URL; idempotent, so it simply finds nothing to do next time.
+    sqlx::query(
+        "UPDATE federated_ban_sources s
+            SET url = left(s.url, length(s.url) - length('/federation/banlist'))
+          WHERE s.url LIKE '%/federation/banlist'
+            AND NOT EXISTS (
+                SELECT 1 FROM federated_ban_sources o
+                 WHERE o.url = left(s.url, length(s.url) - length('/federation/banlist'))
+            )",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations complete");
 
     Ok(())
