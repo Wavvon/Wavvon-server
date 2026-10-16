@@ -93,10 +93,8 @@ pub async fn reconcile(db: &PgPool, siblings: &[Sibling]) {
     let mut wired = Vec::new();
 
     for sibling in &fresh {
-        let banlist_url = format!(
-            "{}/federation/banlist",
-            sibling.hub_url.trim_end_matches('/')
-        );
+        // A source is a hub's base URL; the worker appends the route.
+        let banlist_url = sibling.hub_url.trim_end_matches('/').to_string();
         let added = sqlx::query(
             "INSERT INTO federated_ban_sources (url, policy, added_at, issuer_pubkey)
              VALUES ($1, 'soft-flag', $2, $3)

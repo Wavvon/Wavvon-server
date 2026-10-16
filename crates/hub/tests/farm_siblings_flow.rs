@@ -46,7 +46,12 @@ async fn a_new_sibling_is_subscribed_as_soft_flag_and_trusted_as_an_issuer() {
     let rows = sources(&db).await;
     assert_eq!(rows.len(), 2, "both siblings subscribed");
     for (url, policy, issuer) in &rows {
-        assert!(url.ends_with("/federation/banlist"), "got {url}");
+        // The base URL: the ban list worker appends the route itself, and
+        // storing it with the route made every sibling list 404.
+        assert!(
+            url.starts_with("https://farm.test/hub/") && !url.contains("/federation/"),
+            "got {url}"
+        );
         assert_eq!(
             policy, "soft-flag",
             "a sibling's list must inform, never block — that is what keeps \
