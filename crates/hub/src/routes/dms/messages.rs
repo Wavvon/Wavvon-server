@@ -614,7 +614,20 @@ pub async fn receive_federated_dm(
 
     // Block check for federated inbound DM: if any local recipient has blocked the sender,
     // return 200 (success-shaped) so the sending hub cannot detect the block.
-    for member_key in &req.members {
+    //
+    // The recipients are the members this hub has stored for the conversation
+    // as well as the ones the request names: `req.members` is the sender's
+    // to write, and an empty list used to skip the check entirely.
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT public_key FROM conversation_members WHERE conversation_id = $1",
+    )
+    .bind(&req.conversation_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let recipients: std::collections::HashSet<&String> =
+        stored.iter().chain(req.members.iter()).collect();
+    for member_key in recipients {
         if member_key == &req.sender {
             continue;
         }

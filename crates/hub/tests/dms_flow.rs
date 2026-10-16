@@ -1798,3 +1798,97 @@ async fn unreadable_outbox_row_bounces_without_stalling_the_queue() {
     assert_eq!(attempts, 1, "the healthy row should still have been tried");
     assert!(bounced.is_none(), "and it should still be retryable");
 }
+
+/// The block check on an inbound federated DM covers the members this hub
+/// stored for the conversation, not only the ones the request names: the
+/// list is the sender's to write, and `members: []` used to skip it.
+#[tokio::test]
+async fn federated_dm_block_check_ignores_an_empty_member_list() {
+    let (hub, state, _guard) = start_real_hub("hub-block-roster").await;
+    let client = reqwest::Client::new();
+    let alice = Identity::generate();
+    let alice_token = authenticate_http(&hub, &alice).await;
+
+    let peer = Identity::generate();
+    let challenge: ChallengeResponse = client
+        .post(format!("{hub}/auth/challenge"))
+        .json(&serde_json::json!({ "public_key": peer.public_key_hex() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let verify: VerifyResponse = client
+        .post(format!("{hub}/auth/verify"))
+        .json(&serde_json::json!({
+            "public_key": peer.public_key_hex(),
+            "challenge": challenge.challenge,
+            "signature": hex::encode(peer.sign(&hex::decode(&challenge.challenge).unwrap()).to_bytes()),
+            "is_hub": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let sender = Identity::generate();
+    let conv_id = "dddd0000111122223333444455556666";
+    let deliver = |message_id: &'static str, members: Vec<String>| {
+        let client = client.clone();
+        let hub = hub.clone();
+        let token = verify.token.clone();
+        let sender_pk = sender.public_key_hex();
+        let sig = hex::encode(
+            sender
+                .sign(&wavvon_identity::federated_plaintext_dm_signing_bytes(
+                    conv_id, "dm", message_id,
+                ))
+                .to_bytes(),
+        );
+        async move {
+            client
+                .post(format!("{hub}/federation/dm"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "message_id": message_id,
+                    "conversation_id": conv_id,
+                    "conv_type": "dm",
+                    "sender": sender_pk,
+                    "members": members,
+                    "content": message_id,
+                    "attachments": [],
+                    "signature": sig,
+                    "created_at": 1_700_000_000i64,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    let both = vec![alice.public_key_hex(), sender.public_key_hex()];
+    assert!(deliver("eeee0000111122223333444455556661", both)
+        .await
+        .is_success());
+
+    client
+        .put(format!("{hub}/identity/dm-blocks"))
+        .bearer_auth(&alice_token)
+        .json(&serde_json::json!({ "pubkeys": [sender.public_key_hex()] }))
+        .send()
+        .await
+        .unwrap();
+    deliver("eeee0000111122223333444455556662", vec![]).await;
+
+    let stored: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM dm_messages WHERE conversation_id = $1")
+            .bind(conv_id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(stored, 1, "a blocked sender's DM must not be stored");
+}
