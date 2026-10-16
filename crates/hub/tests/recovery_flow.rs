@@ -506,9 +506,8 @@ async fn attest_dedupes_repeat_submissions_from_same_contact() {
 #[tokio::test]
 async fn admin_list_pending_recovery_requests() {
     let server = common::setup().await;
-    let (_hub_pubkey, request_id, owner, _contact, _new_key, owner_token) =
+    let (hub_pubkey, request_id, owner, contact, new_key, owner_token) =
         open_request_with_one_contact(&server).await;
-    let _ = request_id;
 
     // Grant owner admin so they can list.
     server
@@ -519,13 +518,43 @@ async fn admin_list_pending_recovery_requests() {
         .authorization_bearer(&owner_token)
         .await;
 
-    let resp = server
-        .get("/admin/recovery/pending")
+    // Below the contacts' threshold a request has not earned the admin's
+    // attention: it is not listed, and it cannot be approved.
+    let listed = |token: String| {
+        let server = &server;
+        async move {
+            let resp = server
+                .get("/admin/recovery/pending")
+                .authorization_bearer(&token)
+                .await;
+            resp.assert_status_ok();
+            resp.json::<serde_json::Value>().as_array().unwrap().len()
+        }
+    };
+    assert_eq!(listed(owner_token.clone()).await, 0);
+    server
+        .post(&format!("/admin/recovery/{request_id}/approve"))
         .authorization_bearer(&owner_token)
-        .await;
-    resp.assert_status_ok();
-    let arr = resp.json::<serde_json::Value>();
-    assert!(!arr.as_array().unwrap().is_empty());
+        .await
+        .assert_status(axum::http::StatusCode::CONFLICT);
+
+    let bundle = server
+        .get(&format!("/recovery/rotation-request/{request_id}"))
+        .await
+        .json::<serde_json::Value>();
+    let sig = attestation_signature(
+        &hub_pubkey,
+        &owner.public_key_hex(),
+        &new_key.public_key_hex(),
+        bundle["nonce"].as_str().unwrap(),
+        &contact,
+    );
+    server
+        .post(&format!("/recovery/rotation-request/{request_id}/attest"))
+        .json(&json!({ "attester": contact.public_key_hex(), "signature": sig }))
+        .await
+        .assert_status_ok();
+    assert_eq!(listed(owner_token.clone()).await, 1);
 }
 
 #[tokio::test]

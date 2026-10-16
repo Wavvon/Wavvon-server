@@ -539,7 +539,7 @@ pub async fn admin_list_pending(
                 COUNT(a.id) AS attestation_count
          FROM key_rotation_requests r
          LEFT JOIN rotation_attestations a ON a.request_id = r.id
-         WHERE r.status = 'ready_for_review' OR r.status = 'pending'
+         WHERE r.status = 'ready_for_review'
          GROUP BY r.id
          ORDER BY r.created_at DESC",
     )
@@ -575,8 +575,11 @@ pub async fn admin_approve(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require_owner("approve an identity recovery")?;
 
+    // The contacts' threshold is what earns a request the admin's attention
+    // (recovery-attestation.md): below it, one click would hand a member's
+    // roles to whoever filed the request. Deny stays open on `pending`.
     let row = fetch_rotation_request(&state, &id).await?;
-    if row.status != "ready_for_review" && row.status != "pending" {
+    if row.status != "ready_for_review" {
         return Err((
             StatusCode::CONFLICT,
             "Request is not in an approvable state".to_string(),
