@@ -46,6 +46,12 @@ pub struct SendDmRequest {
     /// and do not use this field.
     #[serde(default)]
     pub plaintext_signature: Option<String>,
+    /// A paired device signs `plaintext_signature` with its subkey and
+    /// presents the cert chaining it to the canonical identity, as the
+    /// encrypted envelopes do (decisions.md, "Paired-device DMs attribute to
+    /// canonical via cert-chained envelopes").
+    #[serde(default)]
+    pub plaintext_signer_cert: Option<SubkeyCert>,
 }
 
 fn default_envelope_version() -> u8 {

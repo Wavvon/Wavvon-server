@@ -278,19 +278,16 @@ pub async fn send_dm(
                 &conv_type,
                 content,
             );
-            let sig_bytes = hex::decode(sig_hex).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Bad plaintext_signature hex: {e}"),
-                )
-            })?;
-            wavvon_identity::verify_signature(&user.public_key, &signing_bytes, &sig_bytes)
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid plaintext_signature: {e}"),
-                    )
-                })?;
+            // Tiered: a paired device holds its subkey and a cert, never the
+            // canonical key the conversation knows it by.
+            let cert_master = verify_tiered_signature(
+                &signing_bytes,
+                sig_hex,
+                req.plaintext_signer_cert.as_ref(),
+                &user.public_key,
+                "plaintext_signature",
+            )?;
+            bind_cert_master(cert_master, &user)?;
             Some(sig_hex.clone())
         } else {
             None
@@ -409,7 +406,8 @@ pub async fn send_dm(
             signer_cert: req
                 .encrypted_envelope
                 .as_ref()
-                .and_then(|e| e.signer_cert.clone()),
+                .and_then(|e| e.signer_cert.clone())
+                .or_else(|| req.plaintext_signer_cert.clone()),
             // The sender's own delivery, whoever it reaches.
             mirror: false,
         };
@@ -796,16 +794,27 @@ pub async fn receive_federated_dm(
             &req.conv_type,
             content,
         );
-        let sig_bytes = hex::decode(sig_hex)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-        wavvon_identity::verify_signature(&req.sender, &signing_bytes, &sig_bytes).map_err(
-            |e| {
-                (
+        // Tiered like the encrypted envelopes: a paired device signs with its
+        // subkey, and the forwarded cert must chain it to the sender.
+        let cert_master = verify_tiered_signature(
+            &signing_bytes,
+            sig_hex,
+            req.signer_cert.as_ref(),
+            &req.sender,
+            "sender",
+        )
+        .map_err(|(_, e)| (StatusCode::UNAUTHORIZED, e))?;
+        if let Some(master) = cert_master {
+            let bound =
+                resolve_master_binding(&state, &req.sender, &master, req.sender_hub_url.as_deref())
+                    .await?;
+            if !bound {
+                return Err((
                     StatusCode::UNAUTHORIZED,
-                    format!("Sender signature verification failed: {e}"),
-                )
-            },
-        )?;
+                    "signer_cert master is not bound to sender".to_string(),
+                ));
+            }
+        }
 
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
