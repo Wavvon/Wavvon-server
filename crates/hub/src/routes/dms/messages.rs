@@ -1034,56 +1034,9 @@ async fn deliver_federated_dm(
     hub_url: &str,
     envelope: &FederatedDmRequest,
 ) -> Result<(), String> {
-    // Ensure we have a session token for this remote hub — authenticate once if not cached.
-    let token = {
-        let peer_key: Option<String> =
-            sqlx::query_scalar("SELECT public_key FROM peers WHERE url = $1")
-                .bind(hub_url)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| format!("peer lookup: {e}"))?;
-
-        let cached = if let Some(ref key) = peer_key {
-            state.peer_tokens.read().await.get(key).cloned()
-        } else {
-            None
-        };
-
-        if let Some(t) = cached {
-            t
-        } else {
-            let fresh = state
-                .federation_client
-                .authenticate(hub_url, &state.hub_identity)
-                .await
-                .map_err(|e| format!("authenticate: {e}"))?;
-
-            let info = state
-                .federation_client
-                .get_info(hub_url)
-                .await
-                .map_err(|e| format!("get_info: {e}"))?;
-            let now = crate::auth::handlers::unix_timestamp();
-            let _ = sqlx::query(
-                "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
-                 ON CONFLICT(public_key) DO UPDATE SET name = $5, url = $6",
-            )
-            .bind(&info.public_key)
-            .bind(&info.name)
-            .bind(hub_url)
-            .bind(now)
-            .bind(&info.name)
-            .bind(hub_url)
-            .execute(&state.db)
-            .await;
-            state
-                .peer_tokens
-                .write()
-                .await
-                .insert(info.public_key, fresh.clone());
-            fresh
-        }
-    };
+    let token = crate::federation::peer_token(state, hub_url)
+        .await
+        .ok_or_else(|| "authenticate: failed".to_string())?;
 
     let resp = state
         .federation_client
@@ -1091,6 +1044,10 @@ async fn deliver_federated_dm(
         .await
         .map_err(|e| format!("deliver: {e}"))?;
 
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        // Our session there ended; the outbox retries with a fresh one.
+        crate::federation::forget_peer_token(state, hub_url).await;
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

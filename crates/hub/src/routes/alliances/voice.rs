@@ -169,7 +169,7 @@ pub async fn mint_voice_grant(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?;
 
     for member in members {
-        let token = match super::channels::peer_token(&state, &member).await {
+        let token = match crate::federation::peer_token(&state, &member.hub_url).await {
             Some(t) => t,
             None => continue,
         };

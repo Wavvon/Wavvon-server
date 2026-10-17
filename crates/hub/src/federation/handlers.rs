@@ -53,11 +53,7 @@ pub async fn add_peer(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Cache the session token in memory
-    state
-        .peer_tokens
-        .write()
-        .await
-        .insert(info.public_key.clone(), token);
+    state.peer_tokens.write().await.insert(url.clone(), token);
 
     tracing::info!(
         "Peered with hub '{}' ({})",

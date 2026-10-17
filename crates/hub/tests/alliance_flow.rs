@@ -1919,3 +1919,94 @@ async fn an_alliance_invite_is_spent_on_use_and_join_needs_a_peer() {
         .unwrap();
     assert_eq!(again.status(), 403);
 }
+
+/// A peer's session can end on the other side (ban, leave, recovery). The
+/// cached token was never dropped, so every call to that peer failed until
+/// the process restarted. A refused token is now forgotten and the call
+/// retried once with a fresh session.
+#[tokio::test]
+async fn a_peer_session_that_ended_is_replaced_not_reused() {
+    let (hub_a_url, hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+    let token_a = authenticate_user(&hub_a_url, &Identity::generate()).await;
+    let token_b = authenticate_user(&hub_b_url, &Identity::generate()).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Resumed" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let invite: AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let b_channel: ChannelResponse = client
+        .post(format!("{hub_b_url}/channels"))
+        .bearer_auth(&token_b)
+        .json(&json!({ "name": "guild-chat" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    client
+        .post(format!("{hub_b_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_b)
+        .json(&json!({ "channel_id": b_channel.id }))
+        .send()
+        .await
+        .unwrap();
+
+    let read = || {
+        let client = client.clone();
+        let url = format!(
+            "{hub_a_url}/alliances/{}/channels/{}/messages",
+            alliance.id, b_channel.id
+        );
+        let token = token_a.clone();
+        async move {
+            client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(read().await, 200);
+
+    // Hub B ends hub A's session behind its back.
+    sqlx::query("DELETE FROM sessions WHERE public_key = $1")
+        .bind(hub_a_state.hub_identity.public_key_hex())
+        .execute(&hub_b_state.db)
+        .await
+        .unwrap();
+    assert_eq!(read().await, 200, "the stale token must be replaced");
+}
