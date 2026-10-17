@@ -153,6 +153,11 @@ pub const CAPABILITIES: &[&str] = &[
     // The raw-UDP and `/voice/ws` relays it replaced are gone, so a client
     // that does not see this string has no voice path to this hub at all.
     "voice.wt",
+    // Webhook deliveries (app dispatch, outgoing webhooks) carry
+    // `X-Wavvon-Signature-V1` over the timestamp and the body. Advertised so a
+    // program can tell a hub that never sends it from a replayed request
+    // stripped of it, and refuse the second.
+    "webhooks.signedtimestamp",
     // The WS answers `ping` with `pong`, echoing the nonce. Without this a
     // client measuring latency would wait for a reply that never comes and
     // show a dead "—" forever, so the readout has to be gated on it.

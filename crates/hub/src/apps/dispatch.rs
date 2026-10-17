@@ -156,6 +156,15 @@ pub async fn dispatch_slash(
     let signature = state.hub_identity.sign(body_bytes);
     let sig_hex = hex::encode(signature.to_bytes());
     let timestamp = crate::auth::handlers::unix_timestamp();
+    let sig_v1_hex = hex::encode(
+        state
+            .hub_identity
+            .sign(&wavvon_identity::webhook_delivery_signing_bytes(
+                timestamp as u64,
+                body_bytes,
+            ))
+            .to_bytes(),
+    );
 
     // POST to app webhook with 5s timeout.
     let resp = state
@@ -164,6 +173,7 @@ pub async fn dispatch_slash(
         .header("Content-Type", "application/json")
         .header("X-Wavvon-Hub-Pubkey", &hub_pubkey)
         .header("X-Wavvon-Signature", &sig_hex)
+        .header("X-Wavvon-Signature-V1", &sig_v1_hex)
         .header("X-Wavvon-Timestamp", timestamp.to_string())
         .body(body_json)
         .timeout(std::time::Duration::from_secs(5))
@@ -456,6 +466,15 @@ pub async fn dispatch_component(
     let signature = state.hub_identity.sign(body_bytes);
     let sig_hex = hex::encode(signature.to_bytes());
     let timestamp = crate::auth::handlers::unix_timestamp();
+    let sig_v1_hex = hex::encode(
+        state
+            .hub_identity
+            .sign(&wavvon_identity::webhook_delivery_signing_bytes(
+                timestamp as u64,
+                body_bytes,
+            ))
+            .to_bytes(),
+    );
 
     let resp = state
         .http_client
@@ -463,6 +482,7 @@ pub async fn dispatch_component(
         .header("Content-Type", "application/json")
         .header("X-Wavvon-Hub-Pubkey", &hub_pubkey)
         .header("X-Wavvon-Signature", &sig_hex)
+        .header("X-Wavvon-Signature-V1", &sig_v1_hex)
         .header("X-Wavvon-Timestamp", timestamp.to_string())
         .body(body_json)
         .timeout(std::time::Duration::from_secs(5))

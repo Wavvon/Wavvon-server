@@ -38,6 +38,7 @@ async fn setup_with_pool() -> (common::TestHarness, PgPool) {
 struct CapturedRequest {
     headers: HeaderMap,
     body: serde_json::Value,
+    raw: Vec<u8>,
 }
 
 #[derive(Clone, Default)]
@@ -57,6 +58,7 @@ async fn mock_receive(
     state.requests.lock().await.push(CapturedRequest {
         headers,
         body: json_body,
+        raw: body.to_vec(),
     });
 
     if state.always_fail.load(std::sync::atomic::Ordering::SeqCst) {
@@ -458,6 +460,21 @@ async fn delivery_signs_and_posts_event_to_receiver() {
     assert_eq!(sig_header.len(), 64);
     assert!(sig_header.chars().all(|c| c.is_ascii_hexdigit()));
     let _ = body_bytes;
+
+    // The v1 signature covers the timestamp as well as the exact body bytes,
+    // so a receiver can refuse a replay (Wavvon-server#160).
+    let ts: u64 = req.headers["X-Wavvon-Timestamp"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let v1 = req.headers["X-Wavvon-Signature-V1"].to_str().unwrap();
+    let mut mac = <hmac::Hmac<sha2::Sha256> as hmac::Mac>::new_from_slice(&signing_key).unwrap();
+    hmac::Mac::update(
+        &mut mac,
+        &wavvon_identity::webhook_delivery_signing_bytes(ts, &req.raw),
+    );
+    assert_eq!(v1, hex::encode(hmac::Mac::finalize(mac).into_bytes()));
 
     // Failure count / last_delivery_at should reflect the success. The mock
     // receiver records the request before the hub's delivery task has

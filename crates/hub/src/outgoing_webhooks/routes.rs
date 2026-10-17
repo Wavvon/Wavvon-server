@@ -110,14 +110,19 @@ fn generate_secret_and_key() -> (String, String) {
     rand::thread_rng().fill_bytes(&mut raw);
     let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
 
-    let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), &raw);
+    (secret, derive_signing_key(&raw))
+}
+
+/// The hex HMAC key a receiver derives from the secret it was shown, exactly
+/// as the hub does: HKDF-SHA256 with salt `wavvon-webhook-signing`, empty info.
+pub fn derive_signing_key(raw_secret: &[u8]) -> String {
+    let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), raw_secret);
     let mut signing_key = [0u8; 32];
     // `expand` only fails if the requested length is too large for the hash
     // (max 255 * hash_len); 32 bytes is always valid, so this cannot fail.
     hk.expand(b"", &mut signing_key)
         .expect("HKDF expand with a 32-byte output cannot fail");
-
-    (secret, hex::encode(signing_key))
+    hex::encode(signing_key)
 }
 
 // ---------------------------------------------------------------------------
