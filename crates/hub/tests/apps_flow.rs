@@ -596,3 +596,62 @@ fn the_hub_event_envelope_has_one_shape_with_optional_extras() {
     assert_eq!(hook["webhook_id"], "wh_1");
     assert_eq!(hook["truncated"], true);
 }
+
+/// A slash dispatch carries a second signature that covers the timestamp,
+/// so a program can refuse a replayed invocation (Wavvon-server#160).
+#[tokio::test]
+async fn a_slash_dispatch_signs_its_timestamp() {
+    use std::sync::{Arc, Mutex};
+    let server = common::setup().await;
+    grant_apps_register(&server).await;
+
+    type Seen = Arc<Mutex<Option<(axum::http::HeaderMap, Vec<u8>)>>>;
+    let seen: Seen = Arc::default();
+    let sink = seen.clone();
+    let receiver = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let sink = sink.clone();
+                async move {
+                    *sink.lock().unwrap() = Some((headers, body.to_vec()));
+                    axum::Json(json!({ "content": "pong" }))
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+
+    let app = Identity::generate();
+    let token = common::authenticate(&server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Signed", "webhook_url": hook_url }))
+        .await
+        .assert_status_success();
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&token)
+        .json(&json!({ "commands": [{ "name": "ping", "description": "p" }] }))
+        .await
+        .assert_status_success();
+    invoke(&server, "someone").await;
+
+    let (headers, raw) = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the app was never called");
+    let header = |name: &str| headers[name].to_str().unwrap().to_string();
+    let ts: u64 = header("X-Wavvon-Timestamp").parse().unwrap();
+    let signature = hex::decode(header("X-Wavvon-Signature-V1")).unwrap();
+    wavvon_identity::verify_signature(
+        &header("X-Wavvon-Hub-Pubkey"),
+        &wavvon_identity::webhook_delivery_signing_bytes(ts, &raw),
+        &signature,
+    )
+    .expect("the v1 signature must cover the timestamp and the exact body");
+}

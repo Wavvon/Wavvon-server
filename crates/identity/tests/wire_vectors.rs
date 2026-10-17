@@ -18,8 +18,9 @@ use wavvon_identity::{
     federated_plaintext_dm_signing_bytes, group_dm_envelope_signing_bytes,
     recovery_attestation_signing_bytes, recovery_request_signing_bytes,
     sender_key_dist_signing_bytes, unwrap_blob_key, voice_key_unwrap, voice_key_wrap_with_nonce,
-    voice_packet_open, voice_packet_seal, wrap_blob_key, DhKeyRecord, HomeHubList, PairingClaim,
-    PairingComplete, PairingOffer, PairingStatus, RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    voice_packet_open, voice_packet_seal, webhook_delivery_signing_bytes, wrap_blob_key,
+    DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer, PairingStatus,
+    RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 const TS: u64 = 1_700_000_000;
@@ -943,4 +944,13 @@ fn dm_member_change_vector() {
         hex::encode(master_key().sign(&bytes).to_bytes()),
         "1a141f3f3d17e7aac9ecfb851df6d4cc4ea7d0dd46aa87658a21c4d53e2efd9290578d11f1dafcc51131325fe4e85de005e73e524bda4d2751d68b9e21b35b00"
     );
+}
+
+/// What a hub signs over a webhook delivery: the timestamp and the body, so a
+/// receiver can refuse a replay (Wavvon-server#160).
+#[test]
+fn webhook_delivery_vector() {
+    let bytes = webhook_delivery_signing_bytes(1_700_000_000, br#"{"type":"slash_command"}"#);
+    assert_eq!(hex::encode(&bytes), "776176766f6e2f776562686f6f6b2d64656c69766572792f76310000f15365000000007b2274797065223a22736c6173685f636f6d6d616e64227d");
+    assert_eq!(hex::encode(master_key().sign(&bytes).to_bytes()), "86328471c43aa165ef1ed671d51e46eaeb8de46d6921c51f7bfe9541825b0e246c90acd6b4aa1b977e4cde24271abcd762ff1c7871436de6ab7e1bea627f3c01");
 }

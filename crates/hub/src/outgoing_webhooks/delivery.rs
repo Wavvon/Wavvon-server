@@ -69,12 +69,26 @@ pub async fn attempt_delivery(
     };
 
     let timestamp = crate::auth::handlers::unix_timestamp();
+    let signature_v1 = match sign_body(
+        &webhook.signing_key,
+        &wavvon_identity::webhook_delivery_signing_bytes(timestamp as u64, body_json.as_bytes()),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return DeliveryResult {
+                success: false,
+                status_code: None,
+                error_msg: Some(e),
+            }
+        }
+    };
 
     let resp = http_client
         .post(&webhook.url)
         .header("Content-Type", "application/json")
         .header("X-Wavvon-Hub-Pubkey", hub_pubkey_hex)
         .header("X-Wavvon-Signature", &signature)
+        .header("X-Wavvon-Signature-V1", &signature_v1)
         .header("X-Wavvon-Timestamp", timestamp.to_string())
         .header("X-Wavvon-Webhook-Id", &webhook.id)
         .body(body_json)
@@ -205,5 +219,29 @@ pub async fn apply_outcome(db: &PgPool, webhook_id: &str, success: bool) -> bool
         true
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The receiver's whole computation, pinned: secret -> HKDF key -> HMAC
+    /// over the timestamp-carrying bytes. Third-party verifiers implement it.
+    #[test]
+    fn signature_v1_vector() {
+        let key = super::super::routes::derive_signing_key(&[7u8; 32]);
+        assert_eq!(
+            key,
+            "351763f9898ddacf3bb67a23c046e219c03c85e5097a965a35f940bc8ae93c87"
+        );
+        let bytes = wavvon_identity::webhook_delivery_signing_bytes(
+            1_700_000_000,
+            br#"{"type":"hub_event"}"#,
+        );
+        assert_eq!(
+            sign_body(&key, &bytes).unwrap(),
+            "42abcf09c2fbd629a8ba1bff16e7f315b27ad167fb36a2f68e648716ee3079d3"
+        );
     }
 }

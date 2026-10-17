@@ -438,6 +438,17 @@ pub fn verify_auth_challenge(
     .or_else(|_| verify_signature(public_key_hex, challenge, signature))
 }
 
+/// What a hub signs when it POSTs to a program's webhook — a slash or
+/// component dispatch (Ed25519, hub key) or an outgoing-webhook delivery
+/// (HMAC-SHA256, per-webhook key). Unlike the body-only signature sent beside
+/// it, this covers the timestamp, so a receiver can refuse a replay.
+pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
+    let mut buf = b"wavvon/webhook-delivery/v1 ".to_vec();
+    write_u64_le(&mut buf, timestamp);
+    buf.extend_from_slice(body);
+    buf
+}
+
 /// Canonical signing bytes for a plaintext federated DM.
 ///
 /// Covers the fields the client knows at send time:
