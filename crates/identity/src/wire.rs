@@ -449,6 +449,15 @@ pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// What an origin hub signs over an alliance voice grant's payload JSON, so
+/// the grant cannot pass for anything else its key signs, nor anything else
+/// for a grant.
+pub fn voice_grant_signing_bytes(payload_json: &[u8]) -> Vec<u8> {
+    let mut buf = b"wavvon/alliance-voice-grant/v1\0".to_vec();
+    buf.extend_from_slice(payload_json);
+    buf
+}
+
 /// Canonical signing bytes for a plaintext federated DM.
 ///
 /// Covers the fields the client knows at send time:

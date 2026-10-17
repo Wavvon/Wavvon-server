@@ -17,10 +17,10 @@ use wavvon_identity::{
     auth_challenge_signing_bytes, dm_envelope_signing_bytes, dm_member_change_signing_bytes,
     federated_plaintext_dm_signing_bytes, group_dm_envelope_signing_bytes,
     recovery_attestation_signing_bytes, recovery_request_signing_bytes,
-    sender_key_dist_signing_bytes, unwrap_blob_key, voice_key_unwrap, voice_key_wrap_with_nonce,
-    voice_packet_open, voice_packet_seal, webhook_delivery_signing_bytes, wrap_blob_key,
-    DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer, PairingStatus,
-    RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    sender_key_dist_signing_bytes, unwrap_blob_key, voice_grant_signing_bytes, voice_key_unwrap,
+    voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal,
+    webhook_delivery_signing_bytes, wrap_blob_key, DhKeyRecord, HomeHubList, PairingClaim,
+    PairingComplete, PairingOffer, PairingStatus, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 const TS: u64 = 1_700_000_000;
@@ -953,4 +953,12 @@ fn webhook_delivery_vector() {
     let bytes = webhook_delivery_signing_bytes(1_700_000_000, br#"{"type":"slash_command"}"#);
     assert_eq!(hex::encode(&bytes), "776176766f6e2f776562686f6f6b2d64656c69766572792f76310000f15365000000007b2274797065223a22736c6173685f636f6d6d616e64227d");
     assert_eq!(hex::encode(master_key().sign(&bytes).to_bytes()), "86328471c43aa165ef1ed671d51e46eaeb8de46d6921c51f7bfe9541825b0e246c90acd6b4aa1b977e4cde24271abcd762ff1c7871436de6ab7e1bea627f3c01");
+}
+
+/// What an origin hub signs over an alliance voice grant (Wavvon-server#111).
+#[test]
+fn voice_grant_vector() {
+    let bytes = voice_grant_signing_bytes(br#"{"alliance_id":"a-1"}"#);
+    assert_eq!(hex::encode(&bytes), "776176766f6e2f616c6c69616e63652d766f6963652d6772616e742f7631007b22616c6c69616e63655f6964223a22612d31227d");
+    assert_eq!(hex::encode(master_key().sign(&bytes).to_bytes()), "b609cb64511dcf807542e6b05c959053d97852757753c486bbcaee73a0acbfe82a063e1f84851802b8200b4b2920e7c39cfe49533f002245aad0a68df5e1e904");
 }
