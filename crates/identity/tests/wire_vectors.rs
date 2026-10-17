@@ -17,9 +17,10 @@ use wavvon_identity::{
     auth_challenge_signing_bytes, dm_envelope_signing_bytes, dm_member_change_signing_bytes,
     federated_plaintext_dm_signing_bytes, group_dm_envelope_signing_bytes,
     recovery_attestation_signing_bytes, recovery_request_signing_bytes,
-    sender_key_dist_signing_bytes, unwrap_blob_key, voice_key_unwrap, voice_key_wrap_with_nonce,
-    voice_packet_open, voice_packet_seal, wrap_blob_key, DhKeyRecord, HomeHubList, PairingClaim,
-    PairingComplete, PairingOffer, PairingStatus, RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    sender_key_dist_signing_bytes, unwrap_blob_key, voice_grant_signing_bytes, voice_key_unwrap,
+    voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal, wrap_blob_key, DhKeyRecord,
+    HomeHubList, PairingClaim, PairingComplete, PairingOffer, PairingStatus, RevocationEntry,
+    SignedPrefsBlob, SubkeyCert,
 };
 
 const TS: u64 = 1_700_000_000;
@@ -943,4 +944,12 @@ fn dm_member_change_vector() {
         hex::encode(master_key().sign(&bytes).to_bytes()),
         "1a141f3f3d17e7aac9ecfb851df6d4cc4ea7d0dd46aa87658a21c4d53e2efd9290578d11f1dafcc51131325fe4e85de005e73e524bda4d2751d68b9e21b35b00"
     );
+}
+
+/// What an origin hub signs over an alliance voice grant (Wavvon-server#111).
+#[test]
+fn voice_grant_vector() {
+    let bytes = voice_grant_signing_bytes(br#"{"alliance_id":"a-1"}"#);
+    assert_eq!(hex::encode(&bytes), "776176766f6e2f616c6c69616e63652d766f6963652d6772616e742f7631007b22616c6c69616e63655f6964223a22612d31227d");
+    assert_eq!(hex::encode(master_key().sign(&bytes).to_bytes()), "b609cb64511dcf807542e6b05c959053d97852757753c486bbcaee73a0acbfe82a063e1f84851802b8200b4b2920e7c39cfe49533f002245aad0a68df5e1e904");
 }

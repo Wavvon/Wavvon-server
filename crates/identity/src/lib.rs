@@ -27,9 +27,9 @@ pub use wire::{
     dr_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
     group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
     recovery_request_signing_bytes, sender_key_dist_signing_bytes, verify_auth_challenge,
-    DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer, PairingStatus,
-    PublicHubEntry, PublicHubProfile, RevocationEntry, SignedPrefsBlob, SubkeyCert,
-    AUTH_CHALLENGE_SCHEME,
+    voice_grant_signing_bytes, DhKeyRecord, HomeHubList, PairingClaim, PairingComplete,
+    PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile, RevocationEntry,
+    SignedPrefsBlob, SubkeyCert, AUTH_CHALLENGE_SCHEME,
 };
 
 pub struct Identity {
