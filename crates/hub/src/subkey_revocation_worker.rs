@@ -42,24 +42,15 @@ pub async fn tick(state: &AppState) {
 }
 
 async fn sync_one(state: &AppState, master_pubkey: &str, home_hub_url: &str) {
-    // Load cursor
-    let last_synced: i64 = sqlx::query_scalar(
-        "SELECT last_synced_at FROM subkey_revocation_sync
-         WHERE master_pubkey = $1 AND home_hub_url = $2",
-    )
-    .bind(master_pubkey)
-    .bind(home_hub_url)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(0);
-
+    // The whole list, every time. A cursor on `revoked_at` -- a timestamp the
+    // revoking client signs -- skipped any revocation signed before the last
+    // poll and posted after it (an offline device is enough). A subkey once
+    // revoked stays revoked, the inserts are idempotent and the list is a
+    // master's revoked devices, so there is nothing to page.
     let url = format!(
-        "{}/identity/{}/revocations?since={}",
+        "{}/identity/{}/revocations",
         home_hub_url.trim_end_matches('/'),
-        master_pubkey,
-        last_synced
+        master_pubkey
     );
 
     let resp = match state
@@ -101,7 +92,6 @@ async fn sync_one(state: &AppState, master_pubkey: &str, home_hub_url: &str) {
         .as_secs() as i64;
 
     let mut applied = 0usize;
-    let mut max_revoked_at = last_synced;
 
     for entry in &entries {
         // Verify signature before trusting the data.
@@ -111,7 +101,7 @@ async fn sync_one(state: &AppState, master_pubkey: &str, home_hub_url: &str) {
             );
             continue;
         }
-        let _ = sqlx::query(
+        if let Ok(r) = sqlx::query(
             "INSERT INTO subkey_revocations
                 (master_pubkey, subkey_pubkey, revoked_at, signature, registered_at)
              VALUES ($1, $2, $3, $4, $5)
@@ -123,11 +113,9 @@ async fn sync_one(state: &AppState, master_pubkey: &str, home_hub_url: &str) {
         .bind(&entry.signature)
         .bind(now)
         .execute(&state.db)
-        .await;
-        applied += 1;
-        let ra = entry.revoked_at as i64;
-        if ra > max_revoked_at {
-            max_revoked_at = ra;
+        .await
+        {
+            applied += r.rows_affected() as usize;
         }
     }
 
@@ -137,22 +125,4 @@ async fn sync_one(state: &AppState, master_pubkey: &str, home_hub_url: &str) {
             &master_pubkey[..16.min(master_pubkey.len())]
         );
     }
-
-    let new_cursor = if entries.is_empty() {
-        now
-    } else {
-        max_revoked_at + 1
-    };
-
-    let _ = sqlx::query(
-        "INSERT INTO subkey_revocation_sync (master_pubkey, home_hub_url, last_synced_at)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (master_pubkey, home_hub_url) DO UPDATE SET
-           last_synced_at = GREATEST(subkey_revocation_sync.last_synced_at, excluded.last_synced_at)",
-    )
-    .bind(master_pubkey)
-    .bind(home_hub_url)
-    .bind(new_cursor)
-    .execute(&state.db)
-    .await;
 }

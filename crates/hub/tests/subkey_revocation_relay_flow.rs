@@ -1,7 +1,7 @@
 //! Integration tests for the subkey revocation relay worker.
 //!
 //! Each test spins up a minimal mock HTTP server that serves
-//! GET /identity/{master}/revocations?since=, deposits subkey_certs rows
+//! GET /identity/{master}/revocations, deposits subkey_certs rows
 //! pointing at it, calls subkey_revocation_worker::tick(), and verifies the
 //! outcome.
 
@@ -146,40 +146,55 @@ async fn revoked_subkey_inserted_after_tick() {
 
 /// The sync cursor is recorded and advances to at least revoked_at after a
 /// successful sync.
+/// A revocation the device signed before an earlier poll, but that reached
+/// its home hub only after it, is still applied. The worker used to page on
+/// the client-signed `revoked_at`, so such a revocation was skipped forever.
 #[tokio::test]
-async fn sync_cursor_advances() {
+async fn a_revocation_posted_after_a_poll_is_still_applied() {
     let (state, _guard) = make_state().await;
 
     let identity = Identity::generate();
-    let master_key = identity.master().unwrap();
-    let master_pubkey = master_key.public_key_hex();
+    let master_pubkey = identity.master().unwrap().public_key_hex();
     let subkey_pubkey = DeviceSubkey::generate("dev".to_string()).public_key_hex();
-    let revoked_at = unix_now() as u64 - 50;
+    let signed_long_ago = unix_now() as u64 - 86_400;
+    let late = serde_json::to_string(&vec![make_revocation(
+        &identity,
+        &subkey_pubkey,
+        signed_long_ago,
+    )])
+    .unwrap();
 
-    let entry = make_revocation(&identity, &subkey_pubkey, revoked_at);
-    let revocations_json = serde_json::to_string(&vec![entry]).unwrap();
-
-    let home_hub_url = start_mock_hub(revocations_json).await;
-
+    let body = Arc::new(std::sync::Mutex::new("[]".to_string()));
+    let served = body.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let home_hub_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let app = Router::new().route(
+        "/identity/{master}/revocations",
+        // Filters on `since` the way the real route does (revoked_at >= since).
+        get(
+            move |axum::extract::Query(q): axum::extract::Query<
+                std::collections::HashMap<String, i64>,
+            >| {
+                let since = q.get("since").copied().unwrap_or(0);
+                let b = if since > signed_long_ago as i64 {
+                    "[]".to_string()
+                } else {
+                    served.lock().unwrap().clone()
+                };
+                async move { ([("content-type", "application/json")], b) }
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     insert_subkey_cert(&state.db, &master_pubkey, &subkey_pubkey, &home_hub_url).await;
 
     subkey_revocation_worker::tick(&state).await;
+    *body.lock().unwrap() = late;
+    subkey_revocation_worker::tick(&state).await;
 
-    let cursor: Option<i64> = sqlx::query_scalar(
-        "SELECT last_synced_at FROM subkey_revocation_sync
-         WHERE master_pubkey = $1 AND home_hub_url = $2",
-    )
-    .bind(&master_pubkey)
-    .bind(&home_hub_url)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap();
-
-    assert!(cursor.is_some(), "sync cursor should be recorded");
-    assert!(
-        cursor.unwrap() >= revoked_at as i64,
-        "cursor should be at least the revoked_at value"
-    );
+    assert!(revocation_exists(&state.db, &master_pubkey, &subkey_pubkey).await);
 }
 
 /// tick() is a no-op when subkey_certs is empty (no home hubs to discover).
@@ -187,7 +202,7 @@ async fn sync_cursor_advances() {
 async fn no_op_when_no_subkey_certs() {
     let (state, _guard) = make_state().await;
     subkey_revocation_worker::tick(&state).await;
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocation_sync")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocations")
         .fetch_one(&state.db)
         .await
         .unwrap();
