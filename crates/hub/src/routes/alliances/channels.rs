@@ -424,6 +424,9 @@ pub async fn post_alliance_channel_message(
     }
 
     // Otherwise, find the peer that owns this channel and proxy.
+    // The owning hub sees neither this hub's mutes nor its rate limits, so
+    // they are applied here, before the hop.
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
     let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -602,6 +605,9 @@ pub async fn post_alliance_forum_post(
             .await;
     }
 
+    // The owning hub sees neither this hub's mutes nor its rate limits, so
+    // they are applied here, before the hop.
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
     let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -651,6 +657,9 @@ pub async fn post_alliance_forum_reply(
         .await;
     }
 
+    // The owning hub sees neither this hub's mutes nor its rate limits, so
+    // they are applied here, before the hop.
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
     let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -703,6 +712,9 @@ pub async fn react_alliance_forum(
         .await;
     }
 
+    // The owning hub sees neither this hub's mutes nor its rate limits, so
+    // they are applied here, before the hop.
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
     let Some((member, token)) = owning_member(&state, &alliance_id, &channel_id).await? else {
         return Err((
             StatusCode::NOT_FOUND,
