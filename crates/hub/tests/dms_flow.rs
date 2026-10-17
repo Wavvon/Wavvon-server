@@ -1892,3 +1892,101 @@ async fn federated_dm_block_check_ignores_an_empty_member_list() {
             .unwrap();
     assert_eq!(stored, 1, "a blocked sender's DM must not be stored");
 }
+
+/// A paired device holds its subkey, never the canonical key a conversation
+/// knows it by, so its plaintext DM is signed by the subkey and carries the
+/// cert chaining it to the sender — as encrypted envelopes already do
+/// (Wavvon-clients#126). A cert from some other master does not.
+#[tokio::test]
+async fn federated_plaintext_dm_accepts_a_cert_chained_signature() {
+    let (hub, state, _guard) = start_real_hub("hub-paired-plain").await;
+    let client = reqwest::Client::new();
+    let alice = Identity::generate();
+    authenticate_http(&hub, &alice).await;
+
+    let peer = Identity::generate();
+    let challenge: ChallengeResponse = client
+        .post(format!("{hub}/auth/challenge"))
+        .json(&serde_json::json!({ "public_key": peer.public_key_hex() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let peer_token = client
+        .post(format!("{hub}/auth/verify"))
+        .json(&serde_json::json!({
+            "public_key": peer.public_key_hex(),
+            "challenge": challenge.challenge,
+            "signature": hex::encode(peer.sign(&hex::decode(&challenge.challenge).unwrap()).to_bytes()),
+            "is_hub": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<VerifyResponse>()
+        .await
+        .unwrap()
+        .token;
+
+    // The sender's canonical key and its master, as this hub already knows them.
+    let master = Identity::generate();
+    let canonical = Identity::generate().public_key_hex();
+    sqlx::query("INSERT INTO users (public_key, first_seen_at, last_seen_at, master_pubkey) VALUES ($1, 0, 0, $2)")
+        .bind(&canonical)
+        .bind(master.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let device = Identity::generate();
+    let conv = "eeee0000111122223333444455556666";
+
+    let deliver = |id: &'static str, cert: serde_json::Value| {
+        let client = client.clone();
+        let hub = hub.clone();
+        let token = peer_token.clone();
+        let canonical = canonical.clone();
+        let members = vec![alice.public_key_hex(), canonical.clone()];
+        let sig = hex::encode(
+            device
+                .sign(&wavvon_identity::federated_plaintext_dm_signing_bytes(
+                    conv, "dm", id,
+                ))
+                .to_bytes(),
+        );
+        async move {
+            client
+                .post(format!("{hub}/federation/dm"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({
+                    "message_id": id, "conversation_id": conv, "conv_type": "dm",
+                    "sender": canonical, "members": members, "content": id,
+                    "attachments": [], "signature": sig, "signer_cert": cert,
+                    "created_at": 1_700_000_000i64,
+                }))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    let ok = deliver(
+        "aaaa0000111122223333444455556661",
+        self_cert(&master, &device.public_key_hex(), &hub),
+    )
+    .await;
+    assert!(
+        ok.is_success(),
+        "a cert-chained plaintext DM must be accepted: {ok}"
+    );
+
+    let stranger = Identity::generate();
+    let refused = deliver(
+        "aaaa0000111122223333444455556662",
+        self_cert(&stranger, &device.public_key_hex(), &hub),
+    )
+    .await;
+    assert_eq!(refused, reqwest::StatusCode::UNAUTHORIZED);
+}

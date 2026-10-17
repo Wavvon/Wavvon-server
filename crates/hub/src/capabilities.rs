@@ -55,6 +55,10 @@ pub const CAPABILITIES: &[&str] = &[
     // destinations it may offer, so its move picker keeps listing them all and
     // the refusal arrives when the move is issued.
     "channels.move.targets",
+    // A plaintext DM may carry `plaintext_signer_cert`, so a paired device can
+    // sign it with its subkey. Gated because an older hub verifies the
+    // signature against the canonical key alone and refuses the send.
+    "dms.plaintext.signercert",
     // `DELETE /me` — a member can remove themselves from the hub: profile and
     // roles cleared, the pubkey kept as the anchor moderation and message
     // history point at. Gated because a client must not offer "leave this
