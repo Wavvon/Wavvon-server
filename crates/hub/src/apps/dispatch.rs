@@ -405,12 +405,15 @@ pub async fn dispatch_component(
     };
 
     // The app has to be able to read the channel its own component was
-    // clicked in, same as anyone else.
-    let allowed =
-        crate::permissions::channel_permissions(&state.db, &msg_info.sender, &msg_info.channel_id)
+    // clicked in, same as anyone else -- and so does the person clicking,
+    // who otherwise could drive an app from a channel hidden from them.
+    let mut allowed = true;
+    for pubkey in [msg_info.sender.as_str(), user_pubkey] {
+        allowed &= crate::permissions::channel_permissions(&state.db, pubkey, &msg_info.channel_id)
             .await
             .map(|perms| perms.has(crate::permissions::MESSAGES_READ))
             .unwrap_or(false);
+    }
 
     if !allowed {
         return;

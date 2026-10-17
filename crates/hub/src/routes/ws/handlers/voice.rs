@@ -611,6 +611,18 @@ pub(in crate::routes::ws) async fn handle_voice_speaking(
         } => (channel_id, speaking),
         _ => return DispatchResult::Continue,
     };
+    // Only a participant of that room speaks in it; the client names the
+    // channel, and a non-participant could otherwise light up a speaking
+    // indicator in any room.
+    let in_room = state
+        .voice_channels
+        .read()
+        .await
+        .get(&channel_id)
+        .is_some_and(|room| room.contains_key(&cs.public_key));
+    if !in_room {
+        return DispatchResult::Continue;
+    }
     // Any speaking transition (start or stop) is activity for the AFK
     // sweep. Stamped before the invisibility gate below — invisible
     // participants talk too.

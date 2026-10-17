@@ -867,7 +867,19 @@ async fn dispatch_client_msg(
         // ── Voice core ─────────────────────────────────────────────────────
         WsClientMessage::VoiceJoin { .. } => voice::handle_voice_join(cs, state, ws_tx, msg).await,
         WsClientMessage::VoiceWatch { channel_id } => {
-            cs.voice_channel = Some(channel_id);
+            // Watching subscribes to the room's speaking events, so it needs
+            // the same visibility the channel list grants: read or join.
+            let visible =
+                crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id)
+                    .await
+                    .map(|p| {
+                        p.has(crate::permissions::VOICE_JOIN)
+                            || p.has(crate::permissions::MESSAGES_READ)
+                    })
+                    .unwrap_or(false);
+            if visible {
+                cs.voice_channel = Some(channel_id);
+            }
             DispatchResult::Continue
         }
         // The client still times the round trip itself — the hub keeps no
