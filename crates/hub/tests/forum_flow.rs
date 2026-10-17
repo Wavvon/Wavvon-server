@@ -1182,16 +1182,20 @@ async fn alliance_forum_posts_and_replies_allows_posts() {
 #[tokio::test]
 async fn alliance_forum_proxied_write_rate_limited() {
     let s = setup_forum_alliance(Some("posts_and_replies")).await;
+    // Two writers: the limiter under test is per origin hub, and one member
+    // alone would meet their own per-user limit on hub A first.
+    let second = authenticate_user(&s.hub_a_url, &Identity::generate()).await;
+    let writers = [s.token_a.clone(), second];
 
     let mut last_status = 0u16;
-    for _ in 0..31 {
+    for i in 0..31 {
         let resp = s
             .client
             .post(format!(
                 "{}/alliances/{}/channels/{}/posts/no-such-post/replies",
                 s.hub_a_url, s.alliance_id, s.channel_id
             ))
-            .bearer_auth(&s.token_a)
+            .bearer_auth(&writers[i % 2])
             .json(&json!({ "body": "flood" }))
             .send()
             .await
@@ -1499,6 +1503,38 @@ async fn a_peer_cannot_react_as_a_member_of_the_owning_hub() {
             &local_member,
             "👍",
         )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+/// The owning hub cannot see this hub's mutes, so a muted member writing
+/// through the alliance proxy used to get through. The hop starts with the
+/// same checks a local message has.
+#[tokio::test]
+async fn a_muted_member_cannot_write_through_the_alliance_proxy() {
+    let s = setup_forum_alliance(None).await; // replies_only
+    let member = Identity::generate();
+    let member_token = authenticate_user(&s.hub_a_url, &member).await;
+    let mute = s
+        .client
+        .post(format!("{}/moderation/mutes", s.hub_a_url))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "target_public_key": member.public_key_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mute.status(), 201, "{}", mute.text().await.unwrap());
+
+    let resp = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&member_token)
+        .json(&json!({ "body": "should not land" }))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
