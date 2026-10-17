@@ -292,8 +292,8 @@ async fn cert_mode_any_accepts_valid_cert() {
     // Insert minimal user row so issue_cert_for can find them.
     let now = wavvon_hub::auth::handlers::unix_timestamp();
     sqlx::query(
-        "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status)
-         VALUES ($1, $2, $3, 'approved')",
+        "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_member)
+         VALUES ($1, $2, $3, 'approved', TRUE)",
     )
     .bind(&newcomer_pk)
     .bind(now - 86400)

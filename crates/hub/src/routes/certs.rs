@@ -470,8 +470,8 @@ pub async fn issue_cert_for(
     let now = unix_timestamp();
 
     // Load user row
-    let user_row: Option<(i64, i64, String, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT first_seen_at, last_seen_at, approval_status, pow_level, COALESCE(pow_level,0)
+    let user_row: Option<(i64, i64, String, Option<i64>, i64, bool)> = sqlx::query_as(
+        "SELECT first_seen_at, last_seen_at, approval_status, pow_level, COALESCE(pow_level,0), is_member
          FROM users WHERE public_key = $1",
     )
     .bind(subject_pubkey)
@@ -479,7 +479,7 @@ pub async fn issue_cert_for(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (first_seen_at, _last_seen_at, approval_status, _pow_col, pow_level_i64) =
+    let (first_seen_at, _last_seen_at, approval_status, _pow_col, pow_level_i64, is_member) =
         user_row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
     let pow_level = if pow_level_i64 > 0 {
         Some(pow_level_i64 as u8)
@@ -489,6 +489,11 @@ pub async fn issue_cert_for(
 
     if approval_status != "approved" {
         return Err((StatusCode::FORBIDDEN, "User is not approved".to_string()));
+    }
+    // Kick, ban and recovery clear membership but leave 'approved'; good
+    // standing is vouched only for someone who is still here.
+    if !is_member {
+        return Err((StatusCode::FORBIDDEN, "User is not a member".to_string()));
     }
 
     // Check not banned

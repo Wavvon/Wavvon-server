@@ -71,6 +71,7 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
         "SELECT u.public_key
          FROM users u
          WHERE u.approval_status = 'approved'
+           AND u.is_member
            AND u.first_seen_at <= $1
            AND COALESCE(u.pow_level, 0) >= $2
            AND NOT EXISTS (
