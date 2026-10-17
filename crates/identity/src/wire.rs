@@ -443,7 +443,7 @@ pub fn verify_auth_challenge(
 /// (HMAC-SHA256, per-webhook key). Unlike the body-only signature sent beside
 /// it, this covers the timestamp, so a receiver can refuse a replay.
 pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
-    let mut buf = b"wavvon/webhook-delivery/v1 ".to_vec();
+    let mut buf = b"wavvon/webhook-delivery/v1\0".to_vec();
     write_u64_le(&mut buf, timestamp);
     buf.extend_from_slice(body);
     buf
