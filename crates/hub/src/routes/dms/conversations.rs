@@ -65,6 +65,13 @@ pub async fn create_conversation(
     for member_key in &req.members {
         let hub_url = req.member_hubs.get(member_key).cloned();
         ensure_user_stub(&state.db, member_key, now).await?;
+        // A stranger discovered through an alliance has no master here. Prove
+        // the claimed one (which caches it) so the send path can look up where
+        // their DMs land.
+        if let (Some(master), Some(url)) = (req.member_masters.get(member_key), &hub_url) {
+            let _ = super::messages::resolve_master_binding(&state, member_key, master, Some(url))
+                .await;
+        }
         sqlx::query("INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url) VALUES ($1, $2, $3, $4)")
             .bind(&id)
             .bind(member_key)

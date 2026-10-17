@@ -370,6 +370,13 @@ pub async fn send_dm(
                 None
             };
 
+            // A remote member's designation is not stored here; their own hub
+            // is the authority, so ask it (alliance-member-discovery.md §5).
+            let designation_urls = match (designation_urls, &master_pubkey, &m.hub_url) {
+                (None, Some(mpk), Some(url)) => fetch_remote_designation(&state, url, mpk).await,
+                (local, _, _) => local,
+            };
+
             // Step 3: use the designation list, or fall back to the stored hub_url.
             match designation_urls {
                 Some(urls) if !urls.is_empty() => urls,
@@ -891,6 +898,24 @@ async fn master_of(state: &AppState, member: &str) -> Option<String> {
         .flatten()
 }
 
+/// The hubs a master designated, fetched from `hub_url` and verified against
+/// the master's own signature. Best effort: any failure means "fall back to the
+/// stored hub_url", exactly as before this existed.
+async fn fetch_remote_designation(
+    state: &AppState,
+    hub_url: &str,
+    master: &str,
+) -> Option<Vec<String>> {
+    let list = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.federation_client.get_designation(hub_url, master),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    (list.master_pubkey == master && list.verify().is_ok()).then_some(list.hubs)
+}
+
 async fn queue_home_hub_mirrors(state: &AppState, req: &FederatedDmRequest, now: i64) {
     let own_url = state
         .canonical_url
@@ -966,7 +991,7 @@ async fn queue_home_hub_mirrors(state: &AppState, req: &FederatedDmRequest, now:
 /// (`subkey_pubkey == canonical`, signed by `master`), caching the result
 /// on success so future messages from the same sender skip the network
 /// round-trip.
-async fn resolve_master_binding(
+pub(super) async fn resolve_master_binding(
     state: &AppState,
     canonical: &str,
     master: &str,

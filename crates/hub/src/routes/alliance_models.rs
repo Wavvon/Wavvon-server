@@ -20,6 +20,9 @@ pub struct AllianceDetailResponse {
     pub created_by: String,
     pub created_at: i64,
     pub members: Vec<AllianceMemberInfo>,
+    /// Whether this hub lists its opted-in members to the alliance's partners.
+    #[serde(default)]
+    pub people_visible: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -193,4 +196,14 @@ pub struct PendingAllianceInviteRow {
     pub invite_token: String,
     pub created_at: i64,
     pub message: Option<String>,
+}
+
+/// One person an allied hub lists: what a DM needs and nothing else
+/// (alliance-member-discovery.md §3).
+#[derive(Serialize, Deserialize, Debug, sqlx::FromRow)]
+pub struct AlliancePerson {
+    pub public_key: String,
+    pub master_pubkey: String,
+    pub display_name: Option<String>,
+    pub avatar: Option<String>,
 }

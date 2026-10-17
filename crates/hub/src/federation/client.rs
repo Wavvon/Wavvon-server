@@ -425,6 +425,54 @@ impl FederationClient {
             .context("Invalid alliance channels response")
     }
 
+    /// `Ok(None)` is the owning hub's 404: it does not serve the route, or does
+    /// not share its members with this alliance -- the caller reports both the
+    /// same way.
+    pub async fn get_alliance_people(
+        &self,
+        base_url: &str,
+        token: &str,
+        alliance_id: &str,
+        hub: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Option<Vec<crate::routes::alliance_models::AlliancePerson>>> {
+        let resp = self
+            .http
+            .get(format!("{base_url}/alliances/{alliance_id}/people"))
+            .query(&[("hub", hub)])
+            .query(query)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("Failed to fetch alliance people from peer")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        resp.error_for_status()
+            .context("Peer refused the alliance people request")?
+            .json()
+            .await
+            .map(Some)
+            .context("Invalid alliance people response")
+    }
+
+    pub async fn get_designation(
+        &self,
+        base_url: &str,
+        master: &str,
+    ) -> Result<wavvon_identity::HomeHubList> {
+        self.http
+            .get(format!("{base_url}/identity/{master}/designation"))
+            .send()
+            .await
+            .context("Failed to fetch designation")?
+            .error_for_status()
+            .context("No designation there")?
+            .json()
+            .await
+            .context("Invalid designation response")
+    }
+
     pub async fn post_federated_dm(
         &self,
         base_url: &str,

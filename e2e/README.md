@@ -44,6 +44,7 @@ POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17
 | `permissions` | The permission model end to end: validation, the escalation ceiling on all four grant paths, the read/voice split, and the catalogue the hub serves. |
 | `pgupgrade` | The major upgrade walked the way the hub's own refusal tells an operator to walk it. |
 | `alliancesplit` | Three hubs: a partner in one alliance must not see the other. |
+| `alliancepeople` | Three hubs: browsing an ally's people through your own hub shows only members who opted in, needs both switches, and is refused to a hub outside the alliance. |
 | `alliancedelegate` | Who may act on *one* alliance: the per-alliance grant list, the channel permission sharing also needs, and the widening a delegate must not manage. |
 | `alliancestress`, `alliancechurn`, `alliancedrift` | Alliances under load, membership churn, and state drift between hubs. |
 | `farm`, `crossfarm` | A farm hosting its own hubs, and an alliance across two farms. |

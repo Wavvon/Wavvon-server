@@ -15,7 +15,7 @@
 //
 // Usage:  node e2e/run.mjs [stage...]
 //         stages: hubs alliance voice certs permissions pgupgrade challenge alliancesplit
-//                 alliancedelegate alliancestress alliancechurn alliancedrift farm crossfarm
+//                 alliancedelegate alliancepeople alliancestress alliancechurn alliancedrift farm crossfarm
 //                 (default: all)
 //         E2E_VERBOSE=1 to stream every process's output.
 
@@ -28,7 +28,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFi
 import { join } from "node:path";
 
 const want = new Set(process.argv.slice(2).length ? process.argv.slice(2)
-  : ["hubs","alliance","voice","certs","permissions","pgupgrade","challenge","alliancesplit","alliancestress","alliancechurn","alliancedrift","farm","crossfarm"]);
+  : ["hubs","alliance","voice","certs","permissions","pgupgrade","challenge","alliancesplit","alliancepeople","alliancestress","alliancechurn","alliancedrift","farm","crossfarm"]);
 
 if (!existsSync(hubBinary())) {
   console.error(`No hub binary at ${hubBinary()}\n  cargo build -p wavvon-hub`);
@@ -2489,6 +2489,166 @@ try {
         shared.body.some((c) => c.channel_id === channel.body.id),
         `hub B must see A's channel across the farm boundary, got ${JSON.stringify(shared.body)}`,
       );
+    });
+  }
+  // ── alliancepeople ──────────────────────────────────────────────────────
+  //
+  // Member discovery (alliance-member-discovery.md): hub 1 owns the people,
+  // hubs 2 and 3 are its allies, and a member of an ally browses them through
+  // *their own* hub. Three real binaries because the path under test is
+  // member -> own hub -> peer session -> owning hub, and the owning hub's
+  // answer is only as private as its two switches make it.
+  if (want.has("alliancepeople")) {
+    const owner1 = identity();
+    const owner2 = identity();
+    const owner3 = identity();
+    // Seating several people per hub spends the per-IP auth budget in seconds.
+    process.env.WAVVON_AUTH_RATE_BURST = "200";
+    const hub1 = await hub("hub-people-1", owner1);
+    const hub2 = await hub("hub-people-2", owner2);
+    const hub3 = await hub("hub-people-3", owner3);
+    delete process.env.WAVVON_AUTH_RATE_BURST;
+    const token1 = (await authenticate(hub1.url, owner1)).body.token;
+    const token2 = (await authenticate(hub2.url, owner2)).body.token;
+    const token3 = (await authenticate(hub3.url, owner3)).body.token;
+    const auth = (t) => ({ Authorization: `Bearer ${t}` });
+
+    const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n); return b; };
+    const u64 = (n) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(BigInt(n)); return b; };
+    const str = (s) => Buffer.concat([u32(Buffer.byteLength(s)), Buffer.from(s)]);
+
+    // A member of `h`, optionally findable, optionally reachable (a master with
+    // a designation on this hub). Everything through routes.
+    const person = async (h, ownerToken, name, { findable, designated }) => {
+      const inv = await json(`${h.url}/invites`, {
+        method: "POST", headers: auth(ownerToken), body: JSON.stringify({}),
+      });
+      check(inv.status === 200 || inv.status === 201, `invite on ${h.name}: ${JSON.stringify(inv.body)}`);
+      const id = identity();
+      const joined = await authenticate(h.url, id, { invite_code: inv.body.code });
+      checkEq(joined.status, 200, `${name} joins ${h.name}: ${JSON.stringify(joined.body)}`);
+      let token = joined.body.token;
+      const patch = await json(`${h.url}/me`, {
+        method: "PATCH", headers: auth(token),
+        body: JSON.stringify({ display_name: name, findable_by_allies: findable }),
+      });
+      checkEq(patch.status, 200, `${name} profile: ${JSON.stringify(patch.body)}`);
+      let master = null;
+      if (designated) {
+        master = identity();
+        const issuedAt = Math.floor(Date.now() / 1000);
+        const certBytes = Buffer.concat([
+          Buffer.from("wavvon/subkey-cert/v1\0"), str(master.pubkey), str(id.pubkey),
+          str("e2e"), u64(issuedAt), Buffer.from([0]), u32(0),
+        ]);
+        const cert = {
+          master_pubkey: master.pubkey, subkey_pubkey: id.pubkey, device_label: "e2e",
+          issued_at: issuedAt, not_after: null, fallback_hubs: [],
+          signature: master.sign(certBytes),
+        };
+        // Re-authenticating with the cert is what records the master here.
+        const again = await authenticate(h.url, id, { subkey_cert: cert });
+        checkEq(again.status, 200, `${name} presents a cert: ${JSON.stringify(again.body)}`);
+        token = again.body.token;
+        const listBytes = Buffer.concat([
+          Buffer.from("wavvon/home-hub-list/v1\0"), str(master.pubkey),
+          u32(1), str(h.url), u64(issuedAt), u64(1),
+        ]);
+        const put = await json(`${h.url}/identity/${master.pubkey}/designation`, {
+          method: "POST",
+          body: JSON.stringify({
+            master_pubkey: master.pubkey, hubs: [h.url], issued_at: issuedAt,
+            sequence: 1, signature: master.sign(listBytes),
+          }),
+        });
+        checkEq(put.status, 200, `${name} designates ${h.name}: ${JSON.stringify(put.body)}`);
+      }
+      return { id, token, master };
+    };
+
+    const world = {};
+    const people = (viaUrl, viaToken, targetKey, qs = "") =>
+      json(`${viaUrl}/alliances/${world.alliance}/people?hub=${targetKey}${qs}`, {
+        headers: auth(viaToken),
+      });
+
+    await scenario("three hubs in one alliance, with people on hub 1", async () => {
+      const al = await json(`${hub1.url}/alliances`, {
+        method: "POST", headers: auth(token1), body: JSON.stringify({ name: "Crafts" }),
+      });
+      checkEq(al.status, 201, `create alliance: ${JSON.stringify(al.body)}`);
+      world.alliance = al.body.id;
+      for (const [h, t] of [[hub2, token2], [hub3, token3]]) {
+        const inv = await json(`${hub1.url}/alliances/${world.alliance}/invite`, {
+          method: "POST", headers: auth(token1),
+        });
+        checkEq(inv.status, 200, `alliance invite: ${JSON.stringify(inv.body)}`);
+        const joined = await json(`${h.url}/alliances/join`, {
+          method: "POST", headers: auth(t),
+          body: JSON.stringify({
+            inviter_hub_url: hub1.url, alliance_id: world.alliance,
+            invite_token: inv.body.token, own_hub_url: h.url,
+          }),
+        });
+        checkEq(joined.status, 200, `${h.name} joins: ${JSON.stringify(joined.body)}`);
+      }
+      world.key1 = (await json(`${hub1.url}/info`)).body.public_key;
+      world.key2 = (await json(`${hub2.url}/info`)).body.public_key;
+
+      world.alice = await person(hub1, token1, "Alice", { findable: true, designated: true });
+      await person(hub1, token1, "Bob", { findable: false, designated: true });
+      await person(hub1, token1, "Carol", { findable: true, designated: false });
+      world.dana = await person(hub2, token2, "Dana", { findable: true, designated: true });
+      world.erin = await person(hub3, token3, "Erin", { findable: false, designated: false });
+    });
+
+    await scenario("hub 1 lists nobody until its alliance switch is on", async () => {
+      const r = await people(hub2.url, world.dana.token, world.key1);
+      checkEq(r.status, 409, `an ally with the switch off must be told the hub does not share: ${JSON.stringify(r.body)}`);
+      const off = await json(`${hub1.url}/alliances/${world.alliance}`, { headers: auth(token1) });
+      checkEq(off.body.people_visible, false, "the switch defaults to off");
+      const on = await json(`${hub1.url}/alliances/${world.alliance}/people-visibility`, {
+        method: "PUT", headers: auth(token1), body: JSON.stringify({ visible: true }),
+      });
+      checkEq(on.status, 204, `switch on: ${JSON.stringify(on.body)}`);
+    });
+
+    await scenario("a member of an ally sees exactly the opted-in, reachable people", async () => {
+      for (const [viaHub, viewer] of [[hub2, world.dana], [hub3, world.erin]]) {
+        const r = await people(viaHub.url, viewer.token, world.key1);
+        checkEq(r.status, 200, `browse via ${viaHub.name}: ${JSON.stringify(r.body)}`);
+        checkEq(r.body.length, 1, `only Alice may appear (not Bob, not Carol): ${JSON.stringify(r.body)}`);
+        checkEq(r.body[0].public_key, world.alice.id.pubkey, "Alice's roster key");
+        checkEq(r.body[0].master_pubkey, world.alice.master.pubkey, "Alice's master, for DM routing");
+        checkEq(r.body[0].display_name, "Alice", "name");
+        checkEq(Object.keys(r.body[0]).sort().join(), "avatar,display_name,master_pubkey,public_key", "nothing else leaves hub 1");
+      }
+      const search = await people(hub2.url, world.dana.token, world.key1, "&q=bob");
+      checkEq(search.body.length, 0, `search must not surface a member who did not opt in: ${JSON.stringify(search.body)}`);
+    });
+
+    await scenario("opting out hides a member on the next request", async () => {
+      const off = await json(`${hub1.url}/me`, {
+        method: "PATCH", headers: auth(world.alice.token),
+        body: JSON.stringify({ findable_by_allies: false }),
+      });
+      checkEq(off.status, 200, `Alice opts out: ${JSON.stringify(off.body)}`);
+      const r = await people(hub2.url, world.dana.token, world.key1);
+      checkEq(r.body.length, 0, `nobody left to list: ${JSON.stringify(r.body)}`);
+    });
+
+    await scenario("a hub that is not in the alliance is refused, and so is a hub that shares nothing", async () => {
+      const stranger = identity();
+      const s = await authenticate(hub1.url, stranger, { is_hub: true });
+      checkEq(s.status, 200, "a stranger hub can authenticate");
+      const r = await json(`${hub1.url}/alliances/${world.alliance}/people`, { headers: auth(s.body.token) });
+      checkEq(r.status, 404, `a stranger must not learn this exists: ${JSON.stringify(r.body)}`);
+
+      // Hub 2 never switched its own people on, so a member of hub 3 asking
+      // for hub 2's people is told it does not share them, not given an empty
+      // list that reads as "nobody is there".
+      const other = await people(hub3.url, world.erin.token, world.key2);
+      checkEq(other.status, 409, `hub 2 shares nothing: ${JSON.stringify(other.body)}`);
     });
   }
 } catch (e) {
