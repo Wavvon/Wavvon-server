@@ -26,6 +26,12 @@
 /// Seeded with the cases where a newer client would otherwise call an
 /// endpoint an older hub does not have, or silently get a worse answer.
 pub const CAPABILITIES: &[&str] = &[
+    // `GET /alliances/{id}/people` lists the members of one allied hub who
+    // opted in (`PATCH /me` `findable_by_allies`) under an alliance whose
+    // manager allowed it (`PUT /alliances/{id}/people-visibility`). Gated so a
+    // client does not offer a People tab, or the member switch, on a hub that
+    // would answer 404, which reads as "nobody is there".
+    "alliance.people",
     // Alliance management is delegable: `alliances.manage` carries the
     // hub-scoped acts, and `alliance_managers` — a per-alliance grant list over
     // local roles — carries the ones that belong to one relationship (inviting

@@ -159,6 +159,7 @@ fn peer_path_allowed(method: &axum::http::Method, path: &str) -> bool {
         (&Method::GET, ["alliances", id]) => *id != "pending-invites",
         (&Method::POST, ["alliances", _, "join"]) => true,
         (&Method::GET, ["alliances", _, "channels"]) => true,
+        (&Method::GET, ["alliances", _, "people"]) => true,
         (&Method::GET | &Method::POST, ["alliances", _, "channels", _, "messages"]) => true,
         (&Method::GET, ["alliances", _, "channels", _, "posts"]) => true,
         (&Method::GET, ["alliances", _, "channels", _, "posts", _]) => true,

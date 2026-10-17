@@ -195,6 +195,10 @@ pub struct RateLimiters {
     /// shape (fixed window, same eviction policy) at a cadence sized for
     /// chat-like content rather than the much rarer badge handshake.
     pub forum_federated_write: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-caller limiter for `GET /alliances/{id}/people` (60 requests/60 s).
+    /// Keyed by the asking member on the hub that proxies, and by the asking hub
+    /// on the hub that answers -- the same route, one key space.
+    pub alliance_people: Mutex<HashMap<String, (u32, Instant)>>,
     /// Slash-command cooldowns: (app pubkey, command, invoker) -> when the
     /// invoker last ran it. Per user, so one person's use never blocks another.
     pub app_cooldowns: Mutex<HashMap<(String, String, String), Instant>>,
@@ -245,6 +249,7 @@ impl Default for RateLimiters {
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
             forum_federated_write: Mutex::new(HashMap::new()),
+            alliance_people: Mutex::new(HashMap::new()),
             app_cooldowns: Mutex::new(HashMap::new()),
         }
     }

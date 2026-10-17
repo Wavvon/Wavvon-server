@@ -1865,6 +1865,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // Alliance member discovery (alliance-member-discovery.md §2): two consent
+    // switches, both off. The alliance one is the manager's, the member one is
+    // the person's; a member is listed to allies only when both are on.
+    let _ = sqlx::query(
+        "ALTER TABLE alliances ADD COLUMN people_visible BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE users ADD COLUMN findable_by_allies BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+
     let _ = sqlx::query("ALTER TABLE invites ADD COLUMN grant_role_id TEXT REFERENCES roles(id)")
         .execute(pool)
         .await;

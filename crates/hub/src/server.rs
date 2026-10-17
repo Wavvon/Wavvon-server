@@ -615,6 +615,14 @@ pub fn create_router_full(
             get(routes::alliances::list_shared_channels).post(routes::alliances::share_channel),
         )
         .route(
+            "/alliances/{alliance_id}/people",
+            get(routes::alliances::get_alliance_people),
+        )
+        .route(
+            "/alliances/{alliance_id}/people-visibility",
+            axum::routing::put(routes::alliances::set_people_visibility),
+        )
+        .route(
             "/alliances/{alliance_id}/voice-grant",
             post(routes::alliances::mint_voice_grant),
         )
