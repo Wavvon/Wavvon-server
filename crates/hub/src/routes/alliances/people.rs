@@ -14,7 +14,6 @@ use crate::routes::alliance_models::AlliancePerson;
 use crate::routes::paging::{DEFAULT_LIMIT, MAX_LIMIT};
 use crate::state::AppState;
 
-use super::channels::peer_token;
 use super::managers::require_alliance_manager;
 use super::models::{caller_is_peer, require_alliance_visibility, MemberRow};
 
@@ -127,7 +126,7 @@ pub async fn get_alliance_people(
         "Hub not in this alliance".to_string(),
     ))?;
 
-    let token = peer_token(&state, &member)
+    let token = crate::federation::peer_token(&state, &member.hub_url)
         .await
         .ok_or((StatusCode::BAD_GATEWAY, "peer_unreachable".to_string()))?;
 
@@ -151,6 +150,8 @@ pub async fn get_alliance_people(
         Ok(None) => Err((StatusCode::CONFLICT, "peer_unsupported".to_string())),
         Err(e) => {
             tracing::warn!("alliance people from {} failed: {e}", member.hub_url);
+            // The session there may have ended; the next request starts a new one.
+            crate::federation::forget_peer_token(&state, &member.hub_url).await;
             Err((StatusCode::BAD_GATEWAY, "peer_unreachable".to_string()))
         }
     }
