@@ -2096,3 +2096,77 @@ async fn a_peer_session_that_ended_is_replaced_not_reused() {
         .unwrap();
     assert_eq!(read().await, 200, "the stale token must be replaced");
 }
+
+/// A voice grant is signed over its own domain tag (Wavvon-server#111). An
+/// untagged grant from a hub that predates the tag still admits; one signed
+/// under some other tag the origin's key uses does not.
+#[tokio::test]
+async fn a_voice_grant_is_domain_tagged() {
+    let (hub_a_url, _hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let user_b = Identity::generate();
+    let (alliance_id, channel_id, token_b, _pk) =
+        alliance_with_shared_voice_channel(&hub_a_url, &hub_b_url, &user_a, &user_b).await;
+    let mint = || async {
+        client
+            .post(format!("{hub_b_url}/alliances/{alliance_id}/voice-grant"))
+            .bearer_auth(&token_b)
+            .json(&json!({ "channel_id": channel_id }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    let payload_json = |grant: &serde_json::Value| {
+        let g: wavvon_hub::routes::alliances::AllianceVoiceGrant =
+            serde_json::from_value(grant.clone()).unwrap();
+        serde_json::to_string(&g.payload).unwrap()
+    };
+
+    // As minted: tagged, and it signs the tagged bytes.
+    let minted = mint().await;
+    let tagged =
+        wavvon_identity::voice_grant_signing_bytes(payload_json(&minted["grant"]).as_bytes());
+    wavvon_identity::verify_signature(
+        &hub_b_state.hub_identity.public_key_hex(),
+        &tagged,
+        &hex::decode(minted["grant"]["signature"].as_str().unwrap()).unwrap(),
+    )
+    .expect("a fresh grant is signed over the tagged bytes");
+    assert_eq!(
+        redeem_grant(&hub_a_url, &user_b, &minted["grant"])
+            .await
+            .status(),
+        200
+    );
+
+    // Re-signed untagged, the way an older origin hub mints.
+    let mut legacy = mint().await["grant"].clone();
+    legacy["signature"] = json!(hex::encode(
+        hub_b_state
+            .hub_identity
+            .sign(payload_json(&legacy).as_bytes())
+            .to_bytes()
+    ));
+    assert_eq!(
+        redeem_grant(&hub_a_url, &user_b, &legacy).await.status(),
+        200
+    );
+
+    // Signed by the same key under another purpose's tag.
+    let mut other = mint().await["grant"].clone();
+    let mut wrong = b"wavvon/alliance-member/v1\0".to_vec();
+    wrong.extend_from_slice(payload_json(&other).as_bytes());
+    other["signature"] = json!(hex::encode(
+        hub_b_state.hub_identity.sign(&wrong).to_bytes()
+    ));
+    assert_eq!(
+        redeem_grant(&hub_a_url, &user_b, &other).await.status(),
+        403
+    );
+}
