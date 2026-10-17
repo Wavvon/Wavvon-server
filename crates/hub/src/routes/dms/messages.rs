@@ -12,7 +12,9 @@ use crate::state::{AppState, DmEvent};
 use super::keys::{
     bind_cert_master, group_envelope_signing_bytes, verify_envelope_sender, verify_tiered_signature,
 };
-use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
+use super::models::{
+    ensure_user_stub, load_members, parse_dm_attachments, ConvMember, DmMessageRow,
+};
 
 pub async fn send_dm(
     State(state): State<Arc<AppState>>,
@@ -344,45 +346,10 @@ pub async fn send_dm(
             continue;
         }
 
-        // Resolve delivery URLs via the home-hub designation when available.
-        let delivery_urls: Vec<String> = {
-            // Step 1: look up master_pubkey for this member. Same resolver the
-            // mirror path uses — reading only `users.master_pubkey` here meant
-            // a member whose cert was registered without a re-auth got mirrored
-            // to but never fanned out to.
-            let master_pubkey: Option<String> = master_of(&state, &m.public_key).await;
-
-            // Step 2: if a master is known, try the designation table.
-            let designation_urls: Option<Vec<String>> = if let Some(ref mpk) = master_pubkey {
-                let hubs_json: Option<String> = sqlx::query_scalar(
-                    "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = $1",
-                )
-                .bind(mpk)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-                hubs_json.and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-            } else {
-                None
-            };
-
-            // A remote member's designation is not stored here; their own hub
-            // is the authority, so ask it (alliance-member-discovery.md §5).
-            let designation_urls = match (designation_urls, &master_pubkey, &m.hub_url) {
-                (None, Some(mpk), Some(url)) => fetch_remote_designation(&state, url, mpk).await,
-                (local, _, _) => local,
-            };
-
-            // Step 3: use the designation list, or fall back to the stored hub_url.
-            match designation_urls {
-                Some(urls) if !urls.is_empty() => urls,
-                _ => match &m.hub_url {
-                    Some(url) => vec![url.clone()],
-                    None => continue,
-                },
-            }
-        };
+        let delivery_urls = delivery_urls(&state, m).await?;
+        if delivery_urls.is_empty() {
+            continue;
+        }
 
         let envelope = FederatedDmRequest {
             message_id: message_id.clone(),
@@ -617,12 +584,19 @@ pub async fn receive_federated_dm(
         return Ok(StatusCode::OK);
     }
 
-    // Block check for federated inbound DM: if any local recipient has blocked the sender,
-    // return 200 (success-shaped) so the sending hub cannot detect the block.
-    //
-    // The recipients are the members this hub has stored for the conversation
-    // as well as the ones the request names: `req.members` is the sender's
-    // to write, and an empty list used to skip the check entirely.
+    // Auto-create the conversation on this hub if this is the first time we've seen it.
+    let conv_exists: Option<String> =
+        sqlx::query_scalar("SELECT id FROM conversations WHERE id = $1")
+            .bind(&req.conversation_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Once this hub holds a roster, it is the roster: `req.members` is the
+    // sending hub's to write, so trusting it let anyone who knew the id post
+    // into the conversation (Wavvon-server#119). Members added since arrive
+    // as signed changes (`members.rs`); a DM that outruns its change is
+    // refused here and the sender's outbox retries it.
     let stored: Vec<String> = sqlx::query_scalar(
         "SELECT public_key FROM conversation_members WHERE conversation_id = $1",
     )
@@ -630,8 +604,25 @@ pub async fn receive_federated_dm(
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let recipients: std::collections::HashSet<&String> =
-        stored.iter().chain(req.members.iter()).collect();
+    let recipients = if conv_exists.is_some() {
+        if !stored.contains(&req.sender) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Sender is not a member of this conversation".to_string(),
+            ));
+        }
+        &stored
+    } else if req.members.contains(&req.sender) {
+        &req.members
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "A new conversation's members must include its sender".to_string(),
+        ));
+    };
+
+    // Block check for federated inbound DM: if any local recipient has blocked the sender,
+    // return 200 (success-shaped) so the sending hub cannot detect the block.
     for member_key in recipients {
         if member_key == &req.sender {
             continue;
@@ -640,14 +631,6 @@ pub async fn receive_federated_dm(
             return Ok(StatusCode::OK);
         }
     }
-
-    // Auto-create the conversation on this hub if this is the first time we've seen it.
-    let conv_exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM conversations WHERE id = $1")
-            .bind(&req.conversation_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     if conv_exists.is_none() {
         // Federated delivery is at-least-once (the sender retries on failure),
@@ -1052,6 +1035,48 @@ pub(super) async fn resolve_master_binding(
     }
 
     Ok(proven)
+}
+
+/// Where a member takes delivery: every hub on their home hub list when it can
+/// be found, else the hub recorded for them in the conversation. Empty for a
+/// member with neither, which is a local one.
+pub(super) async fn delivery_urls(
+    state: &AppState,
+    m: &ConvMember,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    // Step 1: look up master_pubkey for this member. Same resolver the
+    // mirror path uses — reading only `users.master_pubkey` here meant
+    // a member whose cert was registered without a re-auth got mirrored
+    // to but never fanned out to.
+    let master_pubkey: Option<String> = master_of(state, &m.public_key).await;
+
+    // Step 2: if a master is known, try the designation table.
+    let designation_urls: Option<Vec<String>> = if let Some(ref mpk) = master_pubkey {
+        let hubs_json: Option<String> = sqlx::query_scalar(
+            "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = $1",
+        )
+        .bind(mpk)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        hubs_json.and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+    } else {
+        None
+    };
+
+    // A remote member's designation is not stored here; their own hub
+    // is the authority, so ask it (alliance-member-discovery.md §5).
+    let designation_urls = match (designation_urls, &master_pubkey, &m.hub_url) {
+        (None, Some(mpk), Some(url)) => fetch_remote_designation(state, url, mpk).await,
+        (local, _, _) => local,
+    };
+
+    // Step 3: use the designation list, or fall back to the stored hub_url.
+    Ok(match designation_urls {
+        Some(urls) if !urls.is_empty() => urls,
+        _ => m.hub_url.iter().cloned().collect(),
+    })
 }
 
 /// Public wrapper around `deliver_federated_dm` for the retry worker.

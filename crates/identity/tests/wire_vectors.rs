@@ -14,12 +14,12 @@
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha512};
 use wavvon_identity::{
-    auth_challenge_signing_bytes, dm_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
-    group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
-    recovery_request_signing_bytes, sender_key_dist_signing_bytes, unwrap_blob_key,
-    voice_key_unwrap, voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal,
-    wrap_blob_key, DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer,
-    PairingStatus, RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    auth_challenge_signing_bytes, dm_envelope_signing_bytes, dm_member_change_signing_bytes,
+    federated_plaintext_dm_signing_bytes, group_dm_envelope_signing_bytes,
+    recovery_attestation_signing_bytes, recovery_request_signing_bytes,
+    sender_key_dist_signing_bytes, unwrap_blob_key, voice_key_unwrap, voice_key_wrap_with_nonce,
+    voice_packet_open, voice_packet_seal, wrap_blob_key, DhKeyRecord, HomeHubList, PairingClaim,
+    PairingComplete, PairingOffer, PairingStatus, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 const TS: u64 = 1_700_000_000;
@@ -922,5 +922,25 @@ fn auth_challenge_vector() {
     assert_eq!(
         hex::encode(master_key().sign(&bytes).to_bytes()),
         "8a9cb870c40c8f1a4b88e7c8eb4a67bfae8115c98516e62d7bc383f421259cd452915257d6f7030af1e50249b3a08e820f482d1831f3a12a53524bffcd925f04"
+    );
+}
+
+/// What a group member signs to add a member or to leave (Wavvon-server#119).
+#[test]
+fn dm_member_change_vector() {
+    let bytes = dm_member_change_signing_bytes(
+        "conv-1",
+        "actor",
+        &["new-a".to_string(), "new-b".to_string()],
+        &[],
+        1_700_000_000,
+    );
+    assert_eq!(
+        hex::encode(&bytes),
+        "776176766f6e2f646d2d6d656d6265722d6368616e67652f76310006000000636f6e762d31050000006163746f7202000000050000006e65772d61050000006e65772d620000000000f1536500000000"
+    );
+    assert_eq!(
+        hex::encode(master_key().sign(&bytes).to_bytes()),
+        "1a141f3f3d17e7aac9ecfb851df6d4cc4ea7d0dd46aa87658a21c4d53e2efd9290578d11f1dafcc51131325fe4e85de005e73e524bda4d2751d68b9e21b35b00"
     );
 }

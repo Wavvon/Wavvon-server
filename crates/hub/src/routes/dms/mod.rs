@@ -1,5 +1,6 @@
 mod conversations;
 mod keys;
+mod members;
 mod messages;
 mod models;
 
@@ -9,4 +10,5 @@ pub use conversations::{
     remove_conversation_member, AddMemberRequest,
 };
 pub use keys::{get_sender_keys, push_sender_keys};
+pub use members::{deliver_member_change, receive_member_change};
 pub use messages::{deliver_federated_dm_public, list_dm_messages, receive_federated_dm, send_dm};

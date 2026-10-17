@@ -295,6 +295,12 @@ async fn flush_dm_outbox(state: &AppState) {
         .execute(&state.db)
         .await
         .expect("reset the outbox backoff");
+    sqlx::query(
+        "UPDATE dm_member_change_outbox SET next_attempt_at = 0, attempts = 0, bounced_at = NULL",
+    )
+    .execute(&state.db)
+    .await
+    .expect("reset the member change outbox backoff");
     wavvon_hub::dm_worker::tick(state)
         .await
         .expect("drive one outbox pass");
@@ -1989,4 +1995,330 @@ async fn federated_plaintext_dm_accepts_a_cert_chained_signature() {
     )
     .await;
     assert_eq!(refused, reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// A session on `hub` for a key that presents itself as a peer hub.
+async fn peer_session(client: &reqwest::Client, hub: &str) -> String {
+    let peer = Identity::generate();
+    let challenge: ChallengeResponse = client
+        .post(format!("{hub}/auth/challenge"))
+        .json(&json!({ "public_key": peer.public_key_hex() }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let signature = peer.sign(&hex::decode(&challenge.challenge).unwrap());
+    let verify: VerifyResponse = client
+        .post(format!("{hub}/auth/verify"))
+        .json(&json!({
+            "public_key": peer.public_key_hex(),
+            "challenge": challenge.challenge,
+            "signature": hex::encode(signature.to_bytes()),
+            "is_hub": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    verify.token
+}
+
+fn member_change(
+    signer: &Identity,
+    conversation_id: &str,
+    actor: &str,
+    added: &[String],
+    removed: &[String],
+    issued_at: u64,
+) -> serde_json::Value {
+    let bytes = wavvon_identity::dm_member_change_signing_bytes(
+        conversation_id,
+        actor,
+        added,
+        removed,
+        issued_at,
+    );
+    json!({
+        "conversation_id": conversation_id,
+        "actor": actor,
+        "added": added,
+        "removed": removed,
+        "issued_at": issued_at,
+        "signature": hex::encode(signer.sign(&bytes).to_bytes()),
+    })
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// Wavvon-server#119: a hub that already holds a group's roster believes it,
+/// not the member list a peer sends, and changes it only on a change signed
+/// by someone already on it.
+#[tokio::test]
+async fn federated_group_roster_changes_only_on_a_signed_change() {
+    let (hub, state, _guard) = start_real_hub("hub-roster").await;
+    let client = reqwest::Client::new();
+    let token = peer_session(&client, &hub).await;
+
+    let conv_id = "aaaa0000111122223333444455556666";
+    let (x, y, z) = (
+        Identity::generate(),
+        Identity::generate(),
+        Identity::generate(),
+    );
+    let (xk, yk, zk) = (x.public_key_hex(), y.public_key_hex(), z.public_key_hex());
+
+    let deliver = |n: u8, sender: &Identity, members: Vec<String>| {
+        let message_id = format!("bbbb000011112222333344445555{n:04}");
+        let sig = make_plaintext_sig(sender, conv_id, "group", &message_id);
+        let body = json!({
+            "message_id": message_id,
+            "conversation_id": conv_id,
+            "conv_type": "group",
+            "sender": sender.public_key_hex(),
+            "members": members,
+            "content": message_id,
+            "attachments": [],
+            "signature": sig,
+            "created_at": 1_700_000_000i64,
+        });
+        let (client, hub, token) = (client.clone(), hub.clone(), token.clone());
+        async move {
+            client
+                .post(format!("{hub}/federation/dm"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    let change = |body: serde_json::Value| {
+        let (client, hub, token) = (client.clone(), hub.clone(), token.clone());
+        async move {
+            client
+                .post(format!("{hub}/federation/dm-member-change"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert!(deliver(1, &x, vec![xk.clone(), yk.clone()])
+        .await
+        .is_success());
+
+    // A stranger naming itself in the member list is still a stranger.
+    let status = deliver(2, &z, vec![xk.clone(), yk.clone(), zk.clone()]).await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+
+    // Nor can it sign a change in somebody else's name...
+    let t = now_secs();
+    let forged = member_change(&z, conv_id, &xk, std::slice::from_ref(&zk), &[], t);
+    assert_eq!(change(forged).await, reqwest::StatusCode::UNAUTHORIZED);
+    // ...or add itself as itself.
+    let own = member_change(&z, conv_id, &zk, std::slice::from_ref(&zk), &[], t);
+    assert_eq!(change(own).await, reqwest::StatusCode::FORBIDDEN);
+
+    let add = member_change(&x, conv_id, &xk, std::slice::from_ref(&zk), &[], t);
+    assert!(change(add.clone()).await.is_success());
+    assert!(deliver(3, &z, vec![]).await.is_success());
+
+    let leave = member_change(&z, conv_id, &zk, &[], std::slice::from_ref(&zk), t + 1);
+    assert!(change(leave).await.is_success());
+    // The add, replayed after the leave, must not undo it.
+    assert!(change(add).await.is_success());
+    let mut roster: Vec<String> = sqlx::query_scalar(
+        "SELECT public_key FROM conversation_members WHERE conversation_id = $1",
+    )
+    .bind(conv_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap();
+    roster.sort();
+    let mut expected = vec![xk.clone(), yk.clone()];
+    expected.sort();
+    assert_eq!(roster, expected);
+    assert_eq!(deliver(4, &z, vec![]).await, reqwest::StatusCode::FORBIDDEN);
+
+    let mut stored: Vec<String> =
+        sqlx::query_scalar("SELECT sender FROM dm_messages WHERE conversation_id = $1")
+            .bind(conv_id)
+            .fetch_all(&state.db)
+            .await
+            .unwrap();
+    stored.sort();
+    let mut expected = vec![xk, zk];
+    expected.sort();
+    assert_eq!(stored, expected);
+}
+
+/// The origin half: a member added on one hub is carried to the other
+/// members' hubs, so what they then send is accepted there.
+#[tokio::test]
+async fn a_signed_add_reaches_the_other_members_hubs() {
+    let (hub_a, hub_a_state, _ga) = start_real_hub("hub-a-group").await;
+    let (hub_b, hub_b_state, _gb) = start_real_hub("hub-b-group").await;
+    let client = reqwest::Client::new();
+
+    let (alice, bob, carol, dave) = (
+        Identity::generate(),
+        Identity::generate(),
+        Identity::generate(),
+        Identity::generate(),
+    );
+    let alice_token = authenticate_http(&hub_a, &alice).await;
+    let dave_token = authenticate_http(&hub_a, &dave).await;
+    let bob_token = authenticate_http(&hub_b, &bob).await;
+
+    let mut member_hubs = HashMap::new();
+    member_hubs.insert(bob.public_key_hex(), hub_b.clone());
+    let conv: ConversationResponse = client
+        .post(format!("{hub_a}/conversations"))
+        .bearer_auth(&alice_token)
+        .json(&json!({
+            "members": [bob.public_key_hex(), carol.public_key_hex()],
+            "member_hubs": member_hubs,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(conv.conv_type, "group");
+
+    let send = |who: &Identity, token: &str, content: &str| {
+        let sig = make_plaintext_sig(who, &conv.id, "group", content);
+        let req = client
+            .post(format!("{hub_a}/conversations/{}/messages", conv.id))
+            .bearer_auth(token)
+            .json(&json!({ "content": content, "plaintext_signature": sig }));
+        async move { req.send().await.unwrap().status() }
+    };
+    assert_eq!(
+        send(&alice, &alice_token, "hello").await,
+        reqwest::StatusCode::CREATED
+    );
+    wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 1).await;
+
+    let added = [dave.public_key_hex()];
+    let issued_at = now_secs();
+    let sig = alice.sign(&wavvon_identity::dm_member_change_signing_bytes(
+        &conv.id,
+        &alice.public_key_hex(),
+        &added,
+        &[],
+        issued_at,
+    ));
+    let resp = client
+        .post(format!("{hub_a}/conversations/{}/members", conv.id))
+        .bearer_auth(&alice_token)
+        .json(&json!({
+            "public_key": dave.public_key_hex(),
+            "signed": { "issued_at": issued_at, "signature": hex::encode(sig.to_bytes()) },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    // Polled: under load the first attempt can fail and wait out a backoff.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        flush_dm_outbox(&hub_a_state).await;
+        let on_b: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM conversation_members WHERE conversation_id = $1 AND public_key = $2)",
+        )
+        .bind(&conv.id)
+        .bind(dave.public_key_hex())
+        .fetch_one(&hub_b_state.db)
+        .await
+        .unwrap();
+        if on_b {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the add must reach the hub of the other members"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    assert_eq!(
+        send(&dave, &dave_token, "hi, new here").await,
+        reqwest::StatusCode::CREATED
+    );
+    let messages =
+        wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 2).await;
+    // Both land in the same second, so their order is not the assertion.
+    assert!(messages
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|m| m["sender"] == dave.public_key_hex()));
+}
+
+/// A change signed by the wrong key is refused at its origin, before it
+/// touches the roster or travels anywhere.
+#[tokio::test]
+async fn an_add_with_a_bad_signature_is_refused() {
+    let (hub, state, _guard) = start_real_hub("hub-bad-add").await;
+    let client = reqwest::Client::new();
+    let (alice, bob, carol, mallory) = (
+        Identity::generate(),
+        Identity::generate(),
+        Identity::generate(),
+        Identity::generate(),
+    );
+    let alice_token = authenticate_http(&hub, &alice).await;
+    let conv: ConversationResponse = client
+        .post(format!("{hub}/conversations"))
+        .bearer_auth(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex(), carol.public_key_hex()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let issued_at = now_secs();
+    let added = [mallory.public_key_hex()];
+    let sig = mallory.sign(&wavvon_identity::dm_member_change_signing_bytes(
+        &conv.id,
+        &alice.public_key_hex(),
+        &added,
+        &[],
+        issued_at,
+    ));
+    let resp = client
+        .post(format!("{hub}/conversations/{}/members", conv.id))
+        .bearer_auth(&alice_token)
+        .json(&json!({
+            "public_key": mallory.public_key_hex(),
+            "signed": { "issued_at": issued_at, "signature": hex::encode(sig.to_bytes()) },
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let members: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM conversation_members WHERE conversation_id = $1")
+            .bind(&conv.id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(members, 3);
 }
