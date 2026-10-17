@@ -101,6 +101,7 @@ pub async fn challenge(
         StatusCode::OK,
         Json(ChallengeResponse {
             challenge: challenge_hex,
+            scheme: Some(wavvon_identity::AUTH_CHALLENGE_SCHEME.to_string()),
         }),
     ))
 }
@@ -140,7 +141,7 @@ pub async fn verify(
     let signature_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    wavvon_identity::verify_signature(&req.public_key, &challenge_bytes, &signature_bytes)
+    wavvon_identity::verify_auth_challenge(&req.public_key, &challenge_bytes, &signature_bytes)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
 
     // Multi-device: if a cert is presented, resolve to the canonical

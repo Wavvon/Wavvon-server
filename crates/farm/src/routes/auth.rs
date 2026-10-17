@@ -29,6 +29,8 @@ pub struct ChallengeRequest {
 #[derive(Serialize)]
 pub struct ChallengeResponse {
     pub challenge: String,
+    /// See the hub's ChallengeResponse: the tagged scheme is accepted here too.
+    pub scheme: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -97,6 +99,7 @@ pub async fn challenge(
 
     Ok(Json(ChallengeResponse {
         challenge: challenge_hex,
+        scheme: wavvon_identity::AUTH_CHALLENGE_SCHEME,
     }))
 }
 
@@ -158,7 +161,7 @@ pub async fn verify(
     let sig_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    wavvon_identity::verify_signature(&req.public_key, &challenge_bytes, &sig_bytes)
+    wavvon_identity::verify_auth_challenge(&req.public_key, &challenge_bytes, &sig_bytes)
         .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
 
     // Delete the used challenge (single-use).
