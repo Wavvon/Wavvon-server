@@ -273,7 +273,7 @@ async fn post_card_message(
     content: String,
 ) -> Result<(), (StatusCode, String)> {
     let msg_id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp();
+    let now = crate::auth::handlers::unix_timestamp_ms();
 
     sqlx::query(
         "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES ($1, $2, $3, $4, $5)",

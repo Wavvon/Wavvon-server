@@ -363,7 +363,7 @@ pub async fn post_webhook_message(
     }
 
     let msg_id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp();
+    let now = crate::auth::handlers::unix_timestamp_ms();
 
     // The sender identity is the webhook id (which has a users row).
     // Override display name if the request provides a username.
