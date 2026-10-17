@@ -1205,6 +1205,34 @@ async fn a_visitor_publishes_its_dh_key_where_the_room_is() {
         .await
         .unwrap();
     assert_eq!(got["dh_pubkey_hex"], dh_hex);
+
+    // And the room lets them in: a visitor holds no roles here, so a role
+    // gate on the join would refuse every visitor there could ever be.
+    use futures_util::{SinkExt, StreamExt};
+    let ws_url = format!(
+        "{}/ws?token={visitor_token}",
+        hub_a_url.replace("http://", "ws://")
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut tx, mut rx) = ws.split();
+    tx.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({ "type": "voice_join", "channel_id": channel_id }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = rx.next().await {
+                let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                if matches!(v["type"].as_str(), Some("voice_joined") | Some("error")) {
+                    return v;
+                }
+            }
+        }
+    })
+    .await
+    .expect("no voice_joined or error within 10s");
+    assert_eq!(reply["type"], "voice_joined", "{reply}");
 }
 
 /// Hub A re-resolves the channel against its own shared set and never trusts

@@ -119,7 +119,11 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                 .get(&cs.public_key)
                 .map(|grants| grants.contains(&channel_id))
                 .unwrap_or(false);
-            if !has_grant {
+            // An alliance visitor holds no roles here, by design, so the gate
+            // could only ever refuse them. The grant they were admitted on is
+            // their authorization, and it was matched to this channel above.
+            let visiting = cs.alliance_voice_channel.as_deref() == Some(channel_id.as_str());
+            if !has_grant && !visiting {
                 let err = WsServerMessage::Error {
                     context: "voice_join".to_string(),
                     message: "You do not have access to this channel.".to_string(),
