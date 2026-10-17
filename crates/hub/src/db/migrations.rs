@@ -2049,6 +2049,34 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .await?;
     }
 
+    // A group's membership changes travel to the other members' hubs as a
+    // change the actor signed (Wavvon-server#119). The outbox carries them
+    // whole; the ledger keeps the newest change applied per member, so a
+    // replayed older one can never undo it.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dm_member_change_outbox (
+            id BIGSERIAL PRIMARY KEY,
+            recipient_hub_url TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at BIGINT NOT NULL,
+            last_error TEXT,
+            bounced_at BIGINT
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS conversation_member_changes (
+            conversation_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            issued_at BIGINT NOT NULL,
+            PRIMARY KEY (conversation_id, public_key)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations complete");
 
     Ok(())

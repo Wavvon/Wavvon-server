@@ -55,6 +55,11 @@ pub const CAPABILITIES: &[&str] = &[
     // destinations it may offer, so its move picker keeps listing them all and
     // the refusal arrives when the move is issued.
     "channels.move.targets",
+    // Adding a member to a group DM, or leaving one, takes the actor's
+    // signature (`signed`), and the hub carries the change to the other
+    // members' hubs. Gated so a client signs only where the change will be
+    // carried; an older hub keeps every change to itself.
+    "dms.group.signedmembers",
     // A plaintext DM may carry `plaintext_signer_cert`, so a paired device can
     // sign it with its subkey. Gated because an older hub verifies the
     // signature against the canonical key alone and refuses the send.

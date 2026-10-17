@@ -409,14 +409,6 @@ pub fn group_dm_envelope_signing_bytes(
     buf
 }
 
-/// Canonical signing bytes for a plaintext federated DM.
-///
-/// Covers the fields the client knows at send time:
-/// `conversation_id || conv_type || content`.
-/// Domain tag: `"wavvon/federated-dm/v1\0"`.
-///
-/// `message_id` and `created_at` are hub-assigned and therefore excluded from
-/// the signed payload; the client cannot know them before the hub responds.
 /// The scheme a hub or farm names in its `/auth/challenge` response when it
 /// accepts an answer signed over [`auth_challenge_signing_bytes`].
 pub const AUTH_CHALLENGE_SCHEME: &str = "tagged-v1";
@@ -425,7 +417,7 @@ pub const AUTH_CHALLENGE_SCHEME: &str = "tagged-v1";
 /// key signs envelopes, certs and invite material, and a bare signature over
 /// whatever bytes a server sends lets that server collect one of those.
 pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Vec<u8> {
-    let mut buf = b"wavvon/auth-challenge/v1 ".to_vec();
+    let mut buf = b"wavvon/auth-challenge/v1\0".to_vec();
     buf.extend_from_slice(challenge);
     buf
 }
@@ -446,6 +438,15 @@ pub fn verify_auth_challenge(
     .or_else(|_| verify_signature(public_key_hex, challenge, signature))
 }
 
+/// Canonical signing bytes for a plaintext federated DM.
+///
+/// Covers the fields the client knows at send time:
+/// `conversation_id || conv_type || content`.
+/// Domain tag: `"wavvon/federated-dm/v1\0"`.
+///
+/// `message_id` and `created_at` are hub-assigned and therefore excluded from
+/// the signed payload; the client cannot know them before the hub responds.
+///
 /// The conversation_id + conv_type + content triple is sufficient to prevent a
 /// remote hub from injecting a message with a forged `sender` field — an
 /// attacker claiming `sender=victim` cannot produce victim's Ed25519 signature
@@ -459,6 +460,26 @@ pub fn federated_plaintext_dm_signing_bytes(
     write_str(&mut buf, conversation_id);
     write_str(&mut buf, conv_type);
     write_str(&mut buf, content);
+    buf
+}
+
+/// What a group member signs to add members to a group DM or to leave it.
+/// A remote hub applies the change only on this signature, from someone its
+/// own roster already holds: trusting the member list a peer hub sends is what
+/// let anyone who knew a conversation id write into it (Wavvon-server#119).
+pub fn dm_member_change_signing_bytes(
+    conversation_id: &str,
+    actor: &str,
+    added: &[String],
+    removed: &[String],
+    issued_at: u64,
+) -> Vec<u8> {
+    let mut buf = b"wavvon/dm-member-change/v1\0".to_vec();
+    write_str(&mut buf, conversation_id);
+    write_str(&mut buf, actor);
+    write_str_vec(&mut buf, added);
+    write_str_vec(&mut buf, removed);
+    write_u64_le(&mut buf, issued_at);
     buf
 }
 

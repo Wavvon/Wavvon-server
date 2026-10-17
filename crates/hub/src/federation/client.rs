@@ -497,6 +497,24 @@ impl FederationClient {
             .context("Failed to deliver DM to peer")
     }
 
+    /// POST a queued group membership change, already serialized when it was
+    /// queued, to a peer's `/federation/dm-member-change`.
+    pub async fn post_member_change(
+        &self,
+        base_url: &str,
+        token: &str,
+        payload: &str,
+    ) -> Result<reqwest::Response> {
+        self.http
+            .post(format!("{base_url}/federation/dm-member-change"))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload.to_string())
+            .send()
+            .await
+            .context("Failed to deliver member change to peer")
+    }
+
     /// POST a badge offer to a remote hub's unauthenticated
     /// `/federation/badge-offer` endpoint.
     #[allow(clippy::too_many_arguments)]

@@ -143,7 +143,7 @@ pub async fn tick(state: &AppState) -> Result<(), sqlx::Error> {
             }
         }
     }
-    Ok(())
+    tick_member_changes(state, now).await
 }
 
 /// A row that cannot be rebuilt is not the same failure as a database that
@@ -277,4 +277,46 @@ struct OutboxRow {
     recipient_hub_url: String,
     attempts: i64,
     mirror: bool,
+}
+
+/// Same schedule for queued group membership changes. They are applied in
+/// `issued_at` order wherever they land, so retrying one late is harmless.
+async fn tick_member_changes(state: &AppState, now: i64) -> Result<(), sqlx::Error> {
+    let due: Vec<(i64, String, String, i32)> = sqlx::query_as(
+        "SELECT id, recipient_hub_url, payload, attempts FROM dm_member_change_outbox
+         WHERE bounced_at IS NULL AND next_attempt_at <= $1
+         ORDER BY id LIMIT 100",
+    )
+    .bind(now)
+    .fetch_all(&state.db)
+    .await?;
+
+    for (id, url, payload, attempts) in due {
+        match crate::routes::dms::deliver_member_change(state, &url, &payload).await {
+            Ok(()) => {
+                sqlx::query("DELETE FROM dm_member_change_outbox WHERE id = $1")
+                    .bind(id)
+                    .execute(&state.db)
+                    .await?;
+            }
+            Err(err) => {
+                let (next_at, bounced) = match BACKOFF_SECS.get(attempts as usize) {
+                    Some(secs) => (now + secs, None),
+                    None => (now, Some(now)),
+                };
+                sqlx::query(
+                    "UPDATE dm_member_change_outbox
+                     SET attempts = attempts + 1, next_attempt_at = $1, last_error = $2, bounced_at = $3
+                     WHERE id = $4",
+                )
+                .bind(next_at)
+                .bind(&err)
+                .bind(bounced)
+                .bind(id)
+                .execute(&state.db)
+                .await?;
+            }
+        }
+    }
+    Ok(())
 }

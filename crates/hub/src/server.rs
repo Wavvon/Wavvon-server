@@ -398,6 +398,10 @@ pub fn create_router_full(
         )
         .route("/federation/dm", post(routes::dms::receive_federated_dm))
         .route(
+            "/federation/dm-member-change",
+            post(routes::dms::receive_member_change),
+        )
+        .route(
             "/federation/badge-offer",
             post(federation::handlers::receive_badge_offer),
         )
