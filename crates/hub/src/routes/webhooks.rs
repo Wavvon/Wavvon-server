@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -302,7 +302,6 @@ pub async fn delete_webhook(
 pub async fn post_webhook_message(
     State(state): State<Arc<AppState>>,
     Path((webhook_id, token)): Path<(String, String)>,
-    headers: HeaderMap,
     Json(req): Json<WebhookPostRequest>,
 ) -> Result<Json<WebhookPostResponse>, (StatusCode, String)> {
     // Look up webhook.
@@ -338,24 +337,10 @@ pub async fn post_webhook_message(
         ));
     }
 
-    // Optional HMAC-SHA256 body signature verification.
-    // If the header is present, verify it; if absent, skip (not required).
-    // We re-serialize the body to bytes for HMAC. Since we already deserialized,
-    // we use the raw body approach via the header value only — we check the header
-    // only when present, as documenting that the body bytes were signed.
-    // Note: to properly verify HMAC over the raw body, we would need to extract
-    // it as bytes before deserialization. For v1 we verify the presence check
-    // as a stub: if the header is present we accept it (the sender controls the
-    // secret and we've already validated the URL token). A future version should
-    // use a middleware that captures raw body bytes.
-    if let Some(sig_header) = headers.get("X-Wavvon-Signature") {
-        // Header present — acknowledged. Full HMAC verification requires raw
-        // body bytes captured before JSON parsing; deferred to a future middleware
-        // refactor. For now: if signature is present but we can't verify, we log
-        // but don't reject (the URL token is the primary credential).
-        let _ = sig_header;
-        tracing::debug!("Webhook HMAC signature present but full verification deferred");
-    }
+    // The URL token is the whole credential. There is no body signature to
+    // check: the hub keeps only the token's hash, so it holds no key a sender's
+    // HMAC could be verified against, and a header it cannot verify must not
+    // look accepted.
 
     let content = req.content.trim();
     if content.is_empty() {
