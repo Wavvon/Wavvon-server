@@ -417,6 +417,35 @@ pub fn group_dm_envelope_signing_bytes(
 ///
 /// `message_id` and `created_at` are hub-assigned and therefore excluded from
 /// the signed payload; the client cannot know them before the hub responds.
+/// The scheme a hub or farm names in its `/auth/challenge` response when it
+/// accepts an answer signed over [`auth_challenge_signing_bytes`].
+pub const AUTH_CHALLENGE_SCHEME: &str = "tagged-v1";
+
+/// What a client signs to answer an auth challenge. Domain-tagged: the same
+/// key signs envelopes, certs and invite material, and a bare signature over
+/// whatever bytes a server sends lets that server collect one of those.
+pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Vec<u8> {
+    let mut buf = b"wavvon/auth-challenge/v1 ".to_vec();
+    buf.extend_from_slice(challenge);
+    buf
+}
+
+/// Checks an answer to an auth challenge in either form: tagged, or the raw
+/// challenge older clients sign. The raw form goes away at a major; until
+/// then a signer only uses it against a server that names no scheme.
+pub fn verify_auth_challenge(
+    public_key_hex: &str,
+    challenge: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    verify_signature(
+        public_key_hex,
+        &auth_challenge_signing_bytes(challenge),
+        signature,
+    )
+    .or_else(|_| verify_signature(public_key_hex, challenge, signature))
+}
+
 /// The conversation_id + conv_type + content triple is sufficient to prevent a
 /// remote hub from injecting a message with a forged `sender` field — an
 /// attacker claiming `sender=victim` cannot produce victim's Ed25519 signature

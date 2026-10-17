@@ -65,7 +65,16 @@ impl FederationClient {
             "Peer sent a {}-byte auth challenge; refusing to sign it",
             challenge_bytes.len()
         );
-        let signature = identity.sign(&challenge_bytes);
+        // Tagged when the peer says it takes that; the raw form stays for an
+        // older peer, guarded by the length check above.
+        let signature =
+            if challenge.scheme.as_deref() == Some(wavvon_identity::AUTH_CHALLENGE_SCHEME) {
+                identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+                    &challenge_bytes,
+                ))
+            } else {
+                identity.sign(&challenge_bytes)
+            };
 
         let verify: VerifyResponse = self
             .http

@@ -14,7 +14,7 @@
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha512};
 use wavvon_identity::{
-    dm_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
+    auth_challenge_signing_bytes, dm_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
     group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
     recovery_request_signing_bytes, sender_key_dist_signing_bytes, unwrap_blob_key,
     voice_key_unwrap, voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal,
@@ -906,5 +906,21 @@ fn federated_plaintext_dm_vector() {
     assert_eq!(
         hex::encode(master_key().sign(&bytes).to_bytes()),
         "19cb16f7d84ee382ee5d2b01ac60e340b6011fe912a733f10b53785ce555e5844e4a49eab1f44fd5543c4a0d5b3a5efdc227bb02ced6c72705c9de15f5e49a0a"
+    );
+}
+
+/// What a client signs to answer an auth challenge from a hub or farm that
+/// names the `tagged-v1` scheme (Wavvon-server#111).
+#[test]
+fn auth_challenge_vector() {
+    let challenge: Vec<u8> = (0u8..32).collect();
+    let bytes = auth_challenge_signing_bytes(&challenge);
+    assert_eq!(
+        hex::encode(&bytes),
+        "776176766f6e2f617574682d6368616c6c656e67652f763100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    );
+    assert_eq!(
+        hex::encode(master_key().sign(&bytes).to_bytes()),
+        "8a9cb870c40c8f1a4b88e7c8eb4a67bfae8115c98516e62d7bc383f421259cd452915257d6f7030af1e50249b3a08e820f482d1831f3a12a53524bffcd925f04"
     );
 }

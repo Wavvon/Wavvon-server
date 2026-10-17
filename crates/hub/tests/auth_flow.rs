@@ -584,3 +584,54 @@ async fn pending_members_are_blocked_until_approved() {
         .await
         .assert_status_ok();
 }
+
+/// Both answers are accepted while older clients are about: the tagged one
+/// (Wavvon-server#111) and the raw challenge. A tagged signature over some
+/// other challenge is not.
+#[tokio::test]
+async fn auth_accepts_the_tagged_answer_and_still_the_raw_one() {
+    let server = common::setup().await;
+    for tagged in [true, false] {
+        let id = Identity::generate();
+        let pk = id.public_key_hex();
+        let ch: serde_json::Value = server
+            .post("/auth/challenge")
+            .json(&json!({ "public_key": pk }))
+            .await
+            .json();
+        assert_eq!(ch["scheme"], wavvon_identity::AUTH_CHALLENGE_SCHEME);
+        let bytes = hex::decode(ch["challenge"].as_str().unwrap()).unwrap();
+        let msg = if tagged {
+            wavvon_identity::auth_challenge_signing_bytes(&bytes)
+        } else {
+            bytes.clone()
+        };
+        server
+            .post("/auth/verify")
+            .json(&json!({
+                "public_key": pk,
+                "challenge": ch["challenge"],
+                "signature": hex::encode(id.sign(&msg).to_bytes()),
+            }))
+            .await
+            .assert_status_ok();
+    }
+
+    let id = Identity::generate();
+    let pk = id.public_key_hex();
+    let ch: serde_json::Value = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pk }))
+        .await
+        .json();
+    let wrong = wavvon_identity::auth_challenge_signing_bytes(&[7u8; 32]);
+    server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": pk,
+            "challenge": ch["challenge"],
+            "signature": hex::encode(id.sign(&wrong).to_bytes()),
+        }))
+        .await
+        .assert_status_unauthorized();
+}
