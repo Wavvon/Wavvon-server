@@ -1159,7 +1159,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dh_keys (
-            pubkey        TEXT PRIMARY KEY REFERENCES users(public_key),
+            pubkey        TEXT PRIMARY KEY,
             dh_pubkey_hex TEXT NOT NULL,
             signature_hex TEXT NOT NULL,
             published_at  BIGINT NOT NULL
@@ -1864,6 +1864,14 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     let _ = sqlx::query("ALTER TABLE bans ADD COLUMN expires_at BIGINT")
         .execute(pool)
         .await;
+
+    // An alliance voice visitor publishes its DH key here and has, on
+    // purpose, no `users` row — so a key tied to `users` could never be
+    // stored, nobody could wrap a voice key for a visitor, and the room was
+    // silent for them. Pre-1.0, so the constraint simply goes.
+    sqlx::query("ALTER TABLE dh_keys DROP CONSTRAINT IF EXISTS dh_keys_pubkey_fkey")
+        .execute(pool)
+        .await?;
 
     // Alliance member discovery (alliance-member-discovery.md §2): two consent
     // switches, both off. The alliance one is the manager's, the member one is

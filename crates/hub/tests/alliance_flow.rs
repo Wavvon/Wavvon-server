@@ -6,7 +6,7 @@ use wavvon_hub::routes::alliance_models::*;
 use wavvon_hub::routes::chat_models::{ChannelResponse, MessageResponse};
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
-use wavvon_identity::Identity;
+use wavvon_identity::{DhKeyRecord, Identity};
 
 #[path = "common.rs"]
 mod common;
@@ -1147,6 +1147,92 @@ async fn a_visitor_token_cannot_read_this_hubs_members() {
         403,
         "publishing a DH key is what makes the visitor audible"
     );
+}
+
+/// A visitor has no `users` row, and its DH key has to be stored anyway:
+/// voice keys are wrapped to each recipient's key on the hub the room is on.
+#[tokio::test]
+async fn a_visitor_publishes_its_dh_key_where_the_room_is() {
+    let (hub_a_url, _hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let user_b = Identity::generate();
+    let (alliance_id, channel_id, token_b, _pk) =
+        alliance_with_shared_voice_channel(&hub_a_url, &hub_b_url, &user_a, &user_b).await;
+    let minted: serde_json::Value = client
+        .post(format!("{hub_b_url}/alliances/{alliance_id}/voice-grant"))
+        .bearer_auth(&token_b)
+        .json(&json!({ "channel_id": channel_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session: serde_json::Value = redeem_grant(&hub_a_url, &user_b, &minted["grant"])
+        .await
+        .json()
+        .await
+        .unwrap();
+    let visitor_token = session["token"].as_str().unwrap();
+
+    let pk = user_b.public_key_hex();
+    let (_, dh_pub) = user_b.dh_keypair();
+    let dh_hex = hex::encode(dh_pub.as_bytes());
+    let sig = hex::encode(
+        user_b
+            .sign(&DhKeyRecord::signing_bytes(&pk, &dh_hex))
+            .to_bytes(),
+    );
+    let put = client
+        .put(format!("{hub_a_url}/identity/{pk}/dh-key"))
+        .bearer_auth(visitor_token)
+        .json(&json!({ "dh_pubkey_hex": dh_hex, "signature_hex": sig }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 200, "{}", put.text().await.unwrap());
+
+    let got: serde_json::Value = client
+        .get(format!("{hub_a_url}/identity/{pk}/dh-key"))
+        .bearer_auth(visitor_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["dh_pubkey_hex"], dh_hex);
+
+    // And the room lets them in: a visitor holds no roles here, so a role
+    // gate on the join would refuse every visitor there could ever be.
+    use futures_util::{SinkExt, StreamExt};
+    let ws_url = format!(
+        "{}/ws?token={visitor_token}",
+        hub_a_url.replace("http://", "ws://")
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut tx, mut rx) = ws.split();
+    tx.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({ "type": "voice_join", "channel_id": channel_id }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = rx.next().await {
+                let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                if matches!(v["type"].as_str(), Some("voice_joined") | Some("error")) {
+                    return v;
+                }
+            }
+        }
+    })
+    .await
+    .expect("no voice_joined or error within 10s");
+    assert_eq!(reply["type"], "voice_joined", "{reply}");
 }
 
 /// Hub A re-resolves the channel against its own shared set and never trusts
