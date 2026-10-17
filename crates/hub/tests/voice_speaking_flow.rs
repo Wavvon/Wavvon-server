@@ -84,9 +84,7 @@ async fn a_non_participant_cannot_speak_in_a_room() {
     let _ = speaker.next().await;
     watcher
         .send(Message::Text(
-            json!({ "type": "voice_watch", "channel_id": channel_id })
-                .to_string()
-                .into(),
+            json!({ "type": "voice_watch", "channel_id": channel_id }).to_string(),
         ))
         .await
         .unwrap();
@@ -95,8 +93,7 @@ async fn a_non_participant_cannot_speak_in_a_room() {
     speaker
         .send(Message::Text(
             json!({ "type": "voice_speaking", "channel_id": channel_id, "speaking": true })
-                .to_string()
-                .into(),
+                .to_string(),
         ))
         .await
         .unwrap();
