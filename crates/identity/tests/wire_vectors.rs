@@ -14,7 +14,8 @@
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha512};
 use wavvon_identity::{
-    dm_envelope_signing_bytes, group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
+    dm_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
+    group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
     recovery_request_signing_bytes, sender_key_dist_signing_bytes, unwrap_blob_key,
     voice_key_unwrap, voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal,
     wrap_blob_key, DhKeyRecord, HomeHubList, PairingClaim, PairingComplete, PairingOffer,
@@ -889,5 +890,21 @@ fn gen_vectors() {
     println!(
         "SENDER_KEY_DIST_SIG: {}",
         hex::encode(master_key().sign(&sb).to_bytes())
+    );
+}
+
+/// A plaintext DM crossing hubs carries the sender's signature over these
+/// bytes, and the receiving hub refuses one without it. No client signed it
+/// until Wavvon-clients#126, which is why no vector existed.
+#[test]
+fn federated_plaintext_dm_vector() {
+    let bytes = federated_plaintext_dm_signing_bytes("conv-1", "dm", "h\u{e9}llo");
+    assert_eq!(
+        hex::encode(&bytes),
+        "776176766f6e2f6665646572617465642d646d2f76310006000000636f6e762d3102000000646d0600000068c3a96c6c6f"
+    );
+    assert_eq!(
+        hex::encode(master_key().sign(&bytes).to_bytes()),
+        "19cb16f7d84ee382ee5d2b01ac60e340b6011fe912a733f10b53785ce555e5844e4a49eab1f44fd5543c4a0d5b3a5efdc227bb02ced6c72705c9de15f5e49a0a"
     );
 }
