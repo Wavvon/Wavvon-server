@@ -372,3 +372,35 @@ async fn events_carry_the_callers_own_rsvp() {
         .unwrap();
     assert_eq!(mine["my_rsvp"], "maybe");
 }
+
+/// An event in a channel the caller cannot read 404s on every route that
+/// takes its id: the RSVP routes used to list attendees and take an RSVP.
+#[tokio::test]
+async fn rsvps_of_a_hidden_event_are_not_reachable() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let member_token = common::authenticate(&server, &Identity::generate()).await;
+    let channel_id = create_channel(&server, &owner_token).await;
+    let event: Value = server
+        .post("/events")
+        .add_header("Authorization", format!("Bearer {owner_token}"))
+        .json(
+            &json!({ "channel_id": channel_id, "title": "Secret", "starts_at": 9_999_999_999i64 }),
+        )
+        .await
+        .json();
+    let event_id = event["id"].as_str().unwrap().to_string();
+    deny_everyone(&server, &owner_token, &channel_id, "messages.read").await;
+
+    server
+        .get(&format!("/events/{event_id}/rsvps"))
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+    server
+        .post(&format!("/events/{event_id}/rsvp"))
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .json(&json!({ "status": "going" }))
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
