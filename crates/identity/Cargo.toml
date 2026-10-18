@@ -5,6 +5,10 @@ edition = "2021"
 license = "Apache-2.0"
 description = "Wavvon wire format: signed envelopes, signing bytes and the crypto they use"
 repository = "https://github.com/Wavvon/Wavvon-server"
+homepage = "https://github.com/Wavvon/Wavvon-docs/blob/main/docs/wire-format.md"
+readme = "README.md"
+keywords = ["wavvon", "ed25519", "protocol", "federation", "chat"]
+categories = ["cryptography", "encoding"]
 
 [dependencies]
 anyhow = { workspace = true }
