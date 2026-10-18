@@ -162,6 +162,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          operators who trust all registered bots on this hub can enable it hub-wide.",
     ),
     (
+        "WAVVON_ALLOW_PRIVATE_WEBHOOKS",
+        "false",
+        "Set to `true` to let outgoing webhooks and app `webhook_url`s use plain http and          private/loopback hosts. Off by default: both are https-only and refuse private          ranges, because any member holding apps.register could otherwise aim the hub at          localhost or a cloud metadata address (SSRF). Enable only on a LAN-only hub.",
+    ),
+    (
         "WAVVON_BOTS_ALLOW_VIDEO",
         "false",
         "Set to `true` to allow bots granted `can_inject_video` to push frames into the \
@@ -305,6 +310,11 @@ pub struct Settings {
     ///
     /// Env: WAVVON_APPS_ALLOW_CAMERA
     pub apps_allow_camera: bool,
+    /// Let outgoing webhooks and app `webhook_url`s use plain http and
+    /// private/loopback hosts (LAN-only hubs, local test harnesses).
+    ///
+    /// Env: WAVVON_ALLOW_PRIVATE_WEBHOOKS
+    pub allow_private_webhooks: bool,
     /// Operator kill-switch for `can_inject_video` bot video streams.
     /// Max concurrent video streams started over HTTP, hub-wide.
     /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
@@ -374,6 +384,7 @@ pub fn load() -> Result<Settings> {
         .set_default("log_format", "text")?
         .set_default("trusted_proxy", false)?
         .set_default("apps_allow_camera", false)?
+        .set_default("allow_private_webhooks", false)?
         .set_default("http_video_stream_budget", 2u32)?
         .set_default("device_token_ttl_days", 30u64)?
         .set_default("db_max_connections", 5u32)?

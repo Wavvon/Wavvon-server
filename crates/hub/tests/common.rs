@@ -394,6 +394,7 @@ pub fn base_state(db: PgPool) -> AppState {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         apps_allow_camera: false,
+        allow_private_webhooks: false,
         http_video_stream_budget: 2,
         webauthn: make_test_webauthn(),
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
@@ -415,6 +416,23 @@ pub fn base_state(db: PgPool) -> AppState {
 pub async fn setup() -> TestHarness {
     let (db, guard) = create_test_db().await;
     build_harness(db, guard).await
+}
+
+/// Like [`setup`], with `WAVVON_ALLOW_PRIVATE_WEBHOOKS` on, for tests whose
+/// webhook receiver is a local http listener.
+#[allow(dead_code)]
+pub async fn setup_allowing_private_webhooks() -> TestHarness {
+    let (db, guard) = create_test_db().await;
+    let state = Arc::new(AppState {
+        allow_private_webhooks: true,
+        ..base_state(db)
+    });
+    let app = server::create_router_full(state.clone(), "*", false, None);
+    TestHarness {
+        server: TestServer::new(app),
+        _guard: guard,
+        state: Some(state),
+    }
 }
 
 /// Like [`setup`], but re-enables `invite_only` so the hub is in the same

@@ -2,7 +2,6 @@
 //! `permissions::WEBHOOKS_OUTGOING_MANAGE`, matching the `create_webhook`/`delete_webhook`
 //! pattern in `routes::webhooks` (incoming webhooks).
 
-use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -10,7 +9,6 @@ use axum::http::StatusCode;
 use axum::Json;
 use base64::Engine;
 use rand::RngCore;
-use url::Url;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
@@ -23,75 +21,6 @@ use super::models::{
     UpdateOutgoingWebhookRequest, WebhookSubscriptionDto,
 };
 use super::worker::new_webhook_id;
-
-// ---------------------------------------------------------------------------
-// URL validation — same rule as an app `webhook_url` (doc §1, §7): https only,
-// reject private/loopback ranges. `routes::preview` owns the canonical
-// private-IP-range check; we reuse it here rather than duplicating the list.
-// ---------------------------------------------------------------------------
-
-fn validate_webhook_url(raw: &str) -> Result<(), (StatusCode, String)> {
-    let parsed =
-        Url::parse(raw).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid URL".to_string()))?;
-
-    if parsed.scheme() != "https" {
-        return Err((StatusCode::BAD_REQUEST, "URL must use https://".to_string()));
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or((StatusCode::BAD_REQUEST, "URL must have a host".to_string()))?;
-
-    // Reject bare "localhost" outright (matches the redirect-guard rule in
-    // routes::preview).
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "URL host must not be a private or loopback address".to_string(),
-        ));
-    }
-
-    // If the host is a literal IP, check it directly.
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if crate::routes::preview::is_private_ip(ip) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "URL host must not be a private or loopback address".to_string(),
-            ));
-        }
-        return Ok(());
-    }
-
-    // Otherwise resolve the hostname and reject if any resolved address is
-    // private/loopback. Best-effort: DNS failure here is a validation error,
-    // not a delivery-time concern.
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let addrs = (host, port).to_socket_addrs().map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            "Could not resolve host".to_string(),
-        )
-    })?;
-
-    let mut any = false;
-    for addr in addrs {
-        any = true;
-        if crate::routes::preview::is_private_ip(addr.ip()) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "URL host must not be a private or loopback address".to_string(),
-            ));
-        }
-    }
-    if !any {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Could not resolve host".to_string(),
-        ));
-    }
-
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Secret generation
@@ -124,7 +53,7 @@ pub async fn create_webhook(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
-    validate_webhook_url(&req.url)?;
+    crate::webhook_url::validate_webhook_url(&req.url, state.allow_private_webhooks)?;
 
     let id = new_webhook_id();
     let now = crate::auth::handlers::unix_timestamp();
@@ -234,7 +163,7 @@ pub async fn update_webhook(
     }
 
     if let Some(url) = &req.url {
-        validate_webhook_url(url)?;
+        crate::webhook_url::validate_webhook_url(url, state.allow_private_webhooks)?;
         sqlx::query("UPDATE outgoing_webhooks SET url = $1 WHERE id = $2")
             .bind(url)
             .bind(&id)

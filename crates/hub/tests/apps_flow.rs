@@ -489,7 +489,7 @@ async fn app_with_command(server: &common::TestHarness, cooldown: i64) -> String
     server
         .put("/me/app/profile")
         .authorization_bearer(&token)
-        .json(&json!({ "name": "Cool", "webhook_url": "nonsense-not-a-url" }))
+        .json(&json!({ "name": "Cool", "webhook_url": "ftp://unsupported.invalid/hook" }))
         .await
         .assert_status_success();
     server
@@ -509,7 +509,7 @@ async fn invoke(server: &common::TestHarness, user: &str) -> Option<String> {
 
 #[tokio::test]
 async fn a_command_inside_its_cooldown_is_refused_with_the_time_left() {
-    let server = common::setup().await;
+    let server = common::setup_allowing_private_webhooks().await;
     app_with_command(&server, 1).await;
 
     let first = invoke(&server, "alice").await.unwrap();
@@ -534,7 +534,7 @@ async fn a_command_inside_its_cooldown_is_refused_with_the_time_left() {
 
 #[tokio::test]
 async fn a_cooldown_is_per_user() {
-    let server = common::setup().await;
+    let server = common::setup_allowing_private_webhooks().await;
     app_with_command(&server, 30).await;
 
     invoke(&server, "alice").await;
@@ -547,7 +547,7 @@ async fn a_cooldown_is_per_user() {
 
 #[tokio::test]
 async fn a_zero_cooldown_never_blocks() {
-    let server = common::setup().await;
+    let server = common::setup_allowing_private_webhooks().await;
     app_with_command(&server, 0).await;
 
     for _ in 0..3 {
@@ -602,7 +602,7 @@ fn the_hub_event_envelope_has_one_shape_with_optional_extras() {
 #[tokio::test]
 async fn a_slash_dispatch_signs_its_timestamp() {
     use std::sync::{Arc, Mutex};
-    let server = common::setup().await;
+    let server = common::setup_allowing_private_webhooks().await;
     grant_apps_register(&server).await;
 
     type Seen = Arc<Mutex<Option<(axum::http::HeaderMap, Vec<u8>)>>>;
@@ -654,4 +654,48 @@ async fn a_slash_dispatch_signs_its_timestamp() {
         &signature,
     )
     .expect("the v1 signature must cover the timestamp and the exact body");
+}
+
+#[tokio::test]
+async fn an_app_webhook_url_must_be_public_https() {
+    let server = common::setup().await;
+    grant_apps_register(&server).await;
+    let app = Identity::generate();
+    let token = common::authenticate(&server, &app).await;
+    for url in [
+        "http://localhost/hook",
+        "https://localhost/hook",
+        "https://127.0.0.1/hook",
+        "https://192.168.1.5/hook",
+        "https://169.254.169.254/latest",
+        "http://example.com/hook",
+        "nonsense-not-a-url",
+    ] {
+        server
+            .put("/me/app/profile")
+            .authorization_bearer(&token)
+            .json(&json!({ "name": "Evil", "webhook_url": url }))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "NoHook" }))
+        .await
+        .assert_status_success();
+}
+
+#[tokio::test]
+async fn the_private_webhooks_opt_in_allows_a_local_app_webhook() {
+    let server = common::setup_allowing_private_webhooks().await;
+    grant_apps_register(&server).await;
+    let app = Identity::generate();
+    let token = common::authenticate(&server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Lan", "webhook_url": "http://192.168.1.5:8080/hook" }))
+        .await
+        .assert_status_success();
 }
