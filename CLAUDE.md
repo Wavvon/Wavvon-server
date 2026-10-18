@@ -124,6 +124,11 @@ Entry: `crates/identity/src/lib.rs`. Pure Rust, no async, no I/O.
 clients and the Rust SDK can link it. Keep it that way: it may depend only on
 permissively licensed crates, never on another crate of this workspace.
 
+It is on crates.io. `release.yml` publishes it with each hub release when its
+`version` is not there yet (trusted publishing, no token), so **bump the
+crate's version when its public API or a wire format changes**, independently
+of the hub's version; an unchanged version is skipped.
+
 Defines every signed envelope type: `HomeHubList`, `SubkeyCert`, `PairingOffer`,
 DM envelopes, prefs blob, recovery request/attestation
 (`wavvon/recovery-request/v1`, `wavvon/recovery-attestation/v1`), and more. Each

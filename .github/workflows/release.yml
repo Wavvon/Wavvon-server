@@ -171,3 +171,41 @@ jobs:
             wavvon-hub-linux-aarch64
             wavvon-hub-linux-x86_64-glibc
             crates/identity/wire-vectors.json
+
+  identity-crate:
+    name: Publish wavvon-identity to crates.io
+    needs: changelog
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Is this version on crates.io already?
+        id: published
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/identity/Cargo.toml | head -1)
+          test -n "$version"
+          if curl -fsS -A "Wavvon-server release (https://github.com/Wavvon/Wavvon-server)" "https://crates.io/api/v1/crates/wavvon-identity/$version" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.published.outputs.exists == 'false'
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Authenticate to crates.io
+        if: steps.published.outputs.exists == 'false'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18
+
+      - name: Publish
+        if: steps.published.outputs.exists == 'false'
+        run: cargo publish -p wavvon-identity
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
