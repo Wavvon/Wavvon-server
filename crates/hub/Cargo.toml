@@ -23,7 +23,6 @@ tower = "0.5"
 tower-http = { workspace = true }
 hex = "0.4"
 hmac = "0.12"
-hkdf = "0.12"
 rand = "0.8"
 sha2 = "0.10"
 base64 = { workspace = true }
@@ -62,6 +61,7 @@ postgresql_embedded = { version = "0.21", default-features = false, features = [
 
 [dev-dependencies]
 axum-test = "19"
+hkdf = "0.12"
 # Software authenticator for the passkey ceremony test. Upstream's own test
 # suite uses it, and it is what makes attestation + signature verification
 # testable without a physical key. Version-matched to webauthn-rs.
