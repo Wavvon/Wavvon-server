@@ -656,7 +656,7 @@ async fn away_and_dnd_users_still_report_online_with_status() {
     let bob_token = authenticate(&base, &bob).await;
 
     let mut ws_alice = connect_ws(&base, &alice_token).await;
-    let _ws_bob = connect_ws(&base, &bob_token).await;
+    let mut ws_bob = connect_ws(&base, &bob_token).await;
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     send_ws_json(
@@ -664,7 +664,9 @@ async fn away_and_dnd_users_still_report_online_with_status() {
         json!({ "type": "set_status", "status": "away" }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // The broadcast follows the UPDATE, so once Bob sees it /users must too;
+    // a fixed sleep raced the write under CI load.
+    wait_for_type(&mut ws_bob, "member_status").await;
 
     let client = reqwest::Client::new();
     let users: Value = client
@@ -690,7 +692,7 @@ async fn away_and_dnd_users_still_report_online_with_status() {
     assert_eq!(a["status"].as_str(), Some("away"));
 
     close_ws(ws_alice).await;
-    close_ws(_ws_bob).await;
+    close_ws(ws_bob).await;
 }
 
 #[tokio::test]
