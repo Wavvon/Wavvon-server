@@ -508,6 +508,9 @@ pub struct AppState {
     /// access in the client webview/iframe sandbox.
     pub apps_allow_camera: bool,
 
+    /// Mirror of `Settings::allow_private_webhooks`; see `webhook_url`.
+    pub allow_private_webhooks: bool,
+
     /// Mirror of `Settings::http_video_stream_budget`. Max concurrent video
     /// streams started over `POST /screenshare/start` across the whole hub;
     /// frames aren't buffered past this, the start is simply rejected.

@@ -897,6 +897,12 @@ async fn main() -> Result<()> {
     );
     tracing::info!("data: identity={cwd}/hub_identity.json  database=PostgreSQL");
 
+    if settings.allow_private_webhooks {
+        tracing::warn!(
+            "WAVVON_ALLOW_PRIVATE_WEBHOOKS is enabled: outgoing webhooks and app webhook URLs              may use plain http and private/loopback hosts (SSRF guard off)."
+        );
+    }
+
     // The generic mixed-content warning doesn't apply to LAN plaintext mode
     // (that tier is documented and gated, not an oversight) — the LAN MODE
     // banner below covers it instead.
@@ -1291,6 +1297,7 @@ async fn main() -> Result<()> {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
         apps_allow_camera: settings.apps_allow_camera,
+        allow_private_webhooks: settings.allow_private_webhooks,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
