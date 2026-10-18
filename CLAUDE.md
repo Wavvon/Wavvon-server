@@ -127,9 +127,10 @@ has a versioned tag (`b"wavvon/<name>/v1\0"`) and length-prefixed binary
 encoding. Also: BIP39 recovery phrases (24 words <-> secret key), X25519 ECDH
 from an Ed25519 seed for E2E DMs, AES-256-GCM, PoW helpers.
 
-**Every client must match this crate byte-for-byte.** Test vectors live in
-`crates/identity/tests/wire_vectors.rs` and are mirrored in the clients repo
-(TypeScript and desktop Rust), each asserting the same vectors. Changing an
+**Every client must match this crate byte-for-byte.** Test vectors are data in
+`crates/identity/wire-vectors.json` (the one authority, also a release asset;
+`tests/wire_vectors.rs` only loads and asserts it) and are mirrored in the clients
+repo (TypeScript and desktop Rust), each asserting the same vectors. Changing an
 envelope is a cross-repo operation — use the **`wire-format-change`** skill.
 
 ### `hub-env` — cross-process config keys

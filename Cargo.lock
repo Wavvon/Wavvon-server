@@ -6057,11 +6057,13 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "base64 0.22.1",
  "bip39",
  "curve25519-dalek",
  "ed25519-dalek",
  "hex",
  "hkdf 0.12.4",
+ "hmac 0.12.1",
  "rand 0.8.6",
  "serde",
  "serde_json",

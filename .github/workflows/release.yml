@@ -170,3 +170,4 @@ jobs:
             wavvon-farm-linux-x86_64
             wavvon-hub-linux-aarch64
             wavvon-hub-linux-x86_64-glibc
+            crates/identity/wire-vectors.json
