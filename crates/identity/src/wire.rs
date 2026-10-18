@@ -449,6 +449,14 @@ pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Header names on every signed webhook delivery, slash/component dispatch
+/// and outgoing webhooks alike. Third parties read them from the vectors.
+pub const HEADER_HUB_PUBKEY: &str = "X-Wavvon-Hub-Pubkey";
+pub const HEADER_SIGNATURE_LEGACY: &str = "X-Wavvon-Signature";
+pub const HEADER_SIGNATURE_V1: &str = "X-Wavvon-Signature-V1";
+pub const HEADER_TIMESTAMP: &str = "X-Wavvon-Timestamp";
+pub const HEADER_WEBHOOK_ID: &str = "X-Wavvon-Webhook-Id";
+
 /// The 32-byte HMAC key an outgoing webhook signs with, derived from the
 /// raw secret the admin was shown (HKDF-SHA256, salt `wavvon-webhook-signing`,
 /// empty info). Receivers run the same derivation.

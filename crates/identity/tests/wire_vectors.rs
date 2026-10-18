@@ -543,6 +543,23 @@ fn webhook_delivery_hub_vector() {
     );
     let sig = ed25519_dalek::Signature::from_slice(&bytes(&r(&v["signature_v1"]))).unwrap();
     assert!(hub.verifying_key().verify(&sb, &sig).is_ok());
+    check_headers(v);
+}
+
+/// The header names in the JSON are the constants the hub sends with.
+fn check_headers(v: &Value) {
+    let h = &v["headers"];
+    for (key, constant) in [
+        ("hub_pubkey", wavvon_identity::HEADER_HUB_PUBKEY),
+        ("signature_legacy", wavvon_identity::HEADER_SIGNATURE_LEGACY),
+        ("signature_v1", wavvon_identity::HEADER_SIGNATURE_V1),
+        ("timestamp", wavvon_identity::HEADER_TIMESTAMP),
+    ] {
+        assert_eq!(h[key].as_str(), Some(constant), "header {key}");
+    }
+    if let Some(id) = h.get("webhook_id") {
+        assert_eq!(id.as_str(), Some(wavvon_identity::HEADER_WEBHOOK_ID));
+    }
 }
 
 /// Outgoing webhook: secret -> HKDF key -> HMAC-SHA256 over body (legacy) and
@@ -577,6 +594,7 @@ fn webhook_delivery_outgoing_vector() {
         "signature_v1",
         &webhook_hmac_sha256(&key, &sb).unwrap(),
     );
+    check_headers(v);
 }
 
 // ---------------------------------------------------------------------------
