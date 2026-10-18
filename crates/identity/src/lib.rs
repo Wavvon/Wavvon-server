@@ -25,11 +25,13 @@ pub use voice::{
 pub use wire::{
     auth_challenge_signing_bytes, dm_envelope_signing_bytes, dm_member_change_signing_bytes,
     dr_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
-    group_dm_envelope_signing_bytes, recovery_attestation_signing_bytes,
-    recovery_request_signing_bytes, sender_key_dist_signing_bytes, verify_auth_challenge,
-    voice_grant_signing_bytes, webhook_delivery_signing_bytes, DhKeyRecord, HomeHubList,
-    PairingClaim, PairingComplete, PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile,
-    RevocationEntry, SignedPrefsBlob, SubkeyCert, AUTH_CHALLENGE_SCHEME,
+    group_dm_envelope_signing_bytes, outgoing_webhook_signing_key,
+    recovery_attestation_signing_bytes, recovery_request_signing_bytes,
+    sender_key_dist_signing_bytes, verify_auth_challenge, voice_grant_signing_bytes,
+    webhook_delivery_signing_bytes, webhook_hmac_sha256, DhKeyRecord, HomeHubList, PairingClaim,
+    PairingComplete, PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile,
+    RevocationEntry, SignedPrefsBlob, SubkeyCert, AUTH_CHALLENGE_SCHEME, HEADER_HUB_PUBKEY,
+    HEADER_SIGNATURE_LEGACY, HEADER_SIGNATURE_V1, HEADER_TIMESTAMP, HEADER_WEBHOOK_ID,
 };
 
 pub struct Identity {

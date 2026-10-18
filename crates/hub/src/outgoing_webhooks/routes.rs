@@ -9,9 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use base64::Engine;
-use hkdf::Hkdf;
 use rand::RngCore;
-use sha2::Sha256;
 use url::Url;
 
 use crate::auth::middleware::AuthUser;
@@ -25,10 +23,6 @@ use super::models::{
     UpdateOutgoingWebhookRequest, WebhookSubscriptionDto,
 };
 use super::worker::new_webhook_id;
-
-/// HKDF salt for deriving the persisted signing key from the one-time secret
-/// (doc §4).
-const HKDF_SALT: &[u8] = b"wavvon-webhook-signing";
 
 // ---------------------------------------------------------------------------
 // URL validation — same rule as an app `webhook_url` (doc §1, §7): https only,
@@ -113,16 +107,9 @@ fn generate_secret_and_key() -> (String, String) {
     (secret, derive_signing_key(&raw))
 }
 
-/// The hex HMAC key a receiver derives from the secret it was shown, exactly
-/// as the hub does: HKDF-SHA256 with salt `wavvon-webhook-signing`, empty info.
+/// The hex HMAC key a receiver derives from the secret it was shown.
 pub fn derive_signing_key(raw_secret: &[u8]) -> String {
-    let hk = Hkdf::<Sha256>::new(Some(HKDF_SALT), raw_secret);
-    let mut signing_key = [0u8; 32];
-    // `expand` only fails if the requested length is too large for the hash
-    // (max 255 * hash_len); 32 bytes is always valid, so this cannot fail.
-    hk.expand(b"", &mut signing_key)
-        .expect("HKDF expand with a 32-byte output cannot fail");
-    hex::encode(signing_key)
+    hex::encode(wavvon_identity::outgoing_webhook_signing_key(raw_secret))
 }
 
 // ---------------------------------------------------------------------------

@@ -31,6 +31,9 @@ bip39 = "2"
 # same BIP39 entropy that already backs the per-device subkey.
 hkdf = "0.12"
 
+# hmac — HMAC-SHA256 for outgoing-webhook delivery signatures.
+hmac = "0.12"
+
 # x25519-dalek — X25519 Diffie-Hellman for E2E DM encryption.
 # Derived from the Ed25519 seed so no separate key storage is needed.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -42,3 +45,6 @@ aes-gcm = "0.10"
 # Montgomery conversion). Indirect dep via ed25519-dalek / x25519-dalek;
 # declared directly here so we can use the point-conversion API in ecies.rs.
 curve25519-dalek = "4"
+
+[dev-dependencies]
+base64 = { workspace = true }

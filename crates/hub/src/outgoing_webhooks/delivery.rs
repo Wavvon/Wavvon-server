@@ -3,15 +3,11 @@
 //! Retry scheduling across attempts lives in `worker.rs`; this module only
 //! knows how to make one HTTP attempt and record its outcome.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::models::OutgoingWebhook;
 use crate::routes::app_models::HubEvent;
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Per-request timeout (doc §5).
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -32,10 +28,9 @@ pub struct DeliveryResult {
 /// HMAC-SHA256, returning the hex-encoded signature.
 pub fn sign_body(signing_key_hex: &str, body: &[u8]) -> Result<String, String> {
     let key_bytes = hex::decode(signing_key_hex).map_err(|e| format!("bad signing key: {e}"))?;
-    let mut mac =
-        HmacSha256::new_from_slice(&key_bytes).map_err(|e| format!("bad HMAC key: {e}"))?;
-    mac.update(body);
-    Ok(hex::encode(mac.finalize().into_bytes()))
+    wavvon_identity::webhook_hmac_sha256(&key_bytes, body)
+        .map(hex::encode)
+        .map_err(|e| e.to_string())
 }
 
 /// Make a single HTTP delivery attempt: sign the envelope, POST it, and
@@ -86,11 +81,11 @@ pub async fn attempt_delivery(
     let resp = http_client
         .post(&webhook.url)
         .header("Content-Type", "application/json")
-        .header("X-Wavvon-Hub-Pubkey", hub_pubkey_hex)
-        .header("X-Wavvon-Signature", &signature)
-        .header("X-Wavvon-Signature-V1", &signature_v1)
-        .header("X-Wavvon-Timestamp", timestamp.to_string())
-        .header("X-Wavvon-Webhook-Id", &webhook.id)
+        .header(wavvon_identity::HEADER_HUB_PUBKEY, hub_pubkey_hex)
+        .header(wavvon_identity::HEADER_SIGNATURE_LEGACY, &signature)
+        .header(wavvon_identity::HEADER_SIGNATURE_V1, &signature_v1)
+        .header(wavvon_identity::HEADER_TIMESTAMP, timestamp.to_string())
+        .header(wavvon_identity::HEADER_WEBHOOK_ID, &webhook.id)
         .body(body_json)
         .timeout(REQUEST_TIMEOUT)
         .send()

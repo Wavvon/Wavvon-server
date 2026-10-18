@@ -449,6 +449,35 @@ pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Header names on every signed webhook delivery, slash/component dispatch
+/// and outgoing webhooks alike. Third parties read them from the vectors.
+pub const HEADER_HUB_PUBKEY: &str = "X-Wavvon-Hub-Pubkey";
+pub const HEADER_SIGNATURE_LEGACY: &str = "X-Wavvon-Signature";
+pub const HEADER_SIGNATURE_V1: &str = "X-Wavvon-Signature-V1";
+pub const HEADER_TIMESTAMP: &str = "X-Wavvon-Timestamp";
+pub const HEADER_WEBHOOK_ID: &str = "X-Wavvon-Webhook-Id";
+
+/// The 32-byte HMAC key an outgoing webhook signs with, derived from the
+/// raw secret the admin was shown (HKDF-SHA256, salt `wavvon-webhook-signing`,
+/// empty info). Receivers run the same derivation.
+pub fn outgoing_webhook_signing_key(raw_secret: &[u8]) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(b"wavvon-webhook-signing"), raw_secret);
+    let mut key = [0u8; 32];
+    // `expand` only fails for outputs over 255 * hash_len; 32 bytes is valid.
+    hk.expand(b"", &mut key)
+        .expect("HKDF expand with a 32-byte output cannot fail");
+    key
+}
+
+/// HMAC-SHA256 as outgoing webhooks use it, over either the raw body (legacy
+/// `X-Wavvon-Signature`) or `webhook_delivery_signing_bytes` (`-V1`).
+pub fn webhook_hmac_sha256(key: &[u8], message: &[u8]) -> Result<[u8; 32]> {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| anyhow!("bad HMAC key: {e}"))?;
+    mac.update(message);
+    Ok(mac.finalize().into_bytes().into())
+}
+
 /// What an origin hub signs over an alliance voice grant's payload JSON, so
 /// the grant cannot pass for anything else its key signs, nor anything else
 /// for a grant.
