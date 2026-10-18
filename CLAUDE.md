@@ -120,6 +120,10 @@ Layout under `crates/hub/src/`:
 
 Entry: `crates/identity/src/lib.rs`. Pure Rust, no async, no I/O.
 
+**Apache-2.0, unlike the rest of this repo (AGPL-3.0)**, so third-party
+clients and the Rust SDK can link it. Keep it that way: it may depend only on
+permissively licensed crates, never on another crate of this workspace.
+
 Defines every signed envelope type: `HomeHubList`, `SubkeyCert`, `PairingOffer`,
 DM envelopes, prefs blob, recovery request/attestation
 (`wavvon/recovery-request/v1`, `wavvon/recovery-attestation/v1`), and more. Each

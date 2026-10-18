@@ -208,6 +208,12 @@ for design rationale before proposing big changes.
 modified version requires offering the corresponding source to users —
 deliberately chosen for a federated platform.
 
+One exception: **`crates/identity` is [Apache-2.0](crates/identity/LICENSE)**.
+It is the wire format — the signed envelopes every client and SDK must
+reproduce byte for byte — and a permissive licence lets a third-party client,
+bot or SDK link it without taking on the AGPL. The hub that uses it stays
+AGPL.
+
 ## Built with AI assistance
 
 This project was built with substantial help from
