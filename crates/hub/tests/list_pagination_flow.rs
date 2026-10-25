@@ -254,3 +254,83 @@ async fn dm_history_non_member_is_still_rejected() {
         .await
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
+
+/// Channel history pages with the dialect's `cursor`, and `before` keeps
+/// working for clients that predate it (Wavvon-server#172). A thread pages
+/// forward with the same parameter instead of stopping at one page.
+#[tokio::test]
+async fn channel_history_and_threads_page_with_cursor() {
+    let (server, token) = common::setup_with_owner().await;
+    let channel: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "history" }))
+        .await
+        .json();
+    let url = format!("/channels/{}/messages", channel["id"].as_str().unwrap());
+
+    let mut posted = Vec::new();
+    for i in 0..5 {
+        let m: serde_json::Value = server
+            .post(&url)
+            .authorization_bearer(&token)
+            .json(&json!({ "content": format!("m{i}") }))
+            .await
+            .json();
+        posted.push(m["id"].as_str().unwrap().to_string());
+    }
+    let root = posted[0].clone();
+    let mut replies = Vec::new();
+    for i in 0..3 {
+        let m: serde_json::Value = server
+            .post(&url)
+            .authorization_bearer(&token)
+            .json(&json!({ "content": format!("r{i}"), "reply_to": root }))
+            .await
+            .json();
+        replies.push(m["id"].as_str().unwrap().to_string());
+    }
+
+    let page = |query: String| {
+        let (server, url, token) = (&server, url.clone(), token.clone());
+        async move {
+            let list: Vec<serde_json::Value> = server
+                .get(&format!("{url}?{query}"))
+                .authorization_bearer(&token)
+                .await
+                .json();
+            list.iter()
+                .map(|m| m["id"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    let mut walked = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let query = match &cursor {
+            Some(c) => format!("limit=3&cursor={c}"),
+            None => "limit=3".to_string(),
+        };
+        let ids = page(query).await;
+        if ids.is_empty() {
+            break;
+        }
+        cursor = ids.last().cloned();
+        walked.extend(ids);
+    }
+    let mut expected: Vec<String> = posted.iter().chain(&replies).cloned().collect();
+    expected.reverse();
+    assert_eq!(walked, expected, "newest first, no gaps or repeats");
+
+    assert_eq!(
+        page(format!("limit=3&before={}", expected[2])).await,
+        page(format!("limit=3&cursor={}", expected[2])).await,
+        "before is the same cursor"
+    );
+
+    let first = page(format!("thread_root={root}&limit=2")).await;
+    assert_eq!(first, replies[..2]);
+    let rest = page(format!("thread_root={root}&limit=2&cursor={}", first[1])).await;
+    assert_eq!(rest, replies[2..]);
+}
