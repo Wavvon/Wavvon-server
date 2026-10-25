@@ -25,9 +25,6 @@ pub const VOICE_UDP_PORT: &str = "WAVVON_VOICE_UDP_PORT";
 /// PostgreSQL connection URL for the hub.
 pub const DATABASE_URL: &str = "WAVVON_DATABASE_URL";
 
-/// Read-replica PostgreSQL URL. Optional.
-pub const DATABASE_READ_URL: &str = "WAVVON_DATABASE_READ_URL";
-
 /// Size of the hub's PostgreSQL connection pool.
 pub const DB_MAX_CONNECTIONS: &str = "WAVVON_DB_MAX_CONNECTIONS";
 
@@ -81,7 +78,6 @@ pub const SPAWNABLE: &[&str] = &[
     HTTP_PORT,
     VOICE_UDP_PORT,
     DATABASE_URL,
-    DATABASE_READ_URL,
     DB_MAX_CONNECTIONS,
     FARM_URL,
     OWNER_PUBKEY,

@@ -45,6 +45,32 @@ fn signed_cert(
     }
 }
 
+/// Make the hub know an identity's master, the way a web client does on its
+/// first join: the device authenticates (no cert yet — it has none), then
+/// registers the cert that links its roster pubkey to the master a designation
+/// is stored under. `PUT`ting a designation for a master the hub has never met
+/// is refused, so every designation test has to arrive the way a client does.
+async fn join_and_link(
+    server: &axum_test::TestServer,
+    identity: &Identity,
+) -> wavvon_identity::MasterIdentity {
+    let master = identity.master().unwrap();
+    let token = common::authenticate(server, identity).await;
+    let cert = signed_cert(
+        &master,
+        &identity.public_key_hex(),
+        "Test device",
+        1_700_000_000,
+    );
+    server
+        .post(&format!("/identity/{}/devices", master.public_key_hex()))
+        .authorization_bearer(&token)
+        .json(&cert)
+        .await
+        .assert_status_ok();
+    master
+}
+
 fn signed_revocation(
     master: &wavvon_identity::MasterIdentity,
     subkey_pubkey: &str,
@@ -80,7 +106,8 @@ fn signed_prefs(
 #[tokio::test]
 async fn designation_roundtrip() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let designation = signed_designation(
@@ -109,7 +136,8 @@ async fn designation_roundtrip() {
 #[tokio::test]
 async fn designation_rejects_stale_sequence() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let d1 = signed_designation(&master, vec!["https://a.example".into()], 1, 5);
@@ -131,7 +159,8 @@ async fn designation_rejects_stale_sequence() {
 #[tokio::test]
 async fn designation_rejects_url_body_mismatch() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let other = Identity::generate().master().unwrap();
 
     let d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
@@ -145,7 +174,8 @@ async fn designation_rejects_url_body_mismatch() {
 #[tokio::test]
 async fn designation_rejects_bad_signature() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let mut d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
@@ -155,6 +185,148 @@ async fn designation_rejects_bad_signature() {
         .json(&d)
         .await;
     assert_eq!(resp.status_code(), StatusCode::BAD_REQUEST);
+}
+
+/// The write stays unauthenticated — the desktop publishes to every hub in the
+/// list and holds a session with at most one of them — so what bounds it is
+/// that the hub has met the identity. A signature proves who signed, not that
+/// anybody here has any reason to keep the row.
+#[tokio::test]
+async fn designation_refuses_a_master_the_hub_has_never_met() {
+    let server = common::setup().await;
+    let master = Identity::generate().master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    let d = signed_designation(&master, vec!["https://a.example".into()], 1, 1);
+    let resp = server
+        .post(&format!("/identity/{master_pubkey}/designation"))
+        .json(&d)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    // And nothing was stored: the refusal is a refusal, not a slower write.
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/designation"))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
+}
+
+/// Authenticate as a bare device subkey, the way a paired device does on a hub
+/// that has not met it yet: challenge, sign, no cert presented.
+async fn auth_as_subkey(server: &axum_test::TestServer, subkey: &DeviceSubkey) -> String {
+    let pub_key = subkey.public_key_hex();
+    let resp = server
+        .post("/auth/challenge")
+        .json(&serde_json::json!({ "public_key": pub_key }))
+        .await;
+    let challenge = resp.json::<serde_json::Value>()["challenge"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let signature = subkey.sign(&hex::decode(&challenge).unwrap());
+    let resp = server
+        .post("/auth/verify")
+        .json(&serde_json::json!({
+            "public_key": pub_key,
+            "challenge": challenge,
+            "signature": hex::encode(signature.to_bytes()),
+        }))
+        .await;
+    resp.assert_status_ok();
+    resp.json::<serde_json::Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn device_cert_refuses_an_unauthenticated_caller() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let master = identity.master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    let cert = signed_cert(&master, &identity.public_key_hex(), "desktop", 1);
+    let resp = server
+        .post(&format!("/identity/{master_pubkey}/devices"))
+        .json(&cert)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::UNAUTHORIZED);
+}
+
+/// The attack the session gate exists for. `SubkeyCert::verify` checks the
+/// master's signature over bytes in which `subkey_pubkey` is an opaque string,
+/// so a throwaway master can name *anybody* as its device. Mallory names
+/// Alice's roster pubkey; `master_of` would then resolve Alice to Mallory's
+/// master and deliver Alice's direct messages wherever Mallory says.
+#[tokio::test]
+async fn device_cert_refuses_a_subkey_the_caller_does_not_hold() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let mallory = Identity::generate();
+    common::authenticate(&server, &alice).await;
+    let mallory_token = common::authenticate(&server, &mallory).await;
+
+    // Free to mint, correctly signed, and about somebody else entirely.
+    let mallory_master = mallory.master().unwrap();
+    let mallory_master_pubkey = mallory_master.public_key_hex();
+    let cert = signed_cert(
+        &mallory_master,
+        &alice.public_key_hex(),
+        "Alice's phone, allegedly",
+        1,
+    );
+
+    let resp = server
+        .post(&format!("/identity/{mallory_master_pubkey}/devices"))
+        .authorization_bearer(&mallory_token)
+        .json(&cert)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    // The refusal is a refusal, not a slower write.
+    let resp = server
+        .get(&format!("/identity/{mallory_master_pubkey}/devices"))
+        .await;
+    resp.assert_status_ok();
+    assert!(resp.json::<Vec<SubkeyCert>>().is_empty());
+}
+
+/// A device belongs to one identity. The session gate already stops a stranger
+/// claiming somebody else's key, but the holder re-registering under a second
+/// master would leave the subkey named by two — and `master_of` picks a row,
+/// not an identity.
+#[tokio::test]
+async fn device_cert_refuses_a_key_already_claimed_by_another_master() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let first = identity.master().unwrap();
+
+    server
+        .post(&format!("/identity/{}/devices", first.public_key_hex()))
+        .authorization_bearer(&token)
+        .json(&signed_cert(
+            &first,
+            &identity.public_key_hex(),
+            "desktop",
+            1,
+        ))
+        .await
+        .assert_status_ok();
+
+    let second = Identity::generate().master().unwrap();
+    let resp = server
+        .post(&format!("/identity/{}/devices", second.public_key_hex()))
+        .authorization_bearer(&token)
+        .json(&signed_cert(
+            &second,
+            &identity.public_key_hex(),
+            "desktop",
+            2,
+        ))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -170,13 +342,21 @@ async fn devices_post_and_list() {
     let cert0 = signed_cert(&master, &subkey_zero.public_key_hex(), "desktop", 1);
     let cert1 = signed_cert(&master, &phone.public_key_hex(), "phone", 2);
 
+    // Each device registers its own cert, under its own session — which is the
+    // only way the certs get here now, and matches what the clients do: the
+    // first device at its first auth, the phone at its own.
+    let desktop_token = common::authenticate(&server, &identity).await;
     server
         .post(&format!("/identity/{master_pubkey}/devices"))
+        .authorization_bearer(&desktop_token)
         .json(&cert0)
         .await
         .assert_status_ok();
+
+    let phone_token = auth_as_subkey(&server, &phone).await;
     server
         .post(&format!("/identity/{master_pubkey}/devices"))
+        .authorization_bearer(&phone_token)
         .json(&cert1)
         .await
         .assert_status_ok();
@@ -194,7 +374,10 @@ async fn devices_post_and_list() {
 #[tokio::test]
 async fn revocation_post_and_list() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    // The hub has to have met the master: a revocation is bounded the same way
+    // a designation is, and for the same reason.
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let compromised = DeviceSubkey::generate("phone".into()).public_key_hex();
@@ -225,7 +408,8 @@ async fn revocation_post_and_list() {
 #[tokio::test]
 async fn prefs_blob_roundtrip_with_version_check() {
     let server = common::setup().await;
-    let master = Identity::generate().master().unwrap();
+    let identity = Identity::generate();
+    let master = join_and_link(&server, &identity).await;
     let master_pubkey = master.public_key_hex();
 
     let v1 = signed_prefs(&master, 1, b"first version");
@@ -295,4 +479,51 @@ async fn empty_resources_return_404_or_empty() {
     resp.assert_status_ok();
     let v: Vec<RevocationEntry> = resp.json();
     assert!(v.is_empty());
+}
+
+/// The designation was bounded in #59; the revocation and the prefs blob are
+/// the same shape and were not. Each stores rows for a master this hub has
+/// never met, from a keypair that costs nothing to mint — and the prefs blob
+/// stores an opaque ciphertext, so the bytes were whatever the sender chose.
+#[tokio::test]
+async fn revocation_refuses_a_master_the_hub_has_never_met() {
+    let server = common::setup().await;
+    let master = Identity::generate().master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    let entry = signed_revocation(
+        &master,
+        &DeviceSubkey::generate("phone".into()).public_key_hex(),
+        42,
+    );
+    let resp = server
+        .post(&format!("/identity/{master_pubkey}/revocations"))
+        .json(&entry)
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    // A refusal, not a slower write.
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/revocations"))
+        .await;
+    resp.assert_status_ok();
+    assert!(resp.json::<Vec<RevocationEntry>>().is_empty());
+}
+
+#[tokio::test]
+async fn prefs_refuses_a_master_the_hub_has_never_met() {
+    let server = common::setup().await;
+    let master = Identity::generate().master().unwrap();
+    let master_pubkey = master.public_key_hex();
+
+    let resp = server
+        .put(&format!("/identity/{master_pubkey}/prefs"))
+        .json(&signed_prefs(&master, 1, b"a blob nobody here asked for"))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::FORBIDDEN);
+
+    let resp = server
+        .get(&format!("/identity/{master_pubkey}/prefs"))
+        .await;
+    assert_eq!(resp.status_code(), StatusCode::NOT_FOUND);
 }

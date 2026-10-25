@@ -9,7 +9,17 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
+use crate::routes::app_models::HubEvent;
 use crate::state::AppState;
+
+/// How far back `Resume` can replay. The audit log is the source, and this is
+/// the window a client may be away for and still catch up rather than being
+/// told to resync from scratch.
+const REPLAY_WINDOW_SECS: i64 = 72 * 3600;
+
+/// Rows pushed before yielding to the runtime. A long replay is a tight loop
+/// otherwise, and it starves everything else on this thread.
+const REPLAY_BATCH_SIZE: usize = 100;
 
 /// Publish a hub event.
 ///
@@ -124,18 +134,14 @@ pub async fn publish_hub_event(
             }
         }
 
-        let envelope_payload = payload.clone();
-
-        let envelope = serde_json::json!({
-            "type": "hub_event",
-            "seq": seq,
-            "event": event_type,
-            "hub_url": hub_url,
-            "at": now,
-            "payload": envelope_payload,
-        });
-
-        let json = envelope.to_string();
+        let json = serde_json::to_string(&HubEvent::new(
+            seq,
+            event_type,
+            hub_url.as_str(),
+            now,
+            payload.clone(),
+        ))
+        .unwrap_or_default();
         // Deliver to every active session for this pubkey. Non-blocking
         // send; a full channel drops the event for that session only.
         for tx in per_app.values() {
@@ -156,8 +162,44 @@ pub async fn replay_events_for_app(
     since_seq: i64,
     tx: &tokio::sync::mpsc::Sender<String>,
 ) -> ReplayResult {
+    let events = match events_for_app(state, app_pubkey, Some(since_seq), usize::MAX).await {
+        Ok(events) => events,
+        Err(unavailable) => return unavailable,
+    };
+
+    let mut replayed = 0usize;
+    for (i, envelope) in events.iter().enumerate() {
+        if tx
+            .send(serde_json::to_string(envelope).unwrap_or_default())
+            .await
+            .is_err()
+        {
+            // App disconnected mid-replay.
+            break;
+        }
+        replayed += 1;
+
+        // Yield every batch so a long replay does not starve the runtime.
+        if (i + 1) % REPLAY_BATCH_SIZE == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    ReplayResult::Complete { replayed }
+}
+
+/// The audit-log rows after `since_seq` that an app subscribed to and may
+/// read, as `hub_event` envelopes, at most `limit` of them. With no
+/// `since_seq` it starts at the beginning of the 72-hour window. The one
+/// source for both Resume and `GET /me/events`.
+pub async fn events_for_app(
+    state: &Arc<AppState>,
+    app_pubkey: &str,
+    since_seq: Option<i64>,
+    limit: usize,
+) -> Result<Vec<HubEvent>, ReplayResult> {
     let now = crate::auth::handlers::unix_timestamp();
-    let window_start = now - 72 * 3600;
+    let window_start = now - REPLAY_WINDOW_SECS;
 
     // Find the earliest seq still in the window.
     let earliest: Option<(i64, i64)> =
@@ -171,16 +213,17 @@ pub async fn replay_events_for_app(
         Some((s, a)) => (s, a),
         None => {
             // Nothing in the window at all — nothing to replay.
-            return ReplayResult::Complete { replayed: 0 };
+            return Ok(Vec::new());
         }
     };
 
+    let since_seq = since_seq.unwrap_or(earliest_seq - 1);
     // If since_seq is before the window, signal unavailable.
     if since_seq < earliest_seq - 1 {
-        return ReplayResult::Unavailable {
+        return Err(ReplayResult::Unavailable {
             earliest_seq,
             earliest_at,
-        };
+        });
     }
 
     // Collect the app's subscribed event types.
@@ -193,7 +236,7 @@ pub async fn replay_events_for_app(
     .unwrap_or_default();
 
     if sub_events.is_empty() {
-        return ReplayResult::Complete { replayed: 0 };
+        return Ok(Vec::new());
     }
 
     // Fetch rows in order from since_seq+1.
@@ -223,11 +266,12 @@ pub async fn replay_events_for_app(
     .unwrap_or_default();
 
     let hub_url = crate::apps::dispatch::hub_url_public(state).await;
-    let mut replayed = 0usize;
-    let batch_size = 100usize;
-    let mut batch_count = 0usize;
+    let mut events = Vec::new();
 
-    for row in &rows {
+    for row in rows {
+        if events.len() >= limit {
+            break;
+        }
         // Filter by subscription.
         if !sub_events.iter().any(|e| e == &row.event_type) {
             continue;
@@ -249,36 +293,21 @@ pub async fn replay_events_for_app(
         let envelope_payload: serde_json::Value =
             serde_json::from_str(&row.payload_json).unwrap_or(serde_json::Value::Null);
 
-        let envelope = serde_json::json!({
-            "type": "hub_event",
-            "seq": row.seq,
-            "event": row.event_type,
-            "hub_url": hub_url,
-            "at": row.at,
-            "actor_pubkey": row.actor_pubkey,
-            "target_pubkey": row.target_pubkey,
-            "channel_id": row.channel_id,
-            "payload": envelope_payload,
-            "replayed": true,
-        });
-
-        if tx.send(envelope.to_string()).await.is_err() {
-            // App disconnected mid-replay.
-            break;
-        }
-
-        replayed += 1;
-        batch_count += 1;
-
-        // Yield every `batch_size` messages so we don't starve the tokio
-        // runtime on a large replay.
-        if batch_count >= batch_size {
-            batch_count = 0;
-            tokio::task::yield_now().await;
-        }
+        let mut envelope = HubEvent::new(
+            row.seq,
+            row.event_type.as_str(),
+            hub_url.as_str(),
+            row.at,
+            envelope_payload,
+        );
+        envelope.actor_pubkey = row.actor_pubkey;
+        envelope.target_pubkey = row.target_pubkey;
+        envelope.channel_id = row.channel_id;
+        envelope.replayed = true;
+        events.push(envelope);
     }
 
-    ReplayResult::Complete { replayed }
+    Ok(events)
 }
 
 pub enum ReplayResult {

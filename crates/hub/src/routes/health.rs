@@ -184,11 +184,6 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
     })
 }
 
-#[derive(Serialize)]
-pub struct HealthResponse {
-    pub status: String,
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct InfoResponse {
     pub name: String,

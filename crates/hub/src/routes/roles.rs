@@ -331,23 +331,28 @@ pub async fn delete_role(
         ));
     }
 
-    sqlx::query("DELETE FROM user_roles WHERE role_id = $1")
-        .bind(&role_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    sqlx::query("DELETE FROM role_permissions WHERE role_id = $1")
-        .bind(&role_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    sqlx::query("DELETE FROM roles WHERE id = $1")
-        .bind(&role_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // One transaction, and every reference first: `invites.grant_role_id`
+    // has no ON DELETE, so an invite that ever granted this role -- even a
+    // spent one -- used to fail the last statement after the role had
+    // already been stripped from every member. The default invite role is a
+    // setting rather than a foreign key, and would otherwise go on naming a
+    // role that no longer exists.
+    let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+    for sql in [
+        "UPDATE invites SET grant_role_id = NULL WHERE grant_role_id = $1",
+        "UPDATE hub_settings SET value = '' WHERE key = 'default_invite_role_id' AND value = $1",
+        "DELETE FROM user_roles WHERE role_id = $1",
+        "DELETE FROM role_permissions WHERE role_id = $1",
+        "DELETE FROM roles WHERE id = $1",
+    ] {
+        sqlx::query(sql)
+            .bind(&role_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+    }
+    tx.commit().await.map_err(db_err)?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -457,7 +462,7 @@ pub async fn list_role_members(
     perms.require(ROLES_MANAGE)?;
 
     let members: Vec<String> =
-        sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+        sqlx::query_scalar("SELECT user_public_key FROM member_roles WHERE role_id = $1")
             .bind(&role_id)
             .fetch_all(&state.db)
             .await
@@ -510,7 +515,7 @@ async fn fetch_user_roles_response(
         "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at,
                 r.color, r.icon, r.category_id
          FROM roles r
-         INNER JOIN user_roles ur ON r.id = ur.role_id
+         INNER JOIN member_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )

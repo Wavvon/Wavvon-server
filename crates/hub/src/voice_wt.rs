@@ -13,6 +13,7 @@ use std::sync::Arc;
 use wtransport::endpoint::{endpoint_side, IncomingSession};
 use wtransport::{Endpoint, Identity as WtIdentity, ServerConfig};
 
+use crate::auth::handlers::unix_timestamp;
 use crate::state::AppState;
 
 /// Self-signed cert validity window (voice-transport-v2.md) — the maximum
@@ -43,13 +44,6 @@ fn self_signed_sans() -> [&'static str; 3] {
     ["localhost", "127.0.0.1", "::1"]
 }
 
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
 fn cert_hash_hex(identity: &WtIdentity) -> String {
     hex::encode(identity.certificate_chain().as_slice()[0].hash().as_ref())
 }
@@ -62,7 +56,7 @@ struct SelfSignedVoiceCert {
 
 impl SelfSignedVoiceCert {
     fn needs_rotation(&self) -> bool {
-        (unix_now() - self.created_at) / 86400 >= VALIDITY_DAYS - ROTATE_WHEN_REMAINING_DAYS
+        (unix_timestamp() - self.created_at) / 86400 >= VALIDITY_DAYS - ROTATE_WHEN_REMAINING_DAYS
     }
 }
 
@@ -73,7 +67,7 @@ async fn generate_and_persist(port: u16) -> anyhow::Result<SelfSignedVoiceCert> 
         .validity_days(VALIDITY_DAYS as u32)
         .build()
         .map_err(|e| anyhow::anyhow!("invalid voice WT self-signed cert SANs: {e:?}"))?;
-    let created_at = unix_now();
+    let created_at = unix_timestamp();
 
     // Port 0 = ephemeral bind (tests): the process can't be restarted onto
     // the "same" port, so persistence buys nothing — keep it in memory.

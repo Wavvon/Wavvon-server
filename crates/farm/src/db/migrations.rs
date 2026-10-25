@@ -110,7 +110,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             visibility        TEXT NOT NULL DEFAULT 'private'
                                   CHECK(visibility IN ('public', 'private')),
             process_port      INTEGER,
-            db_path           TEXT NOT NULL,
             created_at        BIGINT NOT NULL,
             suspended_at      BIGINT,
             suspension_reason TEXT,
@@ -209,14 +208,16 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     //
     // Replaces `db_path`, a SQLite-era file path nothing consumed: the farm
     // passed no database configuration at all, so every hub it spawned fell
-    // back to the same default URL and they all shared one database. `db_path`
-    // stays (additive-only) but is dead.
+    // back to the same default URL and they all shared one database.
     //
     // Nullable because rows created before this exist; a hub with no db_url
     // gets one provisioned on its next spawn.
     let _ = sqlx::query("ALTER TABLE hubs ADD COLUMN db_url TEXT")
         .execute(pool)
         .await;
+    sqlx::query("ALTER TABLE hubs DROP COLUMN IF EXISTS db_path")
+        .execute(pool)
+        .await?;
 
     // Placement capacity (routes/placement.rs). How many hubs each node may
     // hold: a registered server agent, and the farm's own process.

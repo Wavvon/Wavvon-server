@@ -218,3 +218,29 @@ async fn leaving_an_invite_only_hub_re_arms_the_invite_gate() {
         resp.status_code()
     );
 }
+
+/// Leaving sets approval_status = 'left', and rejoining used to leave it
+/// there: no certs, no alliance voice, and on a hub with an approval queue,
+/// no queue either.
+#[tokio::test]
+async fn coming_back_after_leaving_is_joining_again() {
+    let server = common::setup().await;
+    common::authenticate(&server, &Identity::generate()).await;
+    let member = Identity::generate();
+    let token = join(&server, &member).await;
+    server
+        .delete("/me")
+        .authorization_bearer(&token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    join(&server, &member).await;
+    let (status, is_member): (String, bool) =
+        sqlx::query_as("SELECT approval_status, is_member FROM users WHERE public_key = $1")
+            .bind(member.public_key_hex())
+            .fetch_one(&server.state().db)
+            .await
+            .unwrap();
+    assert!(is_member);
+    assert_eq!(status, "approved");
+}

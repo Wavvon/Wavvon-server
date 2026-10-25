@@ -11,16 +11,13 @@ struct HubProcess {
 pub struct HubManager {
     hubs: RwLock<HashMap<String, HubProcess>>,
     hub_bin: String,
-    #[allow(dead_code)]
-    base_port: u16,
 }
 
 impl HubManager {
-    pub fn new(hub_bin: String, base_port: u16) -> Self {
+    pub fn new(hub_bin: String) -> Self {
         Self {
             hubs: RwLock::new(HashMap::new()),
             hub_bin,
-            base_port,
         }
     }
 

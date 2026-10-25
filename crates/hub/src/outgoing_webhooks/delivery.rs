@@ -3,14 +3,11 @@
 //! Retry scheduling across attempts lives in `worker.rs`; this module only
 //! knows how to make one HTTP attempt and record its outcome.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::models::{OutgoingWebhook, WebhookEventEnvelope};
-
-type HmacSha256 = Hmac<Sha256>;
+use super::models::OutgoingWebhook;
+use crate::routes::app_models::HubEvent;
 
 /// Per-request timeout (doc §5).
 pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -31,10 +28,9 @@ pub struct DeliveryResult {
 /// HMAC-SHA256, returning the hex-encoded signature.
 pub fn sign_body(signing_key_hex: &str, body: &[u8]) -> Result<String, String> {
     let key_bytes = hex::decode(signing_key_hex).map_err(|e| format!("bad signing key: {e}"))?;
-    let mut mac =
-        HmacSha256::new_from_slice(&key_bytes).map_err(|e| format!("bad HMAC key: {e}"))?;
-    mac.update(body);
-    Ok(hex::encode(mac.finalize().into_bytes()))
+    wavvon_identity::webhook_hmac_sha256(&key_bytes, body)
+        .map(hex::encode)
+        .map_err(|e| e.to_string())
 }
 
 /// Make a single HTTP delivery attempt: sign the envelope, POST it, and
@@ -43,7 +39,7 @@ pub async fn attempt_delivery(
     http_client: &reqwest::Client,
     hub_pubkey_hex: &str,
     webhook: &OutgoingWebhook,
-    envelope: &WebhookEventEnvelope,
+    envelope: &HubEvent,
 ) -> DeliveryResult {
     let body_json = match serde_json::to_string(envelope) {
         Ok(j) => j,
@@ -68,14 +64,28 @@ pub async fn attempt_delivery(
     };
 
     let timestamp = crate::auth::handlers::unix_timestamp();
+    let signature_v1 = match sign_body(
+        &webhook.signing_key,
+        &wavvon_identity::webhook_delivery_signing_bytes(timestamp as u64, body_json.as_bytes()),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            return DeliveryResult {
+                success: false,
+                status_code: None,
+                error_msg: Some(e),
+            }
+        }
+    };
 
     let resp = http_client
         .post(&webhook.url)
         .header("Content-Type", "application/json")
-        .header("X-Wavvon-Hub-Pubkey", hub_pubkey_hex)
-        .header("X-Wavvon-Signature", &signature)
-        .header("X-Wavvon-Timestamp", timestamp.to_string())
-        .header("X-Wavvon-Webhook-Id", &webhook.id)
+        .header(wavvon_identity::HEADER_HUB_PUBKEY, hub_pubkey_hex)
+        .header(wavvon_identity::HEADER_SIGNATURE_LEGACY, &signature)
+        .header(wavvon_identity::HEADER_SIGNATURE_V1, &signature_v1)
+        .header(wavvon_identity::HEADER_TIMESTAMP, timestamp.to_string())
+        .header(wavvon_identity::HEADER_WEBHOOK_ID, &webhook.id)
         .body(body_json)
         .timeout(REQUEST_TIMEOUT)
         .send()
@@ -204,5 +214,29 @@ pub async fn apply_outcome(db: &PgPool, webhook_id: &str, success: bool) -> bool
         true
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The receiver's whole computation, pinned: secret -> HKDF key -> HMAC
+    /// over the timestamp-carrying bytes. Third-party verifiers implement it.
+    #[test]
+    fn signature_v1_vector() {
+        let key = super::super::routes::derive_signing_key(&[7u8; 32]);
+        assert_eq!(
+            key,
+            "351763f9898ddacf3bb67a23c046e219c03c85e5097a965a35f940bc8ae93c87"
+        );
+        let bytes = wavvon_identity::webhook_delivery_signing_bytes(
+            1_700_000_000,
+            br#"{"type":"hub_event"}"#,
+        );
+        assert_eq!(
+            sign_body(&key, &bytes).unwrap(),
+            "42abcf09c2fbd629a8ba1bff16e7f315b27ad167fb36a2f68e648716ee3079d3"
+        );
     }
 }

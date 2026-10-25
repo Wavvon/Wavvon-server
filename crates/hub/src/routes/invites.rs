@@ -66,6 +66,20 @@ pub async fn create_invite(
     let mut max_uses = req.max_uses;
     let mut expires_at = req.expires_in_seconds.map(|s| now + s);
 
+    // A bound invite names its recipient, so it is single-use by definition
+    // and the key had better be a key: a typo mints a code nobody on earth
+    // can redeem, and the admin finds out when the person they invited says
+    // it did not work.
+    if let Some(bound) = req.bound_pubkey.as_deref() {
+        if bound.len() != 64 || hex::decode(bound).is_err() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "bound_pubkey must be 64 hex characters".to_string(),
+            ));
+        }
+        max_uses = Some(1);
+    }
+
     if let Some(role_id) = req.grant_role_id.as_deref() {
         // Can't mint an invite that grants a role at or above your own —
         // same rule used for direct role assignment (routes/roles.rs).
@@ -118,7 +132,7 @@ pub async fn create_invite(
     let code = generate_invite_code();
 
     sqlx::query(
-        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at, grant_role_id) VALUES ($1, $2, $3, 0, $4, $5, $6)",
+        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey) VALUES ($1, $2, $3, 0, $4, $5, $6, $7)",
     )
     .bind(&code)
     .bind(&user.public_key)
@@ -126,6 +140,7 @@ pub async fn create_invite(
     .bind(expires_at)
     .bind(now)
     .bind(&req.grant_role_id)
+    .bind(&req.bound_pubkey)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -141,6 +156,7 @@ pub async fn create_invite(
             expires_at,
             created_at: now,
             grant_role_id: req.grant_role_id,
+            bound_pubkey: req.bound_pubkey,
         }),
     ))
 }
@@ -183,7 +199,7 @@ pub async fn list_invites(
     // short page, and a client paging to exhaustion would read that as the end
     // of the list.
     let rows = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey FROM invites
          WHERE ($1::text IS NULL OR (created_at, code) <
                 ((SELECT created_at FROM invites WHERE code = $1), $1))
            AND ($3 OR ((max_uses IS NULL OR uses < max_uses)
@@ -210,6 +226,7 @@ pub async fn list_invites(
                 expires_at: r.expires_at,
                 created_at: r.created_at,
                 grant_role_id: r.grant_role_id,
+                bound_pubkey: r.bound_pubkey,
             })
             .collect(),
     ))
@@ -232,26 +249,59 @@ pub async fn revoke_invite(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Called during auth to validate and consume an invite code.
-/// Returns `Ok((created_by, grant_role_id))` if the code is valid —
-/// `created_by` is the invite's minter (needed by `apply_invite_role_grant`'s
-/// redemption-time priority re-check) and `grant_role_id` is the role (if
-/// any) the caller should additionally assign to the joining user (task
-/// #34) — or `Err` if the code is invalid, expired, or exhausted.
+/// May this invite be redeemed by the identity now presenting it?
+///
+/// A bearer invite says yes to everyone — that is what a bearer code is. A
+/// bound one says yes to one identity, and the subtlety is which key that
+/// identity shows up as. The admin binds whatever key they were handed, and
+/// that is not always what arrives:
+///
+/// - a program has one keypair and presents it directly;
+/// - a person may arrive on a **paired device**, whose roster pubkey is a
+///   subkey that resolves to a canonical identity — a third value;
+/// - a key copied out of an invite-directory listing is the **master**.
+///
+/// All three are already resolved before either redemption path runs, so a
+/// bound invite answers to any of them. Binding to one would refuse a
+/// legitimate holder for a reason nobody could see, which is the failure
+/// shape this repo keeps finding. See the wiki's `pubkey-bound-invites.md`.
+pub(crate) fn redeemable_by(bound_pubkey: Option<&str>, candidates: &[&str]) -> bool {
+    match bound_pubkey {
+        None => true,
+        Some(bound) => candidates.contains(&bound),
+    }
+}
+
+/// What a redeemed invite tells the caller.
+pub struct InviteRedemption {
+    /// The invite's minter — `apply_invite_role_grant` re-checks priority
+    /// against them at redemption time.
+    pub created_by: String,
+    /// The role (if any) to assign alongside `builtin-everyone` (task #34).
+    pub grant_role_id: Option<String>,
+}
+
+/// Called during auth to validate and consume an invite code, for the
+/// identity in `candidates` — the presented key, the canonical identity it
+/// resolves to, and the master its cert names (see [`redeemable_by`]).
+///
+/// `Err` if the code is invalid, expired, exhausted, or issued to somebody
+/// else.
 ///
 /// Uses a single atomic UPDATE with the guard conditions so that
 /// concurrent registrations cannot over-consume a limited invite.
 pub async fn validate_and_use_invite(
     db: &sqlx::PgPool,
     code: &str,
-) -> Result<(String, Option<String>), (StatusCode, String)> {
+    candidates: &[&str],
+) -> Result<InviteRedemption, (StatusCode, String)> {
     let now = crate::auth::handlers::unix_timestamp();
 
     // First verify the code exists and hasn't expired (expiry is checked here
     // because SQLite doesn't have a clean way to distinguish "not found" from
     // "max_uses exceeded" without a separate read).
     let invite = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites WHERE code = $1",
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey FROM invites WHERE code = $1",
     )
     .bind(code)
     .fetch_optional(db)
@@ -263,6 +313,18 @@ pub async fn validate_and_use_invite(
         if now > expires_at {
             return Err((StatusCode::FORBIDDEN, "Invite code has expired".to_string()));
         }
+    }
+
+    // Its own message rather than "invalid code". The code is high-entropy
+    // and this path already distinguishes invalid from expired from used-up;
+    // an operator debugging a program that will not join deserves the real
+    // answer, and refusing before the increment means a wrong holder cannot
+    // burn the single use the right one is waiting for.
+    if !redeemable_by(invite.bound_pubkey.as_deref(), candidates) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This invite was issued to a different key".to_string(),
+        ));
     }
 
     // Atomic conditional increment: only increments when uses < max_uses (or max_uses is NULL).
@@ -283,7 +345,10 @@ pub async fn validate_and_use_invite(
         ));
     }
 
-    Ok((invite.created_by, invite.grant_role_id))
+    Ok(InviteRedemption {
+        created_by: invite.created_by,
+        grant_role_id: invite.grant_role_id,
+    })
 }
 
 /// Applies an invite's `grant_role_id` (if any) — or, absent an explicit
@@ -479,12 +544,12 @@ pub async fn maybe_mint_first_boot_owner_invite(
 }
 
 /// GET /join/:code — public; returns hub info so a visitor can preview before joining.
-pub async fn get_join_info(
+async fn get_join_info(
     State(state): State<Arc<AppState>>,
     Path(code): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let invite = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites WHERE code = $1",
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey FROM invites WHERE code = $1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -530,7 +595,7 @@ pub async fn join_with_invite(
     let now = crate::auth::handlers::unix_timestamp();
 
     let invite = sqlx::query_as::<_, InviteRow>(
-        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id FROM invites WHERE code = $1",
+        "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey FROM invites WHERE code = $1",
     )
     .bind(&code)
     .fetch_optional(&state.db)
@@ -550,6 +615,26 @@ pub async fn join_with_invite(
             return Err((StatusCode::GONE, "Invite has been fully used".to_string()));
         }
     }
+
+    // A bound invite names who may redeem it, on this path as on the other
+    // one. This session already resolved to a canonical identity, and
+    // `AuthUser` carries the master alongside it when one is known.
+    let mut candidates = vec![user.public_key.as_str()];
+    if let Some(master) = user.master_pubkey.as_deref() {
+        candidates.push(master);
+    }
+    if !redeemable_by(invite.bound_pubkey.as_deref(), &candidates) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This invite was issued to a different key".to_string(),
+        ));
+    }
+
+    // A farm-token caller who is not yet a member reaches this route past the
+    // invite gate (the invite in the path is the gate), so the admission that
+    // `/auth/verify` performs for a presented code happens here. A no-op for a
+    // member.
+    crate::auth::handlers::admit_member(&state.db, &user.public_key).await?;
 
     // Increment use count
     sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1")
@@ -592,6 +677,19 @@ pub async fn is_invite_only(db: &sqlx::PgPool) -> Result<bool, (StatusCode, Stri
     Ok(value.as_deref() == Some("true"))
 }
 
+/// The refusal a first-contact identity gets on a closed hub when it presents
+/// no invite. One copy, shared by `/auth/verify` and the farm-token path in
+/// `AuthUser`, so the two doors cannot disagree about what "closed" means.
+pub async fn refuse_if_invite_only(db: &sqlx::PgPool) -> Result<(), (StatusCode, String)> {
+    if is_invite_only(db).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub requires an invite code".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn generate_invite_code() -> String {
     let mut bytes = [0u8; 6];
     rand::thread_rng().fill_bytes(&mut bytes);
@@ -607,6 +705,7 @@ struct InviteRow {
     expires_at: Option<i64>,
     created_at: i64,
     grant_role_id: Option<String>,
+    bound_pubkey: Option<String>,
 }
 
 /// GET /join/:code — the same URL for a person and for a program.

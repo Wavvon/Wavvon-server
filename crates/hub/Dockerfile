@@ -79,13 +79,23 @@ FROM debian:trixie-slim
 # is told to run before every upgrade fails on the box where they run it.
 # Trixie's client is PG 17, which dumps from every server back to our declared
 # floor of 14 (pg_dump is forward-compatible with older servers).
+# libxml2: the bundled PostgreSQL (used when WAVVON_DATABASE_URL is unset)
+# links it dynamically, and trixie-slim does not ship it.
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     postgresql-client \
+    libxml2 \
     && rm -rf /var/lib/apt/lists/*
 
-# The hub writes hub.db and hub_identity.json into the working directory.
-# Mount a named volume here so data survives container restarts.
+# initdb refuses to run as root, so bundled mode needs an unprivileged user.
+# The ownership is copied into a fresh named volume; a bind-mounted host
+# directory has to be chowned to this uid by the operator.
+RUN groupadd --system --gid 10001 wavvon \
+    && useradd --system --uid 10001 --gid wavvon --home-dir /data wavvon \
+    && mkdir -p /data && chown wavvon:wavvon /data
+
+# The hub writes hub_identity.json (and, in bundled mode, the database) into
+# the working directory. Mount a volume here so data survives restarts.
 WORKDIR /data
 VOLUME ["/data"]
 
@@ -115,5 +125,7 @@ ENV WAVVON_VOICE_UDP_PORT=3001
 # When the web client was baked in (index.html present), serve it automatically.
 # Overridable at runtime: -e WAVVON_WEB_CLIENT_DIR= (empty) disables serving.
 ENV WAVVON_WEB_CLIENT_DIR=/web-client
+
+USER wavvon
 
 ENTRYPOINT ["/usr/local/bin/wavvon-hub"]

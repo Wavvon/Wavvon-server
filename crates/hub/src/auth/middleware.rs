@@ -143,6 +143,34 @@ fn alliance_voice_prefix_allowed(path: &str) -> bool {
     path.starts_with("/identity/") && path.ends_with("/dh-key")
 }
 
+/// Whether a `scope: "peer"` session may reach `method path`.
+///
+/// A peer hub is not a member of this hub: it holds no `is_member`, no role and
+/// no everyone floor, so permission checks alone would leave every route that
+/// only asks for *some* session (`/users`, profiles, `/channels`) open to any
+/// key that claims `is_hub`. This is the allowlist of what the federation
+/// client actually calls on a remote hub; each route behind it still decides
+/// for itself (alliance membership, the shared channel, the write policy).
+fn peer_path_allowed(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    let seg: Vec<&str> = path.trim_matches('/').split('/').collect();
+    match (method, seg.as_slice()) {
+        (&Method::GET, ["alliances"]) => true,
+        (&Method::GET, ["alliances", id]) => *id != "pending-invites",
+        (&Method::POST, ["alliances", _, "join"]) => true,
+        (&Method::GET, ["alliances", _, "channels"]) => true,
+        (&Method::GET, ["alliances", _, "people"]) => true,
+        (&Method::GET | &Method::POST, ["alliances", _, "channels", _, "messages"]) => true,
+        (&Method::GET, ["alliances", _, "channels", _, "posts"]) => true,
+        (&Method::GET, ["alliances", _, "channels", _, "posts", _]) => true,
+        (&Method::POST, ["federation", "dm"]) => true,
+        (&Method::POST, ["federation", "dm-member-change"]) => true,
+        (&Method::POST | &Method::DELETE, ["federation", "alliance-member"]) => true,
+        (_, ["federation", "forum", ..]) => true,
+        _ => false,
+    }
+}
+
 /// Minimum seconds between farm pubkey re-fetch attempts (handles key rotation
 /// without hammering the farm on every bad-token request).
 const FARM_REFETCH_COOLDOWN: i64 = 60;
@@ -473,7 +501,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             // One combined query collects most of what the admission checks
-            // below need (role_count, ban, approval_status) in a single
+            // below need (is_member, ban, approval_status) in a single
             // round-trip. The federated-ban decision is NOT inlined here: it
             // has override + per-source-policy rules that live in
             // moderation::is_federated_banned — duplicating them as SQL once
@@ -481,7 +509,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             let checks: FarmTokenChecks = sqlx::query_as(
                 "SELECT
                      u.approval_status,
-                     (SELECT COUNT(*) FROM user_roles      WHERE user_public_key  = $1) AS role_count,
+                     u.is_member,
                      (SELECT COUNT(*) FROM bans            WHERE target_public_key = $1
                           AND (expires_at IS NULL OR expires_at > $2)) AS ban_count
                  FROM users u WHERE u.public_key = $1",
@@ -492,16 +520,27 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-            if checks.role_count == 0 {
-                crate::auth::handlers::assign_initial_roles(&state.db, &public_key, now).await?;
-            }
-
             if checks.ban_count > 0 {
                 return Err((StatusCode::FORBIDDEN, "User is banned".to_string()));
             }
 
             if crate::routes::moderation::is_federated_banned(&state.db, &public_key).await? {
                 return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
+            }
+
+            // After the ban checks: admitting first would hand a banned key the
+            // everyone floor in the same breath as refusing it.
+            // The same gate `/auth/verify` applies to a first-contact identity.
+            // The farm token carries no invite, so a closed hub is entered by
+            // redeeming one at `POST /join/{code}`, which admits after
+            // validating it — that one route is let through here.
+            if !checks.is_member {
+                let redeeming = parts.method == axum::http::Method::POST
+                    && parts.uri.path().starts_with("/join/");
+                if !redeeming {
+                    crate::routes::invites::refuse_if_invite_only(&state.db).await?;
+                    crate::auth::handlers::admit_member(&state.db, &public_key).await?;
+                }
             }
 
             if checks.approval_status == "pending" {
@@ -536,6 +575,11 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             if !MINI_APP_ALLOWED_PATHS.contains(&path) {
                 return Err((StatusCode::FORBIDDEN, "mini_app_scope_confined".to_string()));
             }
+        }
+
+        // Peer-hub confinement: see `peer_path_allowed`.
+        if scope == "peer" && !peer_path_allowed(&parts.method, parts.uri.path()) {
+            return Err((StatusCode::FORBIDDEN, "peer_scope_confined".to_string()));
         }
 
         // Alliance-voice confinement (alliances.md). A visitor is not a member
@@ -573,6 +617,6 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
 #[derive(sqlx::FromRow)]
 struct FarmTokenChecks {
     approval_status: String,
-    role_count: i64,
+    is_member: bool,
     ban_count: i64,
 }

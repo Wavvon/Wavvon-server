@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -9,15 +8,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
+use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
+use crate::routes::webhooks::sha256_hex;
 use crate::state::{AppState, AuthChallenge, RegChallenge};
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
 
 fn gen_token() -> String {
     let mut bytes = [0u8; 32];
@@ -27,12 +21,6 @@ fn gen_token() -> String {
 
 fn pubkey_to_uuid(pubkey: &str) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_OID, pubkey.as_bytes())
-}
-
-fn sha256_hex(input: &str) -> String {
-    use sha2::Digest;
-    let hash = sha2::Sha256::new_with_prefix(input).finalize();
-    hex::encode(hash)
 }
 
 // ---------------------------------------------------------------------------
@@ -155,7 +143,7 @@ pub async fn register_finish(
     let passkey_json = serde_json::to_string(&passkey)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let now = now_secs();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO webauthn_credentials
              (credential_id, user_pubkey, passkey_json, friendly_name, created_at)
@@ -283,7 +271,7 @@ pub async fn assert_finish(
         })?;
 
     // Update sign_count for the credential that was used.
-    let now = now_secs();
+    let now = unix_timestamp();
     for sk in &mut challenge.passkeys {
         if sk.cred_id() == auth_result.cred_id() {
             sk.update_credential(&auth_result);
@@ -332,7 +320,7 @@ pub async fn device_token_create(
     let id = Uuid::new_v4().to_string();
     let raw_token = gen_token();
     let token_hash = sha256_hex(&raw_token);
-    let now = now_secs();
+    let now = unix_timestamp();
     let expires_at = now + state.device_token_ttl_secs;
 
     sqlx::query(
@@ -368,7 +356,7 @@ pub async fn device_token_redeem(
     Json(body): Json<DeviceTokenRedeemRequest>,
 ) -> Result<Json<SessionTokenResponse>, (StatusCode, String)> {
     let token_hash = sha256_hex(&body.token);
-    let now = now_secs();
+    let now = unix_timestamp();
 
     let row = sqlx::query_as::<_, (String, String, i64, bool)>(
         "SELECT id, user_pubkey, expires_at, revoked FROM device_tokens WHERE token_hash = $1",
@@ -520,7 +508,7 @@ pub async fn list_devices(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<DeviceInfo>>, (StatusCode, String)> {
-    let now = now_secs();
+    let now = unix_timestamp();
     let rows = sqlx::query_as::<_, (String, Option<String>, i64, i64, Option<i64>)>(
         "SELECT id, device_name, created_at, expires_at, last_used_at
          FROM device_tokens
@@ -581,7 +569,7 @@ async fn issue_session_token(
 ) -> Result<String, (StatusCode, String)> {
     // Ensure a users row exists so the FK on sessions is satisfied.
     // Passkey-registered users may not have gone through /auth/verify.
-    let now = now_secs();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO users (public_key, first_seen_at)
          VALUES ($1, $2)

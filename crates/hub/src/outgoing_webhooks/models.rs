@@ -50,24 +50,6 @@ pub struct DeliveryRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Wire envelope posted to the receiver (doc §3)
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize, Clone, Debug)]
-pub struct WebhookEventEnvelope {
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    pub event: String,
-    pub hub_url: String,
-    pub webhook_id: String,
-    pub at: i64,
-    pub seq: Option<i64>,
-    pub payload: serde_json::Value,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
-}
-
-// ---------------------------------------------------------------------------
 // Subscription DTO (shared shape with app subscriptions)
 // ---------------------------------------------------------------------------
 

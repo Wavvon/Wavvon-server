@@ -130,7 +130,6 @@ variables — env vars win.
 | `voice_udp_port` | `WAVVON_VOICE_UDP_PORT` | `3001` | Voice relay (UDP) |
 | `tls_cert` / `tls_key` | `WAVVON_TLS_CERT` / `WAVVON_TLS_KEY` | — | Enable HTTPS (set both) |
 | `owner_pubkey` | `WAVVON_OWNER_PUBKEY` | — | Hub owner identity |
-| `discovery_url` | `WAVVON_DISCOVERY_URL` | `https://discovery.wavvon.io` | Hub directory base URL |
 | `template_url` / `bootstrap_token` | `WAVVON_TEMPLATE_URL` / `WAVVON_BOOTSTRAP_TOKEN` | — | First-boot channel/role template |
 | `log_format` | `WAVVON_LOG_FORMAT` | `text` | `text` or `json` |
 | `otlp_endpoint` | `WAVVON_OTLP_ENDPOINT` | — | OpenTelemetry traces |
@@ -208,6 +207,12 @@ for design rationale before proposing big changes.
 [GNU Affero General Public License v3.0](LICENSE). Network use of a
 modified version requires offering the corresponding source to users —
 deliberately chosen for a federated platform.
+
+One exception: **`crates/identity` is [Apache-2.0](crates/identity/LICENSE)**.
+It is the wire format — the signed envelopes every client and SDK must
+reproduce byte for byte — and a permissive licence lets a third-party client,
+bot or SDK link it without taking on the AGPL. The hub that uses it stays
+AGPL.
 
 ## Built with AI assistance
 

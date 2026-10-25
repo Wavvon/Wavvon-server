@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use sqlx::postgres::PgPoolOptions;
-use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
 use wavvon_hub::cert_worker;
@@ -709,7 +708,8 @@ async fn main() -> Result<()> {
                         }
                         // Ensure a minimal user record exists
                         sqlx::query(
-                            "INSERT INTO users (public_key, first_seen_at) VALUES ($1, $2) ON CONFLICT (public_key) DO NOTHING",
+                            "INSERT INTO users (public_key, first_seen_at, is_member) VALUES ($1, $2, TRUE)
+                         ON CONFLICT (public_key) DO UPDATE SET is_member = TRUE",
                         )
                         .bind(&pubkey)
                         .bind(now)
@@ -897,6 +897,12 @@ async fn main() -> Result<()> {
     );
     tracing::info!("data: identity={cwd}/hub_identity.json  database=PostgreSQL");
 
+    if settings.allow_private_webhooks {
+        tracing::warn!(
+            "WAVVON_ALLOW_PRIVATE_WEBHOOKS is enabled: outgoing webhooks and app webhook URLs              may use plain http and private/loopback hosts (SSRF guard off)."
+        );
+    }
+
     // The generic mixed-content warning doesn't apply to LAN plaintext mode
     // (that tier is documented and gated, not an oversight) — the LAN MODE
     // banner below covers it instead.
@@ -983,20 +989,7 @@ async fn main() -> Result<()> {
         .await
         .expect("Failed to connect to database");
 
-    let read_pool = if let Some(read_url) = settings.database_read_url.as_deref() {
-        Some(
-            PgPoolOptions::new()
-                .max_connections(settings.db_max_connections)
-                .connect(read_url)
-                .await
-                .expect("Failed to connect to read-replica database"),
-        )
-    } else {
-        None
-    };
-
     let db = write_pool;
-    let db_read = read_pool;
 
     // Before migrations: a server below the floor otherwise fails partway
     // through applying the schema, and the operator sees a CREATE TABLE
@@ -1049,7 +1042,8 @@ async fn main() -> Result<()> {
                     .unwrap_or_default()
                     .as_secs() as i64;
                 sqlx::query(
-                    "INSERT INTO users (public_key, first_seen_at) VALUES ($1, $2) ON CONFLICT (public_key) DO NOTHING",
+                    "INSERT INTO users (public_key, first_seen_at, is_member) VALUES ($1, $2, TRUE)
+                         ON CONFLICT (public_key) DO UPDATE SET is_member = TRUE",
                 )
                 .bind(&owner_pk)
                 .bind(now)
@@ -1180,8 +1174,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
-
     // Publicly-reachable host for the voice WebTransport endpoint
     // (voice-transport-v2.md). Voice is dialled directly, never through the
     // farm's HTTP proxy — a datagram carries no path to route on — so only
@@ -1261,8 +1253,6 @@ async fn main() -> Result<()> {
         hub_name: "my-hub".to_string(),
         hub_identity,
         db,
-        db_read,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
@@ -1307,6 +1297,7 @@ async fn main() -> Result<()> {
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: settings.owner_pubkey.clone(),
         apps_allow_camera: settings.apps_allow_camera,
+        allow_private_webhooks: settings.allow_private_webhooks,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
@@ -1551,8 +1542,8 @@ async fn main() -> Result<()> {
     // all; see its doc comment for why an orphaned postmaster matters.
     let result = tokio::select! {
         r = serve => r,
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Shutdown requested");
+        reason = shutdown_signal() => {
+            tracing::info!("Shutdown requested ({reason})");
             Ok(())
         }
     };
@@ -1564,6 +1555,70 @@ async fn main() -> Result<()> {
     }
 
     result
+}
+
+/// Resolve when the operator asks this process to stop, naming which signal
+/// did it.
+///
+/// `tokio::signal::ctrl_c()` is SIGINT alone on Unix, and SIGINT is the
+/// interactive stop. Every documented production deployment uses SIGTERM —
+/// `systemctl stop`, `docker stop` and a plain `kill` all send it — so waiting
+/// on SIGINT only meant the process was terminated without ever reaching
+/// `stop_embedded`, leaving a postmaster holding the data directory on a
+/// normal, documented stop. See `stop_embedded` for why that matters on the
+/// upgrade path.
+///
+/// A force kill (SIGKILL, `Stop-Process -Force`) stays uncatchable here and
+/// everywhere; adopting the orphan on the next start is what covers it.
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // Failing to install a handler is not worth refusing to serve over —
+        // the other signal still works, and the worst case is the behaviour
+        // this function was written to fix.
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Could not listen for SIGTERM: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return "SIGINT";
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = term.recv() => "SIGTERM",
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // The Windows equivalents of a service stop. `ctrl_close` is the
+        // console window closing and `ctrl_shutdown` is the machine going
+        // down; both give a short grace period, which is enough to stop a
+        // postmaster.
+        use tokio::signal::windows;
+        let mut close = match windows::ctrl_close() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Could not listen for CTRL_CLOSE: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return "Ctrl-C";
+            }
+        };
+        let mut shutdown = match windows::ctrl_shutdown() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Could not listen for CTRL_SHUTDOWN: {e}");
+                let _ = tokio::signal::ctrl_c().await;
+                return "Ctrl-C";
+            }
+        };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "Ctrl-C",
+            _ = close.recv() => "CTRL_CLOSE",
+            _ = shutdown.recv() => "CTRL_SHUTDOWN",
+        }
+    }
 }
 
 /// Stop the PostgreSQL this process started, if it started one.

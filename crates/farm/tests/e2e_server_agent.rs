@@ -139,13 +139,7 @@ async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
             .to_string_lossy()
             .to_string(),
     ));
-    let state = Arc::new(FarmState::new(
-        db,
-        keypair,
-        farm_url.clone(),
-        hub_manager,
-        "/tmp/wavvon-e2e-hubs".to_string(),
-    ));
+    let state = Arc::new(FarmState::new(db, keypair, farm_url.clone(), hub_manager));
 
     let app = server::create_router(state.clone());
     tokio::spawn(async move {

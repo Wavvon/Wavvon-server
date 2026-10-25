@@ -132,6 +132,13 @@ pub async fn get_alliance(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     .ok_or((StatusCode::NOT_FOUND, "Alliance not found".to_string()))?;
 
+    let people_visible: bool =
+        sqlx::query_scalar("SELECT people_visible FROM alliances WHERE id = $1")
+            .bind(&alliance_id)
+            .fetch_one(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
     let members = sqlx::query_as::<_, MemberRow>(
         "SELECT hub_public_key, hub_name, hub_url, joined_at FROM alliance_members WHERE alliance_id = $1",
     )
@@ -154,6 +161,7 @@ pub async fn get_alliance(
                 joined_at: m.joined_at,
             })
             .collect(),
+        people_visible,
     }))
 }
 

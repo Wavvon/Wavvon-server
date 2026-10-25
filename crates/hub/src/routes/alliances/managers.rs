@@ -36,7 +36,7 @@ pub struct AllianceManagerResponse {
 ///
 /// The owner is covered by `user_permissions`, which short-circuits every
 /// check for them.
-pub async fn can_manage_alliance(
+async fn can_manage_alliance(
     state: &AppState,
     public_key: &str,
     alliance_id: &str,
@@ -49,7 +49,7 @@ pub async fn can_manage_alliance(
     sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM alliance_managers am
-             JOIN user_roles ur ON ur.role_id = am.role_id
+             JOIN member_roles ur ON ur.role_id = am.role_id
              WHERE am.alliance_id = $1 AND ur.user_public_key = $2
          )",
     )

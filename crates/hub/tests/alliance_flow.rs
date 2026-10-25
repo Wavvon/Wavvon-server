@@ -1,92 +1,22 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::routes::alliance_models::*;
 use wavvon_hub::routes::chat_models::{ChannelResponse, MessageResponse};
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
-use wavvon_identity::Identity;
+use wavvon_identity::{DhKeyRecord, Identity};
 
 #[path = "common.rs"]
 mod common;
 
 async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
 
     let state = Arc::new(AppState {
         hub_name: name.to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        db_read: None,
-        store,
-        pending_challenges: RwLock::new(HashMap::new()),
-        cert_portfolio_cache: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_last_active: RwLock::new(HashMap::new()),
-        whisper_target_pubkeys: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_wt_url: None,
-        canonical_url: Arc::new(RwLock::new(None)),
-        voice_cert_hash: RwLock::new(None),
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashMap::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        app_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        voice_talk_blocked: Default::default(),
-        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
-        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        owner_pubkey: None,
-        apps_allow_camera: false,
-        http_video_stream_budget: 2,
-        webauthn: {
-            let origin = url::Url::parse("http://localhost:3000").unwrap();
-            std::sync::Arc::new(
-                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
-                    .unwrap()
-                    .rp_name("test-hub")
-                    .build()
-                    .unwrap(),
-            )
-        },
-        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        device_token_ttl_secs: 30 * 86400,
-        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
-            wavvon_hub::state::WebhookCircuit::default(),
-        )),
-        lan_mode: false,
-        lan_tls_mode: None,
-        lan_fingerprint: None,
+        ..common::base_state(db)
     });
 
     let app = server::create_router(state.clone());
@@ -1219,6 +1149,92 @@ async fn a_visitor_token_cannot_read_this_hubs_members() {
     );
 }
 
+/// A visitor has no `users` row, and its DH key has to be stored anyway:
+/// voice keys are wrapped to each recipient's key on the hub the room is on.
+#[tokio::test]
+async fn a_visitor_publishes_its_dh_key_where_the_room_is() {
+    let (hub_a_url, _hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let user_b = Identity::generate();
+    let (alliance_id, channel_id, token_b, _pk) =
+        alliance_with_shared_voice_channel(&hub_a_url, &hub_b_url, &user_a, &user_b).await;
+    let minted: serde_json::Value = client
+        .post(format!("{hub_b_url}/alliances/{alliance_id}/voice-grant"))
+        .bearer_auth(&token_b)
+        .json(&json!({ "channel_id": channel_id }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session: serde_json::Value = redeem_grant(&hub_a_url, &user_b, &minted["grant"])
+        .await
+        .json()
+        .await
+        .unwrap();
+    let visitor_token = session["token"].as_str().unwrap();
+
+    let pk = user_b.public_key_hex();
+    let (_, dh_pub) = user_b.dh_keypair();
+    let dh_hex = hex::encode(dh_pub.as_bytes());
+    let sig = hex::encode(
+        user_b
+            .sign(&DhKeyRecord::signing_bytes(&pk, &dh_hex))
+            .to_bytes(),
+    );
+    let put = client
+        .put(format!("{hub_a_url}/identity/{pk}/dh-key"))
+        .bearer_auth(visitor_token)
+        .json(&json!({ "dh_pubkey_hex": dh_hex, "signature_hex": sig }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), 200, "{}", put.text().await.unwrap());
+
+    let got: serde_json::Value = client
+        .get(format!("{hub_a_url}/identity/{pk}/dh-key"))
+        .bearer_auth(visitor_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["dh_pubkey_hex"], dh_hex);
+
+    // And the room lets them in: a visitor holds no roles here, so a role
+    // gate on the join would refuse every visitor there could ever be.
+    use futures_util::{SinkExt, StreamExt};
+    let ws_url = format!(
+        "{}/ws?token={visitor_token}",
+        hub_a_url.replace("http://", "ws://")
+    );
+    let (ws, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut tx, mut rx) = ws.split();
+    tx.send(tokio_tungstenite::tungstenite::Message::Text(
+        json!({ "type": "voice_join", "channel_id": channel_id }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(Ok(tokio_tungstenite::tungstenite::Message::Text(raw))) = rx.next().await {
+                let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+                if matches!(v["type"].as_str(), Some("voice_joined") | Some("error")) {
+                    return v;
+                }
+            }
+        }
+    })
+    .await
+    .expect("no voice_joined or error within 10s");
+    assert_eq!(reply["type"], "voice_joined", "{reply}");
+}
+
 /// Hub A re-resolves the channel against its own shared set and never trusts
 /// the origin's claim, so a grant naming a channel A has not shared is refused
 /// even though its signature is perfectly valid.
@@ -1916,5 +1932,241 @@ async fn an_alliance_manager_cannot_grant_the_list() {
         resp.status(),
         403,
         "a delegate handing the alliance to another role is exactly what roles.manage gates"
+    );
+}
+
+/// An alliance invite used to be a signature over the alliance id: one token
+/// per alliance, valid forever, and `/alliances/{id}/join` took it from
+/// anyone. Now it is spent on use, and joining needs a peer session.
+#[tokio::test]
+async fn an_alliance_invite_is_spent_on_use_and_join_needs_a_peer() {
+    let (hub_a_url, _hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+    let token_a = authenticate_user(&hub_a_url, &Identity::generate()).await;
+    let token_b = authenticate_user(&hub_b_url, &Identity::generate()).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Spent" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let invite: AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // No session at all: refused before the token is even looked at.
+    let resp = client
+        .post(format!("{hub_a_url}/alliances/{}/join", alliance.id))
+        .json(&json!({ "invite_token": invite.token, "hub_url": hub_b_url }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_client_error(), "got {}", resp.status());
+
+    let joined = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(joined.status(), 200);
+
+    // The same token again, from a third key: spent.
+    let fed = wavvon_hub::federation::client::FederationClient::new();
+    let third = Identity::generate();
+    let peer_token = fed.authenticate(&hub_a_url, &third).await.unwrap();
+    let again = fed
+        .post_alliance_join(
+            &hub_a_url,
+            &peer_token,
+            &alliance.id,
+            &invite.token,
+            "http://127.0.0.1:9",
+        )
+        .await
+        .unwrap();
+    assert_eq!(again.status(), 403);
+}
+
+/// A peer's session can end on the other side (ban, leave, recovery). The
+/// cached token was never dropped, so every call to that peer failed until
+/// the process restarted. A refused token is now forgotten and the call
+/// retried once with a fresh session.
+#[tokio::test]
+async fn a_peer_session_that_ended_is_replaced_not_reused() {
+    let (hub_a_url, hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+    let token_a = authenticate_user(&hub_a_url, &Identity::generate()).await;
+    let token_b = authenticate_user(&hub_b_url, &Identity::generate()).await;
+
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_a_url}/alliances"))
+        .bearer_auth(&token_a)
+        .json(&json!({ "name": "Resumed" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let invite: AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let b_channel: ChannelResponse = client
+        .post(format!("{hub_b_url}/channels"))
+        .bearer_auth(&token_b)
+        .json(&json!({ "name": "guild-chat" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    client
+        .post(format!("{hub_b_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_b)
+        .json(&json!({ "channel_id": b_channel.id }))
+        .send()
+        .await
+        .unwrap();
+
+    let read = || {
+        let client = client.clone();
+        let url = format!(
+            "{hub_a_url}/alliances/{}/channels/{}/messages",
+            alliance.id, b_channel.id
+        );
+        let token = token_a.clone();
+        async move {
+            client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(read().await, 200);
+
+    // Hub B ends hub A's session behind its back.
+    sqlx::query("DELETE FROM sessions WHERE public_key = $1")
+        .bind(hub_a_state.hub_identity.public_key_hex())
+        .execute(&hub_b_state.db)
+        .await
+        .unwrap();
+    assert_eq!(read().await, 200, "the stale token must be replaced");
+}
+
+/// A voice grant is signed over its own domain tag (Wavvon-server#111). An
+/// untagged grant from a hub that predates the tag still admits; one signed
+/// under some other tag the origin's key uses does not.
+#[tokio::test]
+async fn a_voice_grant_is_domain_tagged() {
+    let (hub_a_url, _hub_a_state, _ga) = start_hub("hub-a").await;
+    let (hub_b_url, hub_b_state, _gb) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let user_b = Identity::generate();
+    let (alliance_id, channel_id, token_b, _pk) =
+        alliance_with_shared_voice_channel(&hub_a_url, &hub_b_url, &user_a, &user_b).await;
+    let mint = || async {
+        client
+            .post(format!("{hub_b_url}/alliances/{alliance_id}/voice-grant"))
+            .bearer_auth(&token_b)
+            .json(&json!({ "channel_id": channel_id }))
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    let payload_json = |grant: &serde_json::Value| {
+        let g: wavvon_hub::routes::alliances::AllianceVoiceGrant =
+            serde_json::from_value(grant.clone()).unwrap();
+        serde_json::to_string(&g.payload).unwrap()
+    };
+
+    // As minted: tagged, and it signs the tagged bytes.
+    let minted = mint().await;
+    let tagged =
+        wavvon_identity::voice_grant_signing_bytes(payload_json(&minted["grant"]).as_bytes());
+    wavvon_identity::verify_signature(
+        &hub_b_state.hub_identity.public_key_hex(),
+        &tagged,
+        &hex::decode(minted["grant"]["signature"].as_str().unwrap()).unwrap(),
+    )
+    .expect("a fresh grant is signed over the tagged bytes");
+    assert_eq!(
+        redeem_grant(&hub_a_url, &user_b, &minted["grant"])
+            .await
+            .status(),
+        200
+    );
+
+    // Re-signed untagged, the way an older origin hub mints.
+    let mut legacy = mint().await["grant"].clone();
+    legacy["signature"] = json!(hex::encode(
+        hub_b_state
+            .hub_identity
+            .sign(payload_json(&legacy).as_bytes())
+            .to_bytes()
+    ));
+    assert_eq!(
+        redeem_grant(&hub_a_url, &user_b, &legacy).await.status(),
+        200
+    );
+
+    // Signed by the same key under another purpose's tag.
+    let mut other = mint().await["grant"].clone();
+    let mut wrong = b"wavvon/alliance-member/v1\0".to_vec();
+    wrong.extend_from_slice(payload_json(&other).as_bytes());
+    other["signature"] = json!(hex::encode(
+        hub_b_state.hub_identity.sign(&wrong).to_bytes()
+    ));
+    assert_eq!(
+        redeem_grant(&hub_a_url, &user_b, &other).await.status(),
+        403
     );
 }

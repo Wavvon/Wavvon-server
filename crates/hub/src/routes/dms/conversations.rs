@@ -11,7 +11,46 @@ use crate::routes::dm_models::*;
 use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
+use super::members::{self, FederatedMemberChange, SignedMemberChange};
 use super::models::{ensure_user_stub, find_existing_dm, load_members, ConvRow};
+
+/// Record a change applied here in the ledger and, when the actor signed it,
+/// tell the other members' hubs. An unsigned change is dated now, so a
+/// replayed older one from elsewhere still cannot undo it.
+async fn settle(
+    state: &AppState,
+    conversation_id: &str,
+    member: &str,
+    change: Option<FederatedMemberChange>,
+    now: i64,
+) -> Result<(), (StatusCode, String)> {
+    let issued_at = change.as_ref().map_or(now, |c| c.issued_at as i64);
+    members::record_local(state, conversation_id, &[member.to_string()], issued_at).await?;
+    if let Some(change) = change {
+        members::fan_out(state, &change).await?;
+    }
+    Ok(())
+}
+
+fn federated_change(
+    conversation_id: &str,
+    user: &AuthUser,
+    added: Vec<String>,
+    removed: Vec<String>,
+    signed: SignedMemberChange,
+) -> Result<FederatedMemberChange, (StatusCode, String)> {
+    let change = FederatedMemberChange {
+        conversation_id: conversation_id.to_string(),
+        actor: user.public_key.clone(),
+        added,
+        removed,
+        issued_at: signed.issued_at,
+        signature: signed.signature,
+        signer_cert: signed.signer_cert,
+    };
+    members::verify_local(user, &change)?;
+    Ok(change)
+}
 
 pub async fn create_conversation(
     State(state): State<Arc<AppState>>,
@@ -65,6 +104,13 @@ pub async fn create_conversation(
     for member_key in &req.members {
         let hub_url = req.member_hubs.get(member_key).cloned();
         ensure_user_stub(&state.db, member_key, now).await?;
+        // A stranger discovered through an alliance has no master here. Prove
+        // the claimed one (which caches it) so the send path can look up where
+        // their DMs land.
+        if let (Some(master), Some(url)) = (req.member_masters.get(member_key), &hub_url) {
+            let _ = super::messages::resolve_master_binding(&state, member_key, master, Some(url))
+                .await;
+        }
         sqlx::query("INSERT INTO conversation_members (conversation_id, public_key, joined_at, hub_url) VALUES ($1, $2, $3, $4)")
             .bind(&id)
             .bind(member_key)
@@ -215,6 +261,10 @@ pub async fn get_conversation(
 #[derive(Deserialize)]
 pub struct AddMemberRequest {
     pub public_key: String,
+    /// The actor's signature over the change. Without it the add holds on this
+    /// hub only, as it did before members' other hubs could be told.
+    #[serde(default)]
+    pub signed: Option<SignedMemberChange>,
 }
 
 pub async fn add_conversation_member(
@@ -250,6 +300,12 @@ pub async fn add_conversation_member(
         return Ok(StatusCode::NO_CONTENT);
     }
 
+    let added = vec![req.public_key.clone()];
+    let change = req
+        .signed
+        .map(|s| federated_change(&conversation_id, &user, added, vec![], s))
+        .transpose()?;
+
     let now = crate::auth::handlers::unix_timestamp();
     ensure_user_stub(&state.db, &req.public_key, now).await?;
     sqlx::query(
@@ -263,6 +319,8 @@ pub async fn add_conversation_member(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    settle(&state, &conversation_id, &req.public_key, change, now).await?;
 
     let _ = state.dm_tx.send(crate::state::DmEvent::MemberChanged {
         conversation_id,
@@ -283,6 +341,7 @@ pub async fn remove_conversation_member(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path((conversation_id, pubkey)): Path<(String, String)>,
+    signed: Option<Json<SignedMemberChange>>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if pubkey != user.public_key {
         return Err((
@@ -312,12 +371,20 @@ pub async fn remove_conversation_member(
         ));
     }
 
+    let removed = vec![pubkey.clone()];
+    let change = signed
+        .map(|Json(s)| federated_change(&conversation_id, &user, vec![], removed, s))
+        .transpose()?;
+
     sqlx::query("DELETE FROM conversation_members WHERE conversation_id = $1 AND public_key = $2")
         .bind(&conversation_id)
         .bind(&pubkey)
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let now = crate::auth::handlers::unix_timestamp();
+    settle(&state, &conversation_id, &pubkey, change, now).await?;
 
     let _ = state.dm_tx.send(crate::state::DmEvent::MemberChanged {
         conversation_id,

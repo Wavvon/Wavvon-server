@@ -2,9 +2,15 @@
 name = "wavvon-identity"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+description = "Wavvon wire format: signed envelopes, signing bytes and the crypto they use"
+repository = "https://github.com/Wavvon/Wavvon-server"
+homepage = "https://github.com/Wavvon/Wavvon-docs/blob/main/docs/wire-format.md"
+readme = "README.md"
+keywords = ["wavvon", "ed25519", "protocol", "federation", "chat"]
+categories = ["cryptography", "encoding"]
 
 [dependencies]
-tracing = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,7 +25,6 @@ rand = "0.8"
 hex = "0.4"
 
 # dirs — finds platform-specific directories (like Environment.GetFolderPath in C#)
-dirs = "6"
 
 # SHA256 for proof-of-work security levels
 sha2 = "0.10"
@@ -33,6 +38,9 @@ bip39 = "2"
 # same BIP39 entropy that already backs the per-device subkey.
 hkdf = "0.12"
 
+# hmac — HMAC-SHA256 for outgoing-webhook delivery signatures.
+hmac = "0.12"
+
 # x25519-dalek — X25519 Diffie-Hellman for E2E DM encryption.
 # Derived from the Ed25519 seed so no separate key storage is needed.
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -44,3 +52,6 @@ aes-gcm = "0.10"
 # Montgomery conversion). Indirect dep via ed25519-dalek / x25519-dalek;
 # declared directly here so we can use the point-conversion API in ecies.rs.
 curve25519-dalek = "4"
+
+[dev-dependencies]
+base64 = { workspace = true }

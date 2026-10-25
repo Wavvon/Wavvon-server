@@ -103,12 +103,6 @@ pub struct PendingRequestAdmin {
     pub attestation_count: i64,
 }
 
-#[derive(Deserialize)]
-pub struct AdminDecideRequest {
-    /// "approve" or "deny"
-    pub decision: String,
-}
-
 // ---------------------------------------------------------------------------
 // Owner-side: manage recovery contacts
 // ---------------------------------------------------------------------------
@@ -545,7 +539,7 @@ pub async fn admin_list_pending(
                 COUNT(a.id) AS attestation_count
          FROM key_rotation_requests r
          LEFT JOIN rotation_attestations a ON a.request_id = r.id
-         WHERE r.status = 'ready_for_review' OR r.status = 'pending'
+         WHERE r.status = 'ready_for_review'
          GROUP BY r.id
          ORDER BY r.created_at DESC",
     )
@@ -581,8 +575,11 @@ pub async fn admin_approve(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require_owner("approve an identity recovery")?;
 
+    // The contacts' threshold is what earns a request the admin's attention
+    // (recovery-attestation.md): below it, one click would hand a member's
+    // roles to whoever filed the request. Deny stays open on `pending`.
     let row = fetch_rotation_request(&state, &id).await?;
-    if row.status != "ready_for_review" && row.status != "pending" {
+    if row.status != "ready_for_review" {
         return Err((
             StatusCode::CONFLICT,
             "Request is not in an approvable state".to_string(),
@@ -603,6 +600,9 @@ pub async fn admin_approve(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    let db_err = |e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+
     // Transfer NON-OWNER roles from old key to new key. The owner role never
     // rides along a recovery transfer (identity-recovery.md: owner needs the
     // separate successor path) — otherwise K colluding contacts plus a fooled
@@ -617,9 +617,33 @@ pub async fn admin_approve(
     .bind(&row.new_pubkey)
     .bind(now)
     .bind(&row.old_pubkey)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    .map_err(db_err)?;
+
+    // Membership rides along with the roles, and is cleared on the old key in
+    // the same transaction. An owner key stays a member: the owner role is
+    // the one thing a recovery transfer never moves.
+    sqlx::query(
+        "UPDATE users SET is_member = is_member OR
+             COALESCE((SELECT is_member FROM users WHERE public_key = $2), FALSE)
+         WHERE public_key = $1",
+    )
+    .bind(&row.new_pubkey)
+    .bind(&row.old_pubkey)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
+
+    sqlx::query(
+        "UPDATE users SET is_member = FALSE
+         WHERE public_key = $1
+           AND NOT EXISTS (SELECT 1 FROM user_roles WHERE user_public_key = $1 AND role_id = 'builtin-owner')",
+    )
+    .bind(&row.old_pubkey)
+    .execute(&mut *tx)
+    .await
+    .map_err(db_err)?;
 
     // A transfer, not a copy: the lost/compromised old key keeps nothing but
     // owner (which only the successor path moves).
@@ -628,9 +652,11 @@ pub async fn admin_approve(
          WHERE user_public_key = $1 AND role_id != 'builtin-owner'",
     )
     .bind(&row.old_pubkey)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    .map_err(db_err)?;
+
+    tx.commit().await.map_err(db_err)?;
 
     // Revoke all sessions for the old key.
     sqlx::query("DELETE FROM sessions WHERE public_key = $1")
@@ -638,6 +664,7 @@ pub async fn admin_approve(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    state.close_sessions_of(&row.old_pubkey).await;
 
     // Mark request as approved.
     sqlx::query(

@@ -171,3 +171,85 @@ async fn non_propagated_event_card_stays_in_anchor_only() {
         "child channel must not receive a card without propagation"
     );
 }
+
+/// `GET /events?channel_id=` is one channel's Events tab: its own events,
+/// `hub_wide` ones, and those propagating from an ancestor -- even one the
+/// caller cannot read, since the card was posted into this channel too.
+#[tokio::test]
+async fn events_filtered_by_channel_follow_the_propagation_rule() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    let anchor = create_channel(&server, &owner_token, "raids", None, true).await;
+    let anchor_id = anchor["id"].as_str().unwrap().to_string();
+    let squad = create_channel(&server, &owner_token, "squad", Some(&anchor_id), false).await;
+    let squad_id = squad["id"].as_str().unwrap().to_string();
+    let other = create_channel(&server, &owner_token, "other", None, false).await;
+    let other_id = other["id"].as_str().unwrap().to_string();
+    set_overwrite(
+        &server,
+        &owner_token,
+        &anchor_id,
+        "builtin-everyone",
+        &[],
+        &["messages.read"],
+    )
+    .await;
+    set_overwrite(
+        &server,
+        &owner_token,
+        &squad_id,
+        "builtin-everyone",
+        &["messages.read"],
+        &[],
+    )
+    .await;
+
+    for (title, channel, propagate, hub_wide) in [
+        ("propagated", &anchor_id, true, false),
+        ("anchor only", &anchor_id, false, false),
+        ("elsewhere", &other_id, false, false),
+        ("everyone", &other_id, false, true),
+        ("squad own", &squad_id, false, false),
+    ] {
+        server
+            .post("/events")
+            .add_header("Authorization", format!("Bearer {owner_token}"))
+            .json(&json!({
+                "channel_id": channel,
+                "title": title,
+                "starts_at": 9_999_999_999i64,
+                "propagate_to_children": propagate,
+                "hub_wide": hub_wide,
+            }))
+            .await
+            .assert_status(axum::http::StatusCode::CREATED);
+    }
+
+    let resp = server
+        .get("/events")
+        .add_query_param("channel_id", &squad_id)
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .await;
+    resp.assert_status_ok();
+    let mut titles: Vec<String> = resp
+        .json::<Value>()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["title"].as_str().unwrap().to_string())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, ["everyone", "propagated", "squad own"]);
+
+    // A channel the caller cannot read has no tab to ask about.
+    server
+        .get("/events")
+        .add_query_param("channel_id", &anchor_id)
+        .add_header("Authorization", format!("Bearer {member_token}"))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+}

@@ -1,20 +1,16 @@
 //! Integration tests for the subkey revocation relay worker.
 //!
 //! Each test spins up a minimal mock HTTP server that serves
-//! GET /identity/{master}/revocations?since=, deposits subkey_certs rows
+//! GET /identity/{master}/revocations, deposits subkey_certs rows
 //! pointing at it, calls subkey_revocation_worker::tick(), and verifies the
 //! outcome.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::routing::get;
 use axum::Router;
-use store::PostgresStore;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, RwLock};
-use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::state::AppState;
 use wavvon_hub::subkey_revocation_worker;
 use wavvon_identity::{DeviceSubkey, Identity, RevocationEntry};
@@ -28,76 +24,7 @@ mod common;
 
 async fn make_state() -> (Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
-    let (chat_tx, _) = broadcast::channel(256);
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        db_read: None,
-        store,
-        pending_challenges: RwLock::new(HashMap::new()),
-        cert_portfolio_cache: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        http_client: reqwest::Client::new(),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_last_active: RwLock::new(HashMap::new()),
-        whisper_target_pubkeys: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_wt_url: None,
-        canonical_url: Arc::new(RwLock::new(None)),
-        voice_cert_hash: RwLock::new(None),
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(HashMap::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        app_sessions: RwLock::new(HashMap::new()),
-        farm_url: None,
-        cached_farm_pubkey: Arc::new(RwLock::new(None)),
-        last_farm_pubkey_fetch: Arc::new(RwLock::new(0)),
-        video_channels: RwLock::new(HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_target_defs: RwLock::new(HashMap::new()),
-        whisper_optouts: RwLock::new(std::collections::HashSet::new()),
-        voice_relay_active: RwLock::new(std::collections::HashSet::new()),
-        voice_outbound_loss: RwLock::new(HashMap::new()),
-        staging_voice_grants: RwLock::new(std::collections::HashMap::new()),
-        voice_talk_blocked: Default::default(),
-        voice_pending_binds: RwLock::new(HashMap::new()),
-        ws_key_senders: RwLock::new(HashMap::new()),
-        rate_limiters: Default::default(),
-        preview_cache: std::sync::Mutex::new(HashMap::new()),
-        search: Arc::new(wavvon_hub::search::null_search::NullSearch),
-        reindex_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        owner_pubkey: None,
-        apps_allow_camera: false,
-        http_video_stream_budget: 2,
-        webauthn: {
-            let origin = url::Url::parse("http://localhost:3000").unwrap();
-            std::sync::Arc::new(
-                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
-                    .unwrap()
-                    .rp_name("test-hub")
-                    .build()
-                    .unwrap(),
-            )
-        },
-        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        device_token_ttl_secs: 30 * 86400,
-        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
-            wavvon_hub::state::WebhookCircuit::default(),
-        )),
-        lan_mode: false,
-        lan_tls_mode: None,
-        lan_fingerprint: None,
-    });
+    let state = Arc::new(common::base_state(db));
     (state, guard)
 }
 
@@ -219,40 +146,55 @@ async fn revoked_subkey_inserted_after_tick() {
 
 /// The sync cursor is recorded and advances to at least revoked_at after a
 /// successful sync.
+/// A revocation the device signed before an earlier poll, but that reached
+/// its home hub only after it, is still applied. The worker used to page on
+/// the client-signed `revoked_at`, so such a revocation was skipped forever.
 #[tokio::test]
-async fn sync_cursor_advances() {
+async fn a_revocation_posted_after_a_poll_is_still_applied() {
     let (state, _guard) = make_state().await;
 
     let identity = Identity::generate();
-    let master_key = identity.master().unwrap();
-    let master_pubkey = master_key.public_key_hex();
+    let master_pubkey = identity.master().unwrap().public_key_hex();
     let subkey_pubkey = DeviceSubkey::generate("dev".to_string()).public_key_hex();
-    let revoked_at = unix_now() as u64 - 50;
+    let signed_long_ago = unix_now() as u64 - 86_400;
+    let late = serde_json::to_string(&vec![make_revocation(
+        &identity,
+        &subkey_pubkey,
+        signed_long_ago,
+    )])
+    .unwrap();
 
-    let entry = make_revocation(&identity, &subkey_pubkey, revoked_at);
-    let revocations_json = serde_json::to_string(&vec![entry]).unwrap();
-
-    let home_hub_url = start_mock_hub(revocations_json).await;
-
+    let body = Arc::new(std::sync::Mutex::new("[]".to_string()));
+    let served = body.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let home_hub_url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let app = Router::new().route(
+        "/identity/{master}/revocations",
+        // Filters on `since` the way the real route does (revoked_at >= since).
+        get(
+            move |axum::extract::Query(q): axum::extract::Query<
+                std::collections::HashMap<String, i64>,
+            >| {
+                let since = q.get("since").copied().unwrap_or(0);
+                let b = if since > signed_long_ago as i64 {
+                    "[]".to_string()
+                } else {
+                    served.lock().unwrap().clone()
+                };
+                async move { ([("content-type", "application/json")], b) }
+            },
+        ),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     insert_subkey_cert(&state.db, &master_pubkey, &subkey_pubkey, &home_hub_url).await;
 
     subkey_revocation_worker::tick(&state).await;
+    *body.lock().unwrap() = late;
+    subkey_revocation_worker::tick(&state).await;
 
-    let cursor: Option<i64> = sqlx::query_scalar(
-        "SELECT last_synced_at FROM subkey_revocation_sync
-         WHERE master_pubkey = $1 AND home_hub_url = $2",
-    )
-    .bind(&master_pubkey)
-    .bind(&home_hub_url)
-    .fetch_optional(&state.db)
-    .await
-    .unwrap();
-
-    assert!(cursor.is_some(), "sync cursor should be recorded");
-    assert!(
-        cursor.unwrap() >= revoked_at as i64,
-        "cursor should be at least the revoked_at value"
-    );
+    assert!(revocation_exists(&state.db, &master_pubkey, &subkey_pubkey).await);
 }
 
 /// tick() is a no-op when subkey_certs is empty (no home hubs to discover).
@@ -260,7 +202,7 @@ async fn sync_cursor_advances() {
 async fn no_op_when_no_subkey_certs() {
     let (state, _guard) = make_state().await;
     subkey_revocation_worker::tick(&state).await;
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocation_sync")
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocations")
         .fetch_one(&state.db)
         .await
         .unwrap();

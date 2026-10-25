@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -8,21 +7,15 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use wavvon_identity::{HomeHubList, RevocationEntry, SignedPrefsBlob, SubkeyCert};
 
+use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-fn bad(msg: impl Into<String>) -> (StatusCode, String) {
+pub(crate) fn bad(msg: impl Into<String>) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, msg.into())
 }
 
-fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
+pub(crate) fn db_err(e: impl std::fmt::Display) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"))
 }
 
@@ -55,6 +48,71 @@ pub async fn get_designation(
     }))
 }
 
+/// Has this hub met the identity behind `master`?
+///
+/// The bound on all three unauthenticated personal-axis writes — the home-hub
+/// designation, a device revocation, and the encrypted prefs blob. Each is
+/// unauthenticated on purpose, because a client publishes them to every hub in
+/// its home-hub list while holding a session with at most one; the signature
+/// makes them unspoofable and this makes them finite.
+///
+/// The inverse of `dms::messages::master_of`, which is the only thing that
+/// ever reads a designation: it resolves a *member's* roster pubkey to a
+/// master and looks the row up by that. So the two must agree about what a
+/// link is, and both halves of it are here — stricter in one place, see below:
+///
+/// - a `users` row carrying that master, which auth writes when a device
+///   presents its cert; or
+/// - a device cert for that master whose subkey is itself a member here. The
+///   join onto `users` is where this is stricter than `master_of`, which can
+///   afford the looser form because it is only ever asked about somebody who
+///   is already a member.
+///
+/// That join used to be described here as load-bearing against a stranger
+/// seeding the row that vouches for them, on the reasoning that the cert
+/// registration is unauthenticated. It never did that job: the attacker names
+/// *somebody else's* member key as their subkey, and the join is satisfied by
+/// the victim's own `users` row. `post_device` now requires a session as the
+/// subkey, which is what actually closes it (Wavvon-server#75).
+///
+/// The first write a fresh web client makes lands through the second branch:
+/// it authenticates without a cert (it has none yet), registers one, and
+/// publishes the designation before any auth has carried that cert, so
+/// `users.master_pubkey` is still NULL at that moment.
+async fn master_is_known_here(
+    db: &sqlx::PgPool,
+    master: &str,
+) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (
+            SELECT 1 FROM users WHERE master_pubkey = $1
+            UNION ALL
+            SELECT 1 FROM subkey_certs c
+              JOIN users u ON u.public_key = c.subkey_pubkey
+             WHERE c.master_pubkey = $1
+         )",
+    )
+    .bind(master)
+    .fetch_one(db)
+    .await
+    .map_err(db_err)
+}
+
+/// Store a master-signed `HomeHubList`.
+///
+/// Deliberately **unauthenticated**, which is why the gate below exists
+/// instead. The desktop client publishes one designation to *every* hub in the
+/// list it just signed (`home_hub.rs::publish_designation`), and it holds a
+/// session with at most the hub it is currently on — requiring `AuthUser` here
+/// would silently reduce "my home hubs" to "the hub I happen to be signed in
+/// to". The signature already makes this unspoofable: you can only write your
+/// own designation, one row per master, and only forward.
+///
+/// What it did not bound was *volume*. One keypair is free to mint, so any hub
+/// on the internet would store a designation for a master it had never seen,
+/// belonging to a person who is not a member, and nothing prunes it. That row
+/// can never be read — the lookup starts from a member — so it was dead weight
+/// at best (Wavvon-server#59).
 pub async fn put_designation(
     State(state): State<Arc<AppState>>,
     Path(master): Path<String>,
@@ -65,6 +123,13 @@ pub async fn put_designation(
     }
     body.verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
+
+    if !master_is_known_here(&state.db, &master).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub has no member linked to that master key".to_string(),
+        ));
+    }
 
     let current: Option<i64> =
         sqlx::query_scalar("SELECT sequence FROM home_hub_designations WHERE master_pubkey = $1")
@@ -101,7 +166,7 @@ pub async fn put_designation(
     .bind(body.issued_at as i64)
     .bind(body.sequence as i64)
     .bind(&body.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(&state.db)
     .await
     .map_err(db_err)?;
@@ -145,16 +210,67 @@ pub async fn list_devices(
     Ok(Json(out))
 }
 
+/// Register a device cert, **as the device it names**.
+///
+/// `SubkeyCert::verify` checks exactly one signature — the master's, over
+/// bytes in which `subkey_pubkey` is an opaque string. So the cert alone says
+/// "some master claims this subkey", and a master keypair is free to mint. It
+/// proves nothing about who is holding the subkey, or whether the subkey is a
+/// key at all.
+///
+/// That is why the session has to be the subkey's. Without it, a stranger
+/// could name an existing member's roster pubkey as their device and the hub
+/// would record the link — and `dms::messages::master_of` reads exactly that
+/// link, falling back to this table whenever `users.master_pubkey` is NULL,
+/// which is the normal state for anyone who authenticated without a cert. The
+/// attacker would therefore choose which home hub another member's direct
+/// messages were delivered to: ciphertext and correspondence metadata for a
+/// recipient with a published DH key, cleartext for one without.
+///
+/// Requiring the session costs the real clients nothing, because both places
+/// that POST here already hold one as that very key: `ensureSelfDeviceCert`
+/// runs immediately after a hub auth, and renaming a device in Settings
+/// re-issues its cert from the device being renamed. A *paired* device never
+/// POSTs at all — its cert arrives at auth, which calls `upsert_subkey_cert`
+/// directly and has already proved possession by then.
 pub async fn post_device(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Path(master): Path<String>,
     Json(cert): Json<SubkeyCert>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if cert.master_pubkey != master {
         return Err(bad("master_pubkey mismatch between URL and body"));
     }
+    if cert.subkey_pubkey != user.public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Can only register a device cert for your own key".to_string(),
+        ));
+    }
     cert.verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
+
+    // A device belongs to one identity. The session above already stops a
+    // stranger claiming somebody else's key, but a key that was claimed before
+    // this gate existed would still be sitting in the table, and the holder
+    // re-registering under their real master must not end up with the subkey
+    // named by two masters at once — `master_of` picks a row, not an identity.
+    let other_master: Option<String> = sqlx::query_scalar(
+        "SELECT master_pubkey FROM subkey_certs
+          WHERE subkey_pubkey = $1 AND master_pubkey <> $2",
+    )
+    .bind(&cert.subkey_pubkey)
+    .bind(&cert.master_pubkey)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_err)?;
+    if other_master.is_some() {
+        return Err((
+            StatusCode::CONFLICT,
+            "That key is already registered as a device of another identity".to_string(),
+        ));
+    }
 
     upsert_subkey_cert(&state.db, &cert)
         .await
@@ -197,7 +313,7 @@ pub async fn upsert_subkey_cert(db: &sqlx::PgPool, cert: &SubkeyCert) -> Result<
     .bind(&fallback_json)
     .bind(&home_hub_url)
     .bind(&cert.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(db)
     .await?;
 
@@ -239,6 +355,17 @@ pub async fn list_revocations(
     Ok(Json(out))
 }
 
+/// Record that a master has revoked one of its devices.
+///
+/// Unauthenticated for the same reason `put_designation` is: a client
+/// publishes a revocation to *every* hub in its home-hub list and holds a
+/// session with at most one of them, so requiring `AuthUser` would quietly
+/// reduce "revoked everywhere" to "revoked where I am signed in" — which is
+/// the opposite of what revoking a device is for.
+///
+/// Bounded the same way instead. The signature already makes this unspoofable;
+/// what it did not bound is volume, and one keypair is free to mint
+/// (Wavvon-server#64).
 pub async fn post_revocation(
     State(state): State<Arc<AppState>>,
     Path(master): Path<String>,
@@ -251,6 +378,13 @@ pub async fn post_revocation(
         .verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
 
+    if !master_is_known_here(&state.db, &master).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub has no member linked to that master key".to_string(),
+        ));
+    }
+
     sqlx::query(
         "INSERT INTO subkey_revocations
             (master_pubkey, subkey_pubkey, revoked_at, signature, registered_at)
@@ -261,7 +395,7 @@ pub async fn post_revocation(
     .bind(&entry.subkey_pubkey)
     .bind(entry.revoked_at as i64)
     .bind(&entry.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(&state.db)
     .await
     .map_err(db_err)?;
@@ -293,6 +427,15 @@ pub async fn get_prefs(
     }))
 }
 
+/// Store the master's encrypted prefs blob. The hub holds ciphertext only.
+///
+/// Unauthenticated for the same reason as the designation and the revocation —
+/// personal-axis state is published to every home hub, not just the one with a
+/// live session.
+///
+/// The one that most needed bounding, because it stores an opaque blob rather
+/// than a few columns: the bytes a free keypair could park here were whatever
+/// the sender felt like sending (Wavvon-server#64).
 pub async fn put_prefs(
     State(state): State<Arc<AppState>>,
     Path(master): Path<String>,
@@ -303,6 +446,13 @@ pub async fn put_prefs(
     }
     blob.verify()
         .map_err(|e| bad(format!("Bad signature: {e}")))?;
+
+    if !master_is_known_here(&state.db, &master).await? {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "This hub has no member linked to that master key".to_string(),
+        ));
+    }
 
     let current: Option<i64> =
         sqlx::query_scalar("SELECT blob_version FROM prefs_blobs WHERE master_pubkey = $1")
@@ -334,7 +484,7 @@ pub async fn put_prefs(
     .bind(blob.blob_version as i64)
     .bind(&blob.ciphertext_hex)
     .bind(&blob.signature)
-    .bind(now_secs())
+    .bind(unix_timestamp())
     .execute(&state.db)
     .await
     .map_err(db_err)?;

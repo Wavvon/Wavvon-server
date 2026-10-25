@@ -15,7 +15,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::routes::admin::require_admin_pub;
+use crate::routes::admin::require_admin;
 use crate::state::FarmState;
 use crate::unix_now;
 
@@ -46,7 +46,7 @@ pub async fn generate_server_token(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<GenerateTokenRequest>,
 ) -> Result<Json<GenerateTokenResponse>, (StatusCode, Json<serde_json::Value>)> {
-    require_admin_pub(&headers, &state).await?;
+    require_admin(&headers, &state).await?;
 
     // Random 8-hex-char server ID.
     let server_id = {
@@ -118,7 +118,7 @@ pub async fn list_servers(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<ListServersResponse>, (StatusCode, Json<serde_json::Value>)> {
-    require_admin_pub(&headers, &state).await?;
+    require_admin(&headers, &state).await?;
 
     #[allow(clippy::type_complexity)]
     let rows: Vec<(String, String, Option<String>, Option<i64>, Option<i32>)> = sqlx::query_as(
@@ -433,14 +433,6 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
     tracing::info!(server_id, "Agent disconnected");
 }
 
-/// Pick any connected agent sender (round-robin is future work; first is fine now).
-pub async fn pick_agent(
-    senders: &Arc<tokio::sync::RwLock<HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
-) -> Option<(String, tokio::sync::mpsc::Sender<String>)> {
-    let map = senders.read().await;
-    map.iter().next().map(|(id, s)| (id.clone(), s.clone()))
-}
-
 // ---------------------------------------------------------------------------
 // PATCH /farm/admin/servers/{server_id}
 // ---------------------------------------------------------------------------
@@ -475,7 +467,7 @@ pub async fn update_server(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<UpdateServerRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    require_admin_pub(&headers, &state).await?;
+    require_admin(&headers, &state).await?;
 
     let Some(max_hubs) = req.max_hubs else {
         return Ok(StatusCode::NO_CONTENT);

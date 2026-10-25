@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
@@ -7,8 +6,10 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::auth::handlers::civil_from_unix;
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
+use crate::routes::channels::channel_subtree_ids;
 use crate::routes::chat_models::{ChannelResponse, ChatEvent, MessageResponse, WsServerMessage};
 use crate::state::AppState;
 
@@ -138,6 +139,10 @@ pub struct EventWithRsvps {
     pub event: EventResponse,
     pub rsvp_counts: RsvpCounts,
     pub slots: Vec<SlotResponse>,
+    /// The caller's own RSVP status, absent when they have none. Without it a
+    /// client could not show "you are going" after a reload.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub my_rsvp: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -204,6 +209,11 @@ pub struct CreateSquadRoomsRequest {
 pub struct ListEventsParams {
     pub upcoming: Option<bool>,
     pub limit: Option<i64>,
+    /// Only the events that belong to this channel's Events tab: anchored
+    /// there, `hub_wide`, or anchored on an ancestor with
+    /// `propagate_to_children`. Resolved here because the client cannot walk
+    /// the chain itself: `GET /channels` omits channels it cannot read.
+    pub channel_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -212,31 +222,21 @@ pub struct ListEventsParams {
 
 /// Format a Unix timestamp as "YYYY-MM-DD HH:MM UTC" without external dependencies.
 fn format_unix_utc(ts: i64) -> String {
-    // Days since epoch arithmetic (Gregorian proleptic calendar).
-    const SECS_PER_MIN: i64 = 60;
-    const SECS_PER_HOUR: i64 = 3600;
-    const SECS_PER_DAY: i64 = 86400;
+    let (y, mo, d, h, mi, _) = civil_from_unix(ts.max(0) as u64);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02} UTC")
+}
 
-    let ts = ts.max(0);
-    let time_of_day = ts % SECS_PER_DAY;
-    let days = ts / SECS_PER_DAY;
-
-    let h = time_of_day / SECS_PER_HOUR;
-    let m = (time_of_day % SECS_PER_HOUR) / SECS_PER_MIN;
-
-    // Civil date from days-since-1970-01-01 (algorithm from Howard Hinnant).
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let mth = if mp < 10 { mp + 3 } else { mp - 9 };
-    let yr = y + if mth <= 2 { 1 } else { 0 };
-
-    format!("{yr:04}-{mth:02}-{d:02} {h:02}:{m:02} UTC")
+async fn load_my_rsvp(
+    db: &sqlx::PgPool,
+    event_id: &str,
+    user_pubkey: &str,
+) -> Result<Option<String>, (StatusCode, String)> {
+    sqlx::query_scalar("SELECT status FROM event_rsvps WHERE event_id = $1 AND user_pubkey = $2")
+        .bind(event_id)
+        .bind(user_pubkey)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
 }
 
 async fn load_rsvp_counts(
@@ -273,7 +273,7 @@ async fn post_card_message(
     content: String,
 ) -> Result<(), (StatusCode, String)> {
     let msg_id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp();
+    let now = crate::auth::handlers::unix_timestamp_ms();
 
     sqlx::query(
         "INSERT INTO messages (id, channel_id, sender, content, created_at) VALUES ($1, $2, $3, $4, $5)",
@@ -302,6 +302,7 @@ async fn post_card_message(
         reply_count: 0,
         embeds: None,
         game: None,
+        components: None,
     };
 
     let ws_msg = WsServerMessage::ChatMessage {
@@ -322,9 +323,7 @@ async fn post_card_message(
 
 /// Returns `channel_id` plus every descendant of it in the `channels` tree
 /// (any depth) when `propagate` is true; otherwise just `[channel_id]`
-/// (events.md §6). Mirrors the same BFS-over-`parent_id` shape
-/// `routes::channels::delete_channel` uses to collect a subtree, reused here
-/// for card fan-out rather than deletion.
+/// (events.md §6).
 async fn propagation_targets(
     db: &sqlx::PgPool,
     channel_id: &str,
@@ -334,22 +333,7 @@ async fn propagation_targets(
         return Ok(vec![channel_id.to_string()]);
     }
 
-    let mut seen: HashSet<String> = HashSet::new();
-    seen.insert(channel_id.to_string());
-    let mut frontier: Vec<String> = vec![channel_id.to_string()];
-    while !frontier.is_empty() {
-        let children: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM channels WHERE parent_id = ANY($1)")
-                .bind(&frontier)
-                .fetch_all(db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-        frontier = children
-            .into_iter()
-            .filter(|c| seen.insert(c.clone()))
-            .collect();
-    }
-    Ok(seen.into_iter().collect())
+    channel_subtree_ids(db, channel_id).await
 }
 
 /// "Event created" card: title + formatted start time. Fans out to every
@@ -633,25 +617,43 @@ pub async fn list_events(
     let upcoming = params.upcoming.unwrap_or(false);
     let now = crate::auth::handlers::unix_timestamp();
 
-    let rows: Vec<EventResponse> = if upcoming {
-        sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
-             FROM hub_events WHERE starts_at >= $1 ORDER BY starts_at ASC LIMIT $2",
-        )
-        .bind(now)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
-    } else {
-        sqlx::query_as(
-            "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
-             FROM hub_events ORDER BY starts_at ASC LIMIT $1",
-        )
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
+    // The ancestors whose propagating events reach `channel_id`; the channel
+    // itself is matched on its own, propagating or not.
+    let channel_filter = match &params.channel_id {
+        Some(cid) => {
+            // Every event in a channel's tab is one its announcement card is
+            // posted into, so reading the channel is the whole gate -- the
+            // anchor may be a parent the caller cannot see.
+            permissions::channel_permissions(&state.db, &user.public_key, cid)
+                .await?
+                .require(permissions::MESSAGES_READ)?;
+            let mut chain = permissions::ancestor_chain(&state.db, cid).await?;
+            chain.pop();
+            Some((cid.clone(), chain))
+        }
+        None => None,
+    };
+
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
+         FROM hub_events WHERE TRUE",
+    );
+    if upcoming {
+        qb.push(" AND starts_at >= ").push_bind(now);
     }
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some((cid, ancestors)) = &channel_filter {
+        qb.push(" AND (hub_wide OR channel_id = ")
+            .push_bind(cid.clone())
+            .push(" OR (propagate_to_children AND channel_id = ANY(")
+            .push_bind(ancestors.clone())
+            .push(")))");
+    }
+    qb.push(" ORDER BY starts_at ASC LIMIT ").push_bind(limit);
+    let rows: Vec<EventResponse> = qb
+        .build_query_as()
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Read-gating (§3.5): drop any event whose channel the caller lacks
     // effective MESSAGES_READ on, so title/description/location/channel_id
@@ -668,15 +670,17 @@ pub async fn list_events(
 
     let mut result = Vec::with_capacity(rows.len());
     for event in rows {
-        if !event.hub_wide && !readable.contains(&event.channel_id) {
+        if channel_filter.is_none() && !event.hub_wide && !readable.contains(&event.channel_id) {
             continue;
         }
         let rsvp_counts = load_rsvp_counts(&state.db, &event.id).await?;
         let slots = load_slots(&state.db, &event.id).await?;
+        let my_rsvp = load_my_rsvp(&state.db, &event.id, &user.public_key).await?;
         result.push(EventWithRsvps {
             event,
             rsvp_counts,
             slots,
+            my_rsvp,
         });
     }
     Ok(Json(result))
@@ -688,39 +692,47 @@ pub async fn get_event(
     user: AuthUser,
     Path(event_id): Path<String>,
 ) -> Result<Json<EventWithRsvps>, (StatusCode, String)> {
-    let event: Option<EventResponse> = sqlx::query_as(
-        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
-         FROM hub_events WHERE id = $1",
-    )
-    .bind(&event_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let event = event.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
-
-    // Read-gating (§3.5): the event id itself doesn't reveal the channel, so
-    // a hidden-channel event 404s here rather than 403ing -- 403 would
-    // confirm the event's existence to a caller who can't see its channel.
-    // events.md §5: a `hub_wide` event bypasses this gate entirely -- it's
-    // public to the hub by construction, so an unreadable anchor never 404s
-    // it.
-    if !event.hub_wide {
-        let perms =
-            permissions::channel_permissions(&state.db, &user.public_key, &event.channel_id)
-                .await?;
-        if !perms.has(permissions::MESSAGES_READ) {
-            return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
-        }
-    }
+    let event = require_visible_event(&state, &user.public_key, &event_id).await?;
 
     let rsvp_counts = load_rsvp_counts(&state.db, &event_id).await?;
     let slots = load_slots(&state.db, &event_id).await?;
+    let my_rsvp = load_my_rsvp(&state.db, &event_id, &user.public_key).await?;
     Ok(Json(EventWithRsvps {
         event,
         rsvp_counts,
         slots,
+        my_rsvp,
     }))
+}
+
+/// Loads an event the caller may see, or 404s. Read-gating (§3.5): the event
+/// id itself doesn't reveal the channel, so a hidden-channel event 404s
+/// rather than 403ing -- 403 would confirm the event's existence to a caller
+/// who can't see its channel. events.md §5: a `hub_wide` event bypasses the
+/// gate -- it's public to the hub by construction. Shared by every route that
+/// takes an event id from the caller; the RSVP routes used to skip it.
+async fn require_visible_event(
+    state: &AppState,
+    public_key: &str,
+    event_id: &str,
+) -> Result<EventResponse, (StatusCode, String)> {
+    let event: Option<EventResponse> = sqlx::query_as(
+        "SELECT id, channel_id, creator_pubkey, title, description, starts_at, ends_at, location, created_at, reminder_minutes, reminder_sent_at, hub_wide, propagate_to_children
+         FROM hub_events WHERE id = $1",
+    )
+    .bind(event_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let event = event.ok_or((StatusCode::NOT_FOUND, "Event not found".to_string()))?;
+    if !event.hub_wide {
+        let perms =
+            permissions::channel_permissions(&state.db, public_key, &event.channel_id).await?;
+        if !perms.has(permissions::MESSAGES_READ) {
+            return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
+        }
+    }
+    Ok(event)
 }
 
 /// PUT /events/:id
@@ -927,14 +939,7 @@ pub async fn rsvp_event(
         }
     }
 
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = $1")
-        .bind(&event_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
-    }
+    require_visible_event(&state, &user.public_key, &event_id).await?;
 
     // events.md §2: a slot claim only exists alongside status == "going".
     // Any other status (or an RSVP with no slot_id) clears the claim.
@@ -1018,17 +1023,10 @@ pub async fn rsvp_event(
 /// GET /events/:id/rsvps
 pub async fn list_rsvps(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(event_id): Path<String>,
 ) -> Result<Json<Vec<RsvpEntry>>, (StatusCode, String)> {
-    let exists: Option<String> = sqlx::query_scalar("SELECT id FROM hub_events WHERE id = $1")
-        .bind(&event_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if exists.is_none() {
-        return Err((StatusCode::NOT_FOUND, "Event not found".to_string()));
-    }
+    require_visible_event(&state, &user.public_key, &event_id).await?;
 
     let entries: Vec<RsvpEntry> =
         sqlx::query_as("SELECT user_pubkey, status FROM event_rsvps WHERE event_id = $1")
@@ -1406,4 +1404,26 @@ pub async fn delete_slot(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_unix_utc_pins_format() {
+        let cases: [(i64, &str); 8] = [
+            (-5, "1970-01-01 00:00 UTC"),
+            (0, "1970-01-01 00:00 UTC"),
+            (86_399, "1970-01-01 23:59 UTC"),
+            (951_868_800, "2000-03-01 00:00 UTC"),
+            (1_700_000_000, "2023-11-14 22:13 UTC"),
+            (1_709_251_199, "2024-02-29 23:59 UTC"),
+            (1_709_251_200, "2024-03-01 00:00 UTC"),
+            (4_107_542_400, "2100-03-01 00:00 UTC"),
+        ];
+        for (ts, want) in cases {
+            assert_eq!(format_unix_utc(ts), want, "ts={ts}");
+        }
+    }
 }

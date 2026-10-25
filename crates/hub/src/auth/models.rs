@@ -11,6 +11,10 @@ pub struct ChallengeRequest {
 #[derive(Serialize, Deserialize)]
 pub struct ChallengeResponse {
     pub challenge: String,
+    /// `AUTH_CHALLENGE_SCHEME` when the answer may be signed over the
+    /// tagged bytes. Absent from older hubs, which take the raw challenge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
 }
 
 /// Structured proof-of-work submitted alongside auth/verify.

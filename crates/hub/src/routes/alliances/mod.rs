@@ -3,6 +3,7 @@ mod crud;
 mod managers;
 mod membership;
 mod models;
+mod people;
 mod voice;
 
 // Re-export all public items so server.rs paths remain unchanged.
@@ -22,6 +23,7 @@ pub use membership::{
     join_alliance_local, list_pending_invites, push_invite_handler, receive_alliance_member,
     receive_alliance_member_left, receive_federation_alliance_invite,
 };
+pub use people::{get_alliance_people, set_people_visibility};
 pub use voice::{
     admitted_channel, mint_voice_grant, record_visit, resolve_visitor_token, verify_grant,
     AllianceVoiceGrant, GRANT_TTL_SECS, VISIT_TTL_SECS,

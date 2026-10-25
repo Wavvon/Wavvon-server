@@ -409,6 +409,84 @@ pub fn group_dm_envelope_signing_bytes(
     buf
 }
 
+/// The scheme a hub or farm names in its `/auth/challenge` response when it
+/// accepts an answer signed over [`auth_challenge_signing_bytes`].
+pub const AUTH_CHALLENGE_SCHEME: &str = "tagged-v1";
+
+/// What a client signs to answer an auth challenge. Domain-tagged: the same
+/// key signs envelopes, certs and invite material, and a bare signature over
+/// whatever bytes a server sends lets that server collect one of those.
+pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Vec<u8> {
+    let mut buf = b"wavvon/auth-challenge/v1\0".to_vec();
+    buf.extend_from_slice(challenge);
+    buf
+}
+
+/// Checks an answer to an auth challenge in either form: tagged, or the raw
+/// challenge older clients sign. The raw form goes away at a major; until
+/// then a signer only uses it against a server that names no scheme.
+pub fn verify_auth_challenge(
+    public_key_hex: &str,
+    challenge: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    verify_signature(
+        public_key_hex,
+        &auth_challenge_signing_bytes(challenge),
+        signature,
+    )
+    .or_else(|_| verify_signature(public_key_hex, challenge, signature))
+}
+
+/// What a hub signs when it POSTs to a program's webhook — a slash or
+/// component dispatch (Ed25519, hub key) or an outgoing-webhook delivery
+/// (HMAC-SHA256, per-webhook key). Unlike the body-only signature sent beside
+/// it, this covers the timestamp, so a receiver can refuse a replay.
+pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
+    let mut buf = b"wavvon/webhook-delivery/v1\0".to_vec();
+    write_u64_le(&mut buf, timestamp);
+    buf.extend_from_slice(body);
+    buf
+}
+
+/// Header names on every signed webhook delivery, slash/component dispatch
+/// and outgoing webhooks alike. Third parties read them from the vectors.
+pub const HEADER_HUB_PUBKEY: &str = "X-Wavvon-Hub-Pubkey";
+pub const HEADER_SIGNATURE_LEGACY: &str = "X-Wavvon-Signature";
+pub const HEADER_SIGNATURE_V1: &str = "X-Wavvon-Signature-V1";
+pub const HEADER_TIMESTAMP: &str = "X-Wavvon-Timestamp";
+pub const HEADER_WEBHOOK_ID: &str = "X-Wavvon-Webhook-Id";
+
+/// The 32-byte HMAC key an outgoing webhook signs with, derived from the
+/// raw secret the admin was shown (HKDF-SHA256, salt `wavvon-webhook-signing`,
+/// empty info). Receivers run the same derivation.
+pub fn outgoing_webhook_signing_key(raw_secret: &[u8]) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<Sha256>::new(Some(b"wavvon-webhook-signing"), raw_secret);
+    let mut key = [0u8; 32];
+    // `expand` only fails for outputs over 255 * hash_len; 32 bytes is valid.
+    hk.expand(b"", &mut key)
+        .expect("HKDF expand with a 32-byte output cannot fail");
+    key
+}
+
+/// HMAC-SHA256 as outgoing webhooks use it, over either the raw body (legacy
+/// `X-Wavvon-Signature`) or `webhook_delivery_signing_bytes` (`-V1`).
+pub fn webhook_hmac_sha256(key: &[u8], message: &[u8]) -> Result<[u8; 32]> {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| anyhow!("bad HMAC key: {e}"))?;
+    mac.update(message);
+    Ok(mac.finalize().into_bytes().into())
+}
+
+/// What an origin hub signs over an alliance voice grant's payload JSON, so
+/// the grant cannot pass for anything else its key signs, nor anything else
+/// for a grant.
+pub fn voice_grant_signing_bytes(payload_json: &[u8]) -> Vec<u8> {
+    let mut buf = b"wavvon/alliance-voice-grant/v1\0".to_vec();
+    buf.extend_from_slice(payload_json);
+    buf
+}
+
 /// Canonical signing bytes for a plaintext federated DM.
 ///
 /// Covers the fields the client knows at send time:
@@ -417,6 +495,7 @@ pub fn group_dm_envelope_signing_bytes(
 ///
 /// `message_id` and `created_at` are hub-assigned and therefore excluded from
 /// the signed payload; the client cannot know them before the hub responds.
+///
 /// The conversation_id + conv_type + content triple is sufficient to prevent a
 /// remote hub from injecting a message with a forged `sender` field — an
 /// attacker claiming `sender=victim` cannot produce victim's Ed25519 signature
@@ -430,6 +509,26 @@ pub fn federated_plaintext_dm_signing_bytes(
     write_str(&mut buf, conversation_id);
     write_str(&mut buf, conv_type);
     write_str(&mut buf, content);
+    buf
+}
+
+/// What a group member signs to add members to a group DM or to leave it.
+/// A remote hub applies the change only on this signature, from someone its
+/// own roster already holds: trusting the member list a peer hub sends is what
+/// let anyone who knew a conversation id write into it (Wavvon-server#119).
+pub fn dm_member_change_signing_bytes(
+    conversation_id: &str,
+    actor: &str,
+    added: &[String],
+    removed: &[String],
+    issued_at: u64,
+) -> Vec<u8> {
+    let mut buf = b"wavvon/dm-member-change/v1\0".to_vec();
+    write_str(&mut buf, conversation_id);
+    write_str(&mut buf, actor);
+    write_str_vec(&mut buf, added);
+    write_str_vec(&mut buf, removed);
+    write_u64_le(&mut buf, issued_at);
     buf
 }
 

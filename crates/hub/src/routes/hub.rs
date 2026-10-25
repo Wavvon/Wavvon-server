@@ -162,6 +162,18 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "max_attachment_bytes", &bytes.to_string()).await?;
     }
+    if let Some(bytes) = req.max_upload_bytes {
+        if !(MIN_MAX_UPLOAD_BYTES..=MAX_MAX_UPLOAD_BYTES).contains(&bytes) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "max_upload_bytes must be between {} and {} bytes",
+                    MIN_MAX_UPLOAD_BYTES, MAX_MAX_UPLOAD_BYTES
+                ),
+            ));
+        }
+        upsert_setting(&state.db, "max_upload_bytes", &bytes.to_string()).await?;
+    }
     if let Some(mode) = req.name_color_mode.as_deref() {
         if !crate::routes::users::NAME_COLOR_MODES.contains(&mode) {
             return Err((
@@ -326,50 +338,6 @@ pub struct PowSettingsRequest {
     pub min_pow_level: u8,
 }
 
-/// GET /admin/settings/channel-depth — returns the current max_channel_depth setting.
-pub async fn get_channel_depth(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Result<Json<ChannelDepthResponse>, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(HUB_SETTINGS)?;
-
-    let max_channel_depth: u32 = read_setting(&state.db, "max_channel_depth")
-        .await
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-
-    Ok(Json(ChannelDepthResponse { max_channel_depth }))
-}
-
-/// PATCH /admin/settings/channel-depth — updates the max_channel_depth setting.
-pub async fn patch_channel_depth(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Json(req): Json<ChannelDepthRequest>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(HUB_SETTINGS)?;
-
-    upsert_setting(
-        &state.db,
-        "max_channel_depth",
-        &req.max_channel_depth.to_string(),
-    )
-    .await?;
-    Ok(StatusCode::OK)
-}
-
-#[derive(Serialize)]
-pub struct ChannelDepthResponse {
-    pub max_channel_depth: u32,
-}
-
-#[derive(Deserialize)]
-pub struct ChannelDepthRequest {
-    pub max_channel_depth: u32,
-}
-
 /// Read-only admin view of hub-wide settings for the Overview tab.
 pub async fn get_hub_settings(
     State(state): State<Arc<AppState>>,
@@ -420,6 +388,7 @@ pub async fn get_hub_settings(
         .unwrap_or(DEFAULT_AFK_TIMEOUT_SECS);
 
     let max_attachment_bytes = read_attachment_cap(&state.db).await;
+    let max_upload_bytes = read_upload_cap(&state.db).await;
 
     let name_color_mode = crate::routes::users::name_color_mode(&state.db).await;
 
@@ -435,7 +404,26 @@ pub async fn get_hub_settings(
         afk_timeout_secs,
         name_color_mode,
         max_attachment_bytes,
+        max_upload_bytes,
     }))
+}
+
+/// File uploads (`POST /channels/{id}/upload`) are stored on disk, not inline,
+/// so their cap is about disk and abuse rather than row size. An operator may
+/// lower it; the ceiling is the route's body limit (`uploads::UPLOAD_BODY_LIMIT`
+/// is derived from it), which a reverse proxy in front has to admit too.
+pub const DEFAULT_MAX_UPLOAD_BYTES: u64 = MAX_MAX_UPLOAD_BYTES;
+pub const MIN_MAX_UPLOAD_BYTES: u64 = 1024 * 1024;
+pub const MAX_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+
+/// The configured upload cap, falling back to the default when unset or out
+/// of bounds. Read per request, like the attachment cap.
+pub async fn read_upload_cap(db: &sqlx::PgPool) -> u64 {
+    read_setting(db, "max_upload_bytes")
+        .await
+        .and_then(|v| v.parse().ok())
+        .filter(|b| *b >= MIN_MAX_UPLOAD_BYTES && *b <= MAX_MAX_UPLOAD_BYTES)
+        .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES)
 }
 
 /// Default attachment cap: the value that used to be the compile-time
@@ -450,11 +438,16 @@ pub const MIN_MAX_ATTACHMENT_BYTES: u64 = 64 * 1024;
 /// Ceiling, and it is not arbitrary. Attachments are stored **inline** — the
 /// `attachments` column is TEXT holding base64 — so the cap is really a cap on
 /// how large a single message row may get, and base64 inflates by a third
-/// on top. A reverse proxy in front will refuse the request first anyway:
-/// hosting.md's nginx vhost sets `client_max_body_size 10M`. Letting an
-/// operator raise this past that point would produce uploads that fail at the
-/// proxy with no explanation from the hub.
+/// on top. It also bounds `MESSAGE_BODY_LIMIT`, which a reverse proxy in
+/// front has to admit (hosting.md's nginx vhost is sized for it); a higher
+/// cap would produce uploads that fail at the proxy with no explanation from
+/// the hub.
 pub const MAX_MAX_ATTACHMENT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Body limit for the routes that carry attachments: the ceiling plus room
+/// for the rest of the message, so a body just past the cap is refused by the
+/// cap check, with its message, rather than by axum's 2 MB default.
+pub const MESSAGE_BODY_LIMIT: usize = MAX_MAX_ATTACHMENT_BYTES as usize + 2 * 1024 * 1024;
 
 /// The configured attachment cap, falling back to the default when unset or
 /// unparseable. Read per request: an operator raising the limit should not
@@ -506,6 +499,13 @@ pub struct HubSettings {
     /// Was a compile-time constant, so an operator had no way to change it.
     #[serde(default = "default_attachment_cap")]
     pub max_attachment_bytes: u64,
+    /// Largest file `POST /channels/{id}/upload` accepts, in bytes.
+    #[serde(default = "default_upload_cap")]
+    pub max_upload_bytes: u64,
+}
+
+fn default_upload_cap() -> u64 {
+    DEFAULT_MAX_UPLOAD_BYTES
 }
 
 fn default_attachment_cap() -> u64 {
@@ -611,6 +611,10 @@ pub struct UpdateHubRequest {
     /// constants for why there is a ceiling at all.
     #[serde(default)]
     pub max_attachment_bytes: Option<u64>,
+    /// Largest file upload, in bytes. Clamped to [`MIN_MAX_UPLOAD_BYTES`,
+    /// `MAX_MAX_UPLOAD_BYTES`].
+    #[serde(default)]
+    pub max_upload_bytes: Option<u64>,
     /// Priority order for resolving a member's displayed name color (member
     /// name colors feature). Must be one of `NAME_COLOR_MODES`
     /// ("user_over_role", "role_over_user", "role_only", "user_only",
@@ -738,6 +742,11 @@ pub(crate) async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String>
         .flatten()
 }
 
+/// This hub's own public URL as the operator configured it; empty when unset.
+pub(crate) async fn load_hub_url(state: &AppState) -> String {
+    read_setting(&state.db, "hub_url").await.unwrap_or_default()
+}
+
 /// Admin-facing member listing with joined / last-seen / online + role summaries.
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
@@ -777,7 +786,7 @@ pub async fn list_members(
     )> = sqlx::query_as(
         "SELECT ur.user_public_key, r.id, r.name, r.priority, r.display_separately, r.created_at,
                 r.color, r.icon, r.category_id
-         FROM user_roles ur
+         FROM member_roles ur
          INNER JOIN roles r ON r.id = ur.role_id
          WHERE ur.user_public_key = ANY($1)
          ORDER BY ur.user_public_key, r.priority DESC",

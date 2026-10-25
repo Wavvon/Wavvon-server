@@ -1,13 +1,8 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::federation::client::FederationClient;
-use wavvon_hub::federation::models::{
-    FederatedChannelResponse, FederatedMessageResponse, PeerInfo,
-};
+use wavvon_hub::federation::models::PeerInfo;
 use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
@@ -18,76 +13,10 @@ mod common;
 
 async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
-    let (chat_tx, _) = broadcast::channel(256);
 
     let state = Arc::new(AppState {
         hub_name: name.to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        db_read: None,
-        store,
-        pending_challenges: RwLock::new(HashMap::new()),
-        cert_portfolio_cache: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_last_active: RwLock::new(HashMap::new()),
-        whisper_target_pubkeys: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_wt_url: None,
-        canonical_url: Arc::new(RwLock::new(None)),
-        voice_cert_hash: RwLock::new(None),
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashMap::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        app_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        voice_talk_blocked: Default::default(),
-        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
-        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        owner_pubkey: None,
-        apps_allow_camera: false,
-        http_video_stream_budget: 2,
-        webauthn: {
-            let origin = url::Url::parse("http://localhost:3000").unwrap();
-            std::sync::Arc::new(
-                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
-                    .unwrap()
-                    .rp_name("test-hub")
-                    .build()
-                    .unwrap(),
-            )
-        },
-        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        device_token_ttl_secs: 30 * 86400,
-        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
-            wavvon_hub::state::WebhookCircuit::default(),
-        )),
-        lan_mode: false,
-        lan_tls_mode: None,
-        lan_fingerprint: None,
+        ..common::base_state(db)
     });
 
     let app = server::create_router(state.clone());
@@ -144,8 +73,8 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
 }
 
 #[tokio::test]
-async fn two_hubs_federate() {
-    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+async fn two_hubs_peer_without_gaining_membership() {
+    let (hub_a_url, hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
     let (hub_b_url, hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
 
@@ -202,65 +131,59 @@ async fn two_hubs_federate() {
         .unwrap();
     assert_eq!(peers.len(), 1);
 
-    // Hub A: fetch channels from Hub B
-    let fed_channels: Vec<FederatedChannelResponse> = client
-        .get(format!(
-            "{hub_a_url}/federation/peers/{}/channels",
-            peer.public_key
-        ))
-        .bearer_auth(&token_a)
-        .send()
-        .await
-        .unwrap()
-        .json()
+    // Peering is not membership: Hub A's session on Hub B reaches neither
+    // Hub B's channel list nor its messages. What a peer may read is what an
+    // alliance shares with it (alliance_flow, peer_session_flow).
+    let peer_token = hub_a_state
+        .federation_client
+        .authenticate(&hub_b_url, &hub_a_state.hub_identity)
         .await
         .unwrap();
-    assert_eq!(fed_channels.len(), 1);
-    assert_eq!(fed_channels[0].name, "hub-b-general");
+    for path in [
+        "/channels".to_string(),
+        format!("/channels/{}/messages", channel.id),
+    ] {
+        let resp = client
+            .get(format!("{hub_b_url}{path}"))
+            .bearer_auth(&peer_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            403,
+            "peer session must be refused GET {path}"
+        );
+    }
+}
 
-    // Hub A: fetch messages from the federated channel
-    let fed_messages: Vec<FederatedMessageResponse> = client
-        .get(format!(
-            "{hub_a_url}/federation/channels/{}/messages",
-            fed_channels[0].id
-        ))
-        .bearer_auth(&token_a)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(fed_messages.len(), 1);
-    assert_eq!(fed_messages[0].content, "hello from hub B!");
-    assert_eq!(fed_messages[0].sender, user_b.public_key_hex());
+/// The hub key signs alliance invite tokens (a signature over the alliance
+/// id) among other things, so signing whatever a peer sends as a challenge
+/// would hand that peer an invite token. Only a challenge of the length a
+/// Wavvon hub issues is signed.
+#[tokio::test]
+async fn the_hub_refuses_to_sign_a_challenge_shaped_like_anything_else() {
+    use axum::routing::post;
+    let alliance_id = "11111111-2222-3333-4444-555555555555";
+    let app = axum::Router::new()
+        .route(
+            "/auth/challenge",
+            post(
+                move || async move { axum::Json(json!({ "challenge": hex::encode(alliance_id) })) },
+            ),
+        )
+        .route(
+            "/auth/verify",
+            post(|| async { axum::Json(json!({ "token": "x" })) }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
 
-    // Hub A: send a message TO Hub B's channel via federation
-    let resp = client
-        .post(format!(
-            "{hub_a_url}/federation/channels/{}/messages",
-            fed_channels[0].id
-        ))
-        .bearer_auth(&token_a)
-        .json(&json!({ "content": "hello from hub A!" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let sent: FederatedMessageResponse = resp.json().await.unwrap();
-    assert_eq!(sent.content, "hello from hub A!");
-
-    // Verify the message appears on Hub B
-    let messages: Vec<wavvon_hub::routes::chat_models::MessageResponse> = client
-        .get(format!("{hub_b_url}/channels/{}/messages", channel.id))
-        .bearer_auth(&token_b)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(messages.len(), 2);
-    assert!(messages.iter().any(|m| m.content == "hello from hub A!"));
-    assert!(messages.iter().any(|m| m.content == "hello from hub B!"));
+    let result = wavvon_hub::federation::client::FederationClient::new()
+        .authenticate(&url, &Identity::generate())
+        .await;
+    assert!(result.is_err(), "a 36-byte challenge must not be signed");
 }

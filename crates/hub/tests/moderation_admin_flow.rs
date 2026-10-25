@@ -1,12 +1,9 @@
 //! Integration tests for ME1 (federated ban list admin routes) and
 //! ME2 (circuit-breaker unit test) moderation enhancements.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::json;
-use tokio::sync::{broadcast, RwLock};
-use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::routes::banlist::{
     BanOverrideResponse, BanSourceResponse, BanlistSettingsResponse, FederatedBanEntryResponse,
 };
@@ -341,6 +338,11 @@ async fn banlist_publish_toggle() {
     resp.assert_status_ok();
     let settings: BanlistSettingsResponse = resp.json();
     assert!(!settings.publish_banlist);
+    // Off means off: who this hub banned is nobody else's business yet.
+    server
+        .get("/federation/banlist")
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
 
     // Enable.
     server
@@ -356,6 +358,7 @@ async fn banlist_publish_toggle() {
         .await;
     let settings: BanlistSettingsResponse = resp.json();
     assert!(settings.publish_banlist);
+    server.get("/federation/banlist").await.assert_status_ok();
 }
 
 // Whitelist override admits user even when they're in federated_bans
@@ -695,75 +698,7 @@ mod common_helpers {
 
 async fn spawn_real_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
-    let state = Arc::new(AppState {
-        hub_name: "test-hub".to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        db_read: None,
-        store,
-        pending_challenges: RwLock::new(HashMap::new()),
-        cert_portfolio_cache: RwLock::new(HashMap::new()),
-        chat_tx: broadcast::channel(256).0,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_last_active: RwLock::new(HashMap::new()),
-        whisper_target_pubkeys: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_wt_url: None,
-        canonical_url: Arc::new(RwLock::new(None)),
-        voice_cert_hash: RwLock::new(None),
-        voice_event_tx: broadcast::channel(16).0,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashMap::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        app_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        voice_talk_blocked: Default::default(),
-        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
-        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        owner_pubkey: None,
-        apps_allow_camera: false,
-        http_video_stream_budget: 2,
-        webauthn: {
-            let origin = url::Url::parse("http://localhost:3000").unwrap();
-            std::sync::Arc::new(
-                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
-                    .unwrap()
-                    .rp_name("test-hub")
-                    .build()
-                    .unwrap(),
-            )
-        },
-        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        device_token_ttl_secs: 30 * 86400,
-        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
-            wavvon_hub::state::WebhookCircuit::default(),
-        )),
-        lan_mode: false,
-        lan_tls_mode: None,
-        lan_fingerprint: None,
-    });
+    let state = Arc::new(common::base_state(db));
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -922,4 +857,74 @@ async fn reading_a_members_history_needs_ban_permission() {
         .unwrap();
 
     assert_eq!(res.status(), 403);
+}
+
+/// The moderation check is signed like every other Wavvon webhook: an
+/// HKDF-derived HMAC key, the body-only signature and the timestamped V1, so
+/// one verifier serves both and a replay can be refused (Wavvon-server#169).
+#[tokio::test]
+async fn the_moderation_check_is_signed_like_an_outgoing_webhook() {
+    use std::sync::Mutex;
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    type Seen = Arc<Mutex<Option<(axum::http::HeaderMap, Vec<u8>)>>>;
+    let seen: Seen = Arc::default();
+    let sink = seen.clone();
+    let receiver = axum::Router::new().route(
+        "/check",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let sink = sink.clone();
+                async move {
+                    *sink.lock().unwrap() = Some((headers, body.to_vec()));
+                    axum::Json(json!({ "action": "allow" }))
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/check", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+
+    server
+        .patch("/admin/settings/moderation")
+        .authorization_bearer(&token)
+        .json(&json!({ "webhook_url": url, "webhook_secret": "s3cr3t" }))
+        .await
+        .assert_status_ok();
+    let channel: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "general" }))
+        .await
+        .json();
+    server
+        .post(&format!(
+            "/channels/{}/messages",
+            channel["id"].as_str().unwrap()
+        ))
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "hello" }))
+        .await
+        .assert_status_success();
+
+    let (headers, body) = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the moderation webhook was never called");
+    let header = |name: &str| headers[name].to_str().unwrap().to_string();
+    let key = wavvon_identity::outgoing_webhook_signing_key(b"s3cr3t");
+    let ts: u64 = header("X-Wavvon-Timestamp").parse().unwrap();
+    let v1 = wavvon_identity::webhook_hmac_sha256(
+        &key,
+        &wavvon_identity::webhook_delivery_signing_bytes(ts, &body),
+    )
+    .unwrap();
+    assert_eq!(header("X-Wavvon-Signature-V1"), hex::encode(v1));
+    let legacy = wavvon_identity::webhook_hmac_sha256(&key, &body).unwrap();
+    assert_eq!(header("X-Wavvon-Signature"), hex::encode(legacy));
+    assert!(headers.contains_key("X-Wavvon-Hub-Pubkey"));
 }

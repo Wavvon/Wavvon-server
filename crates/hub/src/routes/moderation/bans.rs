@@ -15,16 +15,26 @@ use crate::state::AppState;
 
 use super::models::{require_can_moderate, BanRow, MuteRow};
 
-/// Membership ends on kick/ban: strip the target's roles (member = has
-/// roles; /users hides role-less non-bots) and tell connected clients to
+/// Membership ends on kick/ban: clear `is_member` and strip the target's
+/// roles in one transaction (a banned key must not keep the everyone floor;
+/// /users hides non-members) and tell connected clients to
 /// refresh their member list. The users row is deliberately kept so old
 /// messages stay attributed.
 async fn end_membership(state: &AppState, target: &str) -> Result<(), (StatusCode, String)> {
+    let db_err = |e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+    sqlx::query("UPDATE users SET is_member = FALSE WHERE public_key = $1")
+        .bind(target)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
     sqlx::query("DELETE FROM user_roles WHERE user_public_key = $1")
         .bind(target)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
+    state.close_sessions_of(target).await;
 
     // MemberOffline prompts clients to drop/grey the row now; the next
     // /users refetch removes them entirely.
@@ -95,7 +105,12 @@ pub async fn ban_user(
 
     end_membership(&state, &req.target_public_key).await?;
 
-    tracing::info!("Banned user: {}", &req.target_public_key[..16]);
+    tracing::info!(
+        "Banned user: {}",
+        req.target_public_key
+            .get(..16)
+            .unwrap_or(&req.target_public_key)
+    );
 
     // Publish member.banned audit event.
     {
@@ -208,7 +223,12 @@ pub async fn mute_user(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    tracing::info!("Muted user: {}", &req.target_public_key[..16]);
+    tracing::info!(
+        "Muted user: {}",
+        req.target_public_key
+            .get(..16)
+            .unwrap_or(&req.target_public_key)
+    );
 
     Ok((
         StatusCode::CREATED,
@@ -306,7 +326,9 @@ pub async fn timeout_user(
 
     tracing::info!(
         "Timed out user: {} for {}s",
-        &req.target_public_key[..16],
+        req.target_public_key
+            .get(..16)
+            .unwrap_or(&req.target_public_key),
         req.duration_seconds
     );
 
@@ -349,7 +371,12 @@ pub async fn kick_user(
     // hubs) — exactly what "kick" should mean.
     end_membership(&state, &req.target_public_key).await?;
 
-    tracing::info!("Kicked user: {}", &req.target_public_key[..16]);
+    tracing::info!(
+        "Kicked user: {}",
+        req.target_public_key
+            .get(..16)
+            .unwrap_or(&req.target_public_key)
+    );
 
     // Publish member.kicked audit event.
     {

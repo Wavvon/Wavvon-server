@@ -26,6 +26,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::middleware::AuthUser;
+use crate::routes::hub::load_hub_url;
 use crate::state::AppState;
 
 /// How long a minted grant is good for. A ticket to open one session, not a
@@ -62,7 +63,8 @@ pub struct AllianceVoiceGrantPayload {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AllianceVoiceGrant {
     pub payload: AllianceVoiceGrantPayload,
-    /// Hex Ed25519 signature over `serde_json::to_string(&payload)`.
+    /// Hex Ed25519 signature over `voice_grant_signing_bytes` of
+    /// `serde_json::to_string(&payload)`.
     pub signature: String,
 }
 
@@ -84,18 +86,6 @@ pub struct MintGrantResponse {
 /// Why a grant was refused. Names rather than prose so the client can branch.
 fn forbid(code: &str) -> (StatusCode, String) {
     (StatusCode::FORBIDDEN, code.to_string())
-}
-
-/// This hub's own public URL, as the operator configured it. The visitor needs
-/// it to know where the grant came from, and the owner stores it so a roster can
-/// say which hub a visitor is from.
-async fn load_hub_url(state: &AppState) -> String {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_url'")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
 }
 
 /// `POST /alliances/:id/voice-grant` — mint a grant for one of *another*
@@ -180,7 +170,7 @@ pub async fn mint_voice_grant(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?;
 
     for member in members {
-        let token = match super::channels::peer_token(&state, &member).await {
+        let token = match crate::federation::peer_token(&state, &member.hub_url).await {
             Some(t) => t,
             None => continue,
         };
@@ -236,7 +226,14 @@ pub async fn mint_voice_grant(
                 format!("Serialise error: {e}"),
             )
         })?;
-        let signature = hex::encode(state.hub_identity.sign(payload_json.as_bytes()).to_bytes());
+        let signature = hex::encode(
+            state
+                .hub_identity
+                .sign(&wavvon_identity::voice_grant_signing_bytes(
+                    payload_json.as_bytes(),
+                ))
+                .to_bytes(),
+        );
 
         tracing::info!(
             alliance = %alliance_id,
@@ -304,8 +301,21 @@ pub async fn verify_grant(
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "serialise".to_string()))?;
     let sig_bytes =
         hex::decode(&grant.signature).map_err(|_| forbid("grant_signature_malformed"))?;
-    wavvon_identity::verify_signature(&p.origin_hub_pubkey, payload_json.as_bytes(), &sig_bytes)
-        .map_err(|_| forbid("grant_signature_invalid"))?;
+    // The untagged form is what hubs minted before the tag, and still mint
+    // until they upgrade. Accepting it opens nothing: every other untagged
+    // signature this key makes is over JSON the hub builds itself (badges,
+    // certs, ban lists, dispatch bodies, directory payloads) whose first key
+    // is never "alliance_id", or over a peer's auth challenge, which is
+    // tagged or exactly 32 bytes. Goes at a major.
+    wavvon_identity::verify_signature(
+        &p.origin_hub_pubkey,
+        &wavvon_identity::voice_grant_signing_bytes(payload_json.as_bytes()),
+        &sig_bytes,
+    )
+    .or_else(|_| {
+        wavvon_identity::verify_signature(&p.origin_hub_pubkey, payload_json.as_bytes(), &sig_bytes)
+    })
+    .map_err(|_| forbid("grant_signature_invalid"))?;
 
     // The origin must be a hub we are actually allied with, in this alliance.
     let allied: Option<i32> = sqlx::query_scalar(

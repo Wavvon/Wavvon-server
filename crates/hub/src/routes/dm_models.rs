@@ -9,6 +9,11 @@ pub struct CreateConversationRequest {
     /// Optional: where each remote member is reachable. Missing entries = local member.
     #[serde(default)]
     pub member_hubs: HashMap<String, String>,
+    /// Optional: the master pubkey of a remote member, as an allied hub's
+    /// people listing gave it. It is only a claim -- it is checked against that
+    /// member's device certs before it is believed.
+    #[serde(default)]
+    pub member_masters: HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -41,6 +46,12 @@ pub struct SendDmRequest {
     /// and do not use this field.
     #[serde(default)]
     pub plaintext_signature: Option<String>,
+    /// A paired device signs `plaintext_signature` with its subkey and
+    /// presents the cert chaining it to the canonical identity, as the
+    /// encrypted envelopes do (decisions.md, "Paired-device DMs attribute to
+    /// canonical via cert-chained envelopes").
+    #[serde(default)]
+    pub plaintext_signer_cert: Option<SubkeyCert>,
 }
 
 fn default_envelope_version() -> u8 {

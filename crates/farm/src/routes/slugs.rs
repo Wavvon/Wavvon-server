@@ -414,14 +414,12 @@ pub async fn hub_address_by_pubkey(
             .map_err(db_err)?;
     let hub_id = hub_id.ok_or_else(|| err(StatusCode::NOT_FOUND, "hub_not_found"))?;
 
-    let base = state.farm_url.trim_end_matches('/');
-    let hub_url = match canonical_slug(&state.db, &hub_id).await {
-        Some(slug) => format!("{base}/hub/{slug}"),
-        // No slug: the pubkey form, which is what the caller already had. Still
-        // worth answering — it confirms the hub exists and was not renamed,
-        // which is different information from a 404.
-        None => format!("{base}/hub/{pubkey}"),
-    };
+    // No slug gives the pubkey form, which is what the caller already had.
+    // Still worth answering — it confirms the hub exists and was not renamed,
+    // which is different information from a 404.
+    let hub_url = crate::routes::hubs::hub_url(&state.db, &state.farm_url, &hub_id, Some(&pubkey))
+        .await
+        .unwrap_or_default();
 
     Ok(Json(HubAddressResponse { hub_url }))
 }

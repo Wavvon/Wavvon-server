@@ -69,11 +69,6 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "The farm's row id for this hub. Reported on heartbeat so the farm can route to it",
     ),
     (
-        "WAVVON_DISCOVERY_URL",
-        "https://discovery.wavvon.io",
-        "Discovery service base URL",
-    ),
-    (
         "WAVVON_TEMPLATE_URL",
         "(unset)",
         "Bootstrap template URL applied on first boot when the channels table is empty",
@@ -114,14 +109,9 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "PostgreSQL connection URL (required). Example: postgres://user:pass@host/dbname",
     ),
     (
-        wavvon_hub_env::DATABASE_READ_URL,
-        "(unset)",
-        "Read-replica URL (PostgreSQL only). All queries go to the primary when unset",
-    ),
-    (
         wavvon_hub_env::DB_MAX_CONNECTIONS,
         "5",
-        "Size of the PostgreSQL connection pool (applies to the read-replica pool too). \
+        "Size of the PostgreSQL connection pool. \
          Every request borrows a connection for the duration of a query and returns it, \
          so this caps concurrent database work, not concurrent users. Raise it for a busy \
          hub — but keep the total across all hubs sharing one PostgreSQL server under that \
@@ -170,6 +160,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "Set to `true` to allow bot mini-apps that declare `requires_camera: true` to \
          receive camera access in the client webview/iframe sandbox. Defaults to false; \
          operators who trust all registered bots on this hub can enable it hub-wide.",
+    ),
+    (
+        "WAVVON_ALLOW_PRIVATE_WEBHOOKS",
+        "false",
+        "Set to `true` to let outgoing webhooks and app `webhook_url`s use plain http and          private/loopback hosts. Off by default: both are https-only and refuse private          ranges, because any member holding apps.register could otherwise aim the hub at          localhost or a cloud metadata address (SSRF). Enable only on a LAN-only hub.",
     ),
     (
         "WAVVON_BOTS_ALLOW_VIDEO",
@@ -265,8 +260,6 @@ pub struct Settings {
     /// Owner's Ed25519 public key (64 hex chars). Seeded as builtin-owner on first boot.
     /// Env: WAVVON_OWNER_PUBKEY
     pub owner_pubkey: Option<String>,
-    /// Discovery service base URL. Env: WAVVON_DISCOVERY_URL
-    pub discovery_url: String,
     /// Bootstrap template URL applied on first boot when channels table is empty.
     /// Env: WAVVON_TEMPLATE_URL
     pub template_url: Option<String>,
@@ -291,11 +284,7 @@ pub struct Settings {
     /// when unset — with a warning, and only until embedded PostgreSQL lands.
     /// Env: WAVVON_DATABASE_URL
     pub database_url: Option<String>,
-    /// Read-replica URL. Only used when database_url is PostgreSQL.
-    /// If unset, all queries go to the primary.
-    pub database_read_url: Option<String>,
-    /// PostgreSQL connection-pool size, for the primary and the read replica
-    /// alike. Env: WAVVON_DB_MAX_CONNECTIONS
+    /// PostgreSQL connection-pool size. Env: WAVVON_DB_MAX_CONNECTIONS
     pub db_max_connections: u32,
     /// Enable trusted-proxy mode for the rate limiter.
     ///
@@ -321,6 +310,11 @@ pub struct Settings {
     ///
     /// Env: WAVVON_APPS_ALLOW_CAMERA
     pub apps_allow_camera: bool,
+    /// Let outgoing webhooks and app `webhook_url`s use plain http and
+    /// private/loopback hosts (LAN-only hubs, local test harnesses).
+    ///
+    /// Env: WAVVON_ALLOW_PRIVATE_WEBHOOKS
+    pub allow_private_webhooks: bool,
     /// Operator kill-switch for `can_inject_video` bot video streams.
     /// Max concurrent video streams started over HTTP, hub-wide.
     /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
@@ -388,9 +382,9 @@ pub fn load() -> Result<Settings> {
         .set_default("voice_udp_port", 3001)?
         .set_default("cors_origins", "*")?
         .set_default("log_format", "text")?
-        .set_default("discovery_url", "https://discovery.wavvon.io")?
         .set_default("trusted_proxy", false)?
         .set_default("apps_allow_camera", false)?
+        .set_default("allow_private_webhooks", false)?
         .set_default("http_video_stream_budget", 2u32)?
         .set_default("device_token_ttl_days", 30u64)?
         .set_default("db_max_connections", 5u32)?

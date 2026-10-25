@@ -11,7 +11,7 @@ use std::sync::Arc;
 async fn main() {
     tracing_subscriber::fmt::init();
     let cfg = Settings::load().expect("Failed to load config");
-    let manager = Arc::new(HubManager::new(cfg.hub_binary.clone(), cfg.base_port));
+    let manager = Arc::new(HubManager::new(cfg.hub_binary.clone()));
 
     loop {
         if let Err(e) = agent::run(&cfg, manager.clone()).await {

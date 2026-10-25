@@ -26,6 +26,12 @@
 /// Seeded with the cases where a newer client would otherwise call an
 /// endpoint an older hub does not have, or silently get a worse answer.
 pub const CAPABILITIES: &[&str] = &[
+    // `GET /alliances/{id}/people` lists the members of one allied hub who
+    // opted in (`PATCH /me` `findable_by_allies`) under an alliance whose
+    // manager allowed it (`PUT /alliances/{id}/people-visibility`). Gated so a
+    // client does not offer a People tab, or the member switch, on a hub that
+    // would answer 404, which reads as "nobody is there".
+    "alliance.people",
     // Alliance management is delegable: `alliances.manage` carries the
     // hub-scoped acts, and `alliance_managers` — a per-alliance grant list over
     // local roles — carries the ones that belong to one relationship (inviting
@@ -49,12 +55,28 @@ pub const CAPABILITIES: &[&str] = &[
     // destinations it may offer, so its move picker keeps listing them all and
     // the refusal arrives when the move is issued.
     "channels.move.targets",
+    // Adding a member to a group DM, or leaving one, takes the actor's
+    // signature (`signed`), and the hub carries the change to the other
+    // members' hubs. Gated so a client signs only where the change will be
+    // carried; an older hub keeps every change to itself.
+    "dms.group.signedmembers",
+    // A plaintext DM may carry `plaintext_signer_cert`, so a paired device can
+    // sign it with its subkey. Gated because an older hub verifies the
+    // signature against the canonical key alone and refuses the send.
+    "dms.plaintext.signercert",
     // `DELETE /me` — a member can remove themselves from the hub: profile and
     // roles cleared, the pubkey kept as the anchor moderation and message
     // history point at. Gated because a client must not offer "leave this
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // `POST /invites` accepts `bound_pubkey`: the invite admits that identity
+    // and nobody else, and redeeming it also satisfies the admission
+    // challenge. A client that cannot see this string must not offer the
+    // field — the hub would ignore it and mint an ordinary bearer code while
+    // the admin believed they had named someone, which is the one failure
+    // this feature exists to prevent.
+    "invites.bound",
     // `GET /invites` hides the invites that can no longer admit anyone and
     // carries `status` (`live`, `expired`, `used_up`) on the ones it shows;
     // `?include_inactive=true` asks for the history. A client that cannot see
@@ -131,6 +153,11 @@ pub const CAPABILITIES: &[&str] = &[
     // The raw-UDP and `/voice/ws` relays it replaced are gone, so a client
     // that does not see this string has no voice path to this hub at all.
     "voice.wt",
+    // Webhook deliveries (app dispatch, outgoing webhooks) carry
+    // `X-Wavvon-Signature-V1` over the timestamp and the body. Advertised so a
+    // program can tell a hub that never sends it from a replayed request
+    // stripped of it, and refuse the second.
+    "webhooks.signedtimestamp",
     // The WS answers `ping` with `pong`, echoing the nonce. Without this a
     // client measuring latency would wait for a reply that never comes and
     // show a dead "—" forever, so the readout has to be gated on it.

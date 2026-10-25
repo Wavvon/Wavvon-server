@@ -72,7 +72,8 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             favorite_hubs      TEXT, -- JSON [{url,name,icon}]; show_hubs gates visibility
             show_hubs          BOOLEAN, -- NULL = false
             birthday           TEXT, -- MM-DD, never a year; validated in routes/me.rs
-            name_color         TEXT -- per-user override; hub name_color_mode picks the winner
+            name_color         TEXT, -- per-user override; hub name_color_mode picks the winner
+            is_member          BOOLEAN NOT NULL DEFAULT FALSE -- the one answer to: is this identity in the community
         )",
     )
     .execute(pool)
@@ -301,20 +302,14 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Interactive UI components attached to a message.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS message_components (
-            id            TEXT PRIMARY KEY,
-            message_id    TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            row_idx       BIGINT NOT NULL,
-            component_idx BIGINT NOT NULL,
-            type          TEXT NOT NULL,
-            config_json   TEXT NOT NULL,
-            expires_at    BIGINT
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // App components live on messages.components, next to embeds and game;
+    // this table was written by component updates and read by nothing.
+    sqlx::query("DROP TABLE IF EXISTS message_components")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS components TEXT")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS channel_pins (
@@ -409,6 +404,47 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             assigned_at     BIGINT NOT NULL,
             PRIMARY KEY (user_public_key, role_id)
         )",
+    )
+    .execute(pool)
+    .await?;
+
+    // Membership is `users.is_member`; `builtin-everyone` is the floor every
+    // member gets without a `user_roles` row. A database that predates the
+    // column has no way to say who is a member except "holds any role", so
+    // that is the backfill, and the now-implicit everyone rows go. Gated on
+    // the column's absence so it runs once: a stranger handed a role later
+    // must not be promoted to member by a restart.
+    let has_member_col: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns
+         WHERE table_schema = current_schema() AND table_name = 'users' AND column_name = 'is_member')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !has_member_col {
+        let mut tx = pool.begin().await?;
+        sqlx::query("ALTER TABLE users ADD COLUMN is_member BOOLEAN NOT NULL DEFAULT FALSE")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "UPDATE users SET is_member = TRUE
+             WHERE EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_public_key = users.public_key)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM user_roles WHERE role_id = 'builtin-everyone'")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+
+    // The effective role set: explicit grants plus the everyone floor for
+    // members. Read paths use this instead of `user_roles`; writes stay on
+    // `user_roles`, which holds only what is added on top of the floor.
+    sqlx::query(
+        "CREATE OR REPLACE VIEW member_roles (user_public_key, role_id) AS
+         SELECT user_public_key, role_id FROM user_roles
+         UNION
+         SELECT public_key, 'builtin-everyone' FROM users WHERE is_member",
     )
     .execute(pool)
     .await?;
@@ -738,6 +774,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Alliance invites are rows: random, expiring, spent on use. They used
+    // to be a signature over the alliance id -- deterministic, so one token
+    // per alliance, valid forever and impossible to revoke.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS alliance_invites (
+            token       TEXT PRIMARY KEY,
+            alliance_id TEXT NOT NULL REFERENCES alliances(id) ON DELETE CASCADE,
+            created_at  BIGINT NOT NULL,
+            expires_at  BIGINT NOT NULL,
+            used_at     BIGINT
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS alliance_members (
             alliance_id    TEXT NOT NULL REFERENCES alliances(id),
@@ -884,20 +935,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Event queue behind the HTTP polling transport (`GET /me/events`), for
-    // a client that holds no persistent WebSocket.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS app_event_queue (
-            id         TEXT PRIMARY KEY,
-            app_pubkey TEXT NOT NULL REFERENCES users(public_key) ON DELETE CASCADE,
-            event_type TEXT NOT NULL,
-            payload    TEXT NOT NULL,
-            created_at BIGINT NOT NULL,
-            delivered  BOOLEAN NOT NULL DEFAULT FALSE
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // `GET /me/events` reads the audit log, as Resume does; this queue was
+    // only ever written by tests.
+    sqlx::query("DROP TABLE IF EXISTS app_event_queue")
+        .execute(pool)
+        .await?;
 
     // Admission challenges (anti-spam, `challenge_mode`). It was called
     // `bot_challenges` and never had anything to do with bots: it is the
@@ -1102,7 +1144,7 @@ pub async fn run(pool: &PgPool) -> Result<()> {
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS dh_keys (
-            pubkey        TEXT PRIMARY KEY REFERENCES users(public_key),
+            pubkey        TEXT PRIMARY KEY,
             dh_pubkey_hex TEXT NOT NULL,
             signature_hex TEXT NOT NULL,
             published_at  BIGINT NOT NULL
@@ -1177,16 +1219,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS subkey_revocation_sync (
-            master_pubkey  TEXT NOT NULL,
-            home_hub_url   TEXT NOT NULL,
-            last_synced_at BIGINT NOT NULL DEFAULT 0,
-            PRIMARY KEY (master_pubkey, home_hub_url)
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // The subkey revocation worker fetches the whole list now; its cursor
+    // table is gone.
+    sqlx::query("DROP TABLE IF EXISTS subkey_revocation_sync")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS prefs_blobs (
@@ -1813,7 +1850,38 @@ pub async fn run(pool: &PgPool) -> Result<()> {
         .execute(pool)
         .await;
 
+    // An alliance voice visitor publishes its DH key here and has, on
+    // purpose, no `users` row — so a key tied to `users` could never be
+    // stored, nobody could wrap a voice key for a visitor, and the room was
+    // silent for them. Pre-1.0, so the constraint simply goes.
+    sqlx::query("ALTER TABLE dh_keys DROP CONSTRAINT IF EXISTS dh_keys_pubkey_fkey")
+        .execute(pool)
+        .await?;
+
+    // Alliance member discovery (alliance-member-discovery.md §2): two consent
+    // switches, both off. The alliance one is the manager's, the member one is
+    // the person's; a member is listed to allies only when both are on.
+    let _ = sqlx::query(
+        "ALTER TABLE alliances ADD COLUMN people_visible BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+    let _ = sqlx::query(
+        "ALTER TABLE users ADD COLUMN findable_by_allies BOOLEAN NOT NULL DEFAULT FALSE",
+    )
+    .execute(pool)
+    .await;
+
     let _ = sqlx::query("ALTER TABLE invites ADD COLUMN grant_role_id TEXT REFERENCES roles(id)")
+        .execute(pool)
+        .await;
+
+    // Pubkey-bound invites (pubkey-bound-invites.md). NULL = a bearer code,
+    // which is every invite that existed before this column. When set, only
+    // the identity it names may redeem it, and redeeming it also satisfies
+    // the admission challenge -- an admin naming one key is already the human
+    // act the challenge asks about. See routes::invites::redeemable_by.
+    let _ = sqlx::query("ALTER TABLE invites ADD COLUMN bound_pubkey TEXT")
         .execute(pool)
         .await;
 
@@ -1894,10 +1962,113 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await;
 
+    // A federating peer used to be admitted as a full member: any key could
+    // claim `is_hub` at `/auth/verify`, skip the invite gate, and land with
+    // `is_member` and so the everyone floor. A peer is not a member now, so
+    // un-admit the rows that were. Once only (the marker): a person admitted
+    // later whose key also sits in `peers` must not be demoted by a restart.
+    //
+    // The criterion is "in `peers` and nothing a person acquires": no role
+    // granted beyond the floor (which also spares the owner), no display name,
+    // no master identity. A person who self-asserted `is_hub` and then did
+    // anything a person does keeps membership; a peer that only ever
+    // federated is demoted. Its existing sessions are re-scoped, since a
+    // session minted as `member` would otherwise outlive the demotion.
+    let first_run = sqlx::query(
+        "INSERT INTO hub_settings (key, value) VALUES ('peer_membership_cleanup_v1', '1')
+         ON CONFLICT (key) DO NOTHING",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1;
+    if first_run {
+        let mut tx = pool.begin().await?;
+        let demoted: Vec<String> = sqlx::query_scalar(
+            "UPDATE users SET is_member = FALSE
+             WHERE is_member
+               AND public_key IN (SELECT public_key FROM peers)
+               AND master_pubkey IS NULL
+               AND COALESCE(display_name, '') = ''
+               AND NOT EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_public_key = users.public_key)
+             RETURNING public_key",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        sqlx::query("UPDATE sessions SET scope = 'peer' WHERE public_key = ANY($1)")
+            .bind(&demoted)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
+
     // Two capability backfills used to follow, seeding the grant tables that
     // gated what a bot could do. Both tables are gone: a client's authority
     // is its roles, resolved through the permission catalogue like everyone
     // else's, so there is no per-pubkey grant left to seed.
+
+    // Farm siblings were subscribed with the route already on the URL, and the
+    // ban list worker appends it again, so every sibling list 404ed. A source
+    // is a base URL; idempotent, so it simply finds nothing to do next time.
+    sqlx::query(
+        "UPDATE federated_ban_sources s
+            SET url = left(s.url, length(s.url) - length('/federation/banlist'))
+          WHERE s.url LIKE '%/federation/banlist'
+            AND NOT EXISTS (
+                SELECT 1 FROM federated_ban_sources o
+                 WHERE o.url = left(s.url, length(s.url) - length('/federation/banlist'))
+            )",
+    )
+    .execute(pool)
+    .await?;
+
+    // `messages.created_at` is in milliseconds, but poll, event, webhook,
+    // app and welcome messages were stamped in seconds, so they sorted
+    // before all history and were never unread (#114). Once per database:
+    // a value below 1e11 is seconds -- as milliseconds it would be 1973.
+    let first_run = sqlx::query(
+        "INSERT INTO hub_settings (key, value) VALUES ('messages_created_at_ms_v1', '1')
+         ON CONFLICT (key) DO NOTHING",
+    )
+    .execute(pool)
+    .await?
+    .rows_affected()
+        == 1;
+    if first_run {
+        sqlx::query(
+            "UPDATE messages SET created_at = created_at * 1000 WHERE created_at < 100000000000",
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // A group's membership changes travel to the other members' hubs as a
+    // change the actor signed (Wavvon-server#119). The outbox carries them
+    // whole; the ledger keeps the newest change applied per member, so a
+    // replayed older one can never undo it.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS dm_member_change_outbox (
+            id BIGSERIAL PRIMARY KEY,
+            recipient_hub_url TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            next_attempt_at BIGINT NOT NULL,
+            last_error TEXT,
+            bounced_at BIGINT
+        )",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS conversation_member_changes (
+            conversation_id TEXT NOT NULL,
+            public_key TEXT NOT NULL,
+            issued_at BIGINT NOT NULL,
+            PRIMARY KEY (conversation_id, public_key)
+        )",
+    )
+    .execute(pool)
+    .await?;
 
     tracing::info!("Database migrations complete");
 

@@ -65,7 +65,6 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
         keypair,
         farm_url.to_string(),
         hub_manager,
-        "/tmp/hubs-test".to_string(),
     ));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state, guard)
@@ -317,8 +316,8 @@ async fn hub_quota_reflects_owned_hubs_and_limit() {
     let now = unix_now();
     for i in 0..2u32 {
         sqlx::query(
-            "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-             VALUES ($1, $2, $3, 'private', '/tmp/test.db', $4)",
+            "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at)
+             VALUES ($1, $2, $3, 'private', $4)",
         )
         .bind(format!("hub{i}"))
         .bind(user.public_key_hex())
@@ -411,8 +410,8 @@ async fn create_hub_enforces_per_user_quota() {
     // Pre-insert a hub for this user.
     let now = unix_now();
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ('existinghub', $1, 'Existing Hub', 'private', '/tmp/test.db', $2)",
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at)
+         VALUES ('existinghub', $1, 'Existing Hub', 'private', $2)",
     )
     .bind(user.public_key_hex())
     .bind(now)
@@ -445,8 +444,8 @@ async fn create_hub_enforces_farm_total_quota() {
     // Pre-insert a hub owned by another user so total is 1.
     let now = unix_now();
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ('farmhub', $1, 'Farm Hub', 'public', '/tmp/test.db', $2)",
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at)
+         VALUES ('farmhub', $1, 'Farm Hub', 'public', $2)",
     )
     .bind(other.public_key_hex())
     .bind(now)
@@ -502,8 +501,8 @@ async fn list_users_returns_users_with_counts() {
     // Give user a hub.
     let now = unix_now();
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ('uh1', $1, 'User Hub', 'private', '/tmp/test.db', $2)",
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at)
+         VALUES ('uh1', $1, 'User Hub', 'private', $2)",
     )
     .bind(user.public_key_hex())
     .bind(now)
@@ -647,4 +646,47 @@ async fn revoke_sessions_marks_active_sessions_revoked() {
     .await
     .unwrap();
     assert!(count >= 2, "expected ≥2 manually-revoked rows, got {count}");
+}
+
+// ---------------------------------------------------------------------------
+// GET /farm/admin/fleet
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn fleet_hub_url_is_routable_or_absent() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    set_admin(&state, &admin.public_key_hex()).await;
+    let token = authenticate(&server, &state, &admin).await;
+
+    let hub_pubkey = Identity::generate().public_key_hex();
+    let now = unix_now();
+    for (id, pubkey) in [("claimed", Some(hub_pubkey.as_str())), ("fresh", None)] {
+        sqlx::query(
+            "INSERT INTO hubs (id, owner_pubkey, name, visibility, hub_pubkey, created_at)
+             VALUES ($1, $2, $1, 'private', $3, $4)",
+        )
+        .bind(id)
+        .bind(admin.public_key_hex())
+        .bind(pubkey)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .unwrap();
+    }
+
+    let resp = server
+        .get("/farm/admin/fleet")
+        .add_header("Authorization", bearer(&token))
+        .await;
+    resp.assert_status_ok();
+    let fleet: Vec<Value> = resp.json();
+    let by_id = |id: &str| fleet.iter().find(|h| h["id"] == id).unwrap().clone();
+
+    // The proxy resolves a pubkey or a slug; `{farm}/hub/{hub_id}` 404s.
+    assert_eq!(
+        by_id("claimed")["hub_url"],
+        format!("https://farm.test/hub/{hub_pubkey}")
+    );
+    assert!(by_id("fresh").get("hub_url").is_none());
 }

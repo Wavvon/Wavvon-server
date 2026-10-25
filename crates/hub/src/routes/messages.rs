@@ -8,7 +8,6 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
-use crate::routes::app_models::{Embed, GameLaunchCard};
 use crate::routes::chat_models::{
     Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
     ReactionSummary, ReplyContext, SendMessageRequest,
@@ -21,6 +20,19 @@ pub async fn send_message(
     Path(channel_id): Path<String>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, String)> {
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    send_message_with(State(state), user, channel_id, req, perms).await
+}
+
+/// What stands between a member who holds the permission and actually
+/// posting: the per-user rate limit, a mute, a ban from this channel, and a
+/// federated ban (whose session may predate it). Shared with forum posts and
+/// replies, which used to skip all four.
+pub(crate) async fn require_may_post(
+    state: &AppState,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<(), (StatusCode, String)> {
     // 30 messages per 60 seconds per user
     {
         let mut map = state
@@ -39,7 +51,7 @@ pub async fn send_message(
             map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
         }
 
-        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        let entry = map.entry(public_key.to_string()).or_insert((0, now));
         if now.duration_since(entry.1) > window {
             *entry = (0, now);
         }
@@ -52,16 +64,11 @@ pub async fn send_message(
         entry.0 += 1;
     }
 
-    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-    perms.require(permissions::MESSAGES_SEND)?;
-
-    if crate::routes::moderation::is_muted(&state.db, &user.public_key).await? {
+    if crate::routes::moderation::is_muted(&state.db, public_key).await? {
         return Err((StatusCode::FORBIDDEN, "You are muted".to_string()));
     }
 
-    if crate::routes::moderation::is_channel_banned(&state.db, &channel_id, &user.public_key)
-        .await?
-    {
+    if crate::routes::moderation::is_channel_banned(&state.db, channel_id, public_key).await? {
         return Err((
             StatusCode::FORBIDDEN,
             "You are banned from this channel".to_string(),
@@ -72,9 +79,25 @@ pub async fn send_message(
     // master key is listed in federated_bans. Auth middleware already blocks
     // new sessions for these users, but an active session obtained before the
     // ban was applied can still reach here without this second check.
-    if crate::routes::moderation::is_federated_banned(&state.db, &user.public_key).await? {
+    if crate::routes::moderation::is_federated_banned(&state.db, public_key).await? {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
+    Ok(())
+}
+
+/// `send_message` with the caller's effective permissions on the channel
+/// already resolved. A federating peer is not a member, so its permissions come
+/// from the alliance share (`permissions::everyone_channel_permissions`), not
+/// from roles.
+pub async fn send_message_with(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    channel_id: String,
+    req: SendMessageRequest,
+    perms: permissions::UserPermissions,
+) -> Result<(StatusCode, Json<MessageResponse>), (StatusCode, String)> {
+    perms.require(permissions::MESSAGES_SEND)?;
+    require_may_post(&state, &user.public_key, &channel_id).await?;
 
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
@@ -199,6 +222,7 @@ pub async fn send_message(
                     reply_count: 0,
                     embeds: None,
                     game: None,
+                    components: None,
                 };
                 return Ok((StatusCode::OK, Json(placeholder)));
             }
@@ -261,26 +285,17 @@ pub async fn send_message(
                 });
                 let payload_str = serde_json::to_string(&payload).unwrap_or_default();
 
-                // HMAC-SHA256 signature over the payload bytes.
-                use hmac::{Hmac, Mac};
-                use sha2::Sha256;
-                let sig = if !secret.is_empty() {
-                    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-                    mac.update(payload_str.as_bytes());
-                    hex::encode(mac.finalize().into_bytes())
-                } else {
-                    String::new()
-                };
+                let mut request = state
+                    .http_client
+                    .post(&webhook_url)
+                    .header("Content-Type", "application/json");
+                if !secret.is_empty() {
+                    request = moderation_webhook_signed(request, &state, &secret, &payload_str);
+                }
 
                 let result = tokio::time::timeout(
                     std::time::Duration::from_millis(500),
-                    state
-                        .http_client
-                        .post(&webhook_url)
-                        .header("X-Wavvon-Signature", &sig)
-                        .header("Content-Type", "application/json")
-                        .body(payload_str)
-                        .send(),
+                    request.body(payload_str).send(),
                 )
                 .await;
 
@@ -413,6 +428,7 @@ pub async fn send_message(
         // already rejected req.game above unless the sender is a bot.
         embeds: None,
         game: req.game,
+        components: None,
     };
 
     {
@@ -630,7 +646,7 @@ async fn load_message(
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
                 m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
-                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
+                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -658,8 +674,9 @@ async fn load_message(
         reply_to,
         visible_to_pubkey: None,
         reply_count: row.reply_count,
-        embeds: parse_embeds(row.embeds),
-        game: parse_game(row.game),
+        embeds: parse_json(row.embeds),
+        game: parse_json(row.game),
+        components: parse_json(row.components),
     })
 }
 
@@ -682,23 +699,27 @@ pub async fn get_messages(
         .filter(|s| !s.is_empty());
 
     let rows = if let Some(ref root_id) = params.thread_root {
-        // Thread mode: return all replies to this root, oldest first.
+        // Thread mode: replies to this root, oldest first, so the cursor
+        // pages forward.
         sqlx::query_as::<_, MessageRow>(
-            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
+            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
-             ORDER BY m.created_at ASC, m.id ASC LIMIT $3",
+               AND ($3::text IS NULL OR (m.created_at, m.id) >
+                    ((SELECT created_at FROM messages WHERE id = $3), $3))
+             ORDER BY m.created_at ASC, m.id ASC LIMIT $4",
         )
         .bind(&channel_id)
         .bind(root_id)
+        .bind(params.cursor.as_deref())
         .bind(limit)
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     } else {
-        match (search, &params.before) {
+        match search {
             // Search mode: uses Tantivy for full-text, scoped to the single channel.
-            (Some(q), _) => {
+            Some(q) => {
                 let search_params = crate::search::SearchParams {
                     q: q.to_string(),
                     channel_ids: vec![channel_id.clone()],
@@ -724,7 +745,7 @@ pub async fn get_messages(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
                      ORDER BY m.created_at DESC, m.id DESC"
@@ -735,30 +756,17 @@ pub async fn get_messages(
                 }
                 q_builder.fetch_all(&state.db).await
             }
-            (None, Some(before_id)) => {
+            None => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
-                       AND (m.created_at, m.id) < (
-                         (SELECT created_at FROM messages WHERE id = $2), $2
-                       )
+                       AND ($2::text IS NULL OR (m.created_at, m.id) <
+                            ((SELECT created_at FROM messages WHERE id = $2), $2))
                      ORDER BY m.created_at DESC, m.id DESC LIMIT $3",
                 )
                 .bind(&channel_id)
-                .bind(before_id)
-                .bind(limit)
-                .fetch_all(&state.db)
-                .await
-            }
-            (None, None) => {
-                sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game
-                     FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                     WHERE m.channel_id = $1
-                     ORDER BY m.created_at DESC, m.id DESC LIMIT $2",
-                )
-                .bind(&channel_id)
+                .bind(params.cursor.as_deref())
                 .bind(limit)
                 .fetch_all(&state.db)
                 .await
@@ -796,8 +804,9 @@ pub async fn get_messages(
                 reply_to,
                 visible_to_pubkey: None,
                 reply_count: r.reply_count,
-                embeds: parse_embeds(r.embeds),
-                game: parse_game(r.game),
+                embeds: parse_json(r.embeds),
+                game: parse_json(r.game),
+                components: parse_json(r.components),
             }
         })
         .collect();
@@ -819,15 +828,12 @@ struct MessageRow {
     reply_count: i64,
     embeds: Option<String>,
     game: Option<String>,
+    components: Option<String>,
 }
 
-fn parse_embeds(json: Option<String>) -> Option<Vec<Embed>> {
-    json.as_deref()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| serde_json::from_str(s).ok())
-}
-
-fn parse_game(json: Option<String>) -> Option<GameLaunchCard> {
+/// Read one of the optional JSON columns on `messages` (embeds, game,
+/// components); empty or unparsable is the same as absent.
+pub(crate) fn parse_json<T: serde::de::DeserializeOwned>(json: Option<String>) -> Option<T> {
     json.as_deref()
         .filter(|s| !s.is_empty())
         .and_then(|s| serde_json::from_str(s).ok())
@@ -906,7 +912,7 @@ async fn batch_load_reply_contexts(
 
 /// Load a small preview of a parent message for the reply chip. Returns
 /// None if the parent has been deleted.
-async fn load_reply_context(
+pub(crate) async fn load_reply_context(
     db: &sqlx::PgPool,
     parent_id: &str,
 ) -> Result<Option<ReplyContext>, (StatusCode, String)> {
@@ -1034,26 +1040,70 @@ pub async fn add_reaction(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let summary = load_reactions_anon(&state.db, &message_id).await?;
-    {
-        let ws_msg = crate::routes::chat_models::WsServerMessage::ReactionsUpdated {
-            channel_id: channel_id.clone(),
-            message_id: message_id.clone(),
-            reactions: summary.clone(),
-        };
-        let json: std::sync::Arc<str> =
-            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state.chat_tx.send((
-            ChatEvent::ReactionsUpdated {
-                channel_id,
-                message_id,
-                reactions: summary,
-            },
-            json,
-        ));
-    }
+    broadcast_reactions(&state, &channel_id, &message_id).await?;
 
     Ok(StatusCode::CREATED)
+}
+
+/// Sign a moderation check the way an outgoing webhook is signed, so one
+/// verifier serves both: HMAC-SHA256 keyed by HKDF of the secret, body-only
+/// and timestamped (V1). The operator types this secret rather than being
+/// shown a generated one, so the raw secret is its UTF-8 bytes.
+fn moderation_webhook_signed(
+    request: reqwest::RequestBuilder,
+    state: &AppState,
+    secret: &str,
+    body: &str,
+) -> reqwest::RequestBuilder {
+    let key = wavvon_identity::outgoing_webhook_signing_key(secret.as_bytes());
+    let timestamp = crate::auth::handlers::unix_timestamp();
+    let sign = |message: &[u8]| {
+        wavvon_identity::webhook_hmac_sha256(&key, message)
+            .map(hex::encode)
+            .expect("a 32-byte HMAC key is always valid")
+    };
+    request
+        .header(
+            wavvon_identity::HEADER_HUB_PUBKEY,
+            state.hub_identity.public_key_hex(),
+        )
+        .header(
+            wavvon_identity::HEADER_SIGNATURE_LEGACY,
+            sign(body.as_bytes()),
+        )
+        .header(
+            wavvon_identity::HEADER_SIGNATURE_V1,
+            sign(&wavvon_identity::webhook_delivery_signing_bytes(
+                timestamp as u64,
+                body.as_bytes(),
+            )),
+        )
+        .header(wavvon_identity::HEADER_TIMESTAMP, timestamp.to_string())
+}
+
+/// Send a message's new reaction summary to everyone in its channel.
+pub(crate) async fn broadcast_reactions(
+    state: &AppState,
+    channel_id: &str,
+    message_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let summary = load_reactions_anon(&state.db, message_id).await?;
+    let ws_msg = crate::routes::chat_models::WsServerMessage::ReactionsUpdated {
+        channel_id: channel_id.to_string(),
+        message_id: message_id.to_string(),
+        reactions: summary.clone(),
+    };
+    let json: std::sync::Arc<str> =
+        std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
+    let _ = state.chat_tx.send((
+        ChatEvent::ReactionsUpdated {
+            channel_id: channel_id.to_string(),
+            message_id: message_id.to_string(),
+            reactions: summary,
+        },
+        json,
+    ));
+    Ok(())
 }
 
 pub async fn remove_reaction(
@@ -1061,6 +1111,21 @@ pub async fn remove_reaction(
     user: AuthUser,
     Path((channel_id, message_id, emoji)): Path<(String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // The summary below is broadcast to the path's channel, so the message
+    // has to be in it -- otherwise a private message's reactions go out to
+    // whoever can read the channel named.
+    let in_channel: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)",
+    )
+    .bind(&message_id)
+    .bind(&channel_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if !in_channel {
+        return Err((StatusCode::NOT_FOUND, "message not in channel".to_string()));
+    }
+
     sqlx::query(
         "DELETE FROM message_reactions WHERE message_id = $1 AND emoji = $2 AND user_key = $3",
     )
@@ -1071,24 +1136,7 @@ pub async fn remove_reaction(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let summary = load_reactions_anon(&state.db, &message_id).await?;
-    {
-        let ws_msg = crate::routes::chat_models::WsServerMessage::ReactionsUpdated {
-            channel_id: channel_id.clone(),
-            message_id: message_id.clone(),
-            reactions: summary.clone(),
-        };
-        let json: std::sync::Arc<str> =
-            std::sync::Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());
-        let _ = state.chat_tx.send((
-            ChatEvent::ReactionsUpdated {
-                channel_id,
-                message_id,
-                reactions: summary,
-            },
-            json,
-        ));
-    }
+    broadcast_reactions(&state, &channel_id, &message_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 
 use crate::auth::models::{ChallengeResponse, VerifyResponse};
 use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelResponse};
-use crate::routes::chat_models::{ChannelResponse, MessageResponse};
+use crate::routes::chat_models::MessageResponse;
 use crate::routes::dm_models::FederatedDmRequest;
 use crate::routes::health::InfoResponse;
 use crate::routes::post_models::{PostDetail, PostListResponse, ReplyView};
@@ -52,7 +52,29 @@ impl FederationClient {
 
         let challenge_bytes =
             hex::decode(&challenge.challenge).context("Invalid challenge hex from peer")?;
-        let signature = identity.sign(&challenge_bytes);
+        // The hub key also signs alliance invite tokens, voice grants,
+        // badges, certs and the ban list, none of them domain-separated, so
+        // signing whatever bytes a remote server hands over made this a
+        // signing oracle: a server we could be made to authenticate against
+        // could pick the bytes of an invite token and get it signed. A
+        // Wavvon hub issues exactly AUTH_CHALLENGE_LEN random bytes, and
+        // every structured object the hub signs is longer (each carries at
+        // least a hex key or a UUID), so that length is all we sign.
+        anyhow::ensure!(
+            challenge_bytes.len() == crate::auth::handlers::AUTH_CHALLENGE_LEN,
+            "Peer sent a {}-byte auth challenge; refusing to sign it",
+            challenge_bytes.len()
+        );
+        // Tagged when the peer says it takes that; the raw form stays for an
+        // older peer, guarded by the length check above.
+        let signature =
+            if challenge.scheme.as_deref() == Some(wavvon_identity::AUTH_CHALLENGE_SCHEME) {
+                identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+                    &challenge_bytes,
+                ))
+            } else {
+                identity.sign(&challenge_bytes)
+            };
 
         let verify: VerifyResponse = self
             .http
@@ -73,27 +95,21 @@ impl FederationClient {
         Ok(verify.token)
     }
 
-    pub async fn get_channels(&self, base_url: &str, token: &str) -> Result<Vec<ChannelResponse>> {
-        self.http
-            .get(format!("{base_url}/channels"))
-            .bearer_auth(token)
-            .send()
-            .await
-            .context("Failed to fetch channels from peer")?
-            .json()
-            .await
-            .context("Invalid channels response")
-    }
-
+    /// Posts into a channel the peer shares into `alliance_id`. Goes through the
+    /// alliance route, never `/channels/{id}/messages`: this hub is not a member
+    /// of the peer, so the peer authorises the call by the alliance share.
     pub async fn send_message(
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
         content: &str,
     ) -> Result<MessageResponse> {
         self.http
-            .post(format!("{base_url}/channels/{channel_id}/messages"))
+            .post(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/messages"
+            ))
             .bearer_auth(token)
             .json(&serde_json::json!({ "content": content }))
             .send()
@@ -108,10 +124,13 @@ impl FederationClient {
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
     ) -> Result<Vec<MessageResponse>> {
         self.http
-            .get(format!("{base_url}/channels/{channel_id}/messages"))
+            .get(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/messages"
+            ))
             .bearer_auth(token)
             .send()
             .await
@@ -130,6 +149,7 @@ impl FederationClient {
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
         cursor: Option<&str>,
         limit: Option<i64>,
@@ -146,7 +166,9 @@ impl FederationClient {
             query.push(("tag", t.to_string()));
         }
         self.http
-            .get(format!("{base_url}/channels/{channel_id}/posts"))
+            .get(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/posts"
+            ))
             .bearer_auth(token)
             .query(&query)
             .send()
@@ -159,10 +181,12 @@ impl FederationClient {
 
     /// Read-through fetch of a single forum post (with its reply page) from
     /// the peer that owns it.
+    #[allow(clippy::too_many_arguments)]
     pub async fn get_forum_post(
         &self,
         base_url: &str,
         token: &str,
+        alliance_id: &str,
         channel_id: &str,
         post_id: &str,
         after: Option<&str>,
@@ -176,7 +200,9 @@ impl FederationClient {
             query.push(("limit", l.to_string()));
         }
         self.http
-            .get(format!("{base_url}/channels/{channel_id}/posts/{post_id}"))
+            .get(format!(
+                "{base_url}/alliances/{alliance_id}/channels/{channel_id}/posts/{post_id}"
+            ))
             .bearer_auth(token)
             .query(&query)
             .send()
@@ -408,6 +434,54 @@ impl FederationClient {
             .context("Invalid alliance channels response")
     }
 
+    /// `Ok(None)` is the owning hub's 404: it does not serve the route, or does
+    /// not share its members with this alliance -- the caller reports both the
+    /// same way.
+    pub async fn get_alliance_people(
+        &self,
+        base_url: &str,
+        token: &str,
+        alliance_id: &str,
+        hub: &str,
+        query: &[(&str, &str)],
+    ) -> Result<Option<Vec<crate::routes::alliance_models::AlliancePerson>>> {
+        let resp = self
+            .http
+            .get(format!("{base_url}/alliances/{alliance_id}/people"))
+            .query(&[("hub", hub)])
+            .query(query)
+            .bearer_auth(token)
+            .send()
+            .await
+            .context("Failed to fetch alliance people from peer")?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        resp.error_for_status()
+            .context("Peer refused the alliance people request")?
+            .json()
+            .await
+            .map(Some)
+            .context("Invalid alliance people response")
+    }
+
+    pub async fn get_designation(
+        &self,
+        base_url: &str,
+        master: &str,
+    ) -> Result<wavvon_identity::HomeHubList> {
+        self.http
+            .get(format!("{base_url}/identity/{master}/designation"))
+            .send()
+            .await
+            .context("Failed to fetch designation")?
+            .error_for_status()
+            .context("No designation there")?
+            .json()
+            .await
+            .context("Invalid designation response")
+    }
+
     pub async fn post_federated_dm(
         &self,
         base_url: &str,
@@ -421,6 +495,24 @@ impl FederationClient {
             .send()
             .await
             .context("Failed to deliver DM to peer")
+    }
+
+    /// POST a queued group membership change, already serialized when it was
+    /// queued, to a peer's `/federation/dm-member-change`.
+    pub async fn post_member_change(
+        &self,
+        base_url: &str,
+        token: &str,
+        payload: &str,
+    ) -> Result<reqwest::Response> {
+        self.http
+            .post(format!("{base_url}/federation/dm-member-change"))
+            .bearer_auth(token)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload.to_string())
+            .send()
+            .await
+            .context("Failed to deliver member change to peer")
     }
 
     /// POST a badge offer to a remote hub's unauthenticated

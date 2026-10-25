@@ -12,7 +12,9 @@ use crate::state::{AppState, DmEvent};
 use super::keys::{
     bind_cert_master, group_envelope_signing_bytes, verify_envelope_sender, verify_tiered_signature,
 };
-use super::models::{ensure_user_stub, load_members, parse_dm_attachments, DmMessageRow};
+use super::models::{
+    ensure_user_stub, load_members, parse_dm_attachments, ConvMember, DmMessageRow,
+};
 
 pub async fn send_dm(
     State(state): State<Arc<AppState>>,
@@ -278,19 +280,16 @@ pub async fn send_dm(
                 &conv_type,
                 content,
             );
-            let sig_bytes = hex::decode(sig_hex).map_err(|e| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("Bad plaintext_signature hex: {e}"),
-                )
-            })?;
-            wavvon_identity::verify_signature(&user.public_key, &signing_bytes, &sig_bytes)
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid plaintext_signature: {e}"),
-                    )
-                })?;
+            // Tiered: a paired device holds its subkey and a cert, never the
+            // canonical key the conversation knows it by.
+            let cert_master = verify_tiered_signature(
+                &signing_bytes,
+                sig_hex,
+                req.plaintext_signer_cert.as_ref(),
+                &user.public_key,
+                "plaintext_signature",
+            )?;
+            bind_cert_master(cert_master, &user)?;
             Some(sig_hex.clone())
         } else {
             None
@@ -347,38 +346,10 @@ pub async fn send_dm(
             continue;
         }
 
-        // Resolve delivery URLs via the home-hub designation when available.
-        let delivery_urls: Vec<String> = {
-            // Step 1: look up master_pubkey for this member. Same resolver the
-            // mirror path uses — reading only `users.master_pubkey` here meant
-            // a member whose cert was registered without a re-auth got mirrored
-            // to but never fanned out to.
-            let master_pubkey: Option<String> = master_of(&state, &m.public_key).await;
-
-            // Step 2: if a master is known, try the designation table.
-            let designation_urls: Option<Vec<String>> = if let Some(ref mpk) = master_pubkey {
-                let hubs_json: Option<String> = sqlx::query_scalar(
-                    "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = $1",
-                )
-                .bind(mpk)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-                hubs_json.and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
-            } else {
-                None
-            };
-
-            // Step 3: use the designation list, or fall back to the stored hub_url.
-            match designation_urls {
-                Some(urls) if !urls.is_empty() => urls,
-                _ => match &m.hub_url {
-                    Some(url) => vec![url.clone()],
-                    None => continue,
-                },
-            }
-        };
+        let delivery_urls = delivery_urls(&state, m).await?;
+        if delivery_urls.is_empty() {
+            continue;
+        }
 
         let envelope = FederatedDmRequest {
             message_id: message_id.clone(),
@@ -402,7 +373,8 @@ pub async fn send_dm(
             signer_cert: req
                 .encrypted_envelope
                 .as_ref()
-                .and_then(|e| e.signer_cert.clone()),
+                .and_then(|e| e.signer_cert.clone())
+                .or_else(|| req.plaintext_signer_cert.clone()),
             // The sender's own delivery, whoever it reaches.
             mirror: false,
         };
@@ -502,7 +474,7 @@ pub async fn list_dm_messages(
         ));
     }
 
-    // Same `before` + `limit` keyset the channel message list uses. Both
+    // Same `cursor` + `limit` keyset the channel message list uses. Both
     // clients have been sending these two params all along; until 2026-08-08
     // this handler took no query params at all and returned the entire
     // conversation history on every open.
@@ -530,7 +502,7 @@ pub async fn list_dm_messages(
          LIMIT $3",
     )
     .bind(&conversation_id)
-    .bind(params.before.as_deref())
+    .bind(params.cursor.as_deref())
     .bind(limit)
     .fetch_all(&state.db)
     .await
@@ -592,6 +564,14 @@ pub async fn receive_federated_dm(
     _peer: PeerHub,
     Json(req): Json<FederatedDmRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    // The id comes from another hub and ends up in `dm_outbox` via the mirror
+    // queue; anything but a UUID has no business there.
+    if Uuid::parse_str(&req.message_id).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "message_id must be a UUID".to_string(),
+        ));
+    }
     let now = crate::auth::handlers::unix_timestamp();
 
     // Idempotent: if we've already stored this message, succeed without double-broadcast.
@@ -604,17 +584,6 @@ pub async fn receive_federated_dm(
         return Ok(StatusCode::OK);
     }
 
-    // Block check for federated inbound DM: if any local recipient has blocked the sender,
-    // return 200 (success-shaped) so the sending hub cannot detect the block.
-    for member_key in &req.members {
-        if member_key == &req.sender {
-            continue;
-        }
-        if crate::routes::identity::is_dm_blocked(&state.db, member_key, &req.sender).await {
-            return Ok(StatusCode::OK);
-        }
-    }
-
     // Auto-create the conversation on this hub if this is the first time we've seen it.
     let conv_exists: Option<String> =
         sqlx::query_scalar("SELECT id FROM conversations WHERE id = $1")
@@ -622,6 +591,46 @@ pub async fn receive_federated_dm(
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    // Once this hub holds a roster, it is the roster: `req.members` is the
+    // sending hub's to write, so trusting it let anyone who knew the id post
+    // into the conversation (Wavvon-server#119). Members added since arrive
+    // as signed changes (`members.rs`); a DM that outruns its change is
+    // refused here and the sender's outbox retries it.
+    let stored: Vec<String> = sqlx::query_scalar(
+        "SELECT public_key FROM conversation_members WHERE conversation_id = $1",
+    )
+    .bind(&req.conversation_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let recipients = if conv_exists.is_some() {
+        if !stored.contains(&req.sender) {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Sender is not a member of this conversation".to_string(),
+            ));
+        }
+        &stored
+    } else if req.members.contains(&req.sender) {
+        &req.members
+    } else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "A new conversation's members must include its sender".to_string(),
+        ));
+    };
+
+    // Block check for federated inbound DM: if any local recipient has blocked the sender,
+    // return 200 (success-shaped) so the sending hub cannot detect the block.
+    for member_key in recipients {
+        if member_key == &req.sender {
+            continue;
+        }
+        if crate::routes::identity::is_dm_blocked(&state.db, member_key, &req.sender).await {
+            return Ok(StatusCode::OK);
+        }
+    }
 
     if conv_exists.is_none() {
         // Federated delivery is at-least-once (the sender retries on failure),
@@ -768,16 +777,27 @@ pub async fn receive_federated_dm(
             &req.conv_type,
             content,
         );
-        let sig_bytes = hex::decode(sig_hex)
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature hex: {e}")))?;
-        wavvon_identity::verify_signature(&req.sender, &signing_bytes, &sig_bytes).map_err(
-            |e| {
-                (
+        // Tiered like the encrypted envelopes: a paired device signs with its
+        // subkey, and the forwarded cert must chain it to the sender.
+        let cert_master = verify_tiered_signature(
+            &signing_bytes,
+            sig_hex,
+            req.signer_cert.as_ref(),
+            &req.sender,
+            "sender",
+        )
+        .map_err(|(_, e)| (StatusCode::UNAUTHORIZED, e))?;
+        if let Some(master) = cert_master {
+            let bound =
+                resolve_master_binding(&state, &req.sender, &master, req.sender_hub_url.as_deref())
+                    .await?;
+            if !bound {
+                return Err((
                     StatusCode::UNAUTHORIZED,
-                    format!("Sender signature verification failed: {e}"),
-                )
-            },
-        )?;
+                    "signer_cert master is not bound to sender".to_string(),
+                ));
+            }
+        }
 
         sqlx::query(
             "INSERT INTO dm_messages (id, conversation_id, sender, content, attachments, signature, created_at, is_encrypted, ciphertext_json, is_group_encrypted)
@@ -870,6 +890,24 @@ async fn master_of(state: &AppState, member: &str) -> Option<String> {
         .flatten()
 }
 
+/// The hubs a master designated, fetched from `hub_url` and verified against
+/// the master's own signature. Best effort: any failure means "fall back to the
+/// stored hub_url", exactly as before this existed.
+async fn fetch_remote_designation(
+    state: &AppState,
+    hub_url: &str,
+    master: &str,
+) -> Option<Vec<String>> {
+    let list = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.federation_client.get_designation(hub_url, master),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    (list.master_pubkey == master && list.verify().is_ok()).then_some(list.hubs)
+}
+
 async fn queue_home_hub_mirrors(state: &AppState, req: &FederatedDmRequest, now: i64) {
     let own_url = state
         .canonical_url
@@ -945,7 +983,7 @@ async fn queue_home_hub_mirrors(state: &AppState, req: &FederatedDmRequest, now:
 /// (`subkey_pubkey == canonical`, signed by `master`), caching the result
 /// on success so future messages from the same sender skip the network
 /// round-trip.
-async fn resolve_master_binding(
+pub(super) async fn resolve_master_binding(
     state: &AppState,
     canonical: &str,
     master: &str,
@@ -999,6 +1037,48 @@ async fn resolve_master_binding(
     Ok(proven)
 }
 
+/// Where a member takes delivery: every hub on their home hub list when it can
+/// be found, else the hub recorded for them in the conversation. Empty for a
+/// member with neither, which is a local one.
+pub(super) async fn delivery_urls(
+    state: &AppState,
+    m: &ConvMember,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    // Step 1: look up master_pubkey for this member. Same resolver the
+    // mirror path uses — reading only `users.master_pubkey` here meant
+    // a member whose cert was registered without a re-auth got mirrored
+    // to but never fanned out to.
+    let master_pubkey: Option<String> = master_of(state, &m.public_key).await;
+
+    // Step 2: if a master is known, try the designation table.
+    let designation_urls: Option<Vec<String>> = if let Some(ref mpk) = master_pubkey {
+        let hubs_json: Option<String> = sqlx::query_scalar(
+            "SELECT hubs_json FROM home_hub_designations WHERE master_pubkey = $1",
+        )
+        .bind(mpk)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+        hubs_json.and_then(|j| serde_json::from_str::<Vec<String>>(&j).ok())
+    } else {
+        None
+    };
+
+    // A remote member's designation is not stored here; their own hub
+    // is the authority, so ask it (alliance-member-discovery.md §5).
+    let designation_urls = match (designation_urls, &master_pubkey, &m.hub_url) {
+        (None, Some(mpk), Some(url)) => fetch_remote_designation(state, url, mpk).await,
+        (local, _, _) => local,
+    };
+
+    // Step 3: use the designation list, or fall back to the stored hub_url.
+    Ok(match designation_urls {
+        Some(urls) if !urls.is_empty() => urls,
+        _ => m.hub_url.iter().cloned().collect(),
+    })
+}
+
 /// Public wrapper around `deliver_federated_dm` for the retry worker.
 pub async fn deliver_federated_dm_public(
     state: &AppState,
@@ -1013,56 +1093,9 @@ async fn deliver_federated_dm(
     hub_url: &str,
     envelope: &FederatedDmRequest,
 ) -> Result<(), String> {
-    // Ensure we have a session token for this remote hub — authenticate once if not cached.
-    let token = {
-        let peer_key: Option<String> =
-            sqlx::query_scalar("SELECT public_key FROM peers WHERE url = $1")
-                .bind(hub_url)
-                .fetch_optional(&state.db)
-                .await
-                .map_err(|e| format!("peer lookup: {e}"))?;
-
-        let cached = if let Some(ref key) = peer_key {
-            state.peer_tokens.read().await.get(key).cloned()
-        } else {
-            None
-        };
-
-        if let Some(t) = cached {
-            t
-        } else {
-            let fresh = state
-                .federation_client
-                .authenticate(hub_url, &state.hub_identity)
-                .await
-                .map_err(|e| format!("authenticate: {e}"))?;
-
-            let info = state
-                .federation_client
-                .get_info(hub_url)
-                .await
-                .map_err(|e| format!("get_info: {e}"))?;
-            let now = crate::auth::handlers::unix_timestamp();
-            let _ = sqlx::query(
-                "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
-                 ON CONFLICT(public_key) DO UPDATE SET name = $5, url = $6",
-            )
-            .bind(&info.public_key)
-            .bind(&info.name)
-            .bind(hub_url)
-            .bind(now)
-            .bind(&info.name)
-            .bind(hub_url)
-            .execute(&state.db)
-            .await;
-            state
-                .peer_tokens
-                .write()
-                .await
-                .insert(info.public_key, fresh.clone());
-            fresh
-        }
-    };
+    let token = crate::federation::peer_token(state, hub_url)
+        .await
+        .ok_or_else(|| "authenticate: failed".to_string())?;
 
     let resp = state
         .federation_client
@@ -1070,6 +1103,10 @@ async fn deliver_federated_dm(
         .await
         .map_err(|e| format!("deliver: {e}"))?;
 
+    if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        // Our session there ended; the outbox retries with a fresh one.
+        crate::federation::forget_peer_token(state, hub_url).await;
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

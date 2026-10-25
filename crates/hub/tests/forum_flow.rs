@@ -643,10 +643,8 @@ async fn forum_get_post_not_found_returns_404() {
 // client, so `axum_test::TestServer` (in-process, no network) doesn't work
 // here -- mirrors the `start_hub` harness in `alliance_flow.rs`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, RwLock};
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::routes::alliance_models::AllianceResponse;
@@ -656,77 +654,10 @@ use wavvon_hub::state::AppState;
 
 async fn start_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
-    let store: Arc<dyn store::HubStore> = Arc::new(store::PostgresStore::new(db.clone()));
-    let (chat_tx, _) = broadcast::channel(256);
-    let (voice_event_tx, _) = broadcast::channel(16);
 
     let state = Arc::new(AppState {
         hub_name: name.to_string(),
-        hub_identity: Identity::generate(),
-        db,
-        db_read: None,
-        store,
-        pending_challenges: RwLock::new(HashMap::new()),
-        cert_portfolio_cache: RwLock::new(HashMap::new()),
-        chat_tx,
-        federation_client: FederationClient::new(),
-        peer_tokens: RwLock::new(HashMap::new()),
-        voice_channels: RwLock::new(HashMap::new()),
-        voice_last_active: RwLock::new(HashMap::new()),
-        whisper_target_pubkeys: RwLock::new(HashMap::new()),
-        voice_sender_ids: RwLock::new(HashMap::new()),
-        voice_next_sender_id: RwLock::new(HashMap::new()),
-        voice_zones: RwLock::new(HashMap::new()),
-        voice_udp_port: 0,
-        voice_wt_url: None,
-        canonical_url: Arc::new(RwLock::new(None)),
-        voice_cert_hash: RwLock::new(None),
-        voice_event_tx,
-        dm_tx: broadcast::channel(16).0,
-        online_users: RwLock::new(std::collections::HashMap::new()),
-        screen_shares: RwLock::new(HashMap::new()),
-        screen_share_tx: broadcast::channel(16).0,
-        app_sessions: RwLock::new(std::collections::HashMap::new()),
-        http_client: reqwest::Client::new(),
-        farm_url: None,
-        cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
-        last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
-        video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        started_at: std::time::Instant::now(),
-        whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        whisper_optouts: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_relay_active: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        voice_outbound_loss: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        voice_talk_blocked: Default::default(),
-        voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        rate_limiters: Default::default(),
-        preview_cache: std::sync::Mutex::new(std::collections::HashMap::new()),
-        search: std::sync::Arc::new(wavvon_hub::search::null_search::NullSearch),
-        reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        owner_pubkey: None,
-        apps_allow_camera: false,
-        http_video_stream_budget: 2,
-        webauthn: {
-            let origin = url::Url::parse("http://localhost:3000").unwrap();
-            std::sync::Arc::new(
-                webauthn_rs::WebauthnBuilder::new("localhost", &origin)
-                    .unwrap()
-                    .rp_name("test-hub")
-                    .build()
-                    .unwrap(),
-            )
-        },
-        webauthn_reg_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        webauthn_auth_challenges: tokio::sync::RwLock::new(std::collections::HashMap::new()),
-        device_token_ttl_secs: 30 * 86400,
-        webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
-            wavvon_hub::state::WebhookCircuit::default(),
-        )),
-        lan_mode: false,
-        lan_tls_mode: None,
-        lan_fingerprint: None,
+        ..common::base_state(db)
     });
 
     let app = server::create_router(state.clone());
@@ -1251,16 +1182,20 @@ async fn alliance_forum_posts_and_replies_allows_posts() {
 #[tokio::test]
 async fn alliance_forum_proxied_write_rate_limited() {
     let s = setup_forum_alliance(Some("posts_and_replies")).await;
+    // Two writers: the limiter under test is per origin hub, and one member
+    // alone would meet their own per-user limit on hub A first.
+    let second = authenticate_user(&s.hub_a_url, &Identity::generate()).await;
+    let writers = [s.token_a.clone(), second];
 
     let mut last_status = 0u16;
-    for _ in 0..31 {
+    for i in 0..31 {
         let resp = s
             .client
             .post(format!(
                 "{}/alliances/{}/channels/{}/posts/no-such-post/replies",
                 s.hub_a_url, s.alliance_id, s.channel_id
             ))
-            .bearer_auth(&s.token_a)
+            .bearer_auth(&writers[i % 2])
             .json(&json!({ "body": "flood" }))
             .send()
             .await
@@ -1477,4 +1412,130 @@ async fn alliance_forum_retraction_rejects_wrong_origin_hub() {
         .unwrap();
     let r = detail.replies.iter().find(|r| r.id == reply_id).unwrap();
     assert!(!r.is_deleted);
+}
+
+/// `created_at` has one-second resolution, so a busy thread has many replies
+/// sharing a second. A cursor on `created_at` alone skipped every one that
+/// shared the boundary row's second.
+#[tokio::test]
+async fn forum_reply_paging_returns_every_reply_once_within_one_second() {
+    let server = common::setup().await;
+    let token = common::authenticate(&server, &Identity::generate()).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "Busy", "body": "Body" }))
+        .await;
+    let post_id = resp.json::<PostDetail>().summary.id;
+
+    let mut created = Vec::new();
+    for i in 0..7 {
+        let resp = server
+            .post(&format!("/channels/{channel_id}/posts/{post_id}/replies"))
+            .add_header("Authorization", format!("Bearer {token}"))
+            .json(&json!({ "body": format!("reply {i}") }))
+            .await;
+        created.push(resp.json::<Value>()["id"].as_str().unwrap().to_string());
+    }
+    sqlx::query("UPDATE post_replies SET created_at = 1700000000 WHERE post_id = $1")
+        .bind(&post_id)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+
+    let mut seen = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let url = match &after {
+            Some(a) => format!("/channels/{channel_id}/posts/{post_id}?limit=2&after={a}"),
+            None => format!("/channels/{channel_id}/posts/{post_id}?limit=2"),
+        };
+        let page: PostDetail = server
+            .get(&url)
+            .add_header("Authorization", format!("Bearer {token}"))
+            .await
+            .json();
+        seen.extend(page.replies.iter().map(|r| r.id.clone()));
+        match page.reply_cursor {
+            Some(c) => after = Some(c),
+            None => break,
+        }
+        assert!(seen.len() <= created.len(), "paging never ends: {seen:?}");
+    }
+
+    let mut expected = created.clone();
+    expected.sort();
+    let mut got = seen.clone();
+    got.sort();
+    assert_eq!(got, expected, "every reply exactly once");
+}
+
+/// A peer files reactions for its own members. One filed under a member of
+/// the owning hub would read as theirs, with nothing to tell it apart.
+#[tokio::test]
+async fn a_peer_cannot_react_as_a_member_of_the_owning_hub() {
+    let s = setup_forum_alliance(Some("posts_and_replies")).await;
+    let me: Value = s
+        .client
+        .get(format!("{}/me", s.hub_b_url))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let local_member = me["public_key"].as_str().unwrap().to_string();
+
+    let fed = wavvon_hub::federation::client::FederationClient::new();
+    let token = fed
+        .authenticate(&s.hub_b_url, &s.hub_a_state.hub_identity)
+        .await
+        .unwrap();
+    let resp = fed
+        .add_forum_post_reaction(
+            &s.hub_b_url,
+            &token,
+            &s.channel_id,
+            &s.post_id,
+            &local_member,
+            "👍",
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+/// The owning hub cannot see this hub's mutes, so a muted member writing
+/// through the alliance proxy used to get through. The hop starts with the
+/// same checks a local message has.
+#[tokio::test]
+async fn a_muted_member_cannot_write_through_the_alliance_proxy() {
+    let s = setup_forum_alliance(None).await; // replies_only
+    let member = Identity::generate();
+    let member_token = authenticate_user(&s.hub_a_url, &member).await;
+    let mute = s
+        .client
+        .post(format!("{}/moderation/mutes", s.hub_a_url))
+        .bearer_auth(&s.token_a)
+        .json(&json!({ "target_public_key": member.public_key_hex() }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mute.status(), 201, "{}", mute.text().await.unwrap());
+
+    let resp = s
+        .client
+        .post(format!(
+            "{}/alliances/{}/channels/{}/posts/{}/replies",
+            s.hub_a_url, s.alliance_id, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&member_token)
+        .json(&json!({ "body": "should not land" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
 }

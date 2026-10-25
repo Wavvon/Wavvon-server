@@ -119,7 +119,11 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                 .get(&cs.public_key)
                 .map(|grants| grants.contains(&channel_id))
                 .unwrap_or(false);
-            if !has_grant {
+            // An alliance visitor holds no roles here, by design, so the gate
+            // could only ever refuse them. The grant they were admitted on is
+            // their authorization, and it was matched to this channel above.
+            let visiting = cs.alliance_voice_channel.as_deref() == Some(channel_id.as_str());
+            if !has_grant && !visiting {
                 let err = WsServerMessage::Error {
                     context: "voice_join".to_string(),
                     message: "You do not have access to this channel.".to_string(),
@@ -284,7 +288,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         let user_talk_power: i64 = sqlx::query_scalar(
             "SELECT COALESCE(MAX(r.talk_power), 0)
              FROM roles r
-             INNER JOIN user_roles ur ON r.id = ur.role_id
+             INNER JOIN member_roles ur ON r.id = ur.role_id
              WHERE ur.user_public_key = $1",
         )
         .bind(&cs.public_key)
@@ -611,6 +615,18 @@ pub(in crate::routes::ws) async fn handle_voice_speaking(
         } => (channel_id, speaking),
         _ => return DispatchResult::Continue,
     };
+    // Only a participant of that room speaks in it; the client names the
+    // channel, and a non-participant could otherwise light up a speaking
+    // indicator in any room.
+    let in_room = state
+        .voice_channels
+        .read()
+        .await
+        .get(&channel_id)
+        .is_some_and(|room| room.contains_key(&cs.public_key));
+    if !in_room {
+        return DispatchResult::Continue;
+    }
     // Any speaking transition (start or stop) is activity for the AFK
     // sweep. Stamped before the invisibility gate below — invisible
     // participants talk too.

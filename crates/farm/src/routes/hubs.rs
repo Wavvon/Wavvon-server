@@ -95,7 +95,7 @@ pub struct HubEntry {
 /// if the hub has one, otherwise its pubkey. `None` before the hub's first
 /// heartbeat, because until it claims its row there is no address to give — and
 /// an absent field a client must handle beats a present one that 404s.
-async fn hub_url(
+pub(crate) async fn hub_url(
     db: &sqlx::PgPool,
     farm_url: &str,
     hub_id: &str,
@@ -384,28 +384,15 @@ pub async fn create_hub(
     })?;
     let chosen = chosen.server_id.clone();
 
-    // Determine the DB path from the hubs_dir configured in FarmState.
-    let hubs_dir = &state.hubs_dir;
-    let db_path = format!("{}/{}.db", hubs_dir.trim_end_matches('/'), hub_id);
-
-    // Ensure the hubs directory exists.
-    if let Err(e) = std::fs::create_dir_all(hubs_dir) {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("cannot create hubs dir: {e}")})),
-        ));
-    }
-
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, description, visibility, db_path, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO hubs (id, owner_pubkey, name, description, visibility, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&hub_id)
     .bind(&payload.sub)
     .bind(&name)
     .bind(&req.description)
     .bind(visibility)
-    .bind(&db_path)
     .bind(now)
     .execute(&state.db)
     .await

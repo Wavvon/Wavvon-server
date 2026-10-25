@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::from_fn;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{extract::Request, middleware::Next, response::Response, Router};
@@ -136,12 +137,14 @@ pub fn create_router_full(
         .route("/channels", post(routes::channels::create_channel))
         .route(
             "/channels/{channel_id}/messages",
-            post(routes::messages::send_message),
+            post(routes::messages::send_message)
+                .layer(DefaultBodyLimit::max(routes::hub::MESSAGE_BODY_LIMIT)),
         )
         .route("/conversations", post(routes::dms::create_conversation))
         .route(
             "/conversations/{conversation_id}/messages",
-            post(routes::dms::send_dm),
+            post(routes::dms::send_dm)
+                .layer(DefaultBodyLimit::max(routes::hub::MESSAGE_BODY_LIMIT)),
         )
         .layer(from_fn(move |req, next| {
             let l = write_limiter.clone();
@@ -173,10 +176,6 @@ pub fn create_router_full(
         .route(
             "/admin/settings/pow",
             get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
-        )
-        .route(
-            "/admin/settings/channel-depth",
-            get(routes::hub::get_channel_depth).patch(routes::hub::patch_channel_depth),
         )
         .route(
             "/admin/settings/moderation",
@@ -303,10 +302,7 @@ pub fn create_router_full(
             put(routes::apps::put_my_app_subscriptions),
         )
         // ---- Event polling transport, for a client with no WebSocket ----
-        .route(
-            "/me/events",
-            get(routes::apps::poll_events).delete(routes::apps::ack_events),
-        )
+        .route("/me/events", get(routes::apps::poll_events))
         // ---- Voice and screenshare over HTTP, same reason ----
         .route("/voice/leave", delete(routes::apps::voice::voice_leave))
         .route(
@@ -398,6 +394,10 @@ pub fn create_router_full(
             delete(routes::dms::remove_conversation_member),
         )
         .route("/federation/dm", post(routes::dms::receive_federated_dm))
+        .route(
+            "/federation/dm-member-change",
+            post(routes::dms::receive_member_change),
+        )
         .route(
             "/federation/badge-offer",
             post(federation::handlers::receive_badge_offer),
@@ -616,6 +616,14 @@ pub fn create_router_full(
             get(routes::alliances::list_shared_channels).post(routes::alliances::share_channel),
         )
         .route(
+            "/alliances/{alliance_id}/people",
+            get(routes::alliances::get_alliance_people),
+        )
+        .route(
+            "/alliances/{alliance_id}/people-visibility",
+            axum::routing::put(routes::alliances::set_people_visibility),
+        )
+        .route(
             "/alliances/{alliance_id}/voice-grant",
             post(routes::alliances::mint_voice_grant),
         )
@@ -749,19 +757,6 @@ pub fn create_router_full(
         )
         .route("/federation/peers", get(federation::handlers::list_peers))
         .route("/federation/peers", post(federation::handlers::add_peer))
-        .route(
-            "/federation/peers/{peer_key}/channels",
-            get(federation::handlers::peer_channels),
-        )
-        .route(
-            "/federation/channels",
-            get(federation::handlers::all_federated_channels),
-        )
-        .route(
-            "/federation/channels/{fed_channel_id}/messages",
-            get(federation::handlers::federated_messages)
-                .post(federation::handlers::send_federated_message),
-        )
         // ---- Lobby ----
         .route("/lobby/status", get(routes::lobby::get_status))
         .route("/lobby/submit-pow", post(routes::lobby::submit_pow))
@@ -943,7 +938,8 @@ pub fn create_router_full(
         // ---- File uploads ----
         .route(
             "/channels/{channel_id}/upload",
-            post(routes::uploads::upload_file),
+            post(routes::uploads::upload_file)
+                .layer(DefaultBodyLimit::max(routes::uploads::UPLOAD_BODY_LIMIT)),
         )
         .route("/uploads/{filename}", get(routes::uploads::serve_upload))
         // ---- Soundboard (soundboard.md §1) ----

@@ -57,7 +57,6 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
         keypair,
         "https://farm.test".to_string(),
         hub_manager,
-        "/tmp/wavvon-serial-claim-tests".to_string(),
     ));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state, guard)
@@ -66,11 +65,10 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
 /// A hub row as the farm creates it: allocated, but with no pubkey yet.
 async fn insert_unclaimed_hub(state: &FarmState, id: &str) {
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ($1, 'owner', 'Test Hub', 'private', $2, $3)",
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at)
+         VALUES ($1, 'owner', 'Test Hub', 'private', $2)",
     )
     .bind(id)
-    .bind(format!("/tmp/{id}.db"))
     .bind(unix_now())
     .execute(&state.db)
     .await

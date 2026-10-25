@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use uuid::Uuid;
 
+use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::{AuthUser, PeerHub};
 use crate::permissions;
 use crate::routes::chat_models::ChatEvent;
@@ -38,6 +39,20 @@ async fn require_forum_channel(
         Some((_, t)) if t != "forum" => Err((StatusCode::CONFLICT, "not_a_forum".to_string())),
         _ => Ok(()),
     }
+}
+
+/// `require_forum_channel`, plus `messages.read` there (§3.5). For the
+/// routes that otherwise checked only the channel type: search, tags, read
+/// markers and reactions all expose or act on a forum's content.
+async fn require_forum_read(
+    db: &sqlx::PgPool,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    require_forum_channel(db, channel_id).await?;
+    permissions::channel_permissions(db, public_key, channel_id)
+        .await?
+        .require(permissions::MESSAGES_READ)
 }
 
 /// Load a post by id, verifying it belongs to the given channel.
@@ -87,10 +102,6 @@ async fn require_reply(
         return Err((StatusCode::NOT_FOUND, "reply_not_found".to_string()));
     }
     Ok(row)
-}
-
-fn unix_now() -> i64 {
-    crate::auth::handlers::unix_timestamp()
 }
 
 /// Broadcast a forum event over the chat channel so WS subscribers receive it.
@@ -308,12 +319,23 @@ pub async fn list_posts(
     Path(channel_id): Path<String>,
     Query(params): Query<PostListParams>,
 ) -> Result<Json<PostListResponse>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    list_posts_with(state, user, channel_id, params, perms).await
+}
 
-    let can_moderate = {
-        let p = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
-        p.has(permissions::FORUM_POSTS_MANAGE)
-    };
+/// `list_posts` with the caller's permissions supplied: a federating peer
+/// holds no role here, so the alliance route passes the `everyone` floor.
+pub async fn list_posts_with(
+    state: Arc<AppState>,
+    user: AuthUser,
+    channel_id: String,
+    params: PostListParams,
+    perms: permissions::UserPermissions,
+) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    // Read-gating (§3.5), same as message history.
+    perms.require(permissions::MESSAGES_READ)?;
+    let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
 
     let limit = params.limit.unwrap_or(50).min(100);
 
@@ -422,6 +444,7 @@ pub async fn create_post(
 
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::FORUM_POSTS_CREATE)?;
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
 
     let title = req.title.trim().to_string();
     let body = req.body.trim().to_string();
@@ -443,7 +466,7 @@ pub async fn create_post(
     let tag_ids = validate_post_tags(&state.db, &channel_id, &requested_tags, require_tag).await?;
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
     let attachments_json = encode_attachments(&req.attachments);
 
     let mut tx = state
@@ -514,9 +537,21 @@ pub async fn get_post(
     Path((channel_id, post_id)): Path<(String, String)>,
     Query(params): Query<ReplyListParams>,
 ) -> Result<Json<PostDetail>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
-
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    get_post_with(state, user, channel_id, post_id, params, perms).await
+}
+
+/// `get_post` with the caller's permissions supplied; see `list_posts_with`.
+pub async fn get_post_with(
+    state: Arc<AppState>,
+    user: AuthUser,
+    channel_id: String,
+    post_id: String,
+    params: ReplyListParams,
+    perms: permissions::UserPermissions,
+) -> Result<Json<PostDetail>, (StatusCode, String)> {
+    require_forum_channel(&state.db, &channel_id).await?;
+    perms.require(permissions::MESSAGES_READ)?;
     let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
@@ -548,7 +583,9 @@ pub async fn get_post(
                     COALESCE(attachments, '[]') AS attachments, author_hub
              FROM post_replies
              WHERE post_id = $1
-               AND created_at > (SELECT created_at FROM post_replies WHERE id = $2)
+               -- The cursor is the same tuple the page is ordered by: created_at
+               -- alone has one-second resolution and skipped same-second replies.
+               AND (created_at, id) > (SELECT created_at, id FROM post_replies WHERE id = $2)
              ORDER BY created_at ASC, id ASC
              LIMIT $3",
         )
@@ -648,7 +685,7 @@ pub async fn edit_post(
         None => None,
     };
 
-    let now = unix_now();
+    let now = unix_timestamp();
     let mut tx = state
         .db
         .begin()
@@ -727,7 +764,7 @@ pub async fn delete_post(
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE posts SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&post_id)
@@ -764,6 +801,7 @@ pub async fn create_reply(
     // checks across two resolvers.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MESSAGES_SEND)?;
+    crate::routes::messages::require_may_post(&state, &user.public_key, &channel_id).await?;
 
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     if row.deleted_at.is_some() {
@@ -793,7 +831,7 @@ pub async fn create_reply(
     }
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
     let attachments_json = encode_attachments(&req.attachments);
 
     sqlx::query(
@@ -867,7 +905,7 @@ pub async fn edit_reply(
         return Err((StatusCode::BAD_REQUEST, "body_required".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE post_replies SET body = $1, edited_at = $2 WHERE id = $3")
         .bind(&body)
         .bind(now)
@@ -914,7 +952,7 @@ pub async fn delete_reply(
         return Err((StatusCode::FORBIDDEN, "forbidden".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE post_replies SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&reply_id)
@@ -1094,11 +1132,11 @@ pub async fn mark_post_read(
     user: AuthUser,
     Path((channel_id, post_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     // Ensure the post exists and belongs to this channel.
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO post_reads (user_pubkey, post_id, read_at) VALUES ($1, $2, $3)
          ON CONFLICT (user_pubkey, post_id) DO UPDATE SET read_at = EXCLUDED.read_at",
@@ -1126,7 +1164,7 @@ pub async fn add_post_reaction(
     Path((channel_id, post_id)): Path<(String, String)>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
 
     let emoji = req.emoji.trim();
@@ -1137,7 +1175,7 @@ pub async fn add_post_reaction(
         ));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO post_reactions (post_id, emoji, user_key, created_at)
          VALUES ($1, $2, $3, $4) ON CONFLICT (post_id, emoji, user_key) DO NOTHING",
@@ -1170,7 +1208,7 @@ pub async fn remove_post_reaction(
     user: AuthUser,
     Path((channel_id, post_id, emoji)): Path<(String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
 
     sqlx::query("DELETE FROM post_reactions WHERE post_id = $1 AND emoji = $2 AND user_key = $3")
@@ -1203,7 +1241,7 @@ pub async fn add_reply_reaction(
     Path((channel_id, post_id, reply_id)): Path<(String, String, String)>,
     Json(req): Json<ReactionRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
     let _ = require_reply(&state.db, &post_id, &reply_id).await?;
 
@@ -1215,7 +1253,7 @@ pub async fn add_reply_reaction(
         ));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO reply_reactions (reply_id, emoji, user_key, created_at)
          VALUES ($1, $2, $3, $4) ON CONFLICT (reply_id, emoji, user_key) DO NOTHING",
@@ -1249,7 +1287,7 @@ pub async fn remove_reply_reaction(
     user: AuthUser,
     Path((channel_id, post_id, reply_id, emoji)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
     let _ = require_post(&state.db, &channel_id, &post_id).await?;
     let _ = require_reply(&state.db, &post_id, &reply_id).await?;
 
@@ -1279,11 +1317,11 @@ pub async fn remove_reply_reaction(
 
 pub async fn search_posts(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(channel_id): Path<String>,
     Query(params): Query<SearchParams>,
 ) -> Result<Json<PostSearchResponse>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
 
     let q = params
         .q
@@ -1349,10 +1387,10 @@ pub async fn search_posts(
 
 pub async fn list_tags(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<ForumTag>>, (StatusCode, String)> {
-    require_forum_channel(&state.db, &channel_id).await?;
+    require_forum_read(&state.db, &user.public_key, &channel_id).await?;
 
     let rows = sqlx::query_as::<_, ForumTag>(
         "SELECT id, channel_id, label, color, position, created_at
@@ -1391,7 +1429,7 @@ pub async fn create_tag(
     let position = req.position.unwrap_or(0);
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO forum_tags (id, channel_id, label, color, position, created_at)
          VALUES ($1, $2, $3, $4, $5, $6)",
@@ -1653,7 +1691,7 @@ pub async fn federated_create_post(
     }
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
 
     sqlx::query(
         "INSERT INTO posts (id, channel_id, author_pubkey, author_hub, title, body, created_at, last_activity_at)
@@ -1746,7 +1784,7 @@ pub async fn federated_create_reply(
     }
 
     let id = Uuid::new_v4().to_string();
-    let now = unix_now();
+    let now = unix_timestamp();
 
     sqlx::query(
         "INSERT INTO post_replies (id, post_id, author_pubkey, author_hub, body, created_at, reply_to_id)
@@ -1812,6 +1850,21 @@ pub async fn federated_add_post_reaction(
             "author_pubkey_required".to_string(),
         ));
     }
+    // A peer speaks for its own members. A reaction filed here under one of
+    // *ours* would read as theirs, with nothing to tell it apart.
+    let local_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_member)",
+    )
+    .bind(&author_pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if local_member {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "author is a member of this hub".to_string(),
+        ));
+    }
     let emoji = req.emoji.trim();
     if emoji.is_empty() || emoji.chars().count() > 8 {
         return Err((
@@ -1820,7 +1873,7 @@ pub async fn federated_add_post_reaction(
         ));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query(
         "INSERT INTO post_reactions (post_id, emoji, user_key, created_at)
          VALUES ($1, $2, $3, $4) ON CONFLICT (post_id, emoji, user_key) DO NOTHING",
@@ -1880,7 +1933,7 @@ pub async fn federated_delete_post(
         return Err((StatusCode::FORBIDDEN, "not_your_content".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE posts SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&post_id)
@@ -1923,7 +1976,7 @@ pub async fn federated_delete_reply(
         return Err((StatusCode::FORBIDDEN, "not_your_content".to_string()));
     }
 
-    let now = unix_now();
+    let now = unix_timestamp();
     sqlx::query("UPDATE post_replies SET deleted_at = $1 WHERE id = $2")
         .bind(now)
         .bind(&reply_id)

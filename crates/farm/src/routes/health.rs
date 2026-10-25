@@ -31,22 +31,14 @@ pub async fn farm_info(State(state): State<Arc<FarmState>>) -> Json<FarmInfoResp
     // Read name/description from the farms singleton row (id=1).
     // If the row doesn't exist yet (first request before bootstrap completes)
     // fall back to sensible defaults.
-    let row: Option<(String, Option<String>)> =
-        sqlx::query_as("SELECT name, description FROM farms WHERE id = 1")
+    let row: Option<(String, Option<String>, bool)> =
+        sqlx::query_as("SELECT name, description, directory_public FROM farms WHERE id = 1")
             .fetch_optional(&state.db)
             .await
             .unwrap_or(None);
 
-    let (name, description) = row.unwrap_or_else(|| ("My Farm".to_string(), None));
-
-    let directory_public: bool =
-        sqlx::query_scalar::<_, i64>("SELECT directory_public FROM farms WHERE id = 1")
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v != 0)
-            .unwrap_or(false);
+    let (name, description, directory_public) =
+        row.unwrap_or_else(|| ("My Farm".to_string(), None, false));
 
     let hosted_hubs: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM hubs WHERE suspended_at IS NULL AND deleted_at IS NULL",

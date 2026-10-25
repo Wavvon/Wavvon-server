@@ -1,0 +1,334 @@
+{
+  "format": 1,
+  "notes": "A string beginning with \"@\" refers to the fixture of that name (inputs and expected outputs alike). Fixtures, seeds, keys, nonces and byte inputs are lowercase hex; signing_bytes, signature and every other output are lowercase hex. Text inputs (body, payload_json, labels) are UTF-8 strings. Timestamps are unix seconds. Field layouts: docs/docs/wire-format.md in the Wavvon-docs repo.",
+  "fixtures": {
+    "master_seed": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+    "subkey_seed": "2122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f40",
+    "new_key_seed": "4142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f60",
+    "voice_sender_seed": "6162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f80",
+    "voice_recipient_seed": "8182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0",
+    "master_pub": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+    "subkey_pub": "e7f162a10bec559afea195e4dce84b69568d5d2cb0963eb446c0685e2b17f2f0",
+    "new_pub": "adc14011f82d1c56d956aa4f9d73d8858361a606048525e0d08c638dc75dd8c7",
+    "master_dh_pub": "4a3807d064d077181cc070989e76891d20dca5559548dc2c77c1a50273882b38",
+    "voice_sender_key": "c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0",
+    "voice_nonce_salt": "aabbccdd",
+    "voice_wrap_nonce": "0102030405060708090a0b0c",
+    "opus_frame": "6f7075732d6672616d652d766563746f72"
+  },
+  "vectors": {
+    "master_pubkey": {
+      "description": "Ed25519 public key of the master seed.",
+      "inputs": {
+        "seed": "@master_seed"
+      },
+      "public_key": "@master_pub"
+    },
+    "master_from_entropy": {
+      "description": "Master signing key derived from BIP39 entropy: HKDF-SHA256(entropy, info \"wavvon/master/v1\") is the Ed25519 seed. Entropy here equals master_seed.",
+      "inputs": {
+        "entropy": "@master_seed",
+        "hkdf_info": "wavvon/master/v1"
+      },
+      "public_key": "8fbafd0f662f225430eed18b132b3de956dc7d75c95b26baa97ada69aab51565"
+    },
+    "new_key_pubkey": {
+      "description": "Ed25519 public key of the new-key seed (the key rotated to in the recovery vectors).",
+      "inputs": {
+        "seed": "@new_key_seed"
+      },
+      "public_key": "@new_pub"
+    },
+    "subkey_pubkey": {
+      "description": "Ed25519 public key of the subkey seed.",
+      "inputs": {
+        "seed": "@subkey_seed"
+      },
+      "public_key": "@subkey_pub"
+    },
+    "master_dh_pubkey": {
+      "description": "X25519 public key derived from an Ed25519 seed: SHA-512(seed)[0..32], clamped.",
+      "inputs": {
+        "seed": "@master_seed"
+      },
+      "dh_pubkey": "@master_dh_pub"
+    },
+    "home_hub_list": {
+      "description": "HomeHubList signed by the master key.",
+      "inputs": {
+        "master_pubkey": "@master_pub",
+        "hubs": [
+          "https://hub.example"
+        ],
+        "issued_at": 1700000000,
+        "sequence": 1,
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f686f6d652d6875622d6c6973742f7631004000000037396235353632653866653635346639343037386231313265386139386261373930316638353361653639356265643765306533393130626164303439363634010000001300000068747470733a2f2f6875622e6578616d706c6500f15365000000000100000000000000",
+      "signature": "193d446382d6dde14c0d85cf3b92a13858c7daa702bf284688af0514019de5665dbe52be683d41f85fa004c2b0c8be329ac608dbb18a4c03e9e0fd4380db0907"
+    },
+    "subkey_cert": {
+      "description": "SubkeyCert signed by the master key, no expiry, no fallback hubs.",
+      "inputs": {
+        "master_pubkey": "@master_pub",
+        "subkey_pubkey": "@subkey_pub",
+        "device_label": "laptop",
+        "issued_at": 1700000000,
+        "not_after": null,
+        "fallback_hubs": [],
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f7375626b65792d636572742f76310040000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636344000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630060000006c6170746f7000f15365000000000000000000",
+      "signature": "ba99a98b72bef53d3dfc4767728806ca27cd247ecc11383453696d0011fc586e9eaf583c9632ff2805358dfda0de59f0cc8ca9aad33a5877be0d680b40513209"
+    },
+    "revocation": {
+      "description": "RevocationEntry signed by the master key.",
+      "inputs": {
+        "master_pubkey": "@master_pub",
+        "subkey_pubkey": "@subkey_pub",
+        "revoked_at": 1700000500,
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f7265766f636174696f6e2f76310040000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636344000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630f4f2536500000000",
+      "signature": "6020787fb48d42085cbc7dbd8b3c78c7a4d1bcaa390baf2a9248af5d1d4b240813e2775acb86820f4ec106ae3b36df01a65c1db784fc40b36f279af50e0d910d"
+    },
+    "prefs_blob": {
+      "description": "SignedPrefsBlob over the ciphertext bytes (hex(\"ciphertext\")).",
+      "inputs": {
+        "master_pubkey": "@master_pub",
+        "blob_version": 1,
+        "ciphertext": "63697068657274657874",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f70726566732d626c6f622f76310040000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636340100000000000000305531dcc50ebca31cf1d5b31e9fc76ed51f66b3b6dd5a030c6539ae6532f979",
+      "signature": "7c463797b5cc76b3d8f47e6f86eff82bdbb8797bb538efcecfb8f743aed0c621d71d62612bd7aa750745710f0b3796ac60c8b4aefaeeb0f98883c5f47c8a1b0c"
+    },
+    "pairing_offer": {
+      "description": "PairingOffer signed by the master key; expires 300 s after issue.",
+      "inputs": {
+        "master_pubkey": "@master_pub",
+        "home_hubs": [
+          "https://hub.example"
+        ],
+        "pairing_token": "tok123",
+        "issued_at": 1700000000,
+        "expires_at": 1700000300,
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f70616972696e672d6f666665722f7631004000000037396235353632653866653635346639343037386231313265386139386261373930316638353361653639356265643765306533393130626164303439363634010000001300000068747470733a2f2f6875622e6578616d706c6506000000746f6b31323300f15365000000002cf2536500000000",
+      "signature": "93add8ced681c4dda4060417ba2f7301bff6a64876d015c30fa976307edeec75b69ff0af42a9415a50ce605ef2c561a70d19de0820334c16054336f904ec540f"
+    },
+    "pairing_claim": {
+      "description": "PairingClaim proof, signed by the claiming SUBKEY (not the master).",
+      "inputs": {
+        "pairing_token": "tok123",
+        "subkey_pubkey": "@subkey_pub",
+        "device_label": "laptop",
+        "signer_seed": "@subkey_seed"
+      },
+      "signing_bytes": "776176766f6e2f70616972696e672d636c61696d2f76310006000000746f6b3132334000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630060000006c6170746f70",
+      "proof": "cea1002c8bcad922848865158e5e7b2a7241929fcb13ce4a288e52cfecf912b71e2527ee0929198c2450027fb06ae04ac5f82acfffca28494feca7d253e22709"
+    },
+    "dh_key_record": {
+      "description": "DhKeyRecord binding the master pubkey to its X25519 key.",
+      "inputs": {
+        "pubkey": "@master_pub",
+        "dh_pubkey": "@master_dh_pub",
+        "published_at": 1700000000,
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f64682d6b65792f76310040000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636344000000034613338303764303634643037373138316363303730393839653736383931643230646361353535393534386463326337376331613530323733383832623338",
+      "signature": "6fbb512c648347920f714a831b0e1b13266c60fef157fd93922092e04bb281ecc2918d6bd6ffce7e6602463753188fde022d04763bc30cd5d720829ddcff5603"
+    },
+    "dm_envelope": {
+      "description": "EncryptedDmEnvelope (1:1). ciphertext and nonce are passed to the encoder as their hex strings, not decoded bytes.",
+      "inputs": {
+        "conversation_id": "conv123",
+        "ciphertext": "63697068657274657874",
+        "nonce": "0102030405060708090a0b0c",
+        "sender_dh_pubkey": "@master_dh_pub",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f646d2d636970686572746578742f76310007000000636f6e76313233140000003633363937303638363537323734363537383734180000003031303230333034303530363037303830393061306230634000000034613338303764303634643037373138316363303730393839653736383931643230646361353535393534386463326337376331613530323733383832623338",
+      "signature": "6d41d6b3f9f4c5b5d87a7d819f4e9b2e1a1340c3aa97cf044037f926c63710dd3edeb5bc66d9dfa89fc0d9fe2a67b8a28c6c5908f42b947b3551c04dbf113709"
+    },
+    "group_dm_envelope": {
+      "description": "GroupEncryptedEnvelope, sender_key_version 1, iteration 2. ciphertext and nonce are hex strings.",
+      "inputs": {
+        "conversation_id": "conv123",
+        "ciphertext": "63697068657274657874",
+        "nonce": "0102030405060708090a0b0c",
+        "sender_key_version": 1,
+        "iteration": 2,
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f67726f75702d646d2d636970686572746578742f76310007000000636f6e763132330100000031010000003214000000363336393730363836353732373436353738373418000000303130323033303430353036303730383039306130623063",
+      "signature": "d2788d4211a7fae57b17eae2cb74b56bd8a587ee9a9a57fd1ff0f048d0a86e256786bbdbc486f7754a6dac4975c2b25a2f9b0a7c73c288056e4b4938d6878b07"
+    },
+    "sender_key_dist": {
+      "description": "Sender-key distribution, version 1. Recipients are given unsorted (subkey first) to exercise the canonical sort by recipient pubkey; each is [recipient_pubkey, wrapped_key_hex_string].",
+      "inputs": {
+        "conversation_id": "conv123",
+        "version": 1,
+        "recipients": [
+          [
+            "@subkey_pub",
+            "55667788"
+          ],
+          [
+            "@master_pub",
+            "11223344"
+          ]
+        ],
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f67726f75702d6b65792d646973742f76310007000000636f6e76313233010000003140000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636340800000031313232333334344000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630080000003535363637373838",
+      "signature": "b3edd408f6a0700da3a9445be38cc6de2dcee4a927049b98e9f423e9654ee0b9c6adf9ff9ff4364f8ccd4f629d672b0c9cb517a0bb5b4e4de200f8a66f88fd04"
+    },
+    "recovery_request": {
+      "description": "Requester new-key proof, signed by the NEW key. Hub and old pubkeys reuse master_pub / subkey_pub as opaque strings.",
+      "inputs": {
+        "hub_pubkey": "@master_pub",
+        "old_pubkey": "@subkey_pub",
+        "new_pubkey": "@new_pub",
+        "signer_seed": "@new_key_seed"
+      },
+      "signing_bytes": "776176766f6e2f7265636f766572792d726571756573742f763100400000003739623535363265386665363534663934303738623131326538613938626137393031663835336165363935626564376530653339313062616430343936363440000000653766313632613130626563353539616665613139356534646365383462363935363864356432636230393633656234343663303638356532623137663266304000000061646331343031316638326431633536643935366161346639643733643838353833363161363036303438353235653064303863363338646337356464386337",
+      "proof": "31d6892113f05da64c22ee7b3a108bf61e4df1592f820d53de0eeb15a7d3a1c50859df4dc08e72d4997047f590b001b2fa3378e77a64d678e277c5edc78a160b"
+    },
+    "recovery_attestation": {
+      "description": "Contact attestation; the master seed stands in for the contact key. Must differ from the request bytes for the same triple.",
+      "inputs": {
+        "hub_pubkey": "@master_pub",
+        "old_pubkey": "@subkey_pub",
+        "new_pubkey": "@new_pub",
+        "request_nonce": "req-nonce-0001",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f7265636f766572792d6174746573746174696f6e2f7631004000000037396235353632653866653635346639343037386231313265386139386261373930316638353361653639356265643765306533393130626164303439363634400000006537663136326131306265633535396166656131393565346463653834623639353638643564326362303936336562343436633036383565326231376632663040000000616463313430313166383264316335366439353661613466396437336438383538333631613630363034383532356530643038633633386463373564643863370e0000007265712d6e6f6e63652d30303031",
+      "signature": "878bd554b21b60e63d1725db9a829d0107830e58ed0d8e80149368a833f1c09948490afd7cba160f34bc808092b15cf99141a86656c0d383fbaf04151edfb302"
+    },
+    "federated_plaintext_dm": {
+      "description": "What a sender signs over a plaintext DM crossing hubs. Strings are UTF-8.",
+      "inputs": {
+        "conversation_id": "conv-1",
+        "kind": "dm",
+        "content": "héllo",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f6665646572617465642d646d2f76310006000000636f6e762d3102000000646d0600000068c3a96c6c6f",
+      "signature": "19cb16f7d84ee382ee5d2b01ac60e340b6011fe912a733f10b53785ce555e5844e4a49eab1f44fd5543c4a0d5b3a5efdc227bb02ced6c72705c9de15f5e49a0a"
+    },
+    "auth_challenge": {
+      "description": "What a client signs to answer a challenge from a hub or farm naming the tagged-v1 scheme.",
+      "inputs": {
+        "challenge": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f617574682d6368616c6c656e67652f763100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature": "8a9cb870c40c8f1a4b88e7c8eb4a67bfae8115c98516e62d7bc383f421259cd452915257d6f7030af1e50249b3a08e820f482d1831f3a12a53524bffcd925f04"
+    },
+    "dm_member_change": {
+      "description": "What a group member signs to add members or to leave.",
+      "inputs": {
+        "conversation_id": "conv-1",
+        "actor": "actor",
+        "added": [
+          "new-a",
+          "new-b"
+        ],
+        "removed": [],
+        "timestamp": 1700000000,
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f646d2d6d656d6265722d6368616e67652f76310006000000636f6e762d31050000006163746f7202000000050000006e65772d61050000006e65772d620000000000f1536500000000",
+      "signature": "1a141f3f3d17e7aac9ecfb851df6d4cc4ea7d0dd46aa87658a21c4d53e2efd9290578d11f1dafcc51131325fe4e85de005e73e524bda4d2751d68b9e21b35b00"
+    },
+    "voice_grant": {
+      "description": "What an origin hub signs over an alliance voice grant payload JSON.",
+      "inputs": {
+        "payload_json": "{\"alliance_id\":\"a-1\"}",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f616c6c69616e63652d766f6963652d6772616e742f7631007b22616c6c69616e63655f6964223a22612d31227d",
+      "signature": "b609cb64511dcf807542e6b05c959053d97852757753c486bbcaee73a0acbfe82a063e1f84851802b8200b4b2920e7c39cfe49533f002245aad0a68df5e1e904"
+    },
+    "webhook_delivery_hub": {
+      "description": "Slash/component dispatch to a program: the hub signs with its Ed25519 key (hub seed here is master_seed). A receiver verifies X-Wavvon-Signature-V1 over signing_bytes, then rejects if |now - X-Wavvon-Timestamp| > 300 s. signature_legacy is the older body-only signature, kept until a major.",
+      "inputs": {
+        "hub_seed": "@master_seed",
+        "timestamp": 1700000000,
+        "body": "{\"type\":\"slash_command\"}"
+      },
+      "signing_bytes": "776176766f6e2f776562686f6f6b2d64656c69766572792f76310000f15365000000007b2274797065223a22736c6173685f636f6d6d616e64227d",
+      "signature_v1": "86328471c43aa165ef1ed671d51e46eaeb8de46d6921c51f7bfe9541825b0e246c90acd6b4aa1b977e4cde24271abcd762ff1c7871436de6ab7e1bea627f3c01",
+      "signature_legacy": "454be8c174f29083a314c703c8e0bf675e9a2b054356aa6c2dde7bf0110708b71a85fd35ffbfe40723cdc5724c5cb2253dfe44eee2941271319276553ed55b0b",
+      "hub_pubkey": "@master_pub",
+      "headers": {
+        "hub_pubkey": "X-Wavvon-Hub-Pubkey",
+        "signature_v1": "X-Wavvon-Signature-V1",
+        "signature_legacy": "X-Wavvon-Signature",
+        "timestamp": "X-Wavvon-Timestamp"
+      }
+    },
+    "webhook_delivery_outgoing": {
+      "description": "Outgoing webhook: the admin is shown secret_as_shown (base64url, no padding) once; its decoded bytes (raw_secret) feed HKDF-SHA256 with the given salt and empty info, giving a 32-byte signing key. HMAC-SHA256 is keyed with those 32 BYTES, not the hex text. signature_legacy covers the body only; signature_v1 covers signing_bytes.",
+      "inputs": {
+        "secret_as_shown": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+        "raw_secret": "0707070707070707070707070707070707070707070707070707070707070707",
+        "hkdf_salt": "wavvon-webhook-signing",
+        "hkdf_info": "",
+        "timestamp": 1700000000,
+        "body": "{\"type\":\"hub_event\"}"
+      },
+      "signing_key": "351763f9898ddacf3bb67a23c046e219c03c85e5097a965a35f940bc8ae93c87",
+      "signing_bytes": "776176766f6e2f776562686f6f6b2d64656c69766572792f76310000f15365000000007b2274797065223a226875625f6576656e74227d",
+      "signature_legacy": "6a60eb0aae37e4145b1658eaa2a1a19bb6995f70e4d4c2926fbfb57b1488542c",
+      "signature_v1": "42abcf09c2fbd629a8ba1bff16e7f315b27ad167fb36a2f68e648716ee3079d3",
+      "headers": {
+        "hub_pubkey": "X-Wavvon-Hub-Pubkey",
+        "signature_legacy": "X-Wavvon-Signature",
+        "signature_v1": "X-Wavvon-Signature-V1",
+        "timestamp": "X-Wavvon-Timestamp",
+        "webhook_id": "X-Wavvon-Webhook-Id"
+      }
+    },
+    "voice_key_wrap": {
+      "description": "Voice E2E key wrap: the sender wraps a channel sender-key to the recipient (ECDH of the two X25519 keys derived from the seeds, fixed nonce). ciphertext is the wrapped key material.",
+      "inputs": {
+        "sender_seed": "@voice_sender_seed",
+        "recipient_seed": "@voice_recipient_seed",
+        "channel_id": "chan-vector-1",
+        "sender_key": "@voice_sender_key",
+        "nonce_salt": "@voice_nonce_salt",
+        "key_id": 99,
+        "wrap_nonce": "@voice_wrap_nonce"
+      },
+      "ciphertext": "98c781916feb2ea99f7dbf23f15fd58bb9ab8613ec348ebe8c93814ee695a11de59ce0341e00d354b9ff665b5ab38d27a0ab526c71cf495e"
+    },
+    "voice_packet_ctr0": {
+      "description": "Sealed voice datagram (counter 0).",
+      "inputs": {
+        "sender_key": "@voice_sender_key",
+        "nonce_salt": "@voice_nonce_salt",
+        "key_id": 99,
+        "counter": 0,
+        "timestamp": 1000,
+        "opus": "@opus_frame"
+      },
+      "packet": "000000630000000000000000000003e832dbc83526f73e83a90b59aaab331078f359b00fcfab1fa0e6c514ea2034da79b2"
+    },
+    "voice_packet_ctr7": {
+      "description": "Sealed voice datagram (counter 7).",
+      "inputs": {
+        "sender_key": "@voice_sender_key",
+        "nonce_salt": "@voice_nonce_salt",
+        "key_id": 99,
+        "counter": 7,
+        "timestamp": 5000,
+        "opus": "@opus_frame"
+      },
+      "packet": "0000006300000000000000070000138823adf6d5a771baa49d8de5ed1c99e5d5f12e9fffa9ba4fb471ca80882171360024"
+    }
+  }
+}

@@ -213,69 +213,109 @@ async fn hub_scoped_subscriptions_are_replaced_atomically() {
     assert_eq!(rows, 1, "the replace must not leave the old rows behind");
 }
 
+/// `GET /me/events` reads the audit log the socket replays, so a poll
+/// returns the same `hub_event` envelope with its `seq`, and `cursor`
+/// picks up after the last one seen (Wavvon-server#170).
 #[tokio::test]
-async fn queued_events_are_polled_then_acknowledged() {
+async fn polling_returns_hub_event_envelopes_after_the_cursor() {
     let server = common::setup().await;
     grant_apps_register(&server).await;
-    let (app, token) = register_app(&server, "Poller").await;
-
-    let now = wavvon_hub::auth::handlers::unix_timestamp();
-    sqlx::query(
-        "INSERT INTO app_event_queue (id, app_pubkey, event_type, payload, created_at)
-         VALUES ('evt-1', $1, 'member.joined', '{}', $2)",
-    )
-    .bind(app.public_key_hex())
-    .bind(now)
-    .execute(&server.state().db)
-    .await
-    .unwrap();
-
-    let polled: serde_json::Value = server
-        .get("/me/events")
-        .authorization_bearer(&token)
-        .await
-        .json();
-    assert_eq!(polled["events"].as_array().unwrap().len(), 1);
-
+    let (_app, token) = register_app(&server, "Poller").await;
     server
-        .delete("/me/events")
+        .put("/me/app/subscriptions")
         .authorization_bearer(&token)
-        .json(&json!({ "ids": ["evt-1"] }))
+        .json(&json!({ "subscriptions": [{ "event": "member.joined" }] }))
         .await
         .assert_status_success();
 
-    let after: serde_json::Value = server
-        .get("/me/events")
-        .authorization_bearer(&token)
-        .await
-        .json();
-    assert!(after["events"].as_array().unwrap().is_empty());
-}
+    let state = server.state_arc();
+    for (event, who) in [
+        ("member.joined", "a"),
+        ("member.left", "a"),
+        ("member.joined", "b"),
+    ] {
+        wavvon_hub::apps::events::publish_hub_event(
+            &state,
+            event,
+            None,
+            Some(who),
+            None,
+            json!({ "pubkey": who }),
+        )
+        .await;
+    }
 
-#[tokio::test]
-async fn one_identity_never_reads_another_ones_queue() {
-    let server = common::setup().await;
-    grant_apps_register(&server).await;
-    let (app, _app_token) = register_app(&server, "Poller").await;
+    let poll = |query: String| {
+        let token = token.clone();
+        let server = &server;
+        async move {
+            server
+                .get(&format!("/me/events{query}"))
+                .authorization_bearer(&token)
+                .await
+        }
+    };
+    let all: Vec<serde_json::Value> = poll(String::new()).await.json();
+    assert_eq!(all.len(), 2, "only the subscribed event type: {all:?}");
+    assert_eq!(all[0]["type"], "hub_event");
+    assert_eq!(all[0]["event"], "member.joined");
+    assert_eq!(all[0]["payload"]["pubkey"], "a");
+    assert!(all[0]["seq"].as_i64().unwrap() < all[1]["seq"].as_i64().unwrap());
+
+    let first: Vec<serde_json::Value> = poll("?limit=1".into()).await.json();
+    assert_eq!(first, all[..1]);
+    let rest: Vec<serde_json::Value> = poll(format!("?cursor={}", first[0]["seq"])).await.json();
+    assert_eq!(rest, all[1..]);
+    let none: Vec<serde_json::Value> = poll(format!("?cursor={}", all[1]["seq"])).await.json();
+    assert!(none.is_empty());
+
+    // An identity with no subscriptions of its own sees none of it.
     let (_other, other_token) = register_app(&server, "Nosy").await;
-
-    let now = wavvon_hub::auth::handlers::unix_timestamp();
-    sqlx::query(
-        "INSERT INTO app_event_queue (id, app_pubkey, event_type, payload, created_at)
-         VALUES ('evt-1', $1, 'member.joined', '{}', $2)",
-    )
-    .bind(app.public_key_hex())
-    .bind(now)
-    .execute(&server.state().db)
-    .await
-    .unwrap();
-
-    let polled: serde_json::Value = server
+    let theirs: Vec<serde_json::Value> = server
         .get("/me/events")
         .authorization_bearer(&other_token)
         .await
         .json();
-    assert!(polled["events"].as_array().unwrap().is_empty());
+    assert!(theirs.is_empty());
+}
+
+/// A cursor older than the replay window is answered the way the socket
+/// answers it, so the program knows it missed events rather than seeing none.
+#[tokio::test]
+async fn a_cursor_outside_the_window_is_gone() {
+    let server = common::setup().await;
+    grant_apps_register(&server).await;
+    let (_app, token) = register_app(&server, "Late").await;
+    let state = server.state_arc();
+    for _ in 0..3 {
+        wavvon_hub::apps::events::publish_hub_event(
+            &state,
+            "member.joined",
+            None,
+            None,
+            None,
+            json!({}),
+        )
+        .await;
+    }
+    let max_seq: i64 = sqlx::query_scalar("SELECT MAX(seq) FROM hub_audit_log")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE hub_audit_log SET at = 0 WHERE seq < $1")
+        .bind(max_seq)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = server
+        .get("/me/events?cursor=0")
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::GONE);
+    let body: serde_json::Value = resp.json();
+    assert_eq!(body["type"], "replay_unavailable");
+    assert_eq!(body["earliest_seq"], max_seq);
 }
 
 // ---------------------------------------------------------------------------
@@ -474,4 +514,338 @@ async fn an_identity_that_registered_nothing_is_not_in_the_listing() {
         .await
         .json();
     assert!(apps.as_array().unwrap().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Command cooldown and the hub_event envelope
+// ---------------------------------------------------------------------------
+
+/// Registers an app whose webhook URL cannot be called (fails instantly), with one command at
+/// the given cooldown. A dispatch that gets past the cooldown therefore ends
+/// in "failed to respond", which is distinct from the cooldown refusal.
+async fn app_with_command(server: &common::TestHarness, cooldown: i64) -> String {
+    let app = Identity::generate();
+    let token = common::authenticate(server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Cool", "webhook_url": "ftp://unsupported.invalid/hook" }))
+        .await
+        .assert_status_success();
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&token)
+        .json(&json!({ "commands": [
+            { "name": "ping", "description": "p", "cooldown_seconds": cooldown }
+        ]}))
+        .await
+        .assert_status_success();
+    app.public_key_hex()
+}
+
+async fn invoke(server: &common::TestHarness, user: &str) -> Option<String> {
+    wavvon_hub::apps::dispatch::dispatch_slash(&server.state_arc(), "chan", user, "/ping").await
+}
+
+#[tokio::test]
+async fn a_command_inside_its_cooldown_is_refused_with_the_time_left() {
+    let server = common::setup_allowing_private_webhooks().await;
+    app_with_command(&server, 1).await;
+
+    let first = invoke(&server, "alice").await.unwrap();
+    assert!(
+        first.contains("failed to respond"),
+        "first goes through: {first}"
+    );
+
+    let second = invoke(&server, "alice").await.unwrap();
+    assert!(
+        second.contains("cooldown") && second.contains("1s"),
+        "{second}"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let third = invoke(&server, "alice").await.unwrap();
+    assert!(
+        third.contains("failed to respond"),
+        "window passed: {third}"
+    );
+}
+
+#[tokio::test]
+async fn a_cooldown_is_per_user() {
+    let server = common::setup_allowing_private_webhooks().await;
+    app_with_command(&server, 30).await;
+
+    invoke(&server, "alice").await;
+    let bob = invoke(&server, "bob").await.unwrap();
+    assert!(
+        bob.contains("failed to respond"),
+        "bob is not alice's cooldown: {bob}"
+    );
+}
+
+#[tokio::test]
+async fn a_zero_cooldown_never_blocks() {
+    let server = common::setup_allowing_private_webhooks().await;
+    app_with_command(&server, 0).await;
+
+    for _ in 0..3 {
+        let r = invoke(&server, "alice").await.unwrap();
+        assert!(r.contains("failed to respond"), "{r}");
+    }
+}
+
+#[test]
+fn the_hub_event_envelope_has_one_shape_with_optional_extras() {
+    use wavvon_hub::routes::app_models::HubEvent;
+
+    let live = serde_json::to_value(HubEvent::new(
+        7,
+        "member.joined",
+        "https://h",
+        5,
+        json!({"a":1}),
+    ))
+    .unwrap();
+    let mut keys: Vec<&str> = live
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort();
+    assert_eq!(keys, ["at", "event", "hub_url", "payload", "seq", "type"]);
+    assert_eq!(live["type"], "hub_event");
+
+    let mut replay = HubEvent::new(7, "member.joined", "https://h", 5, json!({}));
+    replay.actor_pubkey = Some("a".into());
+    replay.target_pubkey = Some("t".into());
+    replay.channel_id = Some("c".into());
+    replay.replayed = true;
+    let replay = serde_json::to_value(replay).unwrap();
+    for k in ["actor_pubkey", "target_pubkey", "channel_id", "replayed"] {
+        assert!(replay.get(k).is_some(), "replay carries {k}");
+    }
+    assert_eq!(replay["replayed"], true);
+
+    let mut hook = HubEvent::new(7, "member.joined", "https://h", 5, json!({}));
+    hook.webhook_id = Some("wh_1".into());
+    hook.truncated = true;
+    let hook = serde_json::to_value(hook).unwrap();
+    assert_eq!(hook["webhook_id"], "wh_1");
+    assert_eq!(hook["truncated"], true);
+}
+
+/// A slash dispatch carries a second signature that covers the timestamp,
+/// so a program can refuse a replayed invocation (Wavvon-server#160).
+#[tokio::test]
+async fn a_slash_dispatch_signs_its_timestamp() {
+    use std::sync::{Arc, Mutex};
+    let server = common::setup_allowing_private_webhooks().await;
+    grant_apps_register(&server).await;
+
+    type Seen = Arc<Mutex<Option<(axum::http::HeaderMap, Vec<u8>)>>>;
+    let seen: Seen = Arc::default();
+    let sink = seen.clone();
+    let receiver = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let sink = sink.clone();
+                async move {
+                    *sink.lock().unwrap() = Some((headers, body.to_vec()));
+                    axum::Json(json!({ "content": "pong" }))
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+
+    let app = Identity::generate();
+    let token = common::authenticate(&server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Signed", "webhook_url": hook_url }))
+        .await
+        .assert_status_success();
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&token)
+        .json(&json!({ "commands": [{ "name": "ping", "description": "p" }] }))
+        .await
+        .assert_status_success();
+    invoke(&server, "someone").await;
+
+    let (headers, raw) = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the app was never called");
+    let header = |name: &str| headers[name].to_str().unwrap().to_string();
+    let ts: u64 = header("X-Wavvon-Timestamp").parse().unwrap();
+    let signature = hex::decode(header("X-Wavvon-Signature-V1")).unwrap();
+    wavvon_identity::verify_signature(
+        &header("X-Wavvon-Hub-Pubkey"),
+        &wavvon_identity::webhook_delivery_signing_bytes(ts, &raw),
+        &signature,
+    )
+    .expect("the v1 signature must cover the timestamp and the exact body");
+}
+
+#[tokio::test]
+async fn an_app_webhook_url_must_be_public_https() {
+    let server = common::setup().await;
+    grant_apps_register(&server).await;
+    let app = Identity::generate();
+    let token = common::authenticate(&server, &app).await;
+    for url in [
+        "http://localhost/hook",
+        "https://localhost/hook",
+        "https://127.0.0.1/hook",
+        "https://192.168.1.5/hook",
+        "https://169.254.169.254/latest",
+        "http://example.com/hook",
+        "nonsense-not-a-url",
+    ] {
+        server
+            .put("/me/app/profile")
+            .authorization_bearer(&token)
+            .json(&json!({ "name": "Evil", "webhook_url": url }))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "NoHook" }))
+        .await
+        .assert_status_success();
+}
+
+#[tokio::test]
+async fn the_private_webhooks_opt_in_allows_a_local_app_webhook() {
+    let server = common::setup_allowing_private_webhooks().await;
+    grant_apps_register(&server).await;
+    let app = Identity::generate();
+    let token = common::authenticate(&server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Lan", "webhook_url": "http://192.168.1.5:8080/hook" }))
+        .await
+        .assert_status_success();
+}
+
+/// A reply keeps everything `AppReply` accepts: its buttons are served with
+/// the message, it threads under its parent, and the response's reactions land
+/// (Wavvon-server#171). A component update with no rows takes the buttons away.
+#[tokio::test]
+async fn a_slash_reply_keeps_its_components_thread_and_reactions() {
+    let server = common::setup_allowing_private_webhooks().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    grant_apps_register(&server).await;
+
+    let channel: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "general" }))
+        .await
+        .json();
+    let channel_id = channel["id"].as_str().unwrap().to_string();
+    let parent: serde_json::Value = server
+        .post(&format!("/channels/{channel_id}/messages"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "content": "who wants to play?" }))
+        .await
+        .json();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+
+    let row = json!([{ "type": "row", "components": [
+        { "type": "button", "custom_id": "join", "label": "Join" }
+    ]}]);
+    let (reply_parent, reply_row) = (parent_id.clone(), row.clone());
+    let receiver = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let (parent, row) = (reply_parent.clone(), reply_row.clone());
+            async move {
+                axum::Json(if body["type"] == "component_interaction" {
+                    json!({ "update": { "components": [] } })
+                } else {
+                    json!({
+                        "reply": { "body": "game on", "components": row, "reply_to": parent },
+                        "reactions": [
+                            { "message_id": parent, "emoji": "👍" },
+                            { "message_id": "not-a-message", "emoji": "👎" }
+                        ]
+                    })
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+
+    let app = Identity::generate();
+    let app_token = common::authenticate(&server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&app_token)
+        .json(&json!({ "name": "Lobby", "webhook_url": hook_url }))
+        .await
+        .assert_status_success();
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&app_token)
+        .json(&json!({ "commands": [{ "name": "play", "description": "p" }] }))
+        .await
+        .assert_status_success();
+
+    let owner_pubkey = parent["sender"].as_str().unwrap().to_string();
+    let state = server.state_arc();
+    let err =
+        wavvon_hub::apps::dispatch::dispatch_slash(&state, &channel_id, &owner_pubkey, "/play")
+            .await;
+    assert_eq!(err, None, "the dispatch succeeds");
+
+    let url = format!("/channels/{channel_id}/messages");
+    let messages = || async {
+        let list: Vec<serde_json::Value> = server
+            .get(&url)
+            .authorization_bearer(&owner_token)
+            .await
+            .json();
+        list
+    };
+    let list = messages().await;
+    let reply = list
+        .iter()
+        .find(|m| m["sender"] == app.public_key_hex())
+        .expect("the reply is stored");
+    assert_eq!(reply["components"], row, "buttons are served");
+    assert_eq!(reply["reply_to"]["message_id"], parent_id, "threaded");
+    let parent = list.iter().find(|m| m["id"] == parent_id).unwrap();
+    assert_eq!(parent["reply_count"], 1);
+    assert_eq!(parent["reactions"][0]["emoji"], "👍");
+    assert_eq!(parent["reactions"][0]["count"], 1);
+    assert_eq!(
+        parent["reactions"].as_array().unwrap().len(),
+        1,
+        "only reactions on this channel's messages land"
+    );
+
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+    wavvon_hub::apps::dispatch::dispatch_component(&state, &reply_id, "join", &[], &owner_pubkey)
+        .await;
+    let list = messages().await;
+    let reply = list.iter().find(|m| m["id"] == reply_id).unwrap();
+    assert!(
+        reply.get("components").is_none(),
+        "an empty update clears them"
+    );
 }

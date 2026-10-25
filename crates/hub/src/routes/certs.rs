@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, CERTS_ISSUE, CERTS_REVOKE, CERTS_SETTINGS};
+use crate::routes::hub::load_hub_url;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -469,8 +470,8 @@ pub async fn issue_cert_for(
     let now = unix_timestamp();
 
     // Load user row
-    let user_row: Option<(i64, i64, String, Option<i64>, i64)> = sqlx::query_as(
-        "SELECT first_seen_at, last_seen_at, approval_status, pow_level, COALESCE(pow_level,0)
+    let user_row: Option<(i64, i64, String, Option<i64>, i64, bool)> = sqlx::query_as(
+        "SELECT first_seen_at, last_seen_at, approval_status, pow_level, COALESCE(pow_level,0), is_member
          FROM users WHERE public_key = $1",
     )
     .bind(subject_pubkey)
@@ -478,7 +479,7 @@ pub async fn issue_cert_for(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    let (first_seen_at, _last_seen_at, approval_status, _pow_col, pow_level_i64) =
+    let (first_seen_at, _last_seen_at, approval_status, _pow_col, pow_level_i64, is_member) =
         user_row.ok_or((StatusCode::NOT_FOUND, "User not found".to_string()))?;
     let pow_level = if pow_level_i64 > 0 {
         Some(pow_level_i64 as u8)
@@ -488,6 +489,11 @@ pub async fn issue_cert_for(
 
     if approval_status != "approved" {
         return Err((StatusCode::FORBIDDEN, "User is not approved".to_string()));
+    }
+    // Kick, ban and recovery clear membership but leave 'approved'; good
+    // standing is vouched only for someone who is still here.
+    if !is_member {
+        return Err((StatusCode::FORBIDDEN, "User is not a member".to_string()));
     }
 
     // Check not banned
@@ -559,7 +565,7 @@ pub async fn issue_cert_for(
 }
 
 /// Build, sign, and record an achievement badge (a labelled cert) for a user.
-pub async fn issue_badge_for(
+async fn issue_badge_for(
     state: &AppState,
     subject_pubkey: &str,
     label: &str,
@@ -636,7 +642,7 @@ pub async fn issue_badge_for(
 }
 
 /// Re-issue with standing="revoked" and mark the old row revoked_at.
-pub async fn revoke_cert_for(
+async fn revoke_cert_for(
     state: &AppState,
     subject_pubkey: &str,
 ) -> Result<(), (StatusCode, String)> {
@@ -876,7 +882,7 @@ const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// issuer. An issuer with no URL is simply not pullable — its pushed certs
 /// still work — which is a better failure than a trust list that fails to
 /// parse.
-pub async fn load_issuer_urls(state: &AppState) -> std::collections::HashMap<String, String> {
+async fn load_issuer_urls(state: &AppState) -> std::collections::HashMap<String, String> {
     let json_str: String = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'cert_issuer_urls'",
     )
@@ -1004,15 +1010,6 @@ pub async fn load_cert_requirement(state: &AppState) -> Option<CertRequirement> 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async fn load_hub_url(state: &AppState) -> String {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_url'")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-}
 
 async fn setting_i64(state: &AppState, key: &str, default: i64) -> i64 {
     sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")

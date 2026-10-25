@@ -5,7 +5,8 @@
 //!   1. Discovers all distinct (issuer_pubkey, issuer_url) pairs in user_certs.
 //!   2. Fetches `GET {issuer_url}/certs/revocations?since={last_synced_at}` from each.
 //!   3. Deletes matching user_certs rows for each returned revocation.
-//!   4. Advances the last_synced_at cursor in cert_revocation_sync.
+//!   4. Advances the last_synced_at cursor in cert_revocation_sync, in the
+//!      issuer's own clock (its `revoked_at` values), never ours.
 //!
 //! This closes the gap where Hub A revokes a cert but Hub B — which holds a
 //! copy in user_certs — never finds out.
@@ -103,11 +104,6 @@ async fn sync_one(state: &AppState, issuer_pubkey: &str, issuer_url: &str) {
         }
     };
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-
     let mut removed = 0usize;
     let mut max_revoked_at = last_synced;
 
@@ -133,11 +129,11 @@ async fn sync_one(state: &AppState, issuer_pubkey: &str, issuer_url: &str) {
         );
     }
 
-    // Advance the cursor. Use `now` for empty responses so the window always
-    // moves forward. Use max(revoked_at) + 1 when entries were returned so the
-    // next poll doesn't re-fetch the same entries.
+    // The cursor is in the issuer's clock: max(revoked_at) + 1. An empty
+    // answer leaves it where it was -- moving it to *our* now let a skew
+    // between the two hubs skip a revocation for good.
     let new_cursor = if entries.is_empty() {
-        now
+        last_synced
     } else {
         max_revoked_at + 1
     };

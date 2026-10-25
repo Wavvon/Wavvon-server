@@ -10,7 +10,8 @@ use axum::Json;
 use serde::Serialize;
 use sqlx::Row;
 
-use crate::routes::admin::require_admin_pub;
+use crate::routes::admin::require_admin;
+use crate::routes::hubs::hub_url;
 use crate::state::FarmState;
 use crate::unix_now;
 
@@ -194,12 +195,8 @@ pub async fn receive_heartbeat(
                 .await
                 .ok()
                 .flatten();
-        let base = state.farm_url.trim_end_matches('/');
         match hub_id {
-            Some(id) => match crate::routes::slugs::canonical_slug(&state.db, &id).await {
-                Some(slug) => Some(format!("{base}/hub/{slug}")),
-                None => Some(format!("{base}/hub/{hub_pubkey}")),
-            },
+            Some(id) => hub_url(&state.db, &state.farm_url, &id, Some(&hub_pubkey)).await,
             None => None,
         }
     };
@@ -253,7 +250,9 @@ pub async fn receive_heartbeat(
 pub struct FleetEntry {
     pub id: String,
     pub name: String,
-    pub hub_url: String,
+    /// Absent until the hub has claimed its row; see `hubs::hub_url`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hub_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hub_pubkey: Option<String>,
     pub online: bool,
@@ -272,7 +271,7 @@ pub async fn get_fleet(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<Vec<FleetEntry>>, (StatusCode, Json<serde_json::Value>)> {
-    require_admin_pub(&headers, &state).await?;
+    require_admin(&headers, &state).await?;
 
     let now = unix_now();
     // 3 missed 60-second heartbeats = 180 seconds.
@@ -298,29 +297,25 @@ pub async fn get_fleet(
         )
     })?;
 
-    let farm_url = state.farm_url.trim_end_matches('/');
-
-    let fleet: Vec<FleetEntry> = rows
-        .iter()
-        .map(|r| {
-            let id: String = r.get("id");
-            let hub_url = format!("{}/hub/{}", farm_url, id);
-            FleetEntry {
-                hub_url,
-                id,
-                name: r.get("name"),
-                hub_pubkey: r.get("hub_pubkey"),
-                online: r.get::<bool, _>("online"),
-                online_users: r.get::<Option<i64>, _>("online_users").unwrap_or(0),
-                storage_bytes: r.get::<Option<i64>, _>("storage_bytes").unwrap_or(0),
-                last_seen_at: r.get("last_seen_at"),
-                created_at: r.get("created_at"),
-                auto_restart_enabled: r.get("auto_restart_enabled"),
-                restart_attempts: r.get("restart_attempts"),
-                last_restart_at: r.get("last_restart_at"),
-            }
-        })
-        .collect();
+    let mut fleet = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let id: String = r.get("id");
+        let hub_pubkey: Option<String> = r.get("hub_pubkey");
+        fleet.push(FleetEntry {
+            hub_url: hub_url(&state.db, &state.farm_url, &id, hub_pubkey.as_deref()).await,
+            id,
+            name: r.get("name"),
+            hub_pubkey,
+            online: r.get::<bool, _>("online"),
+            online_users: r.get::<Option<i64>, _>("online_users").unwrap_or(0),
+            storage_bytes: r.get::<Option<i64>, _>("storage_bytes").unwrap_or(0),
+            last_seen_at: r.get("last_seen_at"),
+            created_at: r.get("created_at"),
+            auto_restart_enabled: r.get("auto_restart_enabled"),
+            restart_attempts: r.get("restart_attempts"),
+            last_restart_at: r.get("last_restart_at"),
+        });
+    }
 
     Ok(Json(fleet))
 }

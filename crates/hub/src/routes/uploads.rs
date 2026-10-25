@@ -10,8 +10,12 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::state::AppState;
 
-// Max upload size: 25 MB in raw bytes
-const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+/// What the router lets this route's body reach: the largest cap an operator
+/// can set plus room for the multipart framing, so the check below is the one
+/// that answers. Left at axum's 2 MB default, a 3 MB file failed as a
+/// multipart parse error.
+pub const UPLOAD_BODY_LIMIT: usize =
+    crate::routes::hub::MAX_MAX_UPLOAD_BYTES as usize + 1024 * 1024;
 const BANNER_MAX_UPLOAD_BYTES: usize = 512 * 1024;
 
 /// Allowed mime types for uploads.
@@ -31,6 +35,18 @@ fn is_allowed_mime(mime: &str) -> bool {
 /// apart is how a backup silently stops containing anything.
 pub fn uploads_dir() -> String {
     std::env::var("WAVVON_UPLOADS_DIR").unwrap_or_else(|_| "./uploads/".to_string())
+}
+
+/// A body past `UPLOAD_BODY_LIMIT` surfaces as a multipart error, not as a
+/// status of its own; keep axum's 413 and say which limit it was.
+fn multipart_err(e: axum::extract::multipart::MultipartError, max: usize) -> (StatusCode, String) {
+    if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("File exceeds {}MB limit", max / 1024 / 1024),
+        );
+    }
+    (StatusCode::BAD_REQUEST, format!("Multipart error: {e}"))
 }
 
 #[derive(Serialize)]
@@ -58,12 +74,18 @@ pub async fn upload_file(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     let channel_type =
         channel_type.ok_or_else(|| (StatusCode::NOT_FOUND, "Channel not found".to_string()))?;
+    // An upload is an attachment on its way into this channel: the channel's
+    // own send permission applies, so it cannot be used to fill the disk
+    // through a channel the caller could never post in.
+    crate::permissions::channel_permissions(&state.db, &user.public_key, &channel_id)
+        .await?
+        .require(crate::permissions::MESSAGES_SEND)?;
 
     let is_banner = channel_type == "banner";
     let effective_max = if is_banner {
         BANNER_MAX_UPLOAD_BYTES
     } else {
-        MAX_UPLOAD_BYTES
+        crate::routes::hub::read_upload_cap(&state.db).await as usize
     };
 
     // Extract the "file" field from the multipart body.
@@ -74,7 +96,7 @@ pub async fn upload_file(
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Multipart error: {e}")))?
+        .map_err(|e| multipart_err(e, effective_max))?
     {
         let field_name = field.name().unwrap_or("").to_string();
         if field_name != "file" {
@@ -91,7 +113,7 @@ pub async fn upload_file(
         let data = field
             .bytes()
             .await
-            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Read error: {e}")))?;
+            .map_err(|e| multipart_err(e, effective_max))?;
 
         if data.len() > effective_max {
             if is_banner {
@@ -102,7 +124,7 @@ pub async fn upload_file(
             }
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
-                format!("File exceeds {}MB limit", MAX_UPLOAD_BYTES / 1024 / 1024),
+                format!("File exceeds {}MB limit", effective_max / 1024 / 1024),
             ));
         }
 

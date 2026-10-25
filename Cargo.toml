@@ -6,7 +6,6 @@ members = [
     "crates/identity",
     "crates/farm",
     "crates/agent",
-    "crates/store",
     "crates/demo-seed",
 ]
 

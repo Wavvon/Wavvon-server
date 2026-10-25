@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, MODERATION_SETTINGS};
+use crate::routes::hub::{read_setting, upsert_setting};
+use crate::routes::webhooks::sha256_hex;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -56,40 +58,6 @@ pub struct UpdateChallengeSettingsRequest {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async fn read_setting(db: &sqlx::PgPool, key: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = $1")
-        .bind(key)
-        .fetch_optional(db)
-        .await
-        .ok()
-        .flatten()
-}
-
-async fn upsert_setting(
-    db: &sqlx::PgPool,
-    key: &str,
-    value: &str,
-) -> Result<(), (StatusCode, String)> {
-    sqlx::query(
-        "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
-         ON CONFLICT(key) DO UPDATE SET value = $3",
-    )
-    .bind(key)
-    .bind(value)
-    .bind(value)
-    .execute(db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    Ok(())
-}
-
-/// SHA-256 hex of a string (lowercase), for puzzle answer hashing.
-fn sha256_hex(input: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let hash = Sha256::digest(input.as_bytes());
-    hex::encode(hash)
-}
 
 /// Generate a simple math puzzle SVG. Returns (svg_string, answer_string).
 fn make_puzzle_svg(difficulty: &str) -> (String, String) {

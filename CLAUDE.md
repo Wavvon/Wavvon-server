@@ -120,6 +120,15 @@ Layout under `crates/hub/src/`:
 
 Entry: `crates/identity/src/lib.rs`. Pure Rust, no async, no I/O.
 
+**Apache-2.0, unlike the rest of this repo (AGPL-3.0)**, so third-party
+clients and the Rust SDK can link it. Keep it that way: it may depend only on
+permissively licensed crates, never on another crate of this workspace.
+
+It is on crates.io. `release.yml` publishes it with each hub release when its
+`version` is not there yet (trusted publishing, no token), so **bump the
+crate's version when its public API or a wire format changes**, independently
+of the hub's version; an unchanged version is skipped.
+
 Defines every signed envelope type: `HomeHubList`, `SubkeyCert`, `PairingOffer`,
 DM envelopes, prefs blob, recovery request/attestation
 (`wavvon/recovery-request/v1`, `wavvon/recovery-attestation/v1`), and more. Each
@@ -127,19 +136,11 @@ has a versioned tag (`b"wavvon/<name>/v1\0"`) and length-prefixed binary
 encoding. Also: BIP39 recovery phrases (24 words <-> secret key), X25519 ECDH
 from an Ed25519 seed for E2E DMs, AES-256-GCM, PoW helpers.
 
-**Every client must match this crate byte-for-byte.** Test vectors live in
-`crates/identity/tests/wire_vectors.rs` and are mirrored in the clients repo
-(TypeScript and desktop Rust), each asserting the same vectors. Changing an
+**Every client must match this crate byte-for-byte.** Test vectors are data in
+`crates/identity/wire-vectors.json` (the one authority, also a release asset;
+`tests/wire_vectors.rs` only loads and asserts it) and are mirrored in the clients
+repo (TypeScript and desktop Rust), each asserting the same vectors. Changing an
 envelope is a cross-repo operation — use the **`wire-format-change`** skill.
-
-### `store` — database abstraction
-
-Entry: `crates/store/src/lib.rs`. Trait-based: `HubStore` = `AuthStore +
-UserStore + ChannelStore + MessageStore + RoleStore + DmStore + FederationStore +
-...`. The hub holds `Arc<dyn HubStore>`. PostgreSQL is the one and
-only backend (`crates/store/src/impls/`). The trait split's value today is error
-normalization and keeping SQL out of route handlers — prefer it over raw
-`sqlx::query` in new hub code.
 
 ### `hub-env` — cross-process config keys
 
@@ -214,8 +215,14 @@ the data lives; `backup`/`restore` go through the bundled `pg_dump`.
 One live caveat: **bundled mode does not work on musl** (the archive's `initdb`
 wants `libicuuc.so.74`, which no current Alpine ships, and its `libpq.so.5` also
 wants krb5) even though the release still publishes musl targets advertising a
-no-prerequisites path. It is an open item in the wiki's `next-up.md`. The Docker
-image is unaffected: it is `debian:trixie-slim`, so it gets the glibc archive.
+no-prerequisites path; a musl build refuses bundled mode up front. The glibc
+archive is not dependency-free either — its `postgres` links `libxml2.so.2`,
+and since the upstream rebuild of 2026-10-18 it needs **glibc 2.36** (Debian 12,
+Ubuntu 24.04; not Ubuntu 22.04, which is why CI tests on 24.04) —
+and `initdb` refuses to run as root, which is why the Docker image installs
+`libxml2` and runs as the unprivileged `wavvon` user (uid 10001). Every
+documented Docker path uses an external database, so nothing exercised the
+image's bundled mode until that was found by hand.
 
 The **major-upgrade path is walked end to end** as of 2026-09-10, across two
 real majors, by `e2e-topology`'s `pgupgrade` stage: a hub carrying PostgreSQL

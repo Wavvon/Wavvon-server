@@ -41,7 +41,13 @@ pub async fn search_messages(
 
     let limit = params.limit.min(100);
 
-    // Channels the user is not banned from (text channels only).
+    // Text channels the caller can read (§3.5) and is not banned from.
+    let readable = crate::permissions::channels_with_permission(
+        &state.db,
+        &user.public_key,
+        crate::permissions::MESSAGES_READ,
+    )
+    .await?;
     let visible_channels: Vec<String> = sqlx::query_scalar(
         "SELECT id FROM channels
          WHERE is_category = false
@@ -53,7 +59,10 @@ pub async fn search_messages(
     .bind(&user.public_key)
     .fetch_all(&state.db)
     .await
-    .unwrap_or_default();
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    .into_iter()
+    .filter(|id: &String| readable.contains(id))
+    .collect();
 
     if visible_channels.is_empty() {
         return Ok(Json(vec![]));

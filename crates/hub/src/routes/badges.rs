@@ -6,8 +6,10 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, BADGES_MANAGE};
+use crate::routes::hub::load_hub_url;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -143,7 +145,7 @@ pub async fn accept_pending(
         ));
     }
 
-    let accepted_at = unix_now_secs();
+    let accepted_at = unix_timestamp();
 
     let badge_id = Uuid::new_v4().to_string();
     sqlx::query(
@@ -324,7 +326,7 @@ pub async fn issue_badge(
 
     let our_pubkey = state.hub_identity.public_key_hex();
     let our_url = load_hub_url(&state).await;
-    let issued_secs = unix_now_secs();
+    let issued_secs = unix_timestamp();
     let expires_secs: Option<i64> = req
         .expires_days
         .map(|days| issued_secs + (days as i64) * 86400);
@@ -487,26 +489,6 @@ pub async fn load_active_badges(state: &AppState) -> Vec<BadgeEnvelope> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Load the configured hub URL from hub_settings (key = 'hub_url').
-/// Falls back to an empty string when not set so the badge payload is still
-/// syntactically valid; the Tauri client or startup script should populate
-/// this before issuing badges.
-async fn load_hub_url(state: &AppState) -> String {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'hub_url'")
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-}
-
-fn unix_now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
 // ---------------------------------------------------------------------------
 // sqlx row types
 // ---------------------------------------------------------------------------
@@ -562,7 +544,7 @@ pub async fn revoke_issued_badge(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(BADGES_MANAGE)?;
 
-    let now = unix_now_secs();
+    let now = unix_timestamp();
 
     let result = sqlx::query(
         "UPDATE issued_badges SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL",

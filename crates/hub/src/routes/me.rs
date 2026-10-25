@@ -127,6 +127,15 @@ fn empty_row() -> MeProfileRow {
     )
 }
 
+async fn is_findable(db: &sqlx::PgPool, pk: &str) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar("SELECT findable_by_allies FROM users WHERE public_key = $1")
+        .bind(pk)
+        .fetch_optional(db)
+        .await
+        .map(|v| v.unwrap_or(false))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+}
+
 /// Matches "MM-DD" — month/day only, never a year (privacy). Month 01-12,
 /// day 01-31 (02 allows up to 29; callers don't need real per-month/leap-year
 /// day counts since no year is stored).
@@ -179,6 +188,7 @@ pub async fn me(
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
+    let findable_by_allies = is_findable(&state.db, &user.public_key).await?;
     Ok(Json(MeResponse {
         public_key: user.public_key,
         display_name,
@@ -191,6 +201,7 @@ pub async fn me(
         cover,
         favorite_hubs: parse_favorite_hubs(&favorite_hubs),
         show_hubs: show_hubs.unwrap_or(false),
+        findable_by_allies,
         approval_status,
         roles,
         birthday,
@@ -346,6 +357,14 @@ pub async fn update_me(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
+    if let Some(findable) = req.findable_by_allies {
+        sqlx::query("UPDATE users SET findable_by_allies = $1 WHERE public_key = $2")
+            .bind(findable)
+            .bind(pk)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
     if let Some(ref birthday) = req.birthday {
         if !birthday.is_empty() {
             if !crate::routes::hub::birthdays_enabled(&state.db).await {
@@ -422,6 +441,7 @@ pub async fn update_me(
         json,
     ));
 
+    let findable_by_allies = is_findable(&state.db, &user.public_key).await?;
     Ok(Json(MeResponse {
         public_key: user.public_key,
         display_name,
@@ -434,6 +454,7 @@ pub async fn update_me(
         cover,
         favorite_hubs: parse_favorite_hubs(&favorite_hubs),
         show_hubs: show_hubs.unwrap_or(false),
+        findable_by_allies,
         approval_status,
         roles,
         birthday,
@@ -455,7 +476,7 @@ async fn fetch_user_roles(
         "SELECT r.id, r.name, r.priority, r.display_separately, r.created_at,
                 r.color, r.icon, r.category_id
          FROM roles r
-         INNER JOIN user_roles ur ON r.id = ur.role_id
+         INNER JOIN member_roles ur ON r.id = ur.role_id
          WHERE ur.user_public_key = $1
          ORDER BY r.priority DESC",
     )
@@ -510,6 +531,9 @@ pub struct MeResponse {
     pub favorite_hubs: Vec<FavoriteHub>,
     #[serde(default)]
     pub show_hubs: bool,
+    /// Listed to allied hubs' members (alliance-member-discovery.md). Off by default.
+    #[serde(default)]
+    pub findable_by_allies: bool,
     #[serde(default = "default_approval_status")]
     pub approval_status: String,
     #[serde(default)]
@@ -551,6 +575,8 @@ pub struct UpdateMeRequest {
     pub favorite_hubs: Option<Vec<FavoriteHub>>,
     #[serde(default)]
     pub show_hubs: Option<bool>,
+    #[serde(default)]
+    pub findable_by_allies: Option<bool>,
     /// "MM-DD", never a year. Empty string clears it. Rejected with 400 when
     /// `birthdays_enabled` is false hub-wide, or when the format doesn't
     /// match "MM-DD" with a valid month/day.
@@ -588,8 +614,8 @@ struct RoleRow {
 /// Self only. Removing *someone else* is moderation's job and means something
 /// different.
 ///
-/// Note that dropping the roles re-arms the invite gate — it is
-/// `has_roles == 0` — so on an invite-only hub this makes the return that is
+/// Note that clearing `is_member` (in the same transaction that drops the
+/// roles) re-arms the invite gate, so on an invite-only hub this makes the return that is
 /// free today require a new invite. That is intended, and the client says so
 /// before asking.
 pub async fn leave_hub(
@@ -623,9 +649,10 @@ pub async fn leave_hub(
             display_name = NULL, avatar = NULL, bio = NULL, pronouns = NULL,
             interests = NULL, status_message = NULL, activities = NULL,
             accent_color = NULL, cover = NULL, favorite_hubs = NULL,
-            show_hubs = NULL, birthday = NULL, name_color = NULL,
+            show_hubs = NULL, findable_by_allies = FALSE, birthday = NULL, name_color = NULL,
             presence_status = NULL, presence_custom = NULL,
-            approval_status = 'left'
+            approval_status = 'left',
+            is_member = FALSE
          WHERE public_key = $1",
     )
     .bind(pk)
@@ -646,6 +673,7 @@ pub async fn leave_hub(
         .map_err(db_err)?;
 
     tx.commit().await.map_err(db_err)?;
+    state.close_sessions_of(pk).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

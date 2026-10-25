@@ -56,13 +56,7 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
             .to_string_lossy()
             .to_string(),
     ));
-    let state = Arc::new(FarmState::new(
-        db,
-        keypair,
-        farm_url,
-        hub_manager,
-        "/tmp/hubs-test".to_string(),
-    ));
+    let state = Arc::new(FarmState::new(db, keypair, farm_url, hub_manager));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state, guard)
 }
@@ -417,8 +411,8 @@ async fn heartbeat_accepts_known_hub_pubkey() {
         .unwrap()
         .as_secs() as i64;
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at, hub_pubkey)
-         VALUES ('hbhub', 'aa', 'Heartbeat Hub', 'private', '/tmp/x.db', $1, $2)",
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at, hub_pubkey)
+         VALUES ('hbhub', 'aa', 'Heartbeat Hub', 'private', $1, $2)",
     )
     .bind(now)
     .bind(&hub_pubkey)
@@ -632,4 +626,43 @@ async fn verify_rejects_a_cert_nobody_signed() {
         }))
         .await;
     vr.assert_status_unauthorized();
+}
+
+// The TOTP gate used to compare the key on the request, which for a paired
+// device is its own subkey and never the stored admin key — so the second
+// factor was skipped in full for exactly the devices the cert then promotes to
+// admin. It has to compare the identity the token will speak for.
+#[tokio::test]
+async fn totp_applies_to_a_paired_device_of_the_admin() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    let device = Identity::generate();
+    let device_pubkey = device.public_key_hex();
+
+    sqlx::query(
+        "UPDATE farms SET admin_pubkey = $1, totp_secret = $2, totp_enabled = TRUE WHERE id = 1",
+    )
+    .bind(admin.public_key_hex())
+    .bind("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP")
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let (challenge, signature) = challenge_and_sign(&server, &device).await;
+    let vr = server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": device_pubkey,
+            "challenge": challenge,
+            "signature": signature,
+            "subkey_cert": subkey_cert(&admin, &device_pubkey),
+        }))
+        .await;
+
+    vr.assert_status_unauthorized();
+    assert_eq!(
+        vr.text(),
+        "totp_required",
+        "a device paired to the admin must still present the second factor"
+    );
 }

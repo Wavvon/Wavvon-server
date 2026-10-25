@@ -2,30 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::http::StatusCode;
 use bytes::Bytes;
 use sqlx::PgPool;
-use store::StoreError;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_identity::Identity;
 use webauthn_rs::prelude::{PasskeyAuthentication, PasskeyRegistration, Webauthn};
 
 use crate::federation::client::FederationClient;
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
-
-/// Map a `StoreError` to an HTTP status + plain-text body.
-///
-/// Replaces the ad-hoc `.map_err(|_| (StatusCode::..., "...".into()))` and
-/// `"UNIQUE"` string-sniffing that was scattered across route handlers.
-/// Route handlers call `store_error_to_http(e)` or `.map_err(store_error_to_http)`.
-pub fn store_error_to_http(e: StoreError) -> (StatusCode, String) {
-    match e {
-        StoreError::NotFound => (StatusCode::NOT_FOUND, "not found".into()),
-        StoreError::Conflict(msg) => (StatusCode::CONFLICT, msg),
-        StoreError::PermissionDenied => (StatusCode::FORBIDDEN, "permission denied".into()),
-        StoreError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
-    }
-}
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -211,6 +195,51 @@ pub struct RateLimiters {
     /// shape (fixed window, same eviction policy) at a cadence sized for
     /// chat-like content rather than the much rarer badge handshake.
     pub forum_federated_write: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Per-caller limiter for `GET /alliances/{id}/people` (60 requests/60 s).
+    /// Keyed by the asking member on the hub that proxies, and by the asking hub
+    /// on the hub that answers -- the same route, one key space.
+    pub alliance_people: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Slash-command cooldowns: (app pubkey, command, invoker) -> when the
+    /// invoker last ran it. Per user, so one person's use never blocks another.
+    pub app_cooldowns: Mutex<HashMap<(String, String, String), Instant>>,
+}
+
+impl RateLimiters {
+    /// Record an invocation of an app command, or say how many whole seconds
+    /// remain if the invoker is still inside the command's cooldown window.
+    /// `cooldown_seconds <= 0` never blocks.
+    pub fn check_app_cooldown(
+        &self,
+        app_pubkey: &str,
+        command: &str,
+        invoker: &str,
+        cooldown_seconds: i64,
+    ) -> Option<u64> {
+        if cooldown_seconds <= 0 {
+            return None;
+        }
+        let window = std::time::Duration::from_secs(cooldown_seconds as u64);
+        let now = Instant::now();
+        let mut map = self.app_cooldowns.lock().unwrap_or_else(|e| e.into_inner());
+        let key = (
+            app_pubkey.to_string(),
+            command.to_string(),
+            invoker.to_string(),
+        );
+        if let Some(last) = map.get(&key) {
+            let elapsed = now.duration_since(*last);
+            if elapsed < window {
+                return Some((window - elapsed).as_secs_f64().ceil() as u64);
+            }
+        }
+        // ponytail: past 10k entries drop anything older than a day (assumed
+        // ceiling on a sane cooldown); store the window per entry to be exact.
+        if map.len() > 10_000 {
+            map.retain(|_, t| now.duration_since(*t) < std::time::Duration::from_secs(86_400));
+        }
+        map.insert(key, now);
+        None
+    }
 }
 
 impl Default for RateLimiters {
@@ -220,6 +249,8 @@ impl Default for RateLimiters {
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
             forum_federated_write: Mutex::new(HashMap::new()),
+            alliance_people: Mutex::new(HashMap::new()),
+            app_cooldowns: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -246,13 +277,6 @@ pub struct AppState {
     pub hub_name: String,
     pub hub_identity: Identity,
     pub db: PgPool,
-    /// Read-replica pool, if configured. Route handlers that do only reads
-    /// may use this via `state.db_read.as_ref().unwrap_or(&state.db)`.
-    pub db_read: Option<PgPool>,
-    /// Abstracted store handle — use this for new code; existing handlers
-    /// may still use `state.db` directly while the per-handler migration
-    /// proceeds incrementally.
-    pub store: Arc<dyn store::HubStore>,
     /// Outstanding auth challenges, keyed by the challenge hex (NOT the
     /// pubkey) so concurrent auth flows for the same key don't stomp each
     /// other's challenge — e.g. two simultaneous federated DM deliveries to
@@ -461,12 +485,7 @@ pub struct AppState {
 
     /// In-memory link preview cache: url → (result, inserted_at).
     /// Entries expire after 30 minutes.
-    pub preview_cache: std::sync::Mutex<
-        std::collections::HashMap<
-            String,
-            (crate::routes::preview::LinkPreview, std::time::Instant),
-        >,
-    >,
+    pub preview_cache: crate::routes::preview::PreviewCache,
 
     /// Full-text search backend. Either TantivySearch or NullSearch.
     pub search: Arc<dyn crate::search::MessageSearch>,
@@ -479,7 +498,7 @@ pub struct AppState {
     /// The operator-configured owner public key, if any (`WAVVON_OWNER_PUBKEY`).
     ///
     /// When set, startup seeding already inserted a `builtin-owner` row before
-    /// the server accepted connections.  `assign_initial_roles` checks this to
+    /// the server accepted connections.  `auth::handlers::verify` checks this to
     /// decide whether the first-registrant auto-grant should run: if it is
     /// `Some`, the auto-grant is skipped entirely.
     pub owner_pubkey: Option<String>,
@@ -488,6 +507,9 @@ pub struct AppState {
     /// When true, a mini-app that declares `requires_camera` receives camera
     /// access in the client webview/iframe sandbox.
     pub apps_allow_camera: bool,
+
+    /// Mirror of `Settings::allow_private_webhooks`; see `webhook_url`.
+    pub allow_private_webhooks: bool,
 
     /// Mirror of `Settings::http_video_stream_budget`. Max concurrent video
     /// streams started over `POST /screenshare/start` across the whole hub;
@@ -531,6 +553,17 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Close every WebSocket a pubkey has open, voice included.
+    ///
+    /// A socket is authenticated once, at the handshake, so deleting the
+    /// `sessions` rows logs nobody out of a tab that is already connected:
+    /// a banned member kept receiving every channel they could read and
+    /// stayed in voice. Dropping a pubkey's key senders ends each of its
+    /// connection loops, whose disconnect cleanup leaves voice as usual.
+    pub async fn close_sessions_of(&self, pubkey: &str) {
+        self.ws_key_senders.write().await.remove(pubkey);
+    }
+
     /// Deliver a targeted WS message to **every** session a pubkey has open,
     /// and report how many took it.
     ///

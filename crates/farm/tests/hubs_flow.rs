@@ -72,7 +72,6 @@ async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>, com
         keypair,
         farm_url.to_string(),
         hub_manager,
-        "/tmp/hubs-test".to_string(),
     ));
     let app = server::create_router(state.clone());
     (TestServer::new(app), state, guard)
@@ -122,14 +121,13 @@ async fn insert_hub(
         .unwrap()
         .as_secs() as i64;
     sqlx::query(
-        "INSERT INTO hubs (id, owner_pubkey, name, visibility, db_path, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at)
+         VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(hub_id)
     .bind(owner_pubkey)
     .bind(name)
     .bind(visibility)
-    .bind(format!("/tmp/{hub_id}.db"))
     .bind(now)
     .execute(&state.db)
     .await
@@ -843,8 +841,8 @@ async fn an_advertised_hub_url_uses_the_serial_the_proxy_resolves() {
 
     let hub_pubkey = "a".repeat(64);
     sqlx::query(
-        "INSERT INTO hubs (id, name, visibility, created_at, owner_pubkey, db_path, hub_pubkey)
-         VALUES ('routable', 'Routable Hub', 'public', 1, 'owner', 'unused', $1)",
+        "INSERT INTO hubs (id, name, visibility, created_at, owner_pubkey, hub_pubkey)
+         VALUES ('routable', 'Routable Hub', 'public', 1, 'owner', $1)",
     )
     .bind(&hub_pubkey)
     .execute(&state.db)
@@ -861,4 +859,18 @@ async fn an_advertised_hub_url_uses_the_serial_the_proxy_resolves() {
         url.ends_with(&format!("/hub/{hub_pubkey}")),
         "the advertised address must be the pubkey serial the proxy resolves, got {url}"
     );
+}
+
+#[tokio::test]
+async fn farm_info_reports_directory_public() {
+    let (server, state, _guard) = setup().await;
+    let body: Value = server.get("/farm/info").await.json();
+    assert_eq!(body["directory_public"], false);
+
+    sqlx::query("UPDATE farms SET directory_public = TRUE WHERE id = 1")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let body: Value = server.get("/farm/info").await.json();
+    assert_eq!(body["directory_public"], true);
 }

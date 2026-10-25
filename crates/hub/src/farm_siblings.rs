@@ -4,7 +4,9 @@
 //! each sibling it has not seen before:
 //!
 //! - subscribes to that sibling's ban list in **`soft-flag`** — history a
-//!   moderator can read, never an admission block;
+//!   moderator can read, never an admission block. Entries arrive only once
+//!   the sibling's owner turns `publish_banlist` on: publishing stays opt-in
+//!   on every hub, farm or not;
 //! - adds that sibling to `cert_trusted_issuers`, so a member vouched for on
 //!   one hub of a farm is not a stranger on the next.
 //!
@@ -91,10 +93,8 @@ pub async fn reconcile(db: &PgPool, siblings: &[Sibling]) {
     let mut wired = Vec::new();
 
     for sibling in &fresh {
-        let banlist_url = format!(
-            "{}/federation/banlist",
-            sibling.hub_url.trim_end_matches('/')
-        );
+        // A source is a hub's base URL; the worker appends the route.
+        let banlist_url = sibling.hub_url.trim_end_matches('/').to_string();
         let added = sqlx::query(
             "INSERT INTO federated_ban_sources (url, policy, added_at, issuer_pubkey)
              VALUES ($1, 'soft-flag', $2, $3)

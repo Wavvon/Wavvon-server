@@ -7,11 +7,21 @@ on:
     branches: [main, develop]
 
 jobs:
+  dependencies:
+    name: advisories + unused dependencies
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
+        with:
+          command: check advisories
+      - uses: bnjbvr/cargo-machete@ac30a525c0a8d163a92d727b3ff079ee3f6ecb08
+
   check:
     name: cargo check + test
     strategy:
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04]
         # Both ends of the supported range. 14 is the declared minimum
         # (hosting.md); testing only the newest would make "we support 14" a
         # claim nobody checks — which is how the PG floor went undeclared and
@@ -39,7 +49,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
 
       - name: Fetch API spec (Wavvon docs repo)
         if: github.event_name == 'pull_request' && github.base_ref == 'main'

@@ -6,7 +6,6 @@ use axum_test::TestServer;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
-use store::PostgresStore;
 use tokio::sync::{broadcast, RwLock};
 use url::Url;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
@@ -288,6 +287,16 @@ impl TestHarness {
     }
 }
 
+impl TestHarness {
+    /// Same state as `state()`, as the `Arc` that dispatch-level code takes.
+    #[allow(dead_code)]
+    pub fn state_arc(&self) -> Arc<AppState> {
+        self.state
+            .clone()
+            .expect("TestHarness::state_arc() requires a harness built via setup()")
+    }
+}
+
 impl Deref for TestHarness {
     type Target = TestServer;
 
@@ -324,16 +333,26 @@ async fn build_harness_with_web_client(
     guard: TestDbGuard,
     web_client: Option<Arc<wavvon_hub::web_client::WebClientConfig>>,
 ) -> TestHarness {
-    let store: Arc<dyn store::HubStore> = Arc::new(PostgresStore::new(db.clone()));
+    let state = Arc::new(base_state(db));
+    let app = server::create_router_full(state.clone(), "*", false, web_client);
+    TestHarness {
+        server: TestServer::new(app),
+        _guard: guard,
+        state: Some(state),
+    }
+}
+
+/// The canonical test `AppState`. Tests that vary a field use struct-update:
+/// `AppState { cors_origins: x, ..common::base_state(db) }`.
+#[allow(dead_code)]
+pub fn base_state(db: PgPool) -> AppState {
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 
-    let state = Arc::new(AppState {
+    AppState {
         hub_name: "test-hub".to_string(),
         hub_identity: Identity::generate(),
         db,
-        db_read: None,
-        store,
         pending_challenges: RwLock::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
@@ -375,6 +394,7 @@ async fn build_harness_with_web_client(
         reindex_running: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         owner_pubkey: None,
         apps_allow_camera: false,
+        allow_private_webhooks: false,
         http_video_stream_budget: 2,
         webauthn: make_test_webauthn(),
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
@@ -386,12 +406,6 @@ async fn build_harness_with_web_client(
         lan_mode: false,
         lan_tls_mode: None,
         lan_fingerprint: None,
-    });
-    let app = server::create_router_full(state.clone(), "*", false, web_client);
-    TestHarness {
-        server: TestServer::new(app),
-        _guard: guard,
-        state: Some(state),
     }
 }
 
@@ -402,6 +416,23 @@ async fn build_harness_with_web_client(
 pub async fn setup() -> TestHarness {
     let (db, guard) = create_test_db().await;
     build_harness(db, guard).await
+}
+
+/// Like [`setup`], with `WAVVON_ALLOW_PRIVATE_WEBHOOKS` on, for tests whose
+/// webhook receiver is a local http listener.
+#[allow(dead_code)]
+pub async fn setup_allowing_private_webhooks() -> TestHarness {
+    let (db, guard) = create_test_db().await;
+    let state = Arc::new(AppState {
+        allow_private_webhooks: true,
+        ..base_state(db)
+    });
+    let app = server::create_router_full(state.clone(), "*", false, None);
+    TestHarness {
+        server: TestServer::new(app),
+        _guard: guard,
+        state: Some(state),
+    }
 }
 
 /// Like [`setup`], but re-enables `invite_only` so the hub is in the same
