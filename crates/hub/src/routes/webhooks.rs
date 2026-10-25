@@ -391,6 +391,7 @@ pub async fn post_webhook_message(
         // untouched here; a real fix needs a decision on schema and format.
         embeds: None,
         game: None,
+        components: None,
     };
 
     {

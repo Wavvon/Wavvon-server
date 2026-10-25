@@ -699,3 +699,113 @@ async fn the_private_webhooks_opt_in_allows_a_local_app_webhook() {
         .await
         .assert_status_success();
 }
+
+/// A reply keeps everything `AppReply` accepts: its buttons are served with
+/// the message, it threads under its parent, and the response's reactions land
+/// (Wavvon-server#171). A component update with no rows takes the buttons away.
+#[tokio::test]
+async fn a_slash_reply_keeps_its_components_thread_and_reactions() {
+    let server = common::setup_allowing_private_webhooks().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    grant_apps_register(&server).await;
+
+    let channel: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "general" }))
+        .await
+        .json();
+    let channel_id = channel["id"].as_str().unwrap().to_string();
+    let parent: serde_json::Value = server
+        .post(&format!("/channels/{channel_id}/messages"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "content": "who wants to play?" }))
+        .await
+        .json();
+    let parent_id = parent["id"].as_str().unwrap().to_string();
+
+    let row = json!([{ "type": "row", "components": [
+        { "type": "button", "custom_id": "join", "label": "Join" }
+    ]}]);
+    let (reply_parent, reply_row) = (parent_id.clone(), row.clone());
+    let receiver = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let (parent, row) = (reply_parent.clone(), reply_row.clone());
+            async move {
+                axum::Json(if body["type"] == "component_interaction" {
+                    json!({ "update": { "components": [] } })
+                } else {
+                    json!({
+                        "reply": { "body": "game on", "components": row, "reply_to": parent },
+                        "reactions": [
+                            { "message_id": parent, "emoji": "👍" },
+                            { "message_id": "not-a-message", "emoji": "👎" }
+                        ]
+                    })
+                })
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+
+    let app = Identity::generate();
+    let app_token = common::authenticate(&server, &app).await;
+    server
+        .put("/me/app/profile")
+        .authorization_bearer(&app_token)
+        .json(&json!({ "name": "Lobby", "webhook_url": hook_url }))
+        .await
+        .assert_status_success();
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&app_token)
+        .json(&json!({ "commands": [{ "name": "play", "description": "p" }] }))
+        .await
+        .assert_status_success();
+
+    let owner_pubkey = parent["sender"].as_str().unwrap().to_string();
+    let state = server.state_arc();
+    let err =
+        wavvon_hub::apps::dispatch::dispatch_slash(&state, &channel_id, &owner_pubkey, "/play")
+            .await;
+    assert_eq!(err, None, "the dispatch succeeds");
+
+    let url = format!("/channels/{channel_id}/messages");
+    let messages = || async {
+        let list: Vec<serde_json::Value> = server
+            .get(&url)
+            .authorization_bearer(&owner_token)
+            .await
+            .json();
+        list
+    };
+    let list = messages().await;
+    let reply = list
+        .iter()
+        .find(|m| m["sender"] == app.public_key_hex())
+        .expect("the reply is stored");
+    assert_eq!(reply["components"], row, "buttons are served");
+    assert_eq!(reply["reply_to"]["message_id"], parent_id, "threaded");
+    let parent = list.iter().find(|m| m["id"] == parent_id).unwrap();
+    assert_eq!(parent["reply_count"], 1);
+    assert_eq!(parent["reactions"][0]["emoji"], "👍");
+    assert_eq!(parent["reactions"][0]["count"], 1);
+    assert_eq!(
+        parent["reactions"].as_array().unwrap().len(),
+        1,
+        "only reactions on this channel's messages land"
+    );
+
+    let reply_id = reply["id"].as_str().unwrap().to_string();
+    wavvon_hub::apps::dispatch::dispatch_component(&state, &reply_id, "join", &[], &owner_pubkey)
+        .await;
+    let list = messages().await;
+    let reply = list.iter().find(|m| m["id"] == reply_id).unwrap();
+    assert!(
+        reply.get("components").is_none(),
+        "an empty update clears them"
+    );
+}

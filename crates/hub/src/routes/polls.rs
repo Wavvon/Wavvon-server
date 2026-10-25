@@ -154,6 +154,7 @@ async fn post_poll_card(
         reply_count: 0,
         embeds: None,
         game: None,
+        components: None,
     };
 
     let ws_msg = WsServerMessage::ChatMessage {
