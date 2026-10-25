@@ -1074,11 +1074,21 @@ async fn main() -> Result<()> {
     }
 
     if settings.owner_pubkey.is_none() {
-        tracing::warn!(
-            "No WAVVON_OWNER_PUBKEY configured. \
-             The hub has no owner; set WAVVON_OWNER_PUBKEY and restart, \
-             or assign the builtin-owner role manually via the API."
-        );
+        // An owner seated through the first-boot invite holds the role with no
+        // env var behind it, which is the default path, so ask the database.
+        let has_owner: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM user_roles WHERE role_id = 'builtin-owner')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(false);
+        if !has_owner {
+            tracing::warn!(
+                "No WAVVON_OWNER_PUBKEY configured and nobody holds the owner role. \
+                 Redeem the owner invite below, set WAVVON_OWNER_PUBKEY and restart, \
+                 or run `wavvon-hub admin users set-owner <pubkey>`."
+            );
+        }
 
         // Fresh hubs default to invite_only=true (task #31), which would
         // otherwise leave no invite-free path for anyone to become owner.
