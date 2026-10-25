@@ -302,10 +302,7 @@ pub fn create_router_full(
             put(routes::apps::put_my_app_subscriptions),
         )
         // ---- Event polling transport, for a client with no WebSocket ----
-        .route(
-            "/me/events",
-            get(routes::apps::poll_events).delete(routes::apps::ack_events),
-        )
+        .route("/me/events", get(routes::apps::poll_events))
         // ---- Voice and screenshare over HTTP, same reason ----
         .route("/voice/leave", delete(routes::apps::voice::voice_leave))
         .route(

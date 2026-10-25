@@ -935,20 +935,11 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Event queue behind the HTTP polling transport (`GET /me/events`), for
-    // a client that holds no persistent WebSocket.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS app_event_queue (
-            id         TEXT PRIMARY KEY,
-            app_pubkey TEXT NOT NULL REFERENCES users(public_key) ON DELETE CASCADE,
-            event_type TEXT NOT NULL,
-            payload    TEXT NOT NULL,
-            created_at BIGINT NOT NULL,
-            delivered  BOOLEAN NOT NULL DEFAULT FALSE
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // `GET /me/events` reads the audit log, as Resume does; this queue was
+    // only ever written by tests.
+    sqlx::query("DROP TABLE IF EXISTS app_event_queue")
+        .execute(pool)
+        .await?;
 
     // Admission challenges (anti-spam, `challenge_mode`). It was called
     // `bot_challenges` and never had anything to do with bots: it is the
