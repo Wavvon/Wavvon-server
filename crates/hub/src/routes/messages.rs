@@ -285,26 +285,17 @@ pub async fn send_message_with(
                 });
                 let payload_str = serde_json::to_string(&payload).unwrap_or_default();
 
-                // HMAC-SHA256 signature over the payload bytes.
-                use hmac::{Hmac, Mac};
-                use sha2::Sha256;
-                let sig = if !secret.is_empty() {
-                    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-                    mac.update(payload_str.as_bytes());
-                    hex::encode(mac.finalize().into_bytes())
-                } else {
-                    String::new()
-                };
+                let mut request = state
+                    .http_client
+                    .post(&webhook_url)
+                    .header("Content-Type", "application/json");
+                if !secret.is_empty() {
+                    request = moderation_webhook_signed(request, &state, &secret, &payload_str);
+                }
 
                 let result = tokio::time::timeout(
                     std::time::Duration::from_millis(500),
-                    state
-                        .http_client
-                        .post(&webhook_url)
-                        .header("X-Wavvon-Signature", &sig)
-                        .header("Content-Type", "application/json")
-                        .body(payload_str)
-                        .send(),
+                    request.body(payload_str).send(),
                 )
                 .await;
 
@@ -1061,6 +1052,42 @@ pub async fn add_reaction(
     broadcast_reactions(&state, &channel_id, &message_id).await?;
 
     Ok(StatusCode::CREATED)
+}
+
+/// Sign a moderation check the way an outgoing webhook is signed, so one
+/// verifier serves both: HMAC-SHA256 keyed by HKDF of the secret, body-only
+/// and timestamped (V1). The operator types this secret rather than being
+/// shown a generated one, so the raw secret is its UTF-8 bytes.
+fn moderation_webhook_signed(
+    request: reqwest::RequestBuilder,
+    state: &AppState,
+    secret: &str,
+    body: &str,
+) -> reqwest::RequestBuilder {
+    let key = wavvon_identity::outgoing_webhook_signing_key(secret.as_bytes());
+    let timestamp = crate::auth::handlers::unix_timestamp();
+    let sign = |message: &[u8]| {
+        wavvon_identity::webhook_hmac_sha256(&key, message)
+            .map(hex::encode)
+            .expect("a 32-byte HMAC key is always valid")
+    };
+    request
+        .header(
+            wavvon_identity::HEADER_HUB_PUBKEY,
+            state.hub_identity.public_key_hex(),
+        )
+        .header(
+            wavvon_identity::HEADER_SIGNATURE_LEGACY,
+            sign(body.as_bytes()),
+        )
+        .header(
+            wavvon_identity::HEADER_SIGNATURE_V1,
+            sign(&wavvon_identity::webhook_delivery_signing_bytes(
+                timestamp as u64,
+                body.as_bytes(),
+            )),
+        )
+        .header(wavvon_identity::HEADER_TIMESTAMP, timestamp.to_string())
 }
 
 /// Send a message's new reaction summary to everyone in its channel.
