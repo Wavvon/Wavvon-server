@@ -216,7 +216,9 @@ One live caveat: **bundled mode does not work on musl** (the archive's `initdb`
 wants `libicuuc.so.74`, which no current Alpine ships, and its `libpq.so.5` also
 wants krb5) even though the release still publishes musl targets advertising a
 no-prerequisites path; a musl build refuses bundled mode up front. The glibc
-archive is not dependency-free either — its `postgres` links `libxml2.so.2` —
+archive is not dependency-free either — its `postgres` links `libxml2.so.2`,
+and since the upstream rebuild of 2026-10-18 it needs **glibc 2.36** (Debian 12,
+Ubuntu 24.04; not Ubuntu 22.04, which is why CI tests on 24.04) —
 and `initdb` refuses to run as root, which is why the Docker image installs
 `libxml2` and runs as the unprivileged `wavvon` user (uid 10001). Every
 documented Docker path uses an external database, so nothing exercised the

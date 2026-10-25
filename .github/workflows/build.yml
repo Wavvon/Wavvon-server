@@ -21,7 +21,7 @@ jobs:
     name: cargo check + test
     strategy:
       matrix:
-        os: [ubuntu-22.04]
+        os: [ubuntu-24.04]
         # Both ends of the supported range. 14 is the declared minimum
         # (hosting.md); testing only the newest would make "we support 14" a
         # claim nobody checks — which is how the PG floor went undeclared and
