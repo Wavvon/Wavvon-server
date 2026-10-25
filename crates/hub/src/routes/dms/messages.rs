@@ -474,7 +474,7 @@ pub async fn list_dm_messages(
         ));
     }
 
-    // Same `before` + `limit` keyset the channel message list uses. Both
+    // Same `cursor` + `limit` keyset the channel message list uses. Both
     // clients have been sending these two params all along; until 2026-08-08
     // this handler took no query params at all and returned the entire
     // conversation history on every open.
@@ -502,7 +502,7 @@ pub async fn list_dm_messages(
          LIMIT $3",
     )
     .bind(&conversation_id)
-    .bind(params.before.as_deref())
+    .bind(params.cursor.as_deref())
     .bind(limit)
     .fetch_all(&state.db)
     .await

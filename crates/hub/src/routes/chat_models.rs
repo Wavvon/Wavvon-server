@@ -407,10 +407,14 @@ impl ChatEvent {
 
 #[derive(Deserialize)]
 pub struct PaginationParams {
-    pub before: Option<String>,
+    /// The hub's list dialect: the id of the last message of the previous
+    /// page. Older clients send it as `before`, and a client talks to hubs
+    /// of every age, so that spelling stays accepted.
+    #[serde(alias = "before")]
+    pub cursor: Option<String>,
     pub limit: Option<i64>,
-    /// Optional search query: if present, filter messages by content LIKE
-    /// %q% (case-insensitive on SQLite). Pagination via before still works.
+    /// Optional full-text search within the channel; returns one page of
+    /// hits and ignores `cursor`.
     pub q: Option<String>,
     /// Optional thread root message id. When present, return only replies
     /// (messages where reply_to = thread_root) ordered by created_at ASC.

@@ -699,23 +699,27 @@ pub async fn get_messages(
         .filter(|s| !s.is_empty());
 
     let rows = if let Some(ref root_id) = params.thread_root {
-        // Thread mode: return all replies to this root, oldest first.
+        // Thread mode: replies to this root, oldest first, so the cursor
+        // pages forward.
         sqlx::query_as::<_, MessageRow>(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
-             ORDER BY m.created_at ASC, m.id ASC LIMIT $3",
+               AND ($3::text IS NULL OR (m.created_at, m.id) >
+                    ((SELECT created_at FROM messages WHERE id = $3), $3))
+             ORDER BY m.created_at ASC, m.id ASC LIMIT $4",
         )
         .bind(&channel_id)
         .bind(root_id)
+        .bind(params.cursor.as_deref())
         .bind(limit)
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     } else {
-        match (search, &params.before) {
+        match search {
             // Search mode: uses Tantivy for full-text, scoped to the single channel.
-            (Some(q), _) => {
+            Some(q) => {
                 let search_params = crate::search::SearchParams {
                     q: q.to_string(),
                     channel_ids: vec![channel_id.clone()],
@@ -752,30 +756,17 @@ pub async fn get_messages(
                 }
                 q_builder.fetch_all(&state.db).await
             }
-            (None, Some(before_id)) => {
+            None => {
                 sqlx::query_as::<_, MessageRow>(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
-                       AND (m.created_at, m.id) < (
-                         (SELECT created_at FROM messages WHERE id = $2), $2
-                       )
+                       AND ($2::text IS NULL OR (m.created_at, m.id) <
+                            ((SELECT created_at FROM messages WHERE id = $2), $2))
                      ORDER BY m.created_at DESC, m.id DESC LIMIT $3",
                 )
                 .bind(&channel_id)
-                .bind(before_id)
-                .bind(limit)
-                .fetch_all(&state.db)
-                .await
-            }
-            (None, None) => {
-                sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
-                     FROM messages m LEFT JOIN users u ON m.sender = u.public_key
-                     WHERE m.channel_id = $1
-                     ORDER BY m.created_at DESC, m.id DESC LIMIT $2",
-                )
-                .bind(&channel_id)
+                .bind(params.cursor.as_deref())
                 .bind(limit)
                 .fetch_all(&state.db)
                 .await
