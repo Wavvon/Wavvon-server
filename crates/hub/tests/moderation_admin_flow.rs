@@ -858,3 +858,73 @@ async fn reading_a_members_history_needs_ban_permission() {
 
     assert_eq!(res.status(), 403);
 }
+
+/// The moderation check is signed like every other Wavvon webhook: an
+/// HKDF-derived HMAC key, the body-only signature and the timestamped V1, so
+/// one verifier serves both and a replay can be refused (Wavvon-server#169).
+#[tokio::test]
+async fn the_moderation_check_is_signed_like_an_outgoing_webhook() {
+    use std::sync::Mutex;
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    type Seen = Arc<Mutex<Option<(axum::http::HeaderMap, Vec<u8>)>>>;
+    let seen: Seen = Arc::default();
+    let sink = seen.clone();
+    let receiver = axum::Router::new().route(
+        "/check",
+        axum::routing::post(
+            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let sink = sink.clone();
+                async move {
+                    *sink.lock().unwrap() = Some((headers, body.to_vec()));
+                    axum::Json(json!({ "action": "allow" }))
+                }
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/check", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+
+    server
+        .patch("/admin/settings/moderation")
+        .authorization_bearer(&token)
+        .json(&json!({ "webhook_url": url, "webhook_secret": "s3cr3t" }))
+        .await
+        .assert_status_ok();
+    let channel: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "general" }))
+        .await
+        .json();
+    server
+        .post(&format!(
+            "/channels/{}/messages",
+            channel["id"].as_str().unwrap()
+        ))
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "hello" }))
+        .await
+        .assert_status_success();
+
+    let (headers, body) = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the moderation webhook was never called");
+    let header = |name: &str| headers[name].to_str().unwrap().to_string();
+    let key = wavvon_identity::outgoing_webhook_signing_key(b"s3cr3t");
+    let ts: u64 = header("X-Wavvon-Timestamp").parse().unwrap();
+    let v1 = wavvon_identity::webhook_hmac_sha256(
+        &key,
+        &wavvon_identity::webhook_delivery_signing_bytes(ts, &body),
+    )
+    .unwrap();
+    assert_eq!(header("X-Wavvon-Signature-V1"), hex::encode(v1));
+    let legacy = wavvon_identity::webhook_hmac_sha256(&key, &body).unwrap();
+    assert_eq!(header("X-Wavvon-Signature"), hex::encode(legacy));
+    assert!(headers.contains_key("X-Wavvon-Hub-Pubkey"));
+}
