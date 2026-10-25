@@ -936,6 +936,9 @@ pub async fn get_alliance_channel_messages(
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .and_then(|s| serde_json::from_str(s).ok()),
+                // Like reply context: shown on the owning hub, where a click
+                // has an app to reach.
+                components: None,
             });
         }
         return Ok(Json(out));

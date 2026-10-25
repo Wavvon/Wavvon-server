@@ -215,6 +215,10 @@ pub struct MessageResponse {
     /// had one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub game: Option<crate::routes::app_models::GameLaunchCard>,
+    /// App-authored buttons and selects (apps.md), persisted on
+    /// `messages.components`; a click comes back as `component_interaction`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<Vec<crate::routes::app_models::ComponentRow>>,
 }
 
 #[derive(Deserialize)]

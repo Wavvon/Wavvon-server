@@ -302,20 +302,14 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // Interactive UI components attached to a message.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS message_components (
-            id            TEXT PRIMARY KEY,
-            message_id    TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-            row_idx       BIGINT NOT NULL,
-            component_idx BIGINT NOT NULL,
-            type          TEXT NOT NULL,
-            config_json   TEXT NOT NULL,
-            expires_at    BIGINT
-        )",
-    )
-    .execute(pool)
-    .await?;
+    // App components live on messages.components, next to embeds and game;
+    // this table was written by component updates and read by nothing.
+    sqlx::query("DROP TABLE IF EXISTS message_components")
+        .execute(pool)
+        .await?;
+    sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS components TEXT")
+        .execute(pool)
+        .await?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS channel_pins (

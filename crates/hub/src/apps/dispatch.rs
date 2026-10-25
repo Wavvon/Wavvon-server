@@ -4,7 +4,7 @@ use axum::http::StatusCode;
 use uuid::Uuid;
 
 use crate::routes::app_models::{
-    AppResponse, AuthorInfo, ComponentInteraction, ComponentResponse, ComponentUpdate,
+    AppReaction, AppResponse, AuthorInfo, ComponentInteraction, ComponentResponse, ComponentUpdate,
     EphemeralReply, SlashInvocation,
 };
 use crate::routes::chat_models::{ChatEvent, MessageResponse, WsServerMessage};
@@ -228,10 +228,30 @@ pub async fn dispatch_slash(
             .game
             .as_ref()
             .and_then(|g| serde_json::to_string(g).ok());
+        let components_json = reply
+            .components
+            .as_ref()
+            .filter(|rows| !rows.is_empty())
+            .and_then(|rows| serde_json::to_string(rows).ok());
+
+        // A reply may thread under a message of this channel only; a parent
+        // id from elsewhere is dropped rather than linking across channels.
+        let reply_to = match &reply.reply_to {
+            Some(parent) => sqlx::query_scalar::<_, String>(
+                "SELECT id FROM messages WHERE id = $1 AND channel_id = $2",
+            )
+            .bind(parent)
+            .bind(channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten(),
+            None => None,
+        };
 
         sqlx::query(
-            "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey, embeds, game)
-             VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
+            "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey, embeds, game, components, reply_to)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
         )
         .bind(&msg_id)
         .bind(channel_id)
@@ -241,9 +261,27 @@ pub async fn dispatch_slash(
         .bind(visible_to)
         .bind(&embeds_json)
         .bind(&game_json)
+        .bind(&components_json)
+        .bind(&reply_to)
         .execute(&state.db)
         .await
         .ok();
+
+        let reply_ctx = match &reply_to {
+            Some(parent) => {
+                let _ = sqlx::query(
+                    "UPDATE messages SET reply_count = COALESCE(reply_count, 0) + 1 WHERE id = $1",
+                )
+                .bind(parent)
+                .execute(&state.db)
+                .await;
+                crate::routes::messages::load_reply_context(&state.db, parent)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
+        };
 
         // Look up the display name.
         let app_name: Option<String> =
@@ -257,18 +295,19 @@ pub async fn dispatch_slash(
         let message = MessageResponse {
             id: msg_id,
             channel_id: channel_id.to_string(),
-            sender: matched.app_pubkey,
+            sender: matched.app_pubkey.clone(),
             sender_name: app_name.or(Some(matched.app_name)),
             content: reply.body,
             created_at: now,
             edited_at: None,
             attachments: Vec::new(),
             reactions: Vec::new(),
-            reply_to: None,
+            reply_to: reply_ctx,
             visible_to_pubkey: visible_to.map(|s| s.to_string()),
             reply_count: 0,
             embeds: reply.embeds,
             game: app_response.game,
+            components: reply.components.filter(|rows| !rows.is_empty()),
         };
 
         {
@@ -285,6 +324,10 @@ pub async fn dispatch_slash(
                 json,
             ));
         }
+    }
+
+    for reaction in app_response.reactions.unwrap_or_default() {
+        add_app_reaction(state, channel_id, &matched.app_pubkey, &reaction).await;
     }
 
     // Slash command was handled (or deferred) — signal to caller not to store.
@@ -333,6 +376,7 @@ pub async fn insert_ephemeral_error(
         reply_count: 0,
         embeds: None,
         game: None,
+        components: None,
     };
 
     {
@@ -547,24 +591,15 @@ async fn apply_component_response(
         }
 
         if let Some(rows) = &components {
-            // Replace all components for this message.
-            let _ = sqlx::query("DELETE FROM message_components WHERE message_id = $1")
+            // An empty list removes the buttons.
+            let components_json = Some(rows)
+                .filter(|rows| !rows.is_empty())
+                .and_then(|rows| serde_json::to_string(rows).ok());
+            let _ = sqlx::query("UPDATE messages SET components = $1 WHERE id = $2")
+                .bind(&components_json)
                 .bind(message_id)
                 .execute(&state.db)
                 .await;
-
-            let components_json = serde_json::to_string(rows).unwrap_or_default();
-            // Store as a single config_json blob in row 0.
-            let comp_id = Uuid::new_v4().to_string();
-            let _ = sqlx::query(
-                "INSERT INTO message_components(id, message_id, row_idx, component_idx, type, config_json)
-                 VALUES($1,$2,0,0,'rows',$3)",
-            )
-            .bind(&comp_id)
-            .bind(message_id)
-            .bind(&components_json)
-            .execute(&state.db)
-            .await;
         }
 
         // Reload and broadcast the updated message.
@@ -627,6 +662,7 @@ async fn apply_component_response(
             // on that type to read from.
             embeds: None,
             game: None,
+            components: None,
         };
 
         {
@@ -660,8 +696,9 @@ async fn load_updated_message(
         Option<i64>,
         Option<String>,
         Option<String>,
+        Option<String>,
     ) = sqlx::query_as(
-        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at, m.embeds, m.game
+        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at, m.embeds, m.game, m.components
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -682,15 +719,59 @@ async fn load_updated_message(
         reply_to: None,
         visible_to_pubkey: None,
         reply_count: 0,
-        embeds: row
-            .6
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|s| serde_json::from_str(s).ok()),
-        game: row
-            .7
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .and_then(|s| serde_json::from_str(s).ok()),
+        embeds: crate::routes::messages::parse_json(row.6),
+        game: crate::routes::messages::parse_json(row.7),
+        components: crate::routes::messages::parse_json(row.8),
     })
+}
+
+/// An app's reply may react to messages of the channel it was invoked in,
+/// as the app; anything else in the list is skipped with a warning, since
+/// the reply itself has already gone out.
+async fn add_app_reaction(
+    state: &Arc<AppState>,
+    channel_id: &str,
+    app_pubkey: &str,
+    reaction: &AppReaction,
+) {
+    let emoji = reaction.emoji.trim();
+    if emoji.is_empty() || emoji.chars().count() > 16 {
+        tracing::warn!("app {app_pubkey}: reaction emoji must be 1..16 chars");
+        return;
+    }
+    let in_channel: Option<String> =
+        sqlx::query_scalar("SELECT id FROM messages WHERE id = $1 AND channel_id = $2")
+            .bind(&reaction.message_id)
+            .bind(channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    if in_channel.is_none() {
+        tracing::warn!(
+            "app {app_pubkey}: reaction on {} skipped, not a message of this channel",
+            reaction.message_id
+        );
+        return;
+    }
+    let now = crate::auth::handlers::unix_timestamp();
+    let inserted = sqlx::query(
+        "INSERT INTO message_reactions (message_id, emoji, user_key, created_at)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (message_id, emoji, user_key) DO NOTHING",
+    )
+    .bind(&reaction.message_id)
+    .bind(emoji)
+    .bind(app_pubkey)
+    .bind(now)
+    .execute(&state.db)
+    .await;
+    if let Err(e) = inserted {
+        tracing::warn!("app {app_pubkey}: reaction insert failed: {e}");
+        return;
+    }
+    if let Err((_, e)) =
+        crate::routes::messages::broadcast_reactions(state, channel_id, &reaction.message_id).await
+    {
+        tracing::warn!("app {app_pubkey}: reaction broadcast failed: {e}");
+    }
 }
