@@ -213,69 +213,109 @@ async fn hub_scoped_subscriptions_are_replaced_atomically() {
     assert_eq!(rows, 1, "the replace must not leave the old rows behind");
 }
 
+/// `GET /me/events` reads the audit log the socket replays, so a poll
+/// returns the same `hub_event` envelope with its `seq`, and `cursor`
+/// picks up after the last one seen (Wavvon-server#170).
 #[tokio::test]
-async fn queued_events_are_polled_then_acknowledged() {
+async fn polling_returns_hub_event_envelopes_after_the_cursor() {
     let server = common::setup().await;
     grant_apps_register(&server).await;
-    let (app, token) = register_app(&server, "Poller").await;
-
-    let now = wavvon_hub::auth::handlers::unix_timestamp();
-    sqlx::query(
-        "INSERT INTO app_event_queue (id, app_pubkey, event_type, payload, created_at)
-         VALUES ('evt-1', $1, 'member.joined', '{}', $2)",
-    )
-    .bind(app.public_key_hex())
-    .bind(now)
-    .execute(&server.state().db)
-    .await
-    .unwrap();
-
-    let polled: serde_json::Value = server
-        .get("/me/events")
-        .authorization_bearer(&token)
-        .await
-        .json();
-    assert_eq!(polled["events"].as_array().unwrap().len(), 1);
-
+    let (_app, token) = register_app(&server, "Poller").await;
     server
-        .delete("/me/events")
+        .put("/me/app/subscriptions")
         .authorization_bearer(&token)
-        .json(&json!({ "ids": ["evt-1"] }))
+        .json(&json!({ "subscriptions": [{ "event": "member.joined" }] }))
         .await
         .assert_status_success();
 
-    let after: serde_json::Value = server
-        .get("/me/events")
-        .authorization_bearer(&token)
-        .await
-        .json();
-    assert!(after["events"].as_array().unwrap().is_empty());
-}
+    let state = server.state_arc();
+    for (event, who) in [
+        ("member.joined", "a"),
+        ("member.left", "a"),
+        ("member.joined", "b"),
+    ] {
+        wavvon_hub::apps::events::publish_hub_event(
+            &state,
+            event,
+            None,
+            Some(who),
+            None,
+            json!({ "pubkey": who }),
+        )
+        .await;
+    }
 
-#[tokio::test]
-async fn one_identity_never_reads_another_ones_queue() {
-    let server = common::setup().await;
-    grant_apps_register(&server).await;
-    let (app, _app_token) = register_app(&server, "Poller").await;
+    let poll = |query: String| {
+        let token = token.clone();
+        let server = &server;
+        async move {
+            server
+                .get(&format!("/me/events{query}"))
+                .authorization_bearer(&token)
+                .await
+        }
+    };
+    let all: Vec<serde_json::Value> = poll(String::new()).await.json();
+    assert_eq!(all.len(), 2, "only the subscribed event type: {all:?}");
+    assert_eq!(all[0]["type"], "hub_event");
+    assert_eq!(all[0]["event"], "member.joined");
+    assert_eq!(all[0]["payload"]["pubkey"], "a");
+    assert!(all[0]["seq"].as_i64().unwrap() < all[1]["seq"].as_i64().unwrap());
+
+    let first: Vec<serde_json::Value> = poll("?limit=1".into()).await.json();
+    assert_eq!(first, all[..1]);
+    let rest: Vec<serde_json::Value> = poll(format!("?cursor={}", first[0]["seq"])).await.json();
+    assert_eq!(rest, all[1..]);
+    let none: Vec<serde_json::Value> = poll(format!("?cursor={}", all[1]["seq"])).await.json();
+    assert!(none.is_empty());
+
+    // An identity with no subscriptions of its own sees none of it.
     let (_other, other_token) = register_app(&server, "Nosy").await;
-
-    let now = wavvon_hub::auth::handlers::unix_timestamp();
-    sqlx::query(
-        "INSERT INTO app_event_queue (id, app_pubkey, event_type, payload, created_at)
-         VALUES ('evt-1', $1, 'member.joined', '{}', $2)",
-    )
-    .bind(app.public_key_hex())
-    .bind(now)
-    .execute(&server.state().db)
-    .await
-    .unwrap();
-
-    let polled: serde_json::Value = server
+    let theirs: Vec<serde_json::Value> = server
         .get("/me/events")
         .authorization_bearer(&other_token)
         .await
         .json();
-    assert!(polled["events"].as_array().unwrap().is_empty());
+    assert!(theirs.is_empty());
+}
+
+/// A cursor older than the replay window is answered the way the socket
+/// answers it, so the program knows it missed events rather than seeing none.
+#[tokio::test]
+async fn a_cursor_outside_the_window_is_gone() {
+    let server = common::setup().await;
+    grant_apps_register(&server).await;
+    let (_app, token) = register_app(&server, "Late").await;
+    let state = server.state_arc();
+    for _ in 0..3 {
+        wavvon_hub::apps::events::publish_hub_event(
+            &state,
+            "member.joined",
+            None,
+            None,
+            None,
+            json!({}),
+        )
+        .await;
+    }
+    let max_seq: i64 = sqlx::query_scalar("SELECT MAX(seq) FROM hub_audit_log")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE hub_audit_log SET at = 0 WHERE seq < $1")
+        .bind(max_seq)
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let resp = server
+        .get("/me/events?cursor=0")
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status(axum::http::StatusCode::GONE);
+    let body: serde_json::Value = resp.json();
+    assert_eq!(body["type"], "replay_unavailable");
+    assert_eq!(body["earliest_seq"], max_seq);
 }
 
 // ---------------------------------------------------------------------------

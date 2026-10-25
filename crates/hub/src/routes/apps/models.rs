@@ -37,14 +37,6 @@ pub struct AuditLogResponse {
 // ---------------------------------------------------------------------------
 
 #[derive(sqlx::FromRow)]
-pub struct EventRow {
-    pub id: String,
-    pub event_type: String,
-    pub payload: String,
-    pub created_at: i64,
-}
-
-#[derive(sqlx::FromRow)]
 pub struct AppProfileRow {
     pub pubkey: String,
     pub name: String,
@@ -99,28 +91,6 @@ pub struct AppCommandRow {
     pub scope: String,
     pub privileged: bool,
     pub cooldown_seconds: i64,
-}
-
-// ---------------------------------------------------------------------------
-// Event transport request / response types
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct PollQuery {
-    pub since: Option<i64>,
-}
-
-#[derive(Serialize)]
-pub struct EventInfo {
-    pub id: String,
-    pub event_type: String,
-    pub payload: String,
-    pub created_at: i64,
-}
-
-#[derive(Deserialize)]
-pub struct AckRequest {
-    pub ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
