@@ -226,6 +226,20 @@ fn pick_port() -> Result<u16> {
 /// ran. This turns that into a sentence and a way out.
 fn explain_dynamic_link_failure(e: impl std::fmt::Display) -> anyhow::Error {
     let message = e.to_string();
+    // The archives are built against a glibc floor (2.36 since October 2026),
+    // so an older system finds every library and still cannot load them.
+    if let Some(at) = message.find("version `GLIBC_") {
+        let wanted = message[at + "version `".len()..]
+            .split('\'')
+            .next()
+            .unwrap_or("GLIBC");
+        return anyhow::anyhow!(
+            "{message}\n\nThe bundled PostgreSQL binaries need {wanted} or newer, which this \
+             system does not have (Debian 12 and Ubuntu 24.04 do). Upgrade the system, or point \
+             WAVVON_DATABASE_URL at a PostgreSQL you provide — a database you built is never \
+             touched by the bundled mode."
+        );
+    }
     let looks_dynamic = message.contains("Error loading shared library")
         || message.contains("Error relocating")
         || message.contains("cannot open shared object file");
@@ -517,6 +531,20 @@ mod tests {
         assert!(
             glibc.contains("WAVVON_DATABASE_URL"),
             "names the way out: {glibc}"
+        );
+
+        // The real thing, from Ubuntu 22.04 against the 2026-10-18 archives.
+        let old = explain_dynamic_link_failure(
+            "stderr=/tmp/pg/18.6.1/bin/initdb: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.36' not found (required by /tmp/pg/18.6.1/bin/../lib/libstdc++.so.6)",
+        )
+        .to_string();
+        assert!(
+            old.contains("need GLIBC_2.36 or newer"),
+            "names the floor: {old}"
+        );
+        assert!(
+            old.contains("WAVVON_DATABASE_URL"),
+            "names the way out: {old}"
         );
 
         // Everything else must pass through: a port clash or a corrupt data
