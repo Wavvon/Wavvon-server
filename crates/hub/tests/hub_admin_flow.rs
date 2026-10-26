@@ -418,3 +418,75 @@ async fn farewell_label_is_length_capped() {
         .await
         .assert_status_bad_request();
 }
+
+/// The audit log reads newest first and pages backwards: a log viewer opens on
+/// what just happened, and "Load older" walks into the past
+/// (Wavvon-server#189). It used to page forwards from seq 0, so a hub with any
+/// history opened on its very first actions.
+#[tokio::test]
+async fn audit_log_reads_newest_first_and_pages_backwards() {
+    let (server, token) = common::setup_with_owner().await;
+
+    let page = |cursor: Option<i64>, actor: Option<String>, limit: i64| {
+        let server = &server;
+        let token = token.clone();
+        async move {
+            let mut req = server
+                .get("/admin/audit-log")
+                .authorization_bearer(&token)
+                .add_query_param("event_type", "channel.created")
+                .add_query_param("limit", limit);
+            if let Some(c) = cursor {
+                req = req.add_query_param("cursor", c);
+            }
+            if let Some(a) = actor {
+                req = req.add_query_param("actor", a);
+            }
+            let resp = req.await;
+            resp.assert_status_ok();
+            resp.json::<Vec<serde_json::Value>>()
+        }
+    };
+
+    // Channel events are published from a spawned task, so each one is
+    // awaited before the next channel is made: otherwise their seqs could
+    // land in either order.
+    let mut ids = Vec::new();
+    for name in ["audit-a", "audit-b", "audit-c"] {
+        let resp = server
+            .post("/channels")
+            .authorization_bearer(&token)
+            .json(&json!({ "name": name }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+        ids.push(
+            resp.json::<serde_json::Value>()["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+        for _ in 0..50 {
+            if page(None, None, 200).await.len() == ids.len() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    let channel_of = |e: &serde_json::Value| e["channel_id"].as_str().unwrap().to_string();
+    let first = page(None, None, 2).await;
+    assert_eq!(
+        first.iter().map(channel_of).collect::<Vec<_>>(),
+        vec![ids[2].clone(), ids[1].clone()]
+    );
+
+    let older = page(first[1]["seq"].as_i64(), None, 2).await;
+    assert_eq!(
+        older.iter().map(channel_of).collect::<Vec<_>>(),
+        vec![ids[0].clone()]
+    );
+
+    let actor = first[0]["actor_pubkey"].as_str().unwrap().to_string();
+    assert_eq!(page(None, Some(actor), 200).await.len(), 3);
+    assert!(page(None, Some("0".repeat(64)), 200).await.is_empty());
+}
