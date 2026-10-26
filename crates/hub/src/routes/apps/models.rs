@@ -9,8 +9,10 @@ use crate::routes::app_models::{AppCommandDef, AppSubscription};
 #[derive(Deserialize)]
 pub struct AuditLogQuery {
     pub event_type: Option<String>,
+    pub actor: Option<String>,
     pub since: Option<i64>,
     pub until: Option<i64>,
+    /// The `seq` of the last entry already shown: the page holds older ones.
     pub cursor: Option<i64>,
     pub limit: Option<i64>,
 }
@@ -24,12 +26,6 @@ pub struct AuditLogEntry {
     pub target_pubkey: Option<String>,
     pub channel_id: Option<String>,
     pub payload: serde_json::Value,
-}
-
-#[derive(Serialize)]
-pub struct AuditLogResponse {
-    pub entries: Vec<AuditLogEntry>,
-    pub next_cursor: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------

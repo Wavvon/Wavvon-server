@@ -49,6 +49,11 @@ pub const CAPABILITIES: &[&str] = &[
     // here, in beta, because the alternative is an admin panel that looks
     // alive and cannot work.
     "apps.register",
+    // `GET /admin/audit-log` is a plain array, newest first, `cursor` meaning
+    // "older than this seq", and it filters by `actor`. A client that does
+    // not see this string is talking to a hub that answers `{entries,
+    // next_cursor}` oldest first, so it must read that shape instead.
+    "audit.newest",
     // Every channel in `GET /channels` carries `can_move_members`: the
     // caller's own `voice.move_members` there, resolved channel-scoped. A
     // client that does not see this string has no way to know which
