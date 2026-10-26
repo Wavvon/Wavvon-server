@@ -1042,6 +1042,11 @@ pub enum WsServerMessage {
     #[serde(rename = "hub_updated")]
     HubUpdated,
 
+    /// To a recovery contact: a rotation request naming them as a contact
+    /// just opened. Clients refetch `GET /recovery/requests/to-attest`.
+    #[serde(rename = "recovery_attestation_requested")]
+    RecoveryAttestationRequested { request_id: String },
+
     /// Soundboard clip-played attribution (soundboard.md §1). Purely
     /// informational -- the server does not verify the clip was actually
     /// mixed into the sender's stream; clients render a transient
