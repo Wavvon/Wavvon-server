@@ -1,48 +1,104 @@
-// Schema baseline reset 2026-08-20 (pre-1.0), following the same reset of
-// 2026-07-05.
+// Schema history: a baseline, then numbered steps.
 //
-// Every ALTER TABLE ... ADD COLUMN accumulated since the July baseline has
-// been folded into its owning CREATE TABLE, and the two forum-tag tables
-// have moved up into the forum section they belong to. Columns were
-// **appended in the order the ALTERs ran**, so the physical column order is
-// unchanged and the resulting schema is byte-identical to the pre-fold one —
-// verified by diffing `pg_dump --schema-only` before and after, not by
-// reading. No table, column, type, default or REFERENCES clause changed
+// `baseline` is the schema as of 2026-08-20 plus everything appended to it
+// until 2026-10-27, when the version marker landed. It is idempotent and runs
+// on every start, exactly as the whole file used to. **It is frozen**: a
+// schema or data change from now on is a new numbered step in `step`, never
+// an edit to the baseline, and `SCHEMA_VERSION` moves with it.
+//
+// Each step runs once, in its own transaction, and records the version it
+// reached. That is what a one-shot data migration needs: run on every boot,
+// the voice-channel conversion (step 1) turned a room an admin had switched
+// back to text into a voice room again at each restart. And a database newer
+// than the binary is refused before anything touches it, so an older hub
+// started on an upgraded database stops with a sentence instead of running
+// its own baseline, DROPs included, against a schema it does not know.
+//
+// **Until 1.0 a step may be destructive**: DROP, ALTER ... TYPE, renames.
+// **From 1.0.0 steps are additive only** (new tables, new nullable or
+// defaulted columns), and that rule is absolute: a hub in the field cannot be
+// asked to `DROP DATABASE`. Removals wait for a major.
+
 use crate::permissions::{
     ALL_PERMISSIONS, EVENTS_CREATE, FORUM_POSTS_CREATE, MESSAGES_READ, MESSAGES_SEND, VOICE_JOIN,
 };
-// meaning.
-//
-// Exactly one ALTER survives, and it has to: `invites.grant_role_id`
-// REFERENCES `roles`, which this file creates *after* `invites`.
-//
-// This is safe to do only because nothing in production runs this schema
-// yet. Folding an ADD COLUMN deletes the statement that would upgrade an
-// existing database, and `CREATE TABLE IF NOT EXISTS` then skips the table
-// silently — a database created before a folded column would simply lack it,
-// with no error until a query touches it. Once there are hub databases in
-// the field, a fold needs a schema-version marker and a refuse-to-start
-// check first (same shape as `db/version.rs`).
-//
-// Going forward from this baseline, and **for as long as this is beta**,
-// destructive changes are allowed: DROP, ALTER ... TYPE, renames, reshaping a
-// table. No database in the field has a promised upgrade path yet, so the
-// better schema wins over the additive one.
-//
-// **The additive-only rule starts at 1.0.0**, and from there it is absolute:
-// new columns via `ALTER TABLE ... ADD COLUMN` wrapped in `let _ = ...` so
-// "already exists" is ignored, new tables via `CREATE TABLE IF NOT EXISTS`,
-// and nothing destructive ever. The paragraph above is why: a fold deletes the
-// statement that would upgrade an existing database, and
-// `CREATE TABLE IF NOT EXISTS` then skips it silently, so a database created
-// before the fold simply lacks the column with no error until a query touches
-// it. Before 1.0 that costs a `DROP DATABASE`; after it, it costs somebody
-// their hub.
+use anyhow::{bail, Result};
+use sqlx::{PgConnection, PgPool};
 
-use anyhow::Result;
-use sqlx::PgPool;
+/// The schema version this binary migrates to: the number of the last step.
+pub const SCHEMA_VERSION: i32 = 1;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
+    // Single-row table; the CHECK keeps it that way.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            id      BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+            version INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    let found: i32 = sqlx::query_scalar("SELECT version FROM schema_version")
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(0);
+    check_not_newer(found)?;
+
+    baseline(pool).await?;
+
+    for version in found + 1..=SCHEMA_VERSION {
+        let mut tx = pool.begin().await?;
+        step(version, &mut tx).await?;
+        sqlx::query(
+            "INSERT INTO schema_version (id, version) VALUES (TRUE, $1)
+             ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version",
+        )
+        .bind(version)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        tracing::info!(version, "Applied schema step");
+    }
+
+    tracing::info!("Database migrations complete");
+    Ok(())
+}
+
+fn check_not_newer(found: i32) -> Result<()> {
+    if found > SCHEMA_VERSION {
+        bail!(
+            "this database is at schema version {found}, newer than the {SCHEMA_VERSION} \
+             wavvon-hub {} knows. It was upgraded by a newer hub; run that version, \
+             or restore a backup taken before the upgrade.",
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+    Ok(())
+}
+
+async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
+    match version {
+        // Voice lives in voice channels (decisions.md). The rooms that can only
+        // ever have been voice rooms convert themselves: temporary rooms
+        // (spawned and squad rooms) and the AFK channel. Every other channel
+        // stays text until an admin switches it, keeping its chat.
+        1 => {
+            sqlx::query(
+                "UPDATE channels SET channel_type = 'voice'
+                 WHERE channel_type = 'text' AND is_category = FALSE
+                   AND (is_temporary = TRUE
+                        OR id = (SELECT value FROM hub_settings WHERE key = 'afk_channel_id'))",
+            )
+            .execute(conn)
+            .await?;
+        }
+        _ => unreachable!("no schema step {version}"),
+    }
+    Ok(())
+}
+
+async fn baseline(pool: &PgPool) -> Result<()> {
     // =======================================================================
     // Identity & sessions
     // =======================================================================
@@ -2069,22 +2125,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-
-    // Voice lives in voice channels (decisions.md). The rooms that can only
-    // ever have been voice rooms convert themselves: temporary rooms (spawned
-    // and squad rooms) and the AFK channel. Every other channel stays text
-    // until an admin switches it, keeping its chat. Idempotent: new temp
-    // rooms are created as voice.
-    sqlx::query(
-        "UPDATE channels SET channel_type = 'voice'
-         WHERE channel_type = 'text' AND is_category = FALSE
-           AND (is_temporary = TRUE
-                OR id = (SELECT value FROM hub_settings WHERE key = 'afk_channel_id'))",
-    )
-    .execute(pool)
-    .await?;
-
-    tracing::info!("Database migrations complete");
 
     Ok(())
 }

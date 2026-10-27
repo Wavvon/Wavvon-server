@@ -242,3 +242,89 @@ async fn peers_admitted_as_members_are_demoted_once_and_people_are_spared() {
             .unwrap();
     assert!(again);
 }
+
+#[tokio::test]
+async fn schema_version_is_recorded() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    let version: i32 = sqlx::query_scalar("SELECT version FROM schema_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(version, db::migrations::SCHEMA_VERSION);
+}
+
+/// A step runs once. Run on every boot, the voice-channel conversion turned a
+/// room an admin had switched back to text into a voice room at each restart.
+#[tokio::test]
+async fn a_step_does_not_rerun_on_restart() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    for sql in [
+        "INSERT INTO users (public_key, first_seen_at) VALUES ('owner', 1)",
+        "INSERT INTO channels (id, name, created_by, created_at, is_temporary, channel_type) \
+         VALUES ('squad', 'Squad', 'owner', 1, TRUE, 'text')",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    let channel_type: String =
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = 'squad'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(channel_type, "text", "step 1 already ran at creation");
+}
+
+/// A database that predates the marker runs every step once.
+#[tokio::test]
+async fn a_database_without_the_marker_runs_every_step() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    for sql in [
+        "DROP TABLE schema_version",
+        "INSERT INTO users (public_key, first_seen_at) VALUES ('owner', 1)",
+        "INSERT INTO channels (id, name, created_by, created_at, is_temporary, channel_type) \
+         VALUES ('squad', 'Squad', 'owner', 1, TRUE, 'text')",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    let channel_type: String =
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = 'squad'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(channel_type, "voice");
+}
+
+/// An older binary must not run its baseline against a newer schema.
+#[tokio::test]
+async fn a_newer_database_is_refused_before_anything_runs() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    sqlx::query("UPDATE schema_version SET version = $1")
+        .bind(db::migrations::SCHEMA_VERSION + 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE friends")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = db::migrations::run(&pool).await.unwrap_err().to_string();
+    assert!(err.contains("newer"), "{err}");
+
+    let friends: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'friends'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(friends, 0, "the baseline must not have run");
+}
