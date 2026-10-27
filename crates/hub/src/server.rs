@@ -867,6 +867,10 @@ pub fn create_router_full(
         )
         .route("/recovery/requests", get(routes::recovery::get_my_requests))
         .route(
+            "/recovery/requests/to-attest",
+            get(routes::recovery::get_requests_to_attest),
+        )
+        .route(
             "/recovery/rotation-request/{id}",
             get(routes::recovery::get_rotation_request),
         )

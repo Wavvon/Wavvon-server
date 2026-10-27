@@ -311,6 +311,8 @@ pub async fn post_rotate_key(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    nudge_contacts(&state, &req.old_pubkey, &request_id).await;
+
     Ok((
         StatusCode::CREATED,
         Json(RotationRequestResponse {
@@ -520,6 +522,97 @@ pub async fn get_my_requests(
         .collect();
 
     Ok(Json(out))
+}
+
+/// Tell each connected recovery contact of `old_pubkey` that a request needs
+/// them. Contacts are designated by master key, so every device seated under
+/// that master hears it. Best effort: the to-attest list is the record.
+async fn nudge_contacts(state: &AppState, old_pubkey: &str, request_id: &str) {
+    let recipients: Vec<String> = sqlx::query_scalar(
+        "SELECT u.public_key FROM users u
+         JOIN recovery_contacts c ON c.owner_pubkey = $1
+           AND (c.contact_pubkey = u.public_key OR c.contact_pubkey = u.master_pubkey)",
+    )
+    .bind(old_pubkey)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    for pk in recipients {
+        state
+            .send_to_user(
+                &pk,
+                crate::routes::chat_models::WsServerMessage::RecoveryAttestationRequested {
+                    request_id: request_id.to_string(),
+                },
+            )
+            .await;
+    }
+}
+
+#[derive(Serialize)]
+pub struct RequestToAttest {
+    pub id: String,
+    pub old_pubkey: String,
+    pub new_pubkey: String,
+    pub reason: Option<String>,
+    pub created_at: i64,
+    pub attestation_count: i64,
+    pub threshold: i64,
+}
+
+/// GET /recovery/requests/to-attest — open requests whose old key named the
+/// caller (directly or by master key) as a recovery contact, and which the
+/// caller has not attested yet. Finding a request no longer needs its id sent
+/// out of band; judging whether it is really them still does.
+pub async fn get_requests_to_attest(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+) -> Result<Json<Vec<RequestToAttest>>, (StatusCode, String)> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: String,
+        old_pubkey: String,
+        new_pubkey: String,
+        reason: Option<String>,
+        created_at: i64,
+        attestation_count: i64,
+        threshold: Option<i64>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "WITH me AS (
+             SELECT $1::text AS pk
+             UNION SELECT master_pubkey FROM users WHERE public_key = $1 AND master_pubkey IS NOT NULL
+         )
+         SELECT r.id, r.old_pubkey, r.new_pubkey, r.reason, r.created_at,
+                (SELECT COUNT(*) FROM rotation_attestations a WHERE a.request_id = r.id) AS attestation_count,
+                s.threshold
+         FROM key_rotation_requests r
+         LEFT JOIN recovery_settings s ON s.owner_pubkey = r.old_pubkey
+         WHERE r.status = 'pending'
+           AND EXISTS (SELECT 1 FROM recovery_contacts c
+                       WHERE c.owner_pubkey = r.old_pubkey AND c.contact_pubkey IN (SELECT pk FROM me))
+           AND NOT EXISTS (SELECT 1 FROM rotation_attestations a
+                           WHERE a.request_id = r.id AND a.attester_pubkey IN (SELECT pk FROM me))
+         ORDER BY r.created_at DESC",
+    )
+    .bind(&user.public_key)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| RequestToAttest {
+                id: r.id,
+                old_pubkey: r.old_pubkey,
+                new_pubkey: r.new_pubkey,
+                reason: r.reason,
+                created_at: r.created_at,
+                attestation_count: r.attestation_count,
+                threshold: r.threshold.unwrap_or(0),
+            })
+            .collect(),
+    ))
 }
 
 // ---------------------------------------------------------------------------

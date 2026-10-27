@@ -118,6 +118,12 @@ pub const CAPABILITIES: &[&str] = &[
     // the two spellings share no ids, and there is no dual-reading period
     // (permissions.md §6).
     "permissions.catalogue",
+    // `GET /recovery/requests/to-attest` lists the open rotation requests
+    // that name the caller as a recovery contact, and a
+    // `recovery_attestation_requested` WebSocket event says when one opens.
+    // A client that does not see this string has only the request id the
+    // person recovering sends by other means, so it must keep that field.
+    "recovery.attest.requests",
     // Recovery contacts: signed `wavvon/recovery-request/v1` and
     // `wavvon/recovery-attestation/v1` envelopes and the endpoints behind
     // them.
