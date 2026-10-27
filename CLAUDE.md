@@ -32,9 +32,9 @@ cargo check --workspace
 cargo check --all-targets --workspace    # `check` alone does NOT compile tests
 cargo clippy --all-targets --workspace   # NOTE: CI tracks `stable`, which may be AHEAD of yours
 cargo fmt --all                          # required before every commit; CI gates on --check
-cargo test --workspace -- --test-threads=4   # bounded: the default saturates Postgres
-                                             # max_connections and flakes with PoolTimedOut
-cargo test -p wavvon-hub                 # single crate
+cargo nextest run --workspace            # every test has a deadline; 4 threads, see
+                                         # .config/nextest.toml (cargo install cargo-nextest)
+cargo nextest run -p wavvon-hub          # single crate
 cargo build --release
 
 node e2e/run.mjs                         # end-to-end against the real binary
@@ -344,12 +344,17 @@ suffices.
 New endpoints need at minimum a happy-path and a rejection test.
 
 A `PoolTimedOut` failure is almost always `max_connections` exhaustion under
-parallelism, not a real fault — re-run the single binary, or cap with
-`-- --test-threads=4`.
+parallelism, not a real fault — re-run the single binary, or lower
+`test-threads` (`-j 2`). The nextest profile already caps it at 4.
+
+**Every test has a deadline.** `.config/nextest.toml` kills a test after two
+minutes. Plain `cargo test` has no timeout at all, and a test whose loop waits
+on a parameter the hub stopped reading spun silently for 90 minutes before
+anyone looked.
 
 **A test that can skip itself must be unable to skip in CI.** Print
-`WAVVON-TEST-SKIPPED:` and CI fails on it (`build.yml`); `cargo test` runs with
-`--nocapture` there because it otherwise swallows the output of passing tests,
+`WAVVON-TEST-SKIPPED:` and CI fails on it (`build.yml`); CI's nextest profile
+shows the output of passing tests because the runner otherwise swallows it,
 and the guard would grep a log that cannot contain what it looks for. Skips are
 legitimate — `pg_dump` and a built `wavvon-hub` are not on every dev box — but a
 green run that did not execute the test is worse than no test. A backup test

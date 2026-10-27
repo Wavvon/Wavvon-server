@@ -50,6 +50,9 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: cargo-nextest
 
       - name: Fetch API spec (Wavvon docs repo)
         if: github.event_name == 'pull_request' && github.base_ref == 'main'
@@ -104,13 +107,9 @@ jobs:
           TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432
           WAVVON_REQUIRE_PG_TOOLS: "1"
           WAVVON_REQUIRE_E2E: "1"
-        # `--nocapture` is load-bearing, not verbosity: cargo swallows the
-        # output of tests that pass, so a skip notice printed by a passing test
-        # never reaches this log and the guard below would grep a file that
-        # could not contain what it looks for. Found by testing the guard.
         run: |
           set -o pipefail
-          cargo test --workspace -- --nocapture 2>&1 | tee cargo-test.log
+          cargo nextest run --workspace --profile ci 2>&1 | tee cargo-test.log
 
       # A test that skips itself is a test that can stop running with nobody
       # noticing, and it reports as green while it does. The per-test
