@@ -254,7 +254,7 @@ async fn joining_spawner_voice_creates_temp_sibling() {
         Some(member.public_key_hex().as_str())
     );
     assert_eq!(temp.name, "Alice's room");
-    assert_eq!(temp.channel_type, "text");
+    assert_eq!(temp.channel_type, "voice");
 
     let _ = tx.send(TsMessage::Close(None)).await;
 }

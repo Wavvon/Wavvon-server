@@ -482,7 +482,7 @@ async fn talk_power_lets_a_low_power_member_listen_but_not_speak() {
     let channel: ChannelResponse = client
         .post(format!("{hub_url}/channels"))
         .bearer_auth(&owner_token)
-        .json(&json!({ "name": "vip-only" }))
+        .json(&json!({ "name": "vip-only", "channel_type": "voice" }))
         .send()
         .await
         .unwrap()
@@ -702,7 +702,7 @@ async fn channel_voice_mute_blocks_voice_join() {
     let channel: ChannelResponse = client
         .post(format!("{hub_url}/channels"))
         .bearer_auth(&owner_token)
-        .json(&json!({ "name": "voice-ch" }))
+        .json(&json!({ "name": "voice-ch", "channel_type": "voice" }))
         .send()
         .await
         .unwrap()
@@ -772,7 +772,7 @@ async fn patch_channel_sets_min_talk_power() {
     let resp = server
         .post("/channels")
         .authorization_bearer(&owner_token)
-        .json(&json!({ "name": "vchan" }))
+        .json(&json!({ "name": "vchan", "channel_type": "voice" }))
         .await;
     let channel: ChannelResponse = resp.json();
 
@@ -856,7 +856,7 @@ async fn the_floor_is_granted_never_taken() {
     let channel: ChannelResponse = client
         .post(format!("{hub_url}/channels"))
         .bearer_auth(&owner_token)
-        .json(&json!({ "name": "tp-hand-chan" }))
+        .json(&json!({ "name": "tp-hand-chan", "channel_type": "voice" }))
         .send()
         .await
         .unwrap()
@@ -1209,4 +1209,75 @@ async fn bans_page_by_cursor_without_gaps_or_repeats() {
     let mut expected = banned;
     expected.sort();
     assert_eq!(unique, expected, "paging dropped a ban");
+}
+
+/// Voice lives in voice channels (Wavvon-server#188): a join in a text
+/// channel is refused, a text channel switches to voice and back keeping its
+/// id, a forum cannot, and the AFK channel must be a voice channel.
+#[tokio::test]
+async fn voice_is_joined_only_in_voice_channels() {
+    let (hub_url, _state, _guard) = spawn_real_hub().await;
+    let client = reqwest::Client::new();
+    let owner = Identity::generate();
+    let token = http_authenticate(&hub_url, &owner).await;
+
+    let create = |body: serde_json::Value| {
+        let client = client.clone();
+        let (hub_url, token) = (hub_url.clone(), token.clone());
+        async move {
+            client
+                .post(format!("{hub_url}/channels"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<ChannelResponse>()
+                .await
+                .unwrap()
+        }
+    };
+    let text = create(json!({ "name": "chat" })).await;
+    let forum = create(json!({ "name": "board", "channel_type": "forum" })).await;
+
+    let frame = ws_voice_join_and_recv(&hub_url, &token, &text.id).await;
+    assert_eq!(frame["type"], "error", "{frame}");
+    assert!(
+        frame["message"].as_str().unwrap().contains("no voice"),
+        "{frame}"
+    );
+
+    let patch = |id: String, body: serde_json::Value| {
+        let client = client.clone();
+        let (hub_url, token) = (hub_url.clone(), token.clone());
+        async move {
+            client
+                .patch(format!("{hub_url}/channels/{id}"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+    assert_eq!(
+        patch(forum.id.clone(), json!({ "channel_type": "voice" })).await,
+        400
+    );
+
+    let afk = |id: &str| {
+        client
+            .patch(format!("{hub_url}/hub"))
+            .bearer_auth(&token)
+            .json(&json!({ "afk_channel_id": id }))
+            .send()
+    };
+    assert_eq!(afk(&text.id).await.unwrap().status().as_u16(), 400);
+
+    assert!(patch(text.id.clone(), json!({ "channel_type": "voice" })).await < 300);
+    let frame = ws_voice_join_and_recv(&hub_url, &token, &text.id).await;
+    assert_eq!(frame["type"], "voice_joined", "{frame}");
+    assert!(afk(&text.id).await.unwrap().status().is_success());
 }

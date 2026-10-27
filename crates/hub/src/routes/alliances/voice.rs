@@ -186,11 +186,9 @@ pub async fn mint_voice_grant(
             continue;
         };
 
-        // A category has no room, and neither does a banner or a spawner. The
-        // hub has no separate voice channel_type — every leaf `text` channel
-        // hosts a voice call alongside its text pane — so this is the whole
-        // test for "is there a room here".
-        if entry.is_category || entry.channel_type != "text" {
+        // Only a voice channel is a room (decisions.md, "Voice lives in voice
+        // channels").
+        if entry.is_category || entry.channel_type != "voice" {
             return Err((StatusCode::BAD_REQUEST, "not_a_voice_space".to_string()));
         }
 
@@ -337,7 +335,7 @@ pub async fn verify_grant(
     let Some(entry) = ours.iter().find(|c| c.id == p.channel_id) else {
         return Err(forbid("channel_not_shared"));
     };
-    if entry.is_category || entry.channel_type != "text" {
+    if entry.is_category || entry.channel_type != "voice" {
         return Err(forbid("not_a_voice_space"));
     }
 

@@ -380,7 +380,7 @@ pub async fn post_alliance_channel_message(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     if let Some(local) = effective.iter().find(|c| c.id == channel_id) {
-        if local.is_category || (local.channel_type != "text" && local.channel_type != "forum") {
+        if local.is_category || !matches!(local.channel_type.as_str(), "text" | "voice" | "forum") {
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
@@ -882,7 +882,7 @@ pub async fn get_alliance_channel_messages(
         // Non-message spaces (categories, banners, spawners) don't have a
         // message history to read -- an empty list is simpler for clients
         // than special-casing every alliance-channel view.
-        if local.is_category || (local.channel_type != "text" && local.channel_type != "forum") {
+        if local.is_category || !matches!(local.channel_type.as_str(), "text" | "voice" | "forum") {
             return Ok(Json(Vec::new()));
         }
         shared_channel_permissions(&state, &user.public_key, &channel_id)

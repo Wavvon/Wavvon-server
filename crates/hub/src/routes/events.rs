@@ -1187,7 +1187,7 @@ pub async fn create_squad_rooms(
             let result = sqlx::query(
                 "INSERT INTO channels
                     (id, name, created_by, parent_id, is_category, display_order, channel_type, created_at, is_temporary, event_id)
-                 VALUES ($1, $2, $3, $4, FALSE, $5, 'text', $6, TRUE, $7)",
+                 VALUES ($1, $2, $3, $4, FALSE, $5, 'voice', $6, TRUE, $7)",
             )
             .bind(&id)
             .bind(&name)
@@ -1222,7 +1222,7 @@ pub async fn create_squad_rooms(
                         color: None,
                         custom_icon_svg: None,
                         created_at: now,
-                        channel_type: "text".to_string(),
+                        channel_type: "voice".to_string(),
                         banner_url: None,
                         banner_file_id: None,
                         is_temporary: true,

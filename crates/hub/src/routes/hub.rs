@@ -126,7 +126,7 @@ pub async fn update_hub(
             upsert_setting(&state.db, "afk_channel_id", "").await?;
         } else {
             let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1 AND is_category = false)",
+                "SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1 AND channel_type = 'voice')",
             )
             .bind(channel_id)
             .fetch_one(&state.db)
@@ -135,7 +135,7 @@ pub async fn update_hub(
             if !exists {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    "afk_channel_id does not reference an existing channel".to_string(),
+                    "afk_channel_id must reference a voice channel".to_string(),
                 ));
             }
             upsert_setting(&state.db, "afk_channel_id", channel_id).await?;

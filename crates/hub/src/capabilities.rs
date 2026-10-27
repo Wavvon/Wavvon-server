@@ -60,6 +60,12 @@ pub const CAPABILITIES: &[&str] = &[
     // destinations it may offer, so its move picker keeps listing them all and
     // the refusal arrives when the move is issued.
     "channels.move.targets",
+    // Voice works only in `voice` channels (decisions.md, "Voice lives in
+    // voice channels"): the hub refuses a voice join, a voice move, an AFK
+    // channel or an alliance voice grant anywhere else, and a text channel
+    // can be switched to voice and back. A client that does not see this
+    // string keeps offering voice in every channel, as such a hub allows.
+    "channels.voice",
     // Adding a member to a group DM, or leaving one, takes the actor's
     // signature (`signed`), and the hub carries the change to the other
     // members' hubs. Gated so a client signs only where the change will be

@@ -2070,6 +2070,20 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
+    // Voice lives in voice channels (decisions.md). The rooms that can only
+    // ever have been voice rooms convert themselves: temporary rooms (spawned
+    // and squad rooms) and the AFK channel. Every other channel stays text
+    // until an admin switches it, keeping its chat. Idempotent: new temp
+    // rooms are created as voice.
+    sqlx::query(
+        "UPDATE channels SET channel_type = 'voice'
+         WHERE channel_type = 'text' AND is_category = FALSE
+           AND (is_temporary = TRUE
+                OR id = (SELECT value FROM hub_settings WHERE key = 'afk_channel_id'))",
+    )
+    .execute(pool)
+    .await?;
+
     tracing::info!("Database migrations complete");
 
     Ok(())
