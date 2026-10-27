@@ -161,7 +161,7 @@ Multi-hub deployments use `docker-compose.farm.yml` — see
 
 ```bash
 cargo check --workspace               # fast type check
-cargo test --workspace                # integration tests
+cargo nextest run --workspace         # integration tests (cargo install cargo-nextest)
 cargo build --release -p wavvon-hub   # release binary
 ```
 
