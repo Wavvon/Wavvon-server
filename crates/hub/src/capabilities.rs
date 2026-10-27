@@ -127,7 +127,7 @@ pub const CAPABILITIES: &[&str] = &[
     // `recovery_attestation_requested` WebSocket event says when one opens.
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
-    "recovery.to_attest",
+    "recovery.attest.requests",
     // WebRTC screen-share v2 signalling (SDP/ICE relay). Mirrors the older
     // `screen_share_v2` boolean, which stays for clients that read it.
     "screenshare.v2",
