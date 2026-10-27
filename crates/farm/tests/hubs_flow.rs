@@ -90,7 +90,13 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(identity.sign(&challenge_bytes).to_bytes());
+    let sig_hex = hex::encode(
+        identity
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(
+                &challenge_bytes,
+            ))
+            .to_bytes(),
+    );
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))

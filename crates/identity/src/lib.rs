@@ -31,7 +31,7 @@ pub use wire::{
     webhook_delivery_signing_bytes, webhook_hmac_sha256, DhKeyRecord, HomeHubList, PairingClaim,
     PairingComplete, PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile,
     RevocationEntry, SignedPrefsBlob, SubkeyCert, AUTH_CHALLENGE_SCHEME, HEADER_HUB_PUBKEY,
-    HEADER_SIGNATURE_LEGACY, HEADER_SIGNATURE_V1, HEADER_TIMESTAMP, HEADER_WEBHOOK_ID,
+    HEADER_SIGNATURE_V1, HEADER_TIMESTAMP, HEADER_WEBHOOK_ID,
 };
 
 pub struct Identity {

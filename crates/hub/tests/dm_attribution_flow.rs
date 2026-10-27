@@ -55,7 +55,9 @@ async fn auth_with_cert(
         .await;
     let challenge: ChallengeResponse = resp.json();
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = subkey.sign(&challenge_bytes);
+    let signature = subkey.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let mut body = json!({
         "public_key": pub_key,
@@ -649,7 +651,9 @@ async fn authenticate_http_with_cert(
         .unwrap();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = subkey.sign(&challenge_bytes);
+    let signature = subkey.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let mut body = json!({
         "public_key": pub_key,
@@ -689,7 +693,9 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))

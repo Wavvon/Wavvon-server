@@ -58,7 +58,9 @@ async fn authenticate(base: &str, identity: &Identity) -> String {
         .await
         .unwrap();
 
-    let sig = identity.sign(&hex::decode(&resp.challenge).unwrap());
+    let sig = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&resp.challenge).unwrap(),
+    ));
 
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))

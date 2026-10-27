@@ -22,7 +22,9 @@ async fn full_auth_flow() {
 
     // 2. Sign the challenge
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
     let signature_hex = hex::encode(signature.to_bytes());
 
     // 3. Verify (get token)
@@ -71,7 +73,9 @@ async fn concurrent_challenges_for_same_key_do_not_stomp() {
     // Verify the FIRST challenge (issued before the second overwrote it in
     // the old scheme) — must still succeed.
     for challenge in [&first, &second] {
-        let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+        let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+            &hex::decode(&challenge.challenge).unwrap(),
+        ));
         let resp = server
             .post("/auth/verify")
             .json(&json!({
@@ -100,7 +104,9 @@ async fn challenge_cannot_be_verified_by_a_different_key() {
         .await
         .json();
 
-    let signature = mallory.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = mallory.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -585,11 +591,11 @@ async fn pending_members_are_blocked_until_approved() {
         .assert_status_ok();
 }
 
-/// Both answers are accepted while older clients are about: the tagged one
-/// (Wavvon-server#111) and the raw challenge. A tagged signature over some
-/// other challenge is not.
+/// Only the tagged answer (Wavvon-server#111) is accepted. A raw signature
+/// over the challenge is refused: signing hub-chosen bytes bare is the oracle
+/// the tag closes. A tagged signature over some other challenge is refused too.
 #[tokio::test]
-async fn auth_accepts_the_tagged_answer_and_still_the_raw_one() {
+async fn auth_accepts_only_the_tagged_answer() {
     let server = common::setup().await;
     for tagged in [true, false] {
         let id = Identity::generate();
@@ -606,15 +612,19 @@ async fn auth_accepts_the_tagged_answer_and_still_the_raw_one() {
         } else {
             bytes.clone()
         };
-        server
+        let resp = server
             .post("/auth/verify")
             .json(&json!({
                 "public_key": pk,
                 "challenge": ch["challenge"],
                 "signature": hex::encode(id.sign(&msg).to_bytes()),
             }))
-            .await
-            .assert_status_ok();
+            .await;
+        if tagged {
+            resp.assert_status_ok();
+        } else {
+            resp.assert_status_unauthorized();
+        }
     }
 
     let id = Identity::generate();

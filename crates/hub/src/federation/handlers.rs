@@ -6,95 +6,7 @@ use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::auth::middleware::AuthUser;
-use crate::federation::models::{AddPeerRequest, PeerInfo};
-use crate::permissions;
 use crate::state::AppState;
-
-pub async fn add_peer(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Json(req): Json<AddPeerRequest>,
-) -> Result<(StatusCode, Json<PeerInfo>), (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(permissions::ALLIANCES_PEERS)?;
-
-    let url = req.url.trim_end_matches('/').to_string();
-
-    // Discover the remote hub
-    let info = state
-        .federation_client
-        .get_info(&url)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Cannot reach peer: {e}")))?;
-
-    // Authenticate our hub to the remote hub
-    let token = state
-        .federation_client
-        .authenticate(&url, &state.hub_identity)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Handshake failed: {e}")))?;
-
-    let now = crate::auth::handlers::unix_timestamp();
-
-    // Store the peer in DB
-    sqlx::query(
-        "INSERT INTO peers (public_key, name, url, added_at) VALUES ($1, $2, $3, $4)
-         ON CONFLICT(public_key) DO UPDATE SET name = $5, url = $6",
-    )
-    .bind(&info.public_key)
-    .bind(&info.name)
-    .bind(&url)
-    .bind(now)
-    .bind(&info.name)
-    .bind(&url)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    // Cache the session token in memory
-    state.peer_tokens.write().await.insert(url.clone(), token);
-
-    tracing::info!(
-        "Peered with hub '{}' ({})",
-        info.name,
-        &info.public_key[..16]
-    );
-
-    Ok((
-        StatusCode::CREATED,
-        Json(PeerInfo {
-            public_key: info.public_key,
-            name: info.name,
-            url,
-            added_at: now,
-        }),
-    ))
-}
-
-pub async fn list_peers(
-    State(state): State<Arc<AppState>>,
-    _user: AuthUser,
-) -> Result<Json<Vec<PeerInfo>>, (StatusCode, String)> {
-    let rows = sqlx::query_as::<_, PeerRow>(
-        "SELECT public_key, name, url, added_at FROM peers ORDER BY added_at",
-    )
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let peers = rows
-        .into_iter()
-        .map(|r| PeerInfo {
-            public_key: r.public_key,
-            name: r.name,
-            url: r.url,
-            added_at: r.added_at,
-        })
-        .collect();
-
-    Ok(Json(peers))
-}
 
 // ---------------------------------------------------------------------------
 // Federation: badge-offer endpoint (unauthenticated, signature is the auth)
@@ -230,14 +142,4 @@ pub async fn receive_badge_offer(
     );
 
     Ok(StatusCode::CREATED)
-}
-
-// Helpers
-
-#[derive(sqlx::FromRow)]
-struct PeerRow {
-    public_key: String,
-    name: String,
-    url: String,
-    added_at: i64,
 }

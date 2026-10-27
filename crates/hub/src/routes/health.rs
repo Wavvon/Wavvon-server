@@ -165,7 +165,6 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         nsfw,
         badges,
         cert_requirement,
-        screen_share_v2: true,
         sfu_url: std::env::var("WAVVON_SFU_URL").ok(),
         emoji_count,
         rotation,
@@ -223,9 +222,6 @@ pub struct InfoResponse {
     /// Clients read this pre-auth to know which certs to present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cert_requirement: Option<CertRequirement>,
-    /// Signals to clients that this hub supports WebRTC screen-share v2
-    /// signaling (SDP/ICE relay). Always true on this build.
-    pub screen_share_v2: bool,
     /// Optional URL of an SFU (Selective Forwarding Unit) for this hub.
     /// When set, clients capable of SFU-based video should connect there
     /// instead of doing full mesh WebRTC. Read from `WAVVON_SFU_URL` env var.

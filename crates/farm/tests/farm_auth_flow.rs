@@ -154,7 +154,9 @@ async fn verify_happy_path_returns_farm_token() {
 
     // 2. Sign the challenge.
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig = identity.sign(&challenge_bytes);
+    let sig = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
     let sig_hex = hex::encode(sig.to_bytes());
 
     // 3. Verify.
@@ -192,7 +194,9 @@ async fn verify_rejects_bad_signature() {
     // Sign with a different identity (wrong key).
     let wrong_identity = Identity::generate();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let bad_sig = wrong_identity.sign(&challenge_bytes);
+    let bad_sig = wrong_identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let vr = server
         .post("/auth/verify")
@@ -250,7 +254,13 @@ async fn verify_two_outstanding_challenges_both_succeed_when_echoed() {
     // Verify the FIRST challenge, explicitly echoing it back — must succeed
     // even though it's no longer the newest pending challenge.
     let challenge1_bytes = hex::decode(&challenge1_hex).unwrap();
-    let sig1_hex = hex::encode(identity.sign(&challenge1_bytes).to_bytes());
+    let sig1_hex = hex::encode(
+        identity
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(
+                &challenge1_bytes,
+            ))
+            .to_bytes(),
+    );
     let vr1 = server
         .post("/auth/verify")
         .json(&json!({
@@ -264,7 +274,13 @@ async fn verify_two_outstanding_challenges_both_succeed_when_echoed() {
 
     // Verify the SECOND challenge the same way — must also succeed.
     let challenge2_bytes = hex::decode(&challenge2_hex).unwrap();
-    let sig2_hex = hex::encode(identity.sign(&challenge2_bytes).to_bytes());
+    let sig2_hex = hex::encode(
+        identity
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(
+                &challenge2_bytes,
+            ))
+            .to_bytes(),
+    );
     let vr2 = server
         .post("/auth/verify")
         .json(&json!({
@@ -297,7 +313,13 @@ async fn renew_returns_new_token_with_different_jti() {
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(identity.sign(&challenge_bytes).to_bytes());
+    let sig_hex = hex::encode(
+        identity
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(
+                &challenge_bytes,
+            ))
+            .to_bytes(),
+    );
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
@@ -353,7 +375,13 @@ async fn revoke_check_returns_false_for_active_session() {
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(identity.sign(&challenge_bytes).to_bytes());
+    let sig_hex = hex::encode(
+        identity
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(
+                &challenge_bytes,
+            ))
+            .to_bytes(),
+    );
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
@@ -535,7 +563,9 @@ async fn challenge_and_sign(server: &TestServer, id: &Identity) -> (String, Stri
         .as_str()
         .unwrap()
         .to_string();
-    let sig = id.sign(&hex::decode(&challenge_hex).unwrap());
+    let sig = id.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge_hex).unwrap(),
+    ));
     (challenge_hex, hex::encode(sig.to_bytes()))
 }
 

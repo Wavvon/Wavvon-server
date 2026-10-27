@@ -1046,8 +1046,8 @@ pub async fn add_reaction(
 }
 
 /// Sign a moderation check the way an outgoing webhook is signed, so one
-/// verifier serves both: HMAC-SHA256 keyed by HKDF of the secret, body-only
-/// and timestamped (V1). The operator types this secret rather than being
+/// verifier serves both: HMAC-SHA256 keyed by HKDF of the secret, over the
+/// timestamped V1 bytes. The operator types this secret rather than being
 /// shown a generated one, so the raw secret is its UTF-8 bytes.
 fn moderation_webhook_signed(
     request: reqwest::RequestBuilder,
@@ -1066,10 +1066,6 @@ fn moderation_webhook_signed(
         .header(
             wavvon_identity::HEADER_HUB_PUBKEY,
             state.hub_identity.public_key_hex(),
-        )
-        .header(
-            wavvon_identity::HEADER_SIGNATURE_LEGACY,
-            sign(body.as_bytes()),
         )
         .header(
             wavvon_identity::HEADER_SIGNATURE_V1,

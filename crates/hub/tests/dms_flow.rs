@@ -247,7 +247,9 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))
@@ -1311,7 +1313,9 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
             .await
             .unwrap();
         let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-        let signature = attacker.sign(&challenge_bytes);
+        let signature = attacker.sign(&wavvon_identity::auth_challenge_signing_bytes(
+            &challenge_bytes,
+        ));
         let verify: VerifyResponse = client
             .post(format!("{hub}/auth/verify"))
             .json(&serde_json::json!({
@@ -1450,7 +1454,9 @@ async fn federated_dm_accepts_correctly_signed_plaintext() {
             .await
             .unwrap();
         let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-        let signature = hub_identity.sign(&challenge_bytes);
+        let signature = hub_identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+            &challenge_bytes,
+        ));
         let verify: VerifyResponse = client
             .post(format!("{hub}/auth/verify"))
             .json(&serde_json::json!({
@@ -1830,7 +1836,7 @@ async fn federated_dm_block_check_ignores_an_empty_member_list() {
         .json(&serde_json::json!({
             "public_key": peer.public_key_hex(),
             "challenge": challenge.challenge,
-            "signature": hex::encode(peer.sign(&hex::decode(&challenge.challenge).unwrap()).to_bytes()),
+            "signature": hex::encode(peer.sign(&wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())).to_bytes()),
             "is_hub": true,
         }))
         .send()
@@ -1925,7 +1931,7 @@ async fn federated_plaintext_dm_accepts_a_cert_chained_signature() {
         .json(&serde_json::json!({
             "public_key": peer.public_key_hex(),
             "challenge": challenge.challenge,
-            "signature": hex::encode(peer.sign(&hex::decode(&challenge.challenge).unwrap()).to_bytes()),
+            "signature": hex::encode(peer.sign(&wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())).to_bytes()),
             "is_hub": true,
         }))
         .send()
@@ -2009,7 +2015,9 @@ async fn peer_session(client: &reqwest::Client, hub: &str) -> String {
         .json()
         .await
         .unwrap();
-    let signature = peer.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = peer.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
     let verify: VerifyResponse = client
         .post(format!("{hub}/auth/verify"))
         .json(&json!({

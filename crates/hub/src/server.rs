@@ -119,14 +119,6 @@ pub fn create_router_full(
             "/auth/webauthn/assert/finish",
             post(routes::webauthn::assert_finish),
         )
-        .route(
-            "/auth/device-token/create",
-            post(routes::webauthn::device_token_create),
-        )
-        .route(
-            "/auth/device-token/redeem",
-            post(routes::webauthn::device_token_redeem),
-        )
         .layer(from_fn(move |req, next| {
             let l = auth_limiter.clone();
             async move { rate_limit::enforce(l, req, next).await }
@@ -238,8 +230,6 @@ pub fn create_router_full(
             "/me/credentials/{id}",
             patch(routes::webauthn::rename_credential).delete(routes::webauthn::delete_credential),
         )
-        .route("/me/devices", get(routes::webauthn::list_devices))
-        .route("/me/devices/{id}", delete(routes::webauthn::revoke_device))
         .route("/channels", get(routes::channels::list_channels))
         .route(
             "/channels/{channel_id}",
@@ -755,8 +745,6 @@ pub fn create_router_full(
             "/admin/badges/issued/{id}/revoke",
             axum::routing::delete(routes::badges::revoke_issued_badge),
         )
-        .route("/federation/peers", get(federation::handlers::list_peers))
-        .route("/federation/peers", post(federation::handlers::add_peer))
         // ---- Lobby ----
         .route("/lobby/status", get(routes::lobby::get_status))
         .route("/lobby/submit-pow", post(routes::lobby::submit_pow))

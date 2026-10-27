@@ -42,7 +42,9 @@ async fn ban_blocks_authentication() {
         .await;
     let challenge: ChallengeResponse = resp.json();
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = user2.sign(&challenge_bytes);
+    let signature = user2.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let resp = server
         .post("/auth/verify")
@@ -292,7 +294,9 @@ async fn http_authenticate(hub_url: &str, identity: &Identity) -> String {
         .json()
         .await
         .unwrap();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))
         .json(&json!({
@@ -1141,7 +1145,9 @@ async fn banned_user_leaves_the_member_list_and_cannot_return() {
     resp.assert_status_ok();
     let challenge: serde_json::Value = resp.json();
     let ch = challenge["challenge"].as_str().unwrap();
-    let sig = target.sign(&hex::decode(ch).unwrap());
+    let sig = target.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(ch).unwrap(),
+    ));
     server
         .post("/auth/verify")
         .json(&serde_json::json!({

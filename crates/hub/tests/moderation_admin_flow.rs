@@ -726,7 +726,9 @@ async fn http_authenticate(hub_url: &str, identity: &Identity) -> String {
         .json()
         .await
         .unwrap();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))
         .json(&json!({
@@ -924,7 +926,6 @@ async fn the_moderation_check_is_signed_like_an_outgoing_webhook() {
     )
     .unwrap();
     assert_eq!(header("X-Wavvon-Signature-V1"), hex::encode(v1));
-    let legacy = wavvon_identity::webhook_hmac_sha256(&key, &body).unwrap();
-    assert_eq!(header("X-Wavvon-Signature"), hex::encode(legacy));
+    assert!(!headers.contains_key("X-Wavvon-Signature"));
     assert!(headers.contains_key("X-Wavvon-Hub-Pubkey"));
 }

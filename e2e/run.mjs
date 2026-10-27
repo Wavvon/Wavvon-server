@@ -555,9 +555,9 @@ try {
     checkEq(mv.status, 200, `member auth: ${JSON.stringify(mv.body)}`);
     const memberToken = mv.body.token;
 
-    const lobby = await post("/channels", ownerToken, { name: "lobby" });
+    const lobby = await post("/channels", ownerToken, { name: "lobby", channel_type: "voice" });
     checkEq(lobby.status, 201, `lobby: ${JSON.stringify(lobby.body)}`);
-    const raid = await post("/channels", ownerToken, { name: "raid" });
+    const raid = await post("/channels", ownerToken, { name: "raid", channel_type: "voice" });
     checkEq(raid.status, 201, `raid: ${JSON.stringify(raid.body)}`);
     const vault = await post("/channels", ownerToken, { name: "vault" });
     checkEq(vault.status, 201, `vault: ${JSON.stringify(vault.body)}`);

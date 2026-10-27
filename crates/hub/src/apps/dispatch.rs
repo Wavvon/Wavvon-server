@@ -150,11 +150,8 @@ pub async fn dispatch_slash(
         Err(_) => return Some(format!("App @{} failed to respond.", matched.app_name)),
     };
 
-    // Sign the body with the hub's federation keypair.
     let hub_pubkey = state.hub_identity.public_key_hex();
     let body_bytes = body_json.as_bytes();
-    let signature = state.hub_identity.sign(body_bytes);
-    let sig_hex = hex::encode(signature.to_bytes());
     let timestamp = crate::auth::handlers::unix_timestamp();
     let sig_v1_hex = hex::encode(
         state
@@ -172,7 +169,6 @@ pub async fn dispatch_slash(
         .post(&webhook_url)
         .header("Content-Type", "application/json")
         .header(wavvon_identity::HEADER_HUB_PUBKEY, &hub_pubkey)
-        .header(wavvon_identity::HEADER_SIGNATURE_LEGACY, &sig_hex)
         .header(wavvon_identity::HEADER_SIGNATURE_V1, &sig_v1_hex)
         .header(wavvon_identity::HEADER_TIMESTAMP, timestamp.to_string())
         .body(body_json)
@@ -507,8 +503,6 @@ pub async fn dispatch_component(
 
     let hub_pubkey = state.hub_identity.public_key_hex();
     let body_bytes = body_json.as_bytes();
-    let signature = state.hub_identity.sign(body_bytes);
-    let sig_hex = hex::encode(signature.to_bytes());
     let timestamp = crate::auth::handlers::unix_timestamp();
     let sig_v1_hex = hex::encode(
         state
@@ -525,7 +519,6 @@ pub async fn dispatch_component(
         .post(&webhook_url)
         .header("Content-Type", "application/json")
         .header(wavvon_identity::HEADER_HUB_PUBKEY, &hub_pubkey)
-        .header(wavvon_identity::HEADER_SIGNATURE_LEGACY, &sig_hex)
         .header(wavvon_identity::HEADER_SIGNATURE_V1, &sig_v1_hex)
         .header(wavvon_identity::HEADER_TIMESTAMP, timestamp.to_string())
         .body(body_json)
