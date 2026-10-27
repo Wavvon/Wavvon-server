@@ -113,7 +113,7 @@ Layout under `crates/hub/src/`:
 - `state.rs` — `AppState`
 - `permissions.rs` — role-based access control
 - `capabilities.rs` — the feature-string list served by `GET /info`
-- `db/migrations.rs` — schema (destructive changes allowed until 1.0)
+- `db/migrations.rs` — schema: a frozen baseline, then numbered steps tracked in `schema_version`
 - `db/version.rs` — minimum supported PostgreSQL server, checked before migrations
 
 ### `identity` — wire-format authority
@@ -174,23 +174,21 @@ the second only reachable because fixing the first let clippy get past it.
 `rustup update stable` before trusting a green local clippy run, and expect
 the fix to be a real one: these lints have been right both times.
 
-**Migrations: destructive changes are fine until 1.0.** This is beta. There is
-no database in the field whose upgrade path anyone has promised, so `DROP`,
-`ALTER ... TYPE`, renames and reshaping a table are all available — take them
-when they give the better schema instead of bending the design around a
-constraint that does not apply yet.
+**Migrations: a frozen baseline, then numbered steps.** `baseline` in
+`db/migrations.rs` is idempotent and runs on every start; it is frozen. Any
+schema or data change is a new arm in `step` and a bump of
+`SCHEMA_VERSION`. A step runs once, in a transaction, and the version it
+reaches is recorded in `schema_version`. Never append to the baseline: a
+one-shot data migration there runs on every boot, which is how the
+voice-channel conversion kept turning a room an admin had switched back to
+text into a voice room at each restart. A database newer than the binary is
+refused before the baseline runs.
 
-**From 1.0.0 the additive-only rule starts, and it is absolute**: only
-`CREATE TABLE IF NOT EXISTS` and `ALTER TABLE ADD COLUMN`, with column
-additions wrapped so an "already exists" error is ignored. The reason to write
-that down now is that folding a destructive change into a `CREATE TABLE` after
-that point silently produces databases missing a column, with no error until a
-query touches it (see the `migrations.rs` header) — so the day the floor lands,
-this stops being a preference.
-
-Prefer the additive shape anyway when it costs nothing: a schema whose history
-is additive is one you can reason about. Just do not pay design debt for it
-before 1.0.
+**Until 1.0 a step may be destructive** (`DROP`, `ALTER ... TYPE`, renames,
+reshaping a table): take that when it gives the better schema. **From 1.0.0
+steps are additive only, and that is absolute**: new tables, and new columns
+that are nullable or carry a `DEFAULT`, so an older binary can still insert.
+Removals wait for a major.
 
 **PostgreSQL: one backend, a declared floor, a configurable pool.** PostgreSQL is
 the only backend, and reopening that needs a new entry in the wiki's
