@@ -242,6 +242,22 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .await;
     }
 
+    // Voice lives in voice channels (decisions.md, "Voice lives in voice
+    // channels"); a spawner has already been swapped for the voice room it
+    // made, so `channel_id` names a voice channel or the join stops here.
+    if target_channel_type.as_deref() != Some("spawner")
+        && target_channel_type.as_deref() != Some("voice")
+    {
+        let err = WsServerMessage::Error {
+            context: "voice_join".to_string(),
+            message: "This channel has no voice. Join a voice channel instead.".to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
     // Talk-power check.
     let min_talk_power: i64 =
         sqlx::query_scalar("SELECT COALESCE(min_talk_power, 0) FROM channels WHERE id = $1")
@@ -821,9 +837,9 @@ pub(in crate::routes::ws) async fn handle_voice_move(
         }
     }
 
-    // Destination must be a real, non-category channel.
+    // Destination must be a voice channel.
     let target_channel_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND is_category = false")
+        sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND channel_type = 'voice'")
             .bind(&target_channel_id)
             .fetch_optional(&state.db)
             .await
@@ -832,7 +848,7 @@ pub(in crate::routes::ws) async fn handle_voice_move(
     let target_channel_name = match target_channel_name {
         Some(name) => name,
         None => {
-            return send_voice_move_error(ws_tx, "Target channel does not exist.").await;
+            return send_voice_move_error(ws_tx, "Target is not a voice channel.").await;
         }
     };
 

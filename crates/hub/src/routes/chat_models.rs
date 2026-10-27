@@ -118,6 +118,9 @@ pub struct UpdateChannelRequest {
     /// a plain `NOT NULL BOOLEAN`, so absent = unchanged, `Some(bool)` = set.
     #[serde(default)]
     pub nsfw: Option<bool>,
+    /// Switch a channel between `text` and `voice`; both keep their chat.
+    #[serde(default)]
+    pub channel_type: Option<String>,
 }
 
 /// Lets us distinguish "field missing" from "field explicitly null" in JSON.

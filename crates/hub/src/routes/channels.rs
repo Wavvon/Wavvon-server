@@ -211,12 +211,14 @@ pub async fn create_channel(
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
 
-    // Validate channel_type: "text", "forum", "banner", or "spawner" on leaf channels.
+    // Validate channel_type: "text", "voice", "forum", "banner", or "spawner" on
+    // leaf channels. Only a voice channel can be joined for voice.
     let channel_type = if req.is_category {
         "text".to_string()
     } else {
         match req.channel_type.as_deref() {
             None | Some("text") => "text".to_string(),
+            Some("voice") => "voice".to_string(),
             Some("forum") => "forum".to_string(),
             Some("banner") => "banner".to_string(),
             Some("spawner") => "spawner".to_string(),
@@ -385,6 +387,19 @@ pub async fn update_channel(
     let changing_talk_power = req.min_talk_power.is_some();
     let changing_retention = req.retention_days.is_some();
     let changing_forum_require_tag = req.forum_require_tag.is_some();
+    // Text and voice both carry a chat, so a channel can switch between them
+    // keeping its history: the step an admin takes after an upgrade to turn
+    // the rooms people talked in into voice channels.
+    if let Some(ct) = req.channel_type.as_deref() {
+        let switchable = |t: &str| t == "text" || t == "voice";
+        if !switchable(ct) || !switchable(&existing_type) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "channel_type can only switch between text and voice".to_string(),
+            ));
+        }
+        perms.require(permissions::CHANNELS_MANAGE)?;
+    }
 
     // Owner powers, v1: rename only (temp-voice-channels.md §3). A temp
     // channel's owner may change its name without CHANNELS_MANAGE, but any
@@ -523,7 +538,8 @@ pub async fn update_channel(
         || req.banner_url.is_some()
         || req.banner_file_id.is_some()
         || req.forum_require_tag.is_some()
-        || req.nsfw.is_some();
+        || req.nsfw.is_some()
+        || req.channel_type.is_some();
 
     if needs_update {
         let mut qb = sqlx::QueryBuilder::new("UPDATE channels SET ");
@@ -577,6 +593,10 @@ pub async fn update_channel(
         if let Some(nsfw) = req.nsfw {
             sep.push("nsfw = ");
             sep.push_bind_unseparated(nsfw);
+        }
+        if let Some(ct) = req.channel_type.as_deref() {
+            sep.push("channel_type = ");
+            sep.push_bind_unseparated(ct);
         }
         qb.push(" WHERE id = ");
         qb.push_bind(&channel_id);
@@ -1007,7 +1027,7 @@ pub async fn spawn_temp_channel(
         let result = sqlx::query(
             "INSERT INTO channels
                 (id, name, created_by, parent_id, is_category, display_order, channel_type, created_at, is_temporary, owner_pubkey)
-             VALUES ($1, $2, $3, $4, FALSE, $5, 'text', $6, TRUE, $7)",
+             VALUES ($1, $2, $3, $4, FALSE, $5, 'voice', $6, TRUE, $7)",
         )
         .bind(&id)
         .bind(&name)

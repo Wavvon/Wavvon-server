@@ -82,7 +82,7 @@ async fn create_channel(base: &str, token: &str, name: &str) -> Value {
     reqwest::Client::new()
         .post(format!("{base}/channels"))
         .bearer_auth(token)
-        .json(&json!({ "name": name }))
+        .json(&json!({ "name": name, "channel_type": "voice" }))
         .send()
         .await
         .unwrap()

@@ -928,12 +928,11 @@ async fn alliance_with_shared_voice_channel(
         .await
         .unwrap();
 
-    // A plain text channel: the hub has no separate voice type — every leaf
-    // text channel hosts a voice call alongside its text pane.
+    // A voice channel: the only kind an alliance voice grant admits to.
     let channel: ChannelResponse = client
         .post(format!("{hub_a_url}/channels"))
         .bearer_auth(&token_a)
-        .json(&json!({ "name": "war-room" }))
+        .json(&json!({ "name": "war-room", "channel_type": "voice" }))
         .send()
         .await
         .unwrap()
