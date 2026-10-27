@@ -196,11 +196,6 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          or `localhost` when neither is set",
     ),
     (
-        "WAVVON_DEVICE_TOKEN_TTL_DAYS",
-        "30",
-        "Lifetime of 'Trust this device' tokens in days. Default: 30",
-    ),
-    (
         "WAVVON_LAN_MODE",
         "false",
         "Explicit opt-in for LAN/offline mode. When true, the hub refuses to start unless its \
@@ -325,9 +320,6 @@ pub struct Settings {
     /// WebAuthn Relying Party ID override. Falls back to public_url hostname.
     /// Env: WAVVON_WEBAUTHN_RP_ID
     pub webauthn_rp_id: Option<String>,
-    /// Device token TTL in days. Default: 30.
-    /// Env: WAVVON_DEVICE_TOKEN_TTL_DAYS
-    pub device_token_ttl_days: u64,
     /// Explicit opt-in for LAN/offline mode. See `crate::lan` and lan-mode.md.
     /// Env: WAVVON_LAN_MODE
     pub lan_mode: bool,
@@ -386,7 +378,6 @@ pub fn load() -> Result<Settings> {
         .set_default("apps_allow_camera", false)?
         .set_default("allow_private_webhooks", false)?
         .set_default("http_video_stream_budget", 2u32)?
-        .set_default("device_token_ttl_days", 30u64)?
         .set_default("db_max_connections", 5u32)?
         .set_default("lan_mode", false)?
         .set_default("lan_tls_mode", "self")?

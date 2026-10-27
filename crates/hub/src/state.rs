@@ -530,8 +530,6 @@ pub struct AppState {
     pub webauthn_reg_challenges: RwLock<HashMap<String, RegChallenge>>,
     /// In-flight authentication challenges: session_id → AuthChallenge.
     pub webauthn_auth_challenges: RwLock<HashMap<String, AuthChallenge>>,
-    /// Device token TTL in seconds (from settings).
-    pub device_token_ttl_secs: i64,
 
     /// ME2: Circuit breaker for the auto-moderation webhook.
     ///

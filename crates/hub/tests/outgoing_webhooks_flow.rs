@@ -433,12 +433,7 @@ async fn delivery_signs_and_posts_event_to_receiver() {
     assert_eq!(req.body["webhook_id"], webhook_id);
     assert!(req.body["payload"]["channel_id"].is_string());
 
-    let sig_header = req
-        .headers
-        .get("X-Wavvon-Signature")
-        .unwrap()
-        .to_str()
-        .unwrap();
+    assert!(req.headers.get("X-Wavvon-Signature").is_none());
     let webhook_id_header = req
         .headers
         .get("X-Wavvon-Webhook-Id")
@@ -448,18 +443,6 @@ async fn delivery_signs_and_posts_event_to_receiver() {
     assert_eq!(webhook_id_header, webhook_id);
     assert!(req.headers.get("X-Wavvon-Hub-Pubkey").is_some());
     assert!(req.headers.get("X-Wavvon-Timestamp").is_some());
-
-    // Recompute the expected signature over the exact body we received and
-    // confirm it matches — proves the signing key derivation and HMAC
-    // computation are correct end-to-end.
-    let body_bytes = serde_json::to_vec(&req.body).unwrap();
-    // Note: re-serializing may reorder keys vs the original bytes signed by
-    // the hub, so instead we verify the signature format (hex, 64 chars)
-    // and that it is deterministic for the same signing key + a body we
-    // control below.
-    assert_eq!(sig_header.len(), 64);
-    assert!(sig_header.chars().all(|c| c.is_ascii_hexdigit()));
-    let _ = body_bytes;
 
     // The v1 signature covers the timestamp as well as the exact body bytes,
     // so a receiver can refuse a replay (Wavvon-server#160).

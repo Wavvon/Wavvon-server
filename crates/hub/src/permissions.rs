@@ -138,7 +138,6 @@ permission_catalogue! {
     /// and the per-share policies live on the `alliance_managers` grant list,
     /// because they belong to one relationship rather than to the hub.
     ALLIANCES_MANAGE => "alliances.manage", Hub,
-    ALLIANCES_PEERS => "alliances.peers", Hub,
     /// Makes the hub publicly discoverable, and nothing un-indexes it.
     DIRECTORY_PUBLISH => "directory.publish", Hub,
 

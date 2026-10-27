@@ -521,8 +521,7 @@ fn voice_grant_vector() {
     check_signed("voice_grant", "signature", &sb);
 }
 
-/// Slash/component dispatch: Ed25519 by the hub key over the V1 bytes, plus
-/// the older body-only signature.
+/// Slash/component dispatch: Ed25519 by the hub key over the V1 bytes.
 #[test]
 fn webhook_delivery_hub_vector() {
     let name = "webhook_delivery_hub";
@@ -532,11 +531,6 @@ fn webhook_delivery_hub_vector() {
     let sb = webhook_delivery_signing_bytes(n(v, "timestamp"), body.as_bytes());
     expect(name, "signing_bytes", &sb);
     expect(name, "signature_v1", &hub.sign(&sb).to_bytes());
-    expect(
-        name,
-        "signature_legacy",
-        &hub.sign(body.as_bytes()).to_bytes(),
-    );
     assert_eq!(
         hex::encode(hub.verifying_key().as_bytes()),
         r(&v["hub_pubkey"])
@@ -551,7 +545,6 @@ fn check_headers(v: &Value) {
     let h = &v["headers"];
     for (key, constant) in [
         ("hub_pubkey", wavvon_identity::HEADER_HUB_PUBKEY),
-        ("signature_legacy", wavvon_identity::HEADER_SIGNATURE_LEGACY),
         ("signature_v1", wavvon_identity::HEADER_SIGNATURE_V1),
         ("timestamp", wavvon_identity::HEADER_TIMESTAMP),
     ] {
@@ -562,8 +555,7 @@ fn check_headers(v: &Value) {
     }
 }
 
-/// Outgoing webhook: secret -> HKDF key -> HMAC-SHA256 over body (legacy) and
-/// over the V1 bytes.
+/// Outgoing webhook: secret -> HKDF key -> HMAC-SHA256 over the V1 bytes.
 #[test]
 fn webhook_delivery_outgoing_vector() {
     use base64::Engine;
@@ -584,11 +576,6 @@ fn webhook_delivery_outgoing_vector() {
     let body = s(v, "body");
     let sb = webhook_delivery_signing_bytes(n(v, "timestamp"), body.as_bytes());
     expect(name, "signing_bytes", &sb);
-    expect(
-        name,
-        "signature_legacy",
-        &webhook_hmac_sha256(&key, body.as_bytes()).unwrap(),
-    );
     expect(
         name,
         "signature_v1",

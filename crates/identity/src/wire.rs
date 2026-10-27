@@ -422,9 +422,9 @@ pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Checks an answer to an auth challenge in either form: tagged, or the raw
-/// challenge older clients sign. The raw form goes away at a major; until
-/// then a signer only uses it against a server that names no scheme.
+/// Checks an answer to an auth challenge. Only the tagged form verifies: a
+/// signature over the bare challenge is what a hostile hub would collect to
+/// replay as something else the same key signs.
 pub fn verify_auth_challenge(
     public_key_hex: &str,
     challenge: &[u8],
@@ -435,13 +435,12 @@ pub fn verify_auth_challenge(
         &auth_challenge_signing_bytes(challenge),
         signature,
     )
-    .or_else(|_| verify_signature(public_key_hex, challenge, signature))
 }
 
 /// What a hub signs when it POSTs to a program's webhook — a slash or
 /// component dispatch (Ed25519, hub key) or an outgoing-webhook delivery
-/// (HMAC-SHA256, per-webhook key). Unlike the body-only signature sent beside
-/// it, this covers the timestamp, so a receiver can refuse a replay.
+/// (HMAC-SHA256, per-webhook key). It covers the timestamp, so a receiver can
+/// refuse a replay.
 pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
     let mut buf = b"wavvon/webhook-delivery/v1\0".to_vec();
     write_u64_le(&mut buf, timestamp);
@@ -452,7 +451,6 @@ pub fn webhook_delivery_signing_bytes(timestamp: u64, body: &[u8]) -> Vec<u8> {
 /// Header names on every signed webhook delivery, slash/component dispatch
 /// and outgoing webhooks alike. Third parties read them from the vectors.
 pub const HEADER_HUB_PUBKEY: &str = "X-Wavvon-Hub-Pubkey";
-pub const HEADER_SIGNATURE_LEGACY: &str = "X-Wavvon-Signature";
 pub const HEADER_SIGNATURE_V1: &str = "X-Wavvon-Signature-V1";
 pub const HEADER_TIMESTAMP: &str = "X-Wavvon-Timestamp";
 pub const HEADER_WEBHOOK_ID: &str = "X-Wavvon-Webhook-Id";
@@ -469,8 +467,8 @@ pub fn outgoing_webhook_signing_key(raw_secret: &[u8]) -> [u8; 32] {
     key
 }
 
-/// HMAC-SHA256 as outgoing webhooks use it, over either the raw body (legacy
-/// `X-Wavvon-Signature`) or `webhook_delivery_signing_bytes` (`-V1`).
+/// HMAC-SHA256 as outgoing webhooks use it, over
+/// `webhook_delivery_signing_bytes` (`X-Wavvon-Signature-V1`).
 pub fn webhook_hmac_sha256(key: &[u8], message: &[u8]) -> Result<[u8; 32]> {
     use hmac::{Hmac, Mac};
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| anyhow!("bad HMAC key: {e}"))?;

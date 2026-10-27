@@ -254,7 +254,7 @@
       "signature": "b609cb64511dcf807542e6b05c959053d97852757753c486bbcaee73a0acbfe82a063e1f84851802b8200b4b2920e7c39cfe49533f002245aad0a68df5e1e904"
     },
     "webhook_delivery_hub": {
-      "description": "Slash/component dispatch to a program: the hub signs with its Ed25519 key (hub seed here is master_seed). A receiver verifies X-Wavvon-Signature-V1 over signing_bytes, then rejects if |now - X-Wavvon-Timestamp| > 300 s. signature_legacy is the older body-only signature, kept until a major.",
+      "description": "Slash/component dispatch to a program: the hub signs with its Ed25519 key (hub seed here is master_seed). A receiver verifies X-Wavvon-Signature-V1 over signing_bytes, then rejects if |now - X-Wavvon-Timestamp| > 300 s.",
       "inputs": {
         "hub_seed": "@master_seed",
         "timestamp": 1700000000,
@@ -262,17 +262,15 @@
       },
       "signing_bytes": "776176766f6e2f776562686f6f6b2d64656c69766572792f76310000f15365000000007b2274797065223a22736c6173685f636f6d6d616e64227d",
       "signature_v1": "86328471c43aa165ef1ed671d51e46eaeb8de46d6921c51f7bfe9541825b0e246c90acd6b4aa1b977e4cde24271abcd762ff1c7871436de6ab7e1bea627f3c01",
-      "signature_legacy": "454be8c174f29083a314c703c8e0bf675e9a2b054356aa6c2dde7bf0110708b71a85fd35ffbfe40723cdc5724c5cb2253dfe44eee2941271319276553ed55b0b",
       "hub_pubkey": "@master_pub",
       "headers": {
         "hub_pubkey": "X-Wavvon-Hub-Pubkey",
         "signature_v1": "X-Wavvon-Signature-V1",
-        "signature_legacy": "X-Wavvon-Signature",
         "timestamp": "X-Wavvon-Timestamp"
       }
     },
     "webhook_delivery_outgoing": {
-      "description": "Outgoing webhook: the admin is shown secret_as_shown (base64url, no padding) once; its decoded bytes (raw_secret) feed HKDF-SHA256 with the given salt and empty info, giving a 32-byte signing key. HMAC-SHA256 is keyed with those 32 BYTES, not the hex text. signature_legacy covers the body only; signature_v1 covers signing_bytes.",
+      "description": "Outgoing webhook: the admin is shown secret_as_shown (base64url, no padding) once; its decoded bytes (raw_secret) feed HKDF-SHA256 with the given salt and empty info, giving a 32-byte signing key. HMAC-SHA256 is keyed with those 32 BYTES, not the hex text. signature_v1 covers signing_bytes.",
       "inputs": {
         "secret_as_shown": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
         "raw_secret": "0707070707070707070707070707070707070707070707070707070707070707",
@@ -283,11 +281,9 @@
       },
       "signing_key": "351763f9898ddacf3bb67a23c046e219c03c85e5097a965a35f940bc8ae93c87",
       "signing_bytes": "776176766f6e2f776562686f6f6b2d64656c69766572792f76310000f15365000000007b2274797065223a226875625f6576656e74227d",
-      "signature_legacy": "6a60eb0aae37e4145b1658eaa2a1a19bb6995f70e4d4c2926fbfb57b1488542c",
       "signature_v1": "42abcf09c2fbd629a8ba1bff16e7f315b27ad167fb36a2f68e648716ee3079d3",
       "headers": {
         "hub_pubkey": "X-Wavvon-Hub-Pubkey",
-        "signature_legacy": "X-Wavvon-Signature",
         "signature_v1": "X-Wavvon-Signature-V1",
         "timestamp": "X-Wavvon-Timestamp",
         "webhook_id": "X-Wavvon-Webhook-Id"

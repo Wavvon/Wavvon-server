@@ -54,7 +54,9 @@ async fn authenticate_http(base: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&resp.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))

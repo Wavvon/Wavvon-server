@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use serde_json::json;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
-use wavvon_hub::federation::models::PeerInfo;
 use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
@@ -53,7 +52,9 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))
@@ -73,14 +74,10 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
 }
 
 #[tokio::test]
-async fn two_hubs_peer_without_gaining_membership() {
-    let (hub_a_url, hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
-    let (hub_b_url, hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
+async fn a_peer_session_does_not_gain_membership() {
+    let (_hub_a_url, hub_a_state, _hub_a_guard) = start_hub("hub-a").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b").await;
     let client = reqwest::Client::new();
-
-    // Create users on each hub
-    let user_a = Identity::generate();
-    let token_a = authenticate_user(&hub_a_url, &user_a).await;
 
     let user_b = Identity::generate();
     let token_b = authenticate_user(&hub_b_url, &user_b).await;
@@ -105,31 +102,6 @@ async fn two_hubs_peer_without_gaining_membership() {
         .send()
         .await
         .unwrap();
-
-    // Hub A: add Hub B as a peer
-    let resp = client
-        .post(format!("{hub_a_url}/federation/peers"))
-        .bearer_auth(&token_a)
-        .json(&json!({ "url": hub_b_url }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
-    let peer: PeerInfo = resp.json().await.unwrap();
-    assert_eq!(peer.name, "hub-b");
-    assert_eq!(peer.public_key, hub_b_state.hub_identity.public_key_hex());
-
-    // Hub A: list peers
-    let peers: Vec<PeerInfo> = client
-        .get(format!("{hub_a_url}/federation/peers"))
-        .bearer_auth(&token_a)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(peers.len(), 1);
 
     // Peering is not membership: Hub A's session on Hub B reaches neither
     // Hub B's channel list nor its messages. What a peer may read is what an

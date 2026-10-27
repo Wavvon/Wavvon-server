@@ -212,6 +212,11 @@ export function identityFromSeed(seedHex) {
   };
 }
 
+/** The only auth-challenge answer a hub or farm accepts (scheme `tagged-v1`). */
+function tagged(challengeHex) {
+  return Buffer.concat([Buffer.from("wavvon/auth-challenge/v1\0"), Buffer.from(challengeHex, "hex")]);
+}
+
 export function identity() {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   // SPKI DER for Ed25519 is a 12-byte header then the raw 32-byte key.
@@ -229,7 +234,7 @@ export async function authenticate(hubUrl, id, extra = {}) {
     body: JSON.stringify({ public_key: id.pubkey }),
   });
   check(ch.status === 200, `challenge failed: ${ch.status} ${JSON.stringify(ch.body)}`);
-  const signature = id.sign(Buffer.from(ch.body.challenge, "hex"));
+  const signature = id.sign(tagged(ch.body.challenge));
   const v = await json(`${hubUrl}/auth/verify`, {
     method: "POST",
     body: JSON.stringify({
@@ -326,7 +331,7 @@ export async function farmToken(farmUrl, id) {
     body: JSON.stringify({ public_key: id.pubkey }),
   });
   check(ch.status === 200, `farm challenge: ${ch.status} ${JSON.stringify(ch.body)}`);
-  const signature = id.sign(Buffer.from(ch.body.challenge, "hex"));
+  const signature = id.sign(tagged(ch.body.challenge));
   const v = await json(`${farmUrl}/auth/verify`, {
     method: "POST",
     body: JSON.stringify({

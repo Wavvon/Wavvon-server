@@ -1250,8 +1250,6 @@ async fn main() -> Result<()> {
             }),
     );
 
-    let device_token_ttl_secs = (settings.device_token_ttl_days as i64) * 86400;
-
     if rp_id != "localhost" && settings.tls_cert.is_none() {
         tracing::warn!(
             "WebAuthn requires HTTPS for non-localhost rp_id '{rp_id}'; \
@@ -1312,7 +1310,6 @@ async fn main() -> Result<()> {
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
-        device_token_ttl_secs,
         webhook_circuit: Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),

@@ -134,8 +134,7 @@ pub const CAPABILITIES: &[&str] = &[
     // `wavvon/recovery-attestation/v1` envelopes and the endpoints behind
     // them.
     "recovery.attestation",
-    // WebRTC screen-share v2 signalling (SDP/ICE relay). Mirrors the older
-    // `screen_share_v2` boolean, which stays for clients that read it.
+    // WebRTC screen-share v2 signalling (SDP/ICE relay).
     "screenshare.v2",
     // A member of an allied hub can join voice in a channel this hub shares
     // with that alliance: the mint route on their hub, the grant field on

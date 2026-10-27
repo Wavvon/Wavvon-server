@@ -368,10 +368,7 @@ fn setting_text(v: &serde_json::Value) -> String {
 #[derive(Deserialize)]
 pub struct CertSettingsPatch {
     pub cert_auto_issue: Option<serde_json::Value>,
-    pub cert_standing_days: Option<serde_json::Value>,
-    /// What `GET` calls the same setting, and therefore what the admin screen
-    /// sends back. Without this the "member for N days" field silently never
-    /// saved.
+    /// Stored as `cert_standing_days`; the API spells it as `GET` does.
     pub cert_min_age_days: Option<serde_json::Value>,
     pub cert_validity_days: Option<serde_json::Value>,
     pub cert_mode: Option<String>,
@@ -406,12 +403,7 @@ pub async fn patch_cert_settings(
     if let Some(v) = body.cert_auto_issue {
         kvs.push(("cert_auto_issue", setting_text(&v)));
     }
-    // `cert_min_age_days` is the same setting under the name `GET` uses; an
-    // explicit `cert_standing_days` wins if a caller sends both.
     if let Some(v) = body.cert_min_age_days {
-        kvs.push(("cert_standing_days", setting_text(&v)));
-    }
-    if let Some(v) = body.cert_standing_days {
         kvs.push(("cert_standing_days", setting_text(&v)));
     }
     if let Some(v) = body.cert_validity_days {

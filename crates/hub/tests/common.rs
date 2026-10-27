@@ -399,7 +399,6 @@ pub fn base_state(db: PgPool) -> AppState {
         webauthn: make_test_webauthn(),
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
-        device_token_ttl_secs: 30 * 86400,
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
@@ -456,7 +455,9 @@ pub async fn authenticate(server: &TestServer, identity: &Identity) -> String {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
     let resp = server
         .post("/auth/verify")
         .json(&json!({

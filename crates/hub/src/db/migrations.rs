@@ -4,7 +4,10 @@
 // until 2026-10-27, when the version marker landed. It is idempotent and runs
 // on every start, exactly as the whole file used to. **It is frozen**: a
 // schema or data change from now on is a new numbered step in `step`, never
-// an edit to the baseline, and `SCHEMA_VERSION` moves with it.
+// an edit to the baseline, and `SCHEMA_VERSION` moves with it. The one edit
+// it takes is a deletion: dropping a table the baseline creates means
+// removing its CREATE here, or the next start recreates it, and dropping it
+// in a step.
 //
 // Each step runs once, in its own transaction, and records the version it
 // reached. That is what a one-shot data migration needs: run on every boot,
@@ -26,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -89,6 +92,23 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                  WHERE channel_type = 'text' AND is_category = FALSE
                    AND (is_temporary = TRUE
                         OR id = (SELECT value FROM hub_settings WHERE key = 'afk_channel_id'))",
+            )
+            .execute(conn)
+            .await?;
+        }
+        // "Trust this device" tokens: no client ever minted one, and a client
+        // already signs in silently with the key it holds. `alliances.peers`
+        // gated the retired manual peering route; a role still holding it
+        // would fail validation on every later edit.
+        2 => {
+            sqlx::query("DROP TABLE IF EXISTS device_tokens")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query("DELETE FROM role_permissions WHERE permission = 'alliances.peers'")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "DELETE FROM channel_permission_overwrites WHERE permission = 'alliances.peers'",
             )
             .execute(conn)
             .await?;
@@ -163,22 +183,6 @@ async fn baseline(pool: &PgPool) -> Result<()> {
             aaguid         TEXT,
             created_at     BIGINT NOT NULL,
             last_used_at   BIGINT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Device tokens ("Trust this device").
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS device_tokens (
-            id            TEXT PRIMARY KEY,
-            token_hash    TEXT NOT NULL UNIQUE,
-            user_pubkey   TEXT NOT NULL,
-            device_name   TEXT,
-            created_at    BIGINT NOT NULL,
-            expires_at    BIGINT NOT NULL,
-            last_used_at  BIGINT,
-            revoked       BOOLEAN NOT NULL DEFAULT FALSE
         )",
     )
     .execute(pool)

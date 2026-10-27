@@ -411,9 +411,7 @@ impl ChatEvent {
 #[derive(Deserialize)]
 pub struct PaginationParams {
     /// The hub's list dialect: the id of the last message of the previous
-    /// page. Older clients send it as `before`, and a client talks to hubs
-    /// of every age, so that spelling stays accepted.
-    #[serde(alias = "before")]
+    /// page.
     pub cursor: Option<String>,
     pub limit: Option<i64>,
     /// Optional full-text search within the channel; returns one page of

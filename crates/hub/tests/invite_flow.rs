@@ -24,7 +24,9 @@ async fn authenticate_with_invite(
     let challenge: ChallengeResponse = resp.json();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let mut body = json!({
         "public_key": pub_key,
@@ -86,7 +88,9 @@ async fn invite_only_blocks_without_code() {
         .await;
     let challenge: ChallengeResponse = resp.json();
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = user2.sign(&challenge_bytes);
+    let signature = user2.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &challenge_bytes,
+    ));
 
     let resp = server
         .post("/auth/verify")
@@ -141,7 +145,9 @@ async fn default_hub_rejects_join_without_invite() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = user.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = user.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
 
     let resp = server
         .post("/auth/verify")
@@ -507,7 +513,9 @@ async fn first_boot_owner_invite_grants_owner_and_is_one_time() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = intruder.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = intruder.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -593,7 +601,9 @@ async fn first_boot_owner_invite_then_admin_minted_invite_onboards_members() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = intruder.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = intruder.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -1307,7 +1317,9 @@ async fn verify_raw(
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+        &hex::decode(&challenge.challenge).unwrap(),
+    ));
 
     let mut body = json!({
         "public_key": pub_key,
