@@ -1045,8 +1045,8 @@ try {
     const tokenB = (await authenticate(hubB.url, ownerB)).body.token;
 
     await scenario("a hub with the admission challenge on still lets its owner back in", async () => {
-      const set = await json(`${hubA.url}/hub/settings/challenge`, {
-        method: "PUT",
+      const set = await json(`${hubA.url}/admin/settings/challenge`, {
+        method: "PATCH",
         headers: { Authorization: `Bearer ${tokenA}` },
         body: JSON.stringify({ challenge_mode: "puzzle", challenge_difficulty: "easy" }),
       });

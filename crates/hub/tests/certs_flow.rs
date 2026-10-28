@@ -131,7 +131,7 @@ async fn admin_revoke_cert() {
         .assert_status(axum::http::StatusCode::CREATED);
 
     server
-        .post(&format!("/admin/certs/{member_pk}/revoke"))
+        .delete(&format!("/admin/certs/{member_pk}"))
         .authorization_bearer(&owner_token)
         .await
         .assert_status(axum::http::StatusCode::NO_CONTENT);

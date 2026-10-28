@@ -1420,7 +1420,7 @@ async fn a_named_invite_answers_the_admission_challenge() {
     let owner = Identity::generate();
     let owner_token = common::authenticate(&server, &owner).await;
     server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(&owner_token)
         .json(&json!({ "challenge_mode": "click", "challenge_difficulty": "easy" }))
         .await
@@ -1447,7 +1447,7 @@ async fn a_bearer_invite_does_not_answer_the_admission_challenge() {
     let owner = Identity::generate();
     let owner_token = common::authenticate(&server, &owner).await;
     server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(&owner_token)
         .json(&json!({ "challenge_mode": "click", "challenge_difficulty": "easy" }))
         .await

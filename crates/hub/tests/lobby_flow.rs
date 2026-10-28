@@ -80,7 +80,7 @@ async fn admin_can_update_lobby_settings() {
 
     // Update welcome_md
     let resp = server
-        .put("/hub/settings/lobby")
+        .patch("/admin/settings/lobby")
         .authorization_bearer(&token)
         .json(&json!({ "lobby_enabled": true, "welcome_md": "# Welcome!" }))
         .await;
@@ -108,7 +108,7 @@ async fn non_admin_cannot_update_lobby_settings() {
     let user_token = common::authenticate(&server, &user).await;
 
     let resp = server
-        .put("/hub/settings/lobby")
+        .patch("/admin/settings/lobby")
         .authorization_bearer(&user_token)
         .json(&json!({ "lobby_enabled": false }))
         .await;
@@ -415,7 +415,7 @@ async fn min_security_level_still_hard_rejects_when_lobby_disabled() {
 
     // Disable the lobby soft-landing explicitly.
     server
-        .put("/hub/settings/lobby")
+        .patch("/admin/settings/lobby")
         .authorization_bearer(&owner_token)
         .json(&json!({ "lobby_enabled": false }))
         .await
