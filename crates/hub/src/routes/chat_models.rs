@@ -785,6 +785,20 @@ pub enum WsServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         outbound_loss_pct: Option<f32>,
     },
+    /// Who has a hand raised in this voice channel, oldest first, sent to
+    /// everyone in it whenever a hand goes up, comes down or is answered.
+    #[serde(rename = "voice_hands")]
+    VoiceHands {
+        channel_id: String,
+        public_keys: Vec<String>,
+    },
+    /// A moderator gave this member the floor: `may_speak` is now true for
+    /// them until they leave.
+    #[serde(rename = "voice_talk_granted")]
+    VoiceTalkGranted {
+        channel_id: String,
+        public_key: String,
+    },
     #[serde(rename = "voice_roster_update")]
     VoiceRosterUpdate {
         channel_id: String,
