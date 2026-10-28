@@ -5,7 +5,7 @@ use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelRespon
 use crate::routes::chat_models::MessageResponse;
 use crate::routes::dm_models::FederatedDmRequest;
 use crate::routes::health::InfoResponse;
-use crate::routes::post_models::{PostDetail, PostListResponse, ReplyView};
+use crate::routes::post_models::{PostDetail, PostSummary, ReplyView};
 use wavvon_identity::Identity;
 
 pub struct FederationClient {
@@ -152,7 +152,7 @@ impl FederationClient {
         cursor: Option<&str>,
         limit: Option<i64>,
         tag: Option<&str>,
-    ) -> Result<PostListResponse> {
+    ) -> Result<Vec<PostSummary>> {
         let mut query: Vec<(&str, String)> = Vec::new();
         if let Some(c) = cursor {
             query.push(("cursor", c.to_string()));

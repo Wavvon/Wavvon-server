@@ -180,14 +180,6 @@ pub struct ReplyView {
     pub author_hub: Option<String>,
 }
 
-/// Paged list of posts.
-#[derive(Serialize, Deserialize)]
-pub struct PostListResponse {
-    pub posts: Vec<PostSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
 /// Create a new post.
 #[derive(Deserialize)]
 pub struct CreatePostRequest {
@@ -231,14 +223,6 @@ pub struct EditReplyRequest {
     pub body: String,
 }
 
-/// FTS search results for a forum channel.
-#[derive(Serialize, Deserialize)]
-pub struct PostSearchResponse {
-    pub results: Vec<PostSearchHit>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
-}
-
 /// A single FTS hit (may be from a post body/title or a reply body).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PostSearchHit {
@@ -253,7 +237,7 @@ pub struct PostSearchHit {
 /// Cursor parameters for post list pagination.
 #[derive(Deserialize, Default)]
 pub struct PostListParams {
-    /// Opaque cursor: "last_activity_at:id" of the last seen post.
+    /// The id of the last post of the previous page.
     #[serde(default)]
     pub cursor: Option<String>,
     #[serde(default)]
@@ -273,10 +257,14 @@ pub struct ReplyListParams {
     pub limit: Option<i64>,
 }
 
-/// Search query parameter.
+/// Search query, paged like every list: `cursor` is the last hit's `post_id`.
 #[derive(Deserialize)]
 pub struct SearchParams {
     pub q: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 // ── Federation: proxied writes (forum.md §9 phase 2) ────────────────────────

@@ -110,11 +110,6 @@ pub struct ReplaceSubscriptionsRequest {
 }
 
 #[derive(Serialize)]
-pub struct ListSubscriptionsResponse {
-    pub subscriptions: Vec<WebhookSubscriptionDto>,
-}
-
-#[derive(Serialize)]
 pub struct ReplaceSubscriptionsResponse {
     pub count: usize,
 }
@@ -129,8 +124,9 @@ pub struct RotateSecretResponse {
 pub struct ListDeliveriesQuery {
     #[serde(default)]
     pub limit: Option<i64>,
+    /// The id of the last delivery of the previous page.
     #[serde(default)]
-    pub offset: Option<i64>,
+    pub cursor: Option<String>,
     #[serde(default)]
     pub event_type: Option<String>,
     #[serde(default)]

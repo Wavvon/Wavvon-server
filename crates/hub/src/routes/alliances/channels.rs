@@ -10,7 +10,7 @@ use crate::auth::middleware::AuthUser;
 use crate::permissions;
 use crate::routes::alliance_models::*;
 use crate::routes::post_models::{
-    CreatePostRequest, CreateReplyRequest, PostDetail, PostListParams, PostListResponse,
+    CreatePostRequest, CreateReplyRequest, PostDetail, PostListParams, PostSummary,
     ReplyListParams, ReplyView,
 };
 use crate::routes::posts::ReactionRequest;
@@ -481,7 +481,7 @@ pub async fn get_alliance_forum_posts(
     user: AuthUser,
     Path((alliance_id, channel_id)): Path<(String, String)>,
     Query(params): Query<PostListParams>,
-) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+) -> Result<Json<Vec<PostSummary>>, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
 
     let effective = effective_shared_channels(&state.db, &alliance_id)

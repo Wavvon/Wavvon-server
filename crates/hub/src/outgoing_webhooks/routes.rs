@@ -16,9 +16,9 @@ use crate::state::AppState;
 
 use super::models::{
     CreateOutgoingWebhookRequest, CreateOutgoingWebhookResponse, DeliveryRecord,
-    ListDeliveriesQuery, ListSubscriptionsResponse, OutgoingWebhookSummary,
-    ReplaceSubscriptionsRequest, ReplaceSubscriptionsResponse, RotateSecretResponse,
-    UpdateOutgoingWebhookRequest, WebhookSubscriptionDto,
+    ListDeliveriesQuery, OutgoingWebhookSummary, ReplaceSubscriptionsRequest,
+    ReplaceSubscriptionsResponse, RotateSecretResponse, UpdateOutgoingWebhookRequest,
+    WebhookSubscriptionDto,
 };
 use super::worker::new_webhook_id;
 
@@ -224,7 +224,7 @@ pub async fn list_subscriptions(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(id): Path<String>,
-) -> Result<Json<ListSubscriptionsResponse>, (StatusCode, String)> {
+) -> Result<Json<Vec<WebhookSubscriptionDto>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
@@ -281,7 +281,7 @@ pub async fn list_subscriptions(
         }
     }
 
-    Ok(Json(ListSubscriptionsResponse { subscriptions }))
+    Ok(Json(subscriptions))
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +445,6 @@ pub async fn list_deliveries(
     }
 
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let offset = q.offset.unwrap_or(0).max(0);
 
     let rows: Vec<DeliveryRecord> = sqlx::query_as::<_, DeliveryRecord>(
         "SELECT id, webhook_id, event_type, event_seq, attempted_at, attempt_number,
@@ -454,14 +453,16 @@ pub async fn list_deliveries(
          WHERE webhook_id = $1
            AND ($2::TEXT IS NULL OR event_type = $2)
            AND ($3::BOOLEAN IS NULL OR success = $3)
-         ORDER BY attempted_at DESC
-         LIMIT $4 OFFSET $5",
+           AND ($5::TEXT IS NULL OR (attempted_at, id) <
+                ((SELECT attempted_at FROM outgoing_webhook_deliveries WHERE id = $5), $5))
+         ORDER BY attempted_at DESC, id DESC
+         LIMIT $4",
     )
     .bind(&id)
     .bind(&q.event_type)
     .bind(q.success)
     .bind(limit)
-    .bind(offset)
+    .bind(&q.cursor)
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

@@ -333,7 +333,7 @@ async fn subscriptions_replace_happy_path() {
         .authorization_bearer(&owner_token)
         .await
         .json();
-    let subs = listed["subscriptions"].as_array().unwrap();
+    let subs = listed.as_array().unwrap();
     assert_eq!(subs.len(), 2);
     assert!(subs
         .iter()
