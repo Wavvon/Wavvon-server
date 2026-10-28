@@ -138,10 +138,11 @@ pub async fn admin_revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// GET /admin/certs
+/// GET /admin/certs, newest first; `cursor` is the previous page's last `id`.
 pub async fn admin_list(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<crate::routes::paging::PageQuery>,
 ) -> Result<Json<Vec<IssuanceRow>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(CERTS_REVOKE)?;
@@ -149,8 +150,14 @@ pub async fn admin_list(
     let rows = sqlx::query_as::<_, IssuanceDbRow>(
         "SELECT id, subject_pubkey, pow_level, member_since, issued_at, expires_at,
                 revoked_at, standing, payload_json, signature
-         FROM cert_issuances ORDER BY issued_at DESC",
+         FROM cert_issuances
+         WHERE ($1::text IS NULL OR (issued_at, id) <
+                ((SELECT issued_at FROM cert_issuances WHERE id = $1), $1))
+         ORDER BY issued_at DESC, id DESC
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
