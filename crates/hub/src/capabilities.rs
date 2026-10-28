@@ -118,6 +118,11 @@ pub const CAPABILITIES: &[&str] = &[
     // Gated because a client that cannot see this string must not offer a
     // voice affordance on an alliance channel it would then fail to join.
     "voice.alliance",
+    // `voice_hands` (who has a hand up, to everyone in the room) and
+    // `voice_talk_granted` over the WebSocket. Without them a moderator only
+    // learns of a raised hand by polling, and the member granted the floor
+    // never learns it, so a client offers the raise-hand flow only here.
+    "voice.hands",
     // `min_talk_power` gates transmitting, not joining, and the floor is
     // granted by a moderator rather than taken with `raise-hand`. Two things
     // a client may only do once it sees this string: read `may_speak` on
