@@ -23,7 +23,6 @@ pub mod hub_icons;
 pub mod identity;
 pub mod invite_models;
 pub mod invites;
-pub mod key_rotation;
 pub mod listing;
 pub mod lobby;
 pub mod me;

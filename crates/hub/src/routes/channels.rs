@@ -13,41 +13,6 @@ use crate::routes::chat_models::{
 };
 use crate::state::AppState;
 
-/// Returns a per-channel voice population snapshot. Channels with zero
-/// participants are omitted -- callers can treat "missing key" as zero.
-/// Invisible members are not counted (except the requester's own entry) --
-/// a count that includes a hidden user would leak their presence
-/// (decisions.md 2026-07-12, same gate as the participant list below).
-pub async fn voice_populations(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Json<HashMap<String, usize>> {
-    let snapshot: Vec<(String, Vec<String>)> = {
-        let voice = state.voice_channels.read().await;
-        voice
-            .iter()
-            .map(|(ch, members)| (ch.clone(), members.keys().cloned().collect()))
-            .collect()
-    };
-    let all_keys: Vec<String> = snapshot
-        .iter()
-        .flat_map(|(_, ks)| ks.iter().cloned())
-        .collect();
-    let invisible = crate::routes::users::invisible_subset(&state.db, &all_keys).await;
-
-    let mut out: HashMap<String, usize> = HashMap::with_capacity(snapshot.len());
-    for (channel_id, members) in snapshot {
-        let count = members
-            .iter()
-            .filter(|pk| **pk == user.public_key || !invisible.contains(*pk))
-            .count();
-        if count > 0 {
-            out.insert(channel_id, count);
-        }
-    }
-    Json(out)
-}
-
 /// Returns voice participants grouped by channel, enriched with each
 /// member's display_name from the local users table. Lets the sidebar
 /// show participant names nested under each voice-active channel rather
@@ -126,30 +91,6 @@ pub struct VoiceParticipantInfo {
     /// The hub vouching for an alliance-voice visitor; absent for members.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visiting_from: Option<String>,
-}
-
-/// Returns the set of public keys currently in any voice channel on this
-/// hub. Used by the client to show a 🎙️ next to in-voice users in the
-/// member list.
-pub async fn voice_active_users(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Json<Vec<String>> {
-    let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
-    {
-        let voice = state.voice_channels.read().await;
-        for members in voice.values() {
-            for pk in members.keys() {
-                out.insert(pk.clone());
-            }
-        }
-    }
-    // Same invisible gate as the participant list: don't put a 🎙️ badge on
-    // a user everyone is being told is offline (self excepted).
-    let key_vec: Vec<String> = out.iter().cloned().collect();
-    let invisible = crate::routes::users::invisible_subset(&state.db, &key_vec).await;
-    out.retain(|pk| *pk == user.public_key || !invisible.contains(pk));
-    Json(out.into_iter().collect())
 }
 
 pub async fn create_channel(

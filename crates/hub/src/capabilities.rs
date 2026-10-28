@@ -17,6 +17,8 @@
 //! than silently. The list only ever grows — a removed string means every
 //! older client stops offering the feature, which is a breaking change and
 //! waits for a major (decisions.md, "Wire changes are additive").
+//! The one exception was the pre-1.0 prune (Wavvon-server#198): strings
+//! every hub a 1.0 client can meet advertises, and no client tested, went.
 //!
 //! Keep it sorted; the test below enforces that so two features added in
 //! parallel conflict in the merge instead of landing twice.
@@ -49,17 +51,6 @@ pub const CAPABILITIES: &[&str] = &[
     // here, in beta, because the alternative is an admin panel that looks
     // alive and cannot work.
     "apps.register",
-    // `GET /admin/audit-log` is a plain array, newest first, `cursor` meaning
-    // "older than this seq", and it filters by `actor`. A client that does
-    // not see this string is talking to a hub that answers `{entries,
-    // next_cursor}` oldest first, so it must read that shape instead.
-    "audit.newest",
-    // Every channel in `GET /channels` carries `can_move_members`: the
-    // caller's own `voice.move_members` there, resolved channel-scoped. A
-    // client that does not see this string has no way to know which
-    // destinations it may offer, so its move picker keeps listing them all and
-    // the refusal arrives when the move is issued.
-    "channels.move.targets",
     // Voice works only in `voice` channels (decisions.md, "Voice lives in
     // voice channels"): the hub refuses a voice join, a voice move, an AFK
     // channel or an alliance voice grant anywhere else, and a text channel
@@ -88,18 +79,6 @@ pub const CAPABILITIES: &[&str] = &[
     // the admin believed they had named someone, which is the one failure
     // this feature exists to prevent.
     "invites.bound",
-    // `GET /invites` hides the invites that can no longer admit anyone and
-    // carries `status` (`live`, `expired`, `used_up`) on the ones it shows;
-    // `?include_inactive=true` asks for the history. A client that cannot see
-    // this string is talking to a hub that returns every row ever minted and
-    // no status, so it must keep working the answer out from `uses`,
-    // `max_uses` and `expires_at` itself.
-    "invites.status",
-    // `/info` carries `max_attachment_bytes` and hub admin can change it. A
-    // client that does not see this string is talking to a hub whose cap is a
-    // compile-time 3 MB, so it must keep using its own constant rather than
-    // trusting a field that will not be there.
-    "limits.attachments",
     // `GET /users`, `GET /conversations/{id}/messages` and `GET
     // /admin/reports` honour `limit` + a keyset `cursor`. Without this the
     // hub ignores both and returns one truncated page — a client that pages
@@ -113,9 +92,6 @@ pub const CAPABILITIES: &[&str] = &[
     // advertising only `list.cursor` would page an endpoint that ignores the
     // cursor and hand back the first page over and over.
     "list.cursor.lists",
-    // Device pairing: subkey certs presented at `/auth/verify`, and the
-    // ECIES-wrapped canonical DH material a paired device needs for DMs.
-    "pairing.subkey",
     // The permission catalogue is served by the hub and no longer copied into
     // each client: GET /permissions lists every id with its scope, and
     // GET /users/{pubkey}/permissions/why explains one answer. A client that
@@ -130,33 +106,12 @@ pub const CAPABILITIES: &[&str] = &[
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
     "recovery.attest.requests",
-    // Recovery contacts: signed `wavvon/recovery-request/v1` and
-    // `wavvon/recovery-attestation/v1` envelopes and the endpoints behind
-    // them.
-    "recovery.attestation",
-    // WebRTC screen-share v2 signalling (SDP/ICE relay).
-    "screenshare.v2",
     // A member of an allied hub can join voice in a channel this hub shares
     // with that alliance: the mint route on their hub, the grant field on
     // `/auth/verify` here, and the visitor scope behind it (alliances.md).
     // Gated because a client that cannot see this string must not offer a
     // voice affordance on an alliance channel it would then fail to join.
     "voice.alliance",
-    // `pong` carries `outbound_loss_pct`: the relay counts gaps in the
-    // sender's own cleartext `ctr` sequence, which is the only place outbound
-    // loss can be measured at all. Gated because a client that cannot tell
-    // "this hub does not report it" from "loss is zero" would show a
-    // reassuring 0.0% against every older hub.
-    "voice.loss",
-    // Voice admission is its own permission, `voice.join`, independent of
-    // `read_messages` in both directions (permissions.md §3, Voice). Two
-    // things a client may only do once it sees this string: offer `voice.join`
-    // as a channel overwrite — an older hub's validator rejects the id as
-    // unknown — and stop treating a read deny as though it also closed voice,
-    // because on this hub it does not. Named for the shape the alliance work
-    // uses (`alliance.permissions`), not for the permission id, which is a
-    // different namespace that happens to read the same.
-    "voice.permissions",
     // `min_talk_power` gates transmitting, not joining, and the floor is
     // granted by a moderator rather than taken with `raise-hand`. Two things
     // a client may only do once it sees this string: read `may_speak` on
@@ -165,19 +120,11 @@ pub const CAPABILITIES: &[&str] = &[
     // this — and offer the grant route, which an older hub answers 404. On an
     // older hub a raised hand is still how the threshold is cleared.
     "voice.talk",
-    // Voice over WebTransport/QUIC with E2E sender keys (voice-transport-v2).
-    // The raw-UDP and `/voice/ws` relays it replaced are gone, so a client
-    // that does not see this string has no voice path to this hub at all.
-    "voice.wt",
     // Webhook deliveries (app dispatch, outgoing webhooks) carry
     // `X-Wavvon-Signature-V1` over the timestamp and the body. Advertised so a
     // program can tell a hub that never sends it from a replayed request
     // stripped of it, and refuse the second.
     "webhooks.signedtimestamp",
-    // The WS answers `ping` with `pong`, echoing the nonce. Without this a
-    // client measuring latency would wait for a reply that never comes and
-    // show a dead "—" forever, so the readout has to be gated on it.
-    "ws.ping",
 ];
 
 #[cfg(test)]

@@ -445,15 +445,6 @@ try {
       };
     }
 
-    await scenario("the hub advertises voice.permissions", async () => {
-      const info = await json(`${h.url}/info`);
-      checkEq(info.status, 200, "/info");
-      check(
-        info.body.capabilities.includes("voice.permissions"),
-        `a client cannot offer the voice.join row without it, got ${info.body.capabilities}`,
-      );
-    });
-
     await scenario("an unknown permission string is refused, and nothing is written", async () => {
       const bad = await post("/roles", ownerToken, {
         name: "Typo", priority: 50, permissions: ["channels.manage", "roles.manege"],
