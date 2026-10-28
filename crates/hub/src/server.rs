@@ -152,7 +152,7 @@ pub fn create_router_full(
         .route("/hub/settings", get(routes::hub::get_hub_settings))
         .route("/hub/pending", get(routes::hub::list_pending))
         .route(
-            "/hub/pending/{target_key}/approve",
+            "/hub/pending/{pubkey}/approve",
             post(routes::hub::approve_user),
         )
         .route(
@@ -401,11 +401,11 @@ pub fn create_router_full(
             get(routes::friends::list_pending_requests),
         )
         .route(
-            "/friends/{public_key}/accept",
+            "/friends/{pubkey}/accept",
             post(routes::friends::accept_friend_request),
         )
         .route(
-            "/friends/{public_key}",
+            "/friends/{pubkey}",
             axum::routing::delete(routes::friends::remove_friend),
         )
         .route(
@@ -417,7 +417,7 @@ pub fn create_router_full(
             get(routes::permission_catalogue::get_catalogue),
         )
         .route(
-            "/users/{public_key}/permissions/why",
+            "/users/{pubkey}/permissions/why",
             get(routes::permission_catalogue::why),
         )
         .route(
@@ -438,12 +438,9 @@ pub fn create_router_full(
             "/roles/{role_id}/members",
             get(routes::roles::list_role_members),
         )
+        .route("/users/{pubkey}/roles", get(routes::roles::get_user_roles))
         .route(
-            "/users/{public_key}/roles",
-            get(routes::roles::get_user_roles),
-        )
-        .route(
-            "/users/{public_key}/roles/{role_id}",
+            "/users/{pubkey}/roles/{role_id}",
             put(routes::roles::assign_role).delete(routes::roles::remove_role),
         )
         .route(
@@ -481,7 +478,7 @@ pub fn create_router_full(
             get(routes::moderation::list_bans).post(routes::moderation::ban_user),
         )
         .route(
-            "/moderation/bans/{target_key}",
+            "/moderation/bans/{pubkey}",
             axum::routing::delete(routes::moderation::unban_user),
         )
         .route(
@@ -489,7 +486,7 @@ pub fn create_router_full(
             get(routes::moderation::list_mutes).post(routes::moderation::mute_user),
         )
         .route(
-            "/moderation/mutes/{target_key}",
+            "/moderation/mutes/{pubkey}",
             axum::routing::delete(routes::moderation::unmute_user),
         )
         .route(
@@ -502,7 +499,7 @@ pub fn create_router_full(
             get(routes::moderation::list_voice_mutes).post(routes::moderation::voice_mute),
         )
         .route(
-            "/moderation/voice-mutes/{target_key}",
+            "/moderation/voice-mutes/{pubkey}",
             axum::routing::delete(routes::moderation::voice_unmute),
         )
         .route(
@@ -669,19 +666,19 @@ pub fn create_router_full(
                 .delete(routes::alliances::receive_alliance_member_left),
         )
         .route(
-            "/identity/{master}/designation",
+            "/identity/{pubkey}/designation",
             get(routes::identity::get_designation).post(routes::identity::put_designation),
         )
         .route(
-            "/identity/{master}/devices",
+            "/identity/{pubkey}/devices",
             get(routes::identity::list_devices).post(routes::identity::post_device),
         )
         .route(
-            "/identity/{master}/revocations",
+            "/identity/{pubkey}/revocations",
             get(routes::identity::list_revocations).post(routes::identity::post_revocation),
         )
         .route(
-            "/identity/{master}/prefs",
+            "/identity/{pubkey}/prefs",
             get(routes::identity::get_prefs).put(routes::identity::put_prefs),
         )
         .route(
