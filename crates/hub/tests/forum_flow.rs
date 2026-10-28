@@ -1,6 +1,6 @@
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use wavvon_hub::routes::post_models::{PostDetail, PostListResponse, PostSearchResponse};
+use wavvon_hub::routes::post_models::{PostDetail, PostSearchHit, PostSummary};
 use wavvon_identity::Identity;
 
 #[path = "common.rs"]
@@ -57,9 +57,9 @@ async fn forum_create_list_get_post() {
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
     assert_eq!(resp.status_code(), 200);
-    let list: PostListResponse = resp.json();
-    assert_eq!(list.posts.len(), 1);
-    assert_eq!(list.posts[0].id, post_id);
+    let list: Vec<PostSummary> = resp.json();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, post_id);
 
     // Get post detail.
     let resp = server
@@ -126,8 +126,8 @@ async fn forum_delete_post_soft() {
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
     assert_eq!(resp.status_code(), 200);
-    let list: PostListResponse = resp.json();
-    assert!(list.posts.is_empty());
+    let list: Vec<PostSummary> = resp.json();
+    assert!(list.is_empty());
 }
 
 #[tokio::test]
@@ -276,8 +276,8 @@ async fn forum_search_returns_hits() {
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
     assert_eq!(resp.status_code(), 200, "{}", resp.text());
-    let sr: PostSearchResponse = resp.json();
-    assert!(!sr.results.is_empty(), "expected search hits for 'Rust'");
+    let hits: Vec<PostSearchHit> = resp.json();
+    assert!(!hits.is_empty(), "expected search hits for 'Rust'");
 }
 
 // ── Rejection tests ──────────────────────────────────────────────────────────
@@ -823,7 +823,7 @@ async fn alliance_forum_read_through_proxies_to_owning_hub() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    let list: PostListResponse = client
+    let list: Vec<PostSummary> = client
         .get(format!(
             "{hub_a_url}/alliances/{}/channels/{}/posts",
             alliance.id, channel.id
@@ -835,9 +835,9 @@ async fn alliance_forum_read_through_proxies_to_owning_hub() {
         .json()
         .await
         .unwrap();
-    assert_eq!(list.posts.len(), 1);
-    assert_eq!(list.posts[0].id, post.summary.id);
-    assert_eq!(list.posts[0].title.as_deref(), Some("v1.2 notes"));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, post.summary.id);
+    assert_eq!(list[0].title.as_deref(), Some("v1.2 notes"));
 
     // Hub A: get post detail (with the reply) via the proxy.
     let detail: PostDetail = client
@@ -1540,4 +1540,55 @@ async fn a_muted_member_cannot_write_through_the_alliance_proxy() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
+}
+
+/// The list pages by the previous page's last post id, and the key covers the
+/// pin: a pinned post with the oldest activity sorts first and must still
+/// appear exactly once across pages.
+#[tokio::test]
+async fn forum_list_pages_by_post_id_across_a_pin() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let mut ids = Vec::new();
+    for title in ["one", "two", "three"] {
+        let detail: PostDetail = server
+            .post(&format!("/channels/{channel_id}/posts"))
+            .add_header("Authorization", format!("Bearer {token}"))
+            .json(&json!({ "title": title, "body": "body" }))
+            .await
+            .json();
+        ids.push(detail.summary.id);
+    }
+    server
+        .post(&format!("/channels/{channel_id}/posts/{}/pin", ids[0]))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    // Bounded, so an ignored cursor fails the assertion below instead of
+    // looping forever on the same page.
+    for _ in 0..10 {
+        let url = match &cursor {
+            Some(c) => format!("/channels/{channel_id}/posts?limit=1&cursor={c}"),
+            None => format!("/channels/{channel_id}/posts?limit=1"),
+        };
+        let page: Vec<PostSummary> = server
+            .get(&url)
+            .add_header("Authorization", format!("Bearer {token}"))
+            .await
+            .json();
+        let Some(last) = page.last() else { break };
+        cursor = Some(last.id.clone());
+        seen.extend(page.into_iter().map(|p| p.id));
+    }
+    assert_eq!(seen.first(), Some(&ids[0]), "the pinned post comes first");
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(seen.len(), 3, "every post exactly once: {seen:?}");
+    assert_eq!(sorted.len(), 3, "no post twice: {seen:?}");
 }

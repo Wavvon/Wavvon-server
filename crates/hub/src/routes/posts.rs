@@ -13,9 +13,8 @@ use crate::routes::post_models::{
     post_to_summary, reply_to_view, Attachment, CreatePostRequest, CreateReplyRequest,
     CreateTagRequest, EditPostRequest, EditReplyRequest, EditTagRequest,
     FederatedCreatePostRequest, FederatedCreateReplyRequest, FederatedReactionRequest,
-    FederatedRetractRequest, ForumTag, PostDetail, PostListParams, PostListResponse, PostRow,
-    PostSearchHit, PostSearchResponse, ReactionCount, ReplyListParams, ReplyRow, ReplyView,
-    SearchParams, TagRef,
+    FederatedRetractRequest, ForumTag, PostDetail, PostListParams, PostRow, PostSearchHit,
+    PostSummary, ReactionCount, ReplyListParams, ReplyRow, ReplyView, SearchParams, TagRef,
 };
 use crate::state::AppState;
 
@@ -318,7 +317,7 @@ pub async fn list_posts(
     user: AuthUser,
     Path(channel_id): Path<String>,
     Query(params): Query<PostListParams>,
-) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+) -> Result<Json<Vec<PostSummary>>, (StatusCode, String)> {
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     list_posts_with(state, user, channel_id, params, perms).await
 }
@@ -331,7 +330,7 @@ pub async fn list_posts_with(
     channel_id: String,
     params: PostListParams,
     perms: permissions::UserPermissions,
-) -> Result<Json<PostListResponse>, (StatusCode, String)> {
+) -> Result<Json<Vec<PostSummary>>, (StatusCode, String)> {
     require_forum_channel(&state.db, &channel_id).await?;
     // Read-gating (§3.5), same as message history.
     perms.require(permissions::MESSAGES_READ)?;
@@ -361,43 +360,22 @@ pub async fn list_posts_with(
         qb.push(")");
     }
 
+    // The cursor is the previous page's last post; the comparison covers the
+    // whole sort key, pin included, so a pinned post never repeats or skips.
     if let Some(cursor) = &params.cursor {
-        let parts: Vec<&str> = cursor.splitn(2, ':').collect();
-        if parts.len() != 2 {
-            return Err((StatusCode::BAD_REQUEST, "invalid_cursor".to_string()));
-        }
-        let cursor_ts: i64 = parts[0]
-            .parse()
-            .map_err(|_| (StatusCode::BAD_REQUEST, "invalid_cursor".to_string()))?;
-        let cursor_id = parts[1].to_string();
-
-        qb.push(" AND (last_activity_at < ");
-        qb.push_bind(cursor_ts);
-        qb.push(" OR (last_activity_at = ");
-        qb.push_bind(cursor_ts);
-        qb.push(" AND id < ");
-        qb.push_bind(cursor_id);
-        qb.push("))");
+        qb.push(" AND (is_pinned, last_activity_at, id) < (SELECT is_pinned, last_activity_at, id FROM posts WHERE id = ");
+        qb.push_bind(cursor);
+        qb.push(")");
     }
 
     qb.push(" ORDER BY is_pinned DESC, last_activity_at DESC, id DESC LIMIT ");
-    qb.push_bind(limit + 1);
+    qb.push_bind(limit);
 
     let rows: Vec<PostRow> = qb
         .build_query_as()
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let has_more = rows.len() as i64 > limit;
-    let rows: Vec<PostRow> = rows.into_iter().take(limit as usize).collect();
-
-    let cursor = if has_more {
-        rows.last()
-            .map(|r| format!("{}:{}", r.last_activity_at, r.id))
-    } else {
-        None
-    };
 
     // Populate unread_reply_count, reactions, and tags for each post. Tags
     // are batched (one query for the whole page); reactions still fetch
@@ -429,7 +407,7 @@ pub async fn list_posts_with(
         posts.push(summary);
     }
 
-    Ok(Json(PostListResponse { posts, cursor }))
+    Ok(Json(posts))
 }
 
 // ── POST /channels/:cid/posts ────────────────────────────────────────────────
@@ -1320,7 +1298,7 @@ pub async fn search_posts(
     user: AuthUser,
     Path(channel_id): Path<String>,
     Query(params): Query<SearchParams>,
-) -> Result<Json<PostSearchResponse>, (StatusCode, String)> {
+) -> Result<Json<Vec<PostSearchHit>>, (StatusCode, String)> {
     require_forum_read(&state.db, &user.public_key, &channel_id).await?;
 
     let q = params
@@ -1347,10 +1325,14 @@ pub async fn search_posts(
          WHERE p.search_vector @@ plainto_tsquery('simple', $1)
            AND p.channel_id = $2
            AND p.deleted_at IS NULL
-         LIMIT 50",
+           AND ($3::text IS NULL OR p.id < $3)
+         ORDER BY p.id DESC
+         LIMIT $4",
     )
     .bind(q)
     .bind(&channel_id)
+    .bind(&params.cursor)
+    .bind(params.limit.unwrap_or(50).clamp(1, 100))
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -1366,10 +1348,7 @@ pub async fn search_posts(
         })
         .collect();
 
-    Ok(Json(PostSearchResponse {
-        results,
-        cursor: None,
-    }))
+    Ok(Json(results))
 }
 
 // ── Tag CRUD (forum.md §10.2) ────────────────────────────────────────────────
