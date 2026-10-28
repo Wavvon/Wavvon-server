@@ -84,6 +84,12 @@ pub const CAPABILITIES: &[&str] = &[
     // hub ignores both and returns one truncated page — a client that pages
     // to exhaustion against an older hub sees a short list, not an error.
     "list.cursor",
+    // `limit` + keyset `cursor` on the admin lists that grow with the hub:
+    // `GET /hub/members` and `/admin/banlist/entries` (both used to stop at
+    // 1000 rows without saying so), `/admin/certs` and
+    // `/admin/survey/responses`. A client walking pages against a hub that
+    // does not advertise this would get the same first page forever.
+    "list.cursor.admin",
     // The same `limit` + keyset `cursor` dialect on the rest of the lists that
     // grow with use: `GET /moderation/bans`, `/moderation/mutes`, `/invites`,
     // `/hub/pending`, `/conversations`, `/channels/{id}/pins` and

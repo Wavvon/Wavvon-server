@@ -748,17 +748,25 @@ pub(crate) async fn load_hub_url(state: &AppState) -> String {
 }
 
 /// Admin-facing member listing with joined / last-seen / online + role summaries.
+/// Paged like every list: `cursor` is the previous page's last `public_key`.
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<crate::routes::paging::PageQuery>,
 ) -> Result<Json<Vec<MemberAdminInfo>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MEMBERS_READ)?;
 
     let users = sqlx::query_as::<_, UserAdminRow>(
         "SELECT public_key, display_name, first_seen_at, last_seen_at, birthday
-         FROM users ORDER BY first_seen_at LIMIT 1000",
+         FROM users
+         WHERE ($1::text IS NULL OR (first_seen_at, public_key) >
+                ((SELECT first_seen_at FROM users WHERE public_key = $1), $1))
+         ORDER BY first_seen_at, public_key
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

@@ -122,6 +122,7 @@ pub struct ResponsesQuery {
     pub status: String,
     #[serde(default = "default_limit")]
     pub limit: i64,
+    /// The previous page's last `response_id`.
     #[serde(default)]
     pub cursor: Option<String>,
 }
@@ -654,15 +655,19 @@ pub async fn admin_list_responses(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(SURVEYS_RESPONSES_READ)?;
 
+    let limit = q.limit.clamp(1, crate::routes::paging::MAX_LIMIT);
     let rows: Vec<ResponseRow> = if q.status == "all" {
         sqlx::query_as(
             "SELECT sr.id, sr.pubkey, u.display_name, sr.submitted_at
              FROM survey_responses sr
              LEFT JOIN users u ON sr.pubkey = u.public_key
-             ORDER BY sr.submitted_at DESC
+             WHERE ($2::text IS NULL OR (sr.submitted_at, sr.id) <
+                    ((SELECT submitted_at FROM survey_responses WHERE id = $2), $2))
+             ORDER BY sr.submitted_at DESC, sr.id DESC
              LIMIT $1",
         )
-        .bind(q.limit)
+        .bind(limit)
+        .bind(&q.cursor)
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
@@ -673,10 +678,13 @@ pub async fn admin_list_responses(
              FROM survey_responses sr
              LEFT JOIN users u ON sr.pubkey = u.public_key
              WHERE u.approval_status = 'pending'
-             ORDER BY sr.submitted_at DESC
+               AND ($2::text IS NULL OR (sr.submitted_at, sr.id) <
+                    ((SELECT submitted_at FROM survey_responses WHERE id = $2), $2))
+             ORDER BY sr.submitted_at DESC, sr.id DESC
              LIMIT $1",
         )
-        .bind(q.limit)
+        .bind(limit)
+        .bind(&q.cursor)
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
