@@ -51,8 +51,10 @@ pub struct VerifyChallengeRequest {
 
 #[derive(Deserialize)]
 pub struct UpdateChallengeSettingsRequest {
-    pub challenge_mode: String,
-    pub challenge_difficulty: String,
+    #[serde(default)]
+    pub challenge_mode: Option<String>,
+    #[serde(default)]
+    pub challenge_difficulty: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +319,7 @@ pub async fn verify_challenge(
     }
 }
 
-/// PUT /hub/settings/challenge
+/// PATCH /admin/settings/challenge
 pub async fn update_challenge_settings(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -326,23 +328,29 @@ pub async fn update_challenge_settings(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MODERATION_SETTINGS)?;
 
-    let valid_modes = ["off", "click", "puzzle", "both"];
-    if !valid_modes.contains(&req.challenge_mode.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Invalid challenge_mode: {}", req.challenge_mode),
-        ));
+    if let Some(mode) = req.challenge_mode.as_deref() {
+        if !["off", "click", "puzzle", "both"].contains(&mode) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid challenge_mode: {mode}"),
+            ));
+        }
     }
-    let valid_difficulties = ["easy", "medium"];
-    if !valid_difficulties.contains(&req.challenge_difficulty.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("Invalid challenge_difficulty: {}", req.challenge_difficulty),
-        ));
+    if let Some(difficulty) = req.challenge_difficulty.as_deref() {
+        if !["easy", "medium"].contains(&difficulty) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid challenge_difficulty: {difficulty}"),
+            ));
+        }
     }
 
-    upsert_setting(&state.db, "challenge_mode", &req.challenge_mode).await?;
-    upsert_setting(&state.db, "challenge_difficulty", &req.challenge_difficulty).await?;
+    if let Some(mode) = req.challenge_mode.as_deref() {
+        upsert_setting(&state.db, "challenge_mode", mode).await?;
+    }
+    if let Some(difficulty) = req.challenge_difficulty.as_deref() {
+        upsert_setting(&state.db, "challenge_difficulty", difficulty).await?;
+    }
 
     Ok(StatusCode::OK)
 }

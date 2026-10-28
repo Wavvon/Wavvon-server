@@ -8,7 +8,7 @@ mod common;
 
 async fn admin_set_challenge_mode(server: &TestServer, token: &str, mode: &str) {
     server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(token)
         .json(&json!({ "challenge_mode": mode, "challenge_difficulty": "easy" }))
         .await
@@ -159,7 +159,7 @@ async fn admin_can_update_challenge_settings() {
     let owner_token = common::authenticate(&server, &owner).await;
 
     let resp = server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(&owner_token)
         .json(&json!({ "challenge_mode": "puzzle", "challenge_difficulty": "medium" }))
         .await;
@@ -181,7 +181,7 @@ async fn non_admin_cannot_update_challenge_settings() {
     let user_token = common::authenticate(&server, &user).await;
 
     let resp = server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(&user_token)
         .json(&json!({ "challenge_mode": "click", "challenge_difficulty": "easy" }))
         .await;

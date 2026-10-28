@@ -125,7 +125,7 @@ pub async fn admin_grant_badge(
     Ok((StatusCode::CREATED, Json(cert)))
 }
 
-/// POST /admin/certs/:pubkey/revoke
+/// DELETE /admin/certs/:pubkey
 pub async fn admin_revoke(
     State(state): State<Arc<AppState>>,
     user: AuthUser,

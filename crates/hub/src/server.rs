@@ -700,14 +700,13 @@ pub fn create_router_full(
         )
         // ---- Certification routes (Task #20 / #21) ----
         .route("/admin/certs", get(routes::certs::admin_list))
-        .route("/admin/certs/{pubkey}", post(routes::certs::admin_issue))
+        .route(
+            "/admin/certs/{pubkey}",
+            post(routes::certs::admin_issue).delete(routes::certs::admin_revoke),
+        )
         .route(
             "/admin/certs/{pubkey}/badge",
             post(routes::certs::admin_grant_badge),
-        )
-        .route(
-            "/admin/certs/{pubkey}/revoke",
-            post(routes::certs::admin_revoke),
         )
         .route(
             "/admin/settings/certs",
@@ -730,19 +729,21 @@ pub fn create_router_full(
         )
         .route("/badges", get(routes::badges::list_badges))
         .route("/badges/{id}", delete(routes::badges::delete_badge))
-        .route("/admin/badges/issue", post(routes::badges::issue_badge))
-        .route("/admin/badges/issued", get(routes::badges::list_issued))
         .route(
-            "/admin/badges/issued/{id}/revoke",
-            axum::routing::delete(routes::badges::revoke_issued_badge),
+            "/admin/badges/issued",
+            get(routes::badges::list_issued).post(routes::badges::issue_badge),
+        )
+        .route(
+            "/admin/badges/issued/{id}",
+            delete(routes::badges::revoke_issued_badge),
         )
         // ---- Lobby ----
         .route("/lobby/status", get(routes::lobby::get_status))
         .route("/lobby/submit-pow", post(routes::lobby::submit_pow))
         .route("/lobby/welcome", get(routes::lobby::get_welcome))
         .route(
-            "/hub/settings/lobby",
-            put(routes::lobby::update_lobby_settings),
+            "/admin/settings/lobby",
+            patch(routes::lobby::update_lobby_settings),
         )
         // ---- Bot Challenge ----
         .route("/challenge/new", get(routes::challenge::new_challenge))
@@ -751,8 +752,8 @@ pub fn create_router_full(
             post(routes::challenge::verify_challenge),
         )
         .route(
-            "/hub/settings/challenge",
-            put(routes::challenge::update_challenge_settings),
+            "/admin/settings/challenge",
+            patch(routes::challenge::update_challenge_settings),
         )
         // ---- Survey ----
         .route("/survey/current", get(routes::survey::get_current))
