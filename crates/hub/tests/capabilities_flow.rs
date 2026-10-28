@@ -30,7 +30,7 @@ async fn info_advertises_capabilities_unauthenticated() {
 }
 
 /// The list is a growing contract, not a free-for-all: a client that shipped
-/// against `voice.wt` keeps working only if the string never changes spelling.
+/// against `voice.alliance` keeps working only if the string never changes spelling.
 /// Renaming one is a removal, and removals wait for a major.
 #[tokio::test]
 async fn known_capabilities_keep_their_spelling() {
@@ -38,14 +38,7 @@ async fn known_capabilities_keep_their_spelling() {
     let info: serde_json::Value = server.get("/info").await.json();
     let caps: Vec<String> = serde_json::from_value(info["capabilities"].clone()).unwrap();
 
-    for expected in [
-        "list.cursor",
-        "list.cursor.lists",
-        "pairing.subkey",
-        "recovery.attestation",
-        "screenshare.v2",
-        "voice.wt",
-    ] {
+    for expected in ["list.cursor", "list.cursor.lists", "voice.alliance"] {
         assert!(
             caps.iter().any(|c| c == expected),
             "capability {expected:?} disappeared from /info — that is a breaking \

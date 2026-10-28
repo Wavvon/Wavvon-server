@@ -146,7 +146,6 @@ pub fn create_router_full(
     let api_router = Router::new()
         .route("/health", get(routes::health::get_health))
         .route("/info", get(routes::health::info))
-        .route("/key-rotation", get(routes::key_rotation::get_key_rotation))
         .route("/metrics", get(routes::metrics::metrics))
         .route("/hub", axum::routing::patch(routes::hub::update_hub))
         .route("/hub/members", get(routes::hub::list_members))
@@ -348,14 +347,6 @@ pub fn create_router_full(
         .route(
             "/users/{pubkey}/profile",
             get(routes::users::get_user_profile),
-        )
-        .route(
-            "/voice/populations",
-            get(routes::channels::voice_populations),
-        )
-        .route(
-            "/voice/active-users",
-            get(routes::channels::voice_active_users),
         )
         .route(
             "/voice/participants",
