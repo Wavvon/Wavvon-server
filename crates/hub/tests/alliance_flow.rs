@@ -825,6 +825,96 @@ async fn two_hubs_alliance_descendant_message_via_federation() {
     assert!(messages[0].content.contains("wiped at 45%"));
 }
 
+/// An alliance channel pages like a local one, both on the owning hub and
+/// through the federation read-through: `limit` caps the page, newest first,
+/// and `cursor` (the last id of the previous page) continues from there.
+#[tokio::test]
+async fn alliance_channel_messages_page_locally_and_through_federation() {
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a-paging").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b-paging").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+    let user_b = Identity::generate();
+    let token_b = authenticate_user(&hub_b_url, &user_b).await;
+
+    let alliance = create_alliance_named(&client, &hub_a_url, &token_a, "Paging Pact").await;
+    let channel = create_channel(&client, &hub_a_url, &token_a, json!({ "name": "log" })).await;
+    let resp = client
+        .post(format!("{hub_a_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_a)
+        .json(&json!({ "channel_id": channel.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let invite: AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    for content in ["one", "two", "three"] {
+        let resp = client
+            .post(format!("{hub_a_url}/channels/{}/messages", channel.id))
+            .bearer_auth(&token_a)
+            .json(&json!({ "content": content }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+    }
+
+    for (hub_url, token) in [(&hub_a_url, &token_a), (&hub_b_url, &token_b)] {
+        let page = |query: String| {
+            let client = client.clone();
+            let url = format!(
+                "{hub_url}/alliances/{}/channels/{}/messages?{query}",
+                alliance.id, channel.id
+            );
+            let token = token.clone();
+            async move {
+                client
+                    .get(url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Vec<MessageResponse>>()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let first = page("limit=2".to_string()).await;
+        let contents: Vec<&str> = first.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["three", "two"], "newest page from {hub_url}");
+
+        let rest = page(format!("limit=2&cursor={}", first[1].id)).await;
+        let contents: Vec<&str> = rest.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["one"], "next page from {hub_url}");
+    }
+}
+
 #[tokio::test]
 async fn share_banner_channel_lists_type_but_rejects_messages() {
     let (hub_url, _hub_state, _hub_guard) = start_hub("hub-a").await;
