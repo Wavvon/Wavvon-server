@@ -643,10 +643,14 @@ pub async fn join_with_invite(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    // Auto-approve: set approval_status = 'approved' for this user
+    // Auto-approve: an invite vouches for its holder, except where the hub
+    // also asks for an application, which a moderator still reads
+    // (join-forms.md: invite and application can both be required), or where
+    // the ban-evasion flag holds them for review.
     sqlx::query(
         "UPDATE users SET approval_status = 'approved' WHERE public_key = $1
-         AND NOT EXISTS (SELECT 1 FROM admission_flags WHERE public_key = $1)",
+         AND NOT EXISTS (SELECT 1 FROM admission_flags WHERE public_key = $1)
+         AND NOT EXISTS (SELECT 1 FROM surveys WHERE purpose = 'application' AND enabled = TRUE)",
     )
     .bind(&user.public_key)
     .execute(&state.db)

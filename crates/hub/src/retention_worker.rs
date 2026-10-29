@@ -21,6 +21,7 @@ pub async fn run_sweep(state: &AppState) {
         .as_secs() as i64;
 
     crate::ban_evasion::sweep(&state.db, now).await;
+    crate::routes::application::sweep(&state.db, now).await;
 
     // Delete old messages per channel retention policy. `messages.created_at`
     // is in milliseconds; compared against seconds, no member message was

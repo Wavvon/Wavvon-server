@@ -85,8 +85,9 @@ impl FromRequestParts<Arc<AppState>> for PeerHub {
 }
 
 /// Paths that pending (not-yet-approved) users are allowed to hit.
-/// They can see their own status at /me and nothing else.
-const PENDING_ALLOWED_PATHS: &[&str] = &["/me"];
+/// They can see their own status at /me, and fill or follow the hub's join
+/// application (join-forms.md), and nothing else.
+const PENDING_ALLOWED_PATHS: &[&str] = &["/me", "/application", "/application/status"];
 
 /// Paths a `scope: "lobby"` session may reach (lobby-survey.md Feature
 /// 1). Everything else 403s — "anything not explicitly allowed for lobby

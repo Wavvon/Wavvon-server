@@ -2,6 +2,7 @@ pub mod admin_search;
 pub mod alliance_models;
 pub mod alliances;
 pub mod app_models;
+pub mod application;
 pub mod apps;
 pub mod badges;
 pub mod banlist;

@@ -28,6 +28,11 @@
 /// Seeded with the cases where a newer client would otherwise call an
 /// endpoint an older hub does not have, or silently get a worse answer.
 pub const CAPABILITIES: &[&str] = &[
+    // The join application (join-forms.md): `GET /application` serves the
+    // form to anyone, a pending joiner submits it and follows its decision,
+    // and moderators read it and reject with a reason. Gated so a client
+    // offers the form only where the hub will take it.
+    "admission.application",
     // A new identity arriving from the address a banned one last used is
     // seated pending, and `GET /hub/pending` names the banned identity in
     // `ban_evasion_match`. Gated so a client shows the hint only where the
