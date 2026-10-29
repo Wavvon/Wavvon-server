@@ -28,16 +28,16 @@
 /// Seeded with the cases where a newer client would otherwise call an
 /// endpoint an older hub does not have, or silently get a worse answer.
 pub const CAPABILITIES: &[&str] = &[
-    // A new identity arriving from the address a banned one last used is
-    // seated pending, and `GET /hub/pending` names the banned identity in
-    // `ban_evasion_match`. Gated so a client shows the hint only where the
-    // field can be present; on an older hub its absence means nothing.
-    "admission.banevasion",
     // The join application (join-forms.md): `GET /application` serves the
     // form to anyone, a pending joiner submits it and follows its decision,
     // and moderators read it and reject with a reason. Gated so a client
     // offers the form only where the hub will take it.
     "admission.application",
+    // A new identity arriving from the address a banned one last used is
+    // seated pending, and `GET /hub/pending` names the banned identity in
+    // `ban_evasion_match`. Gated so a client shows the hint only where the
+    // field can be present; on an older hub its absence means nothing.
+    "admission.banevasion",
     // `GET /alliances/{id}/people` lists the members of one allied hub who
     // opted in (`PATCH /me` `findable_by_allies`) under an alliance whose
     // manager allowed it (`PUT /alliances/{id}/people-visibility`). Gated so a
