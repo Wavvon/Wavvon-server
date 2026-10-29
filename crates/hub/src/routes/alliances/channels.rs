@@ -868,8 +868,11 @@ pub async fn get_alliance_channel_messages(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path((alliance_id, channel_id)): Path<(String, String)>,
+    Query(page): Query<crate::routes::paging::PageQuery>,
 ) -> Result<Json<Vec<crate::routes::chat_models::MessageResponse>>, (StatusCode, String)> {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+    // Same page size as a local channel's history (messages.rs), newest first.
+    let limit = page.limit.unwrap_or(50).clamp(1, 100);
 
     // Locally-owned alliance channel (explicit share, or a descendant of an
     // include_descendants share)? Just read directly.
@@ -894,9 +897,13 @@ pub async fn get_alliance_channel_messages(
                     m.content, m.attachments, m.created_at, m.edited_at, m.embeds, m.game
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1
-             ORDER BY m.created_at DESC, m.id DESC LIMIT 50",
+               AND ($2::text IS NULL OR (m.created_at, m.id) <
+                    ((SELECT created_at FROM messages WHERE id = $2), $2))
+             ORDER BY m.created_at DESC, m.id DESC LIMIT $3",
         )
         .bind(&channel_id)
+        .bind(page.cursor())
+        .bind(limit)
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -965,7 +972,14 @@ pub async fn get_alliance_channel_messages(
     // The peer owns it -- federate the message read.
     state
         .federation_client
-        .get_messages(&member.hub_url, &token, &alliance_id, &channel_id)
+        .get_messages(
+            &member.hub_url,
+            &token,
+            &alliance_id,
+            &channel_id,
+            limit,
+            page.cursor(),
+        )
         .await
         .map(Json)
         .map_err(|e| {

@@ -124,11 +124,18 @@ impl FederationClient {
         token: &str,
         alliance_id: &str,
         channel_id: &str,
+        limit: i64,
+        cursor: Option<&str>,
     ) -> Result<Vec<MessageResponse>> {
+        let mut query = vec![("limit", limit.to_string())];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor.to_string()));
+        }
         self.http
             .get(format!(
                 "{base_url}/alliances/{alliance_id}/channels/{channel_id}/messages"
             ))
+            .query(&query)
             .bearer_auth(token)
             .send()
             .await
