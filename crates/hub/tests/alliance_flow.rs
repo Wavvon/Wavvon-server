@@ -1938,6 +1938,61 @@ async fn an_alliance_manager_cannot_grant_the_list() {
     );
 }
 
+/// Whoever may edit the grant list may read it, without managing the
+/// alliance; a member holding neither may not.
+#[tokio::test]
+async fn roles_manage_reads_the_grant_list_it_edits() {
+    let (hub_url, _state, _guard) = start_hub("hub-managers-read").await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_user(&hub_url, &owner).await;
+
+    let editor = Identity::generate();
+    let editor_token = authenticate_user(&hub_url, &editor).await;
+    let bystander = Identity::generate();
+    let bystander_token = authenticate_user(&hub_url, &bystander).await;
+
+    let alliance = create_alliance_named(&client, &hub_url, &owner_token, "Pact").await;
+    let editors = create_role_with(
+        &client,
+        &hub_url,
+        &owner_token,
+        "Editors",
+        &["roles.manage"],
+    )
+    .await;
+    assign_role_to(
+        &client,
+        &hub_url,
+        &owner_token,
+        &editor.public_key_hex(),
+        &editors,
+    )
+    .await;
+
+    let list = |token: String| {
+        let client = client.clone();
+        let url = format!("{hub_url}/alliances/{}/managers", alliance.id);
+        async move {
+            client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert_eq!(list(editor_token).await, 200, "roles.manage reads the list");
+    assert_eq!(
+        list(bystander_token).await,
+        403,
+        "neither managing the alliance nor holding roles.manage"
+    );
+}
+
 /// An alliance invite used to be a signature over the alliance id: one token
 /// per alliance, valid forever, and `/alliances/{id}/join` took it from
 /// anyone. Now it is spent on use, and joining needs a peer session.
