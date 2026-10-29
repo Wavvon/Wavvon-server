@@ -458,11 +458,14 @@ pub async fn submit_survey(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         "pending".to_string()
     } else {
-        sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
-            .bind(&user.public_key)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        sqlx::query(
+            "UPDATE users SET approval_status = 'approved' WHERE public_key = $1
+             AND NOT EXISTS (SELECT 1 FROM admission_flags WHERE public_key = $1)",
+        )
+        .bind(&user.public_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         "approved".to_string()
     };
 

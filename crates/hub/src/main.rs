@@ -669,6 +669,7 @@ async fn main() -> Result<()> {
                         .bind(now)
                         .execute(&db)
                         .await?;
+                        wavvon_hub::ban_evasion::flag_banned(&db, &pubkey, None, now).await?;
                         println!("Banned {pubkey}");
                     }
                     "unban" => {
@@ -679,6 +680,7 @@ async fn main() -> Result<()> {
                             .bind(&pubkey)
                             .execute(&db)
                             .await?;
+                        wavvon_hub::ban_evasion::unflag(&db, &pubkey).await?;
                         println!("Unbanned {pubkey}");
                     }
                     "set-owner" => {

@@ -257,11 +257,12 @@ pub async fn list_pending(
     // Oldest first — the queue is worked from the front, so the cursor moves
     // forward rather than back like the newest-first lists.
     let rows = sqlx::query_as::<_, PendingUserRow>(
-        "SELECT public_key, display_name, first_seen_at
-         FROM users WHERE approval_status = 'pending'
-           AND ($1::text IS NULL OR (first_seen_at, public_key) >
+        "SELECT u.public_key, u.display_name, u.first_seen_at, f.matched_pubkey
+         FROM users u LEFT JOIN admission_flags f ON f.public_key = u.public_key
+         WHERE u.approval_status = 'pending'
+           AND ($1::text IS NULL OR (u.first_seen_at, u.public_key) >
                 ((SELECT first_seen_at FROM users WHERE public_key = $1), $1))
-         ORDER BY first_seen_at, public_key
+         ORDER BY u.first_seen_at, u.public_key
          LIMIT $2",
     )
     .bind(page.cursor())
@@ -276,6 +277,7 @@ pub async fn list_pending(
                 public_key: r.public_key,
                 display_name: r.display_name,
                 first_seen_at: r.first_seen_at,
+                ban_evasion_match: r.matched_pubkey,
             })
             .collect(),
     ))
@@ -291,6 +293,12 @@ pub async fn approve_user(
     perms.require(HUB_ADMISSION)?;
 
     sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
+        .bind(&target_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // The moderator has seen the flag and decided; it has done its job.
+    sqlx::query("DELETE FROM admission_flags WHERE public_key = $1")
         .bind(&target_key)
         .execute(&state.db)
         .await
@@ -529,6 +537,9 @@ pub struct PendingUser {
     pub public_key: String,
     pub display_name: Option<String>,
     pub first_seen_at: i64,
+    /// The banned identity whose last address this joiner arrived from, when
+    /// that is why they are waiting (ban_evasion.rs). A hint, not a verdict.
+    pub ban_evasion_match: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -536,6 +547,7 @@ struct PendingUserRow {
     public_key: String,
     display_name: Option<String>,
     first_seen_at: i64,
+    matched_pubkey: Option<String>,
 }
 
 pub async fn upsert_setting(

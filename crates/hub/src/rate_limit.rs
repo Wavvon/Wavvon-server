@@ -207,12 +207,42 @@ impl RateLimiter {
     /// In trusted-proxy mode, use XFF; fall back to the socket peer address.
     /// In direct mode, always use the socket peer address.
     fn resolve_ip(&self, socket_ip: Option<IpAddr>, headers: &HeaderMap) -> Option<IpAddr> {
-        if self.trusted_proxy {
-            xff_ip(headers).or(socket_ip)
-        } else {
-            socket_ip
-        }
+        resolve_ip(self.trusted_proxy, socket_ip, headers)
     }
+}
+
+fn resolve_ip(
+    trusted_proxy: bool,
+    socket_ip: Option<IpAddr>,
+    headers: &HeaderMap,
+) -> Option<IpAddr> {
+    if trusted_proxy {
+        xff_ip(headers).or(socket_ip)
+    } else {
+        socket_ip
+    }
+}
+
+/// The client's address, resolved the way the rate limiter resolves it, for
+/// the handlers that need one (the ban-evasion flag). Absent when the
+/// transport gives no peer address, as under an in-process test server.
+#[derive(Clone, Copy)]
+pub struct ClientIp(pub IpAddr);
+
+pub async fn tag_client_ip(
+    trusted_proxy: bool,
+    mut req: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let socket_ip = req
+        .extract_parts::<ConnectInfo<std::net::SocketAddr>>()
+        .await
+        .ok()
+        .map(|ConnectInfo(addr)| addr.ip());
+    if let Some(ip) = resolve_ip(trusted_proxy, socket_ip, req.headers()) {
+        req.extensions_mut().insert(ClientIp(ip));
+    }
+    next.run(req).await
 }
 
 // ── Middleware ────────────────────────────────────────────────────────────────
