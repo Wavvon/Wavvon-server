@@ -25,13 +25,34 @@ const SIGHTING_TTL_SECS: i64 = 7 * 24 * 3600;
 /// How long a ban keeps flagging its address.
 const FLAG_TTL_SECS: i64 = 30 * 24 * 3600;
 
-pub fn ip_hash(state: &AppState, ip: IpAddr) -> String {
+/// The keyed hash of a client address, or None for an address that names a
+/// proxy or a LAN rather than a person: loopback, private, link-local,
+/// unspecified. A hub behind a reverse proxy it does not trust sees the
+/// proxy's address for everyone, so one ban would hold every newcomer for
+/// review; and a test run, or a LAN hub, is all one such address.
+pub fn ip_hash(state: &AppState, ip: IpAddr) -> Option<String> {
+    let ip = canonicalize_ip(ip);
+    let local = match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (first & 0xfe00) == 0xfc00
+                || (first & 0xffc0) == 0xfe80
+        }
+    };
+    if local {
+        return None;
+    }
     // A signature is deterministic for Ed25519, so this is a stable secret only
     // the hub can produce. Rotating the hub key starts a fresh set of hashes.
     let key = state.hub_identity.sign(b"wavvon/ip-hash/v1\0").to_bytes();
     let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC takes any key length");
-    mac.update(canonicalize_ip(ip).to_string().as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    mac.update(ip.to_string().as_bytes());
+    Some(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Remember the address an identity was last seen from. Best-effort: a
