@@ -1,6 +1,7 @@
 pub mod afk_worker;
 pub mod apps;
 pub mod auth;
+pub mod ban_evasion;
 pub mod banlist_worker;
 pub mod bootstrap;
 pub mod capabilities;

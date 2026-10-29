@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -112,6 +112,34 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             )
             .execute(conn)
             .await?;
+        }
+        // Ban-evasion flag (decisions.md, "A ban stays on the identity; an IP is a
+        // signal, never a wall"). Every table holds a keyed hash, never an
+        // address. `ip_sightings` is the last hash each identity was seen from,
+        // swept after a week; a ban copies it into `ban_ip_flags` for the hub's
+        // window; a new identity arriving from a flagged hash is seated pending
+        // with an `admission_flags` row naming the banned identity it matched.
+        3 => {
+            for ddl in [
+                "CREATE TABLE IF NOT EXISTS ip_sightings (
+                    public_key TEXT PRIMARY KEY,
+                    ip_hash    TEXT NOT NULL,
+                    seen_at    BIGINT NOT NULL
+                )",
+                "CREATE TABLE IF NOT EXISTS ban_ip_flags (
+                    ip_hash       TEXT NOT NULL,
+                    banned_pubkey TEXT NOT NULL,
+                    expires_at    BIGINT NOT NULL,
+                    PRIMARY KEY (ip_hash, banned_pubkey)
+                )",
+                "CREATE TABLE IF NOT EXISTS admission_flags (
+                    public_key     TEXT PRIMARY KEY REFERENCES users(public_key) ON DELETE CASCADE,
+                    matched_pubkey TEXT NOT NULL,
+                    flagged_at     BIGINT NOT NULL
+                )",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
         }
         _ => unreachable!("no schema step {version}"),
     }

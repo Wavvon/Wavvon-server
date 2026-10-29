@@ -961,6 +961,9 @@ pub fn create_router_full(
         .layer(build_cors_layer(cors_origins))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(attach_request_id))
+        .layer(from_fn(move |req, next| {
+            crate::rate_limit::tag_client_ip(trusted_proxy, req, next)
+        }))
         .with_state(state);
 
     // Attach the SPA fallback when a web client directory is configured.

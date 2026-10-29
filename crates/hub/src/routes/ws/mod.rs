@@ -24,6 +24,7 @@ pub use voice::voice_identity;
 pub async fn ws_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WsParams>,
+    client_ip: Option<axum::Extension<crate::rate_limit::ClientIp>>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Delegate to the shared session-validity helper so the WS admission
@@ -41,6 +42,14 @@ pub async fn ws_handler(
     } else {
         None
     };
+
+    // A token outlives many connections, so the sign-in alone would leave the
+    // last-seen address weeks stale; every socket refreshes it.
+    if let Some(axum::Extension(crate::rate_limit::ClientIp(ip))) = client_ip {
+        let hash = crate::ban_evasion::ip_hash(&state, ip);
+        let now = crate::auth::handlers::unix_timestamp();
+        crate::ban_evasion::record_sighting(&state.db, &public_key, &hash, now).await;
+    }
 
     tracing::info!(
         "WebSocket connected: {}",

@@ -108,6 +108,7 @@ pub async fn challenge(
 
 pub async fn verify(
     State(state): State<Arc<AppState>>,
+    client_ip: Option<axum::Extension<crate::rate_limit::ClientIp>>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, (StatusCode, String)> {
     let pending = state
@@ -414,7 +415,35 @@ pub async fn verify(
 
     // `existing_users` was already computed above (before the
     // security-level gate) for the owner-exemption check; reused here.
-    let initial_status = if require_approval && existing_users > 0 && req.is_hub != Some(true) {
+    // A new identity arriving from the address a banned one last used is
+    // seated pending, for a moderator to decide (ban_evasion.rs). Only at
+    // first seat: a member who shares an address with someone later banned
+    // keeps their standing.
+    let ip_hash = client_ip.map(|axum::Extension(crate::rate_limit::ClientIp(ip))| {
+        crate::ban_evasion::ip_hash(&state, ip)
+    });
+    let ban_match = match &ip_hash {
+        Some(hash) if existing_users > 0 && req.is_hub != Some(true) => {
+            let seated: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1)")
+                    .bind(&canonical_pubkey)
+                    .fetch_one(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if seated {
+                None
+            } else {
+                crate::ban_evasion::matching_ban(&state.db, hash, &canonical_pubkey, now)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            }
+        }
+        _ => None,
+    };
+
+    let initial_status = if ban_match.is_some()
+        || (require_approval && existing_users > 0 && req.is_hub != Some(true))
+    {
         "pending"
     } else {
         "approved"
@@ -454,6 +483,22 @@ pub async fn verify(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if let Some(matched) = &ban_match {
+        sqlx::query(
+            "INSERT INTO admission_flags (public_key, matched_pubkey, flagged_at)
+             VALUES ($1, $2, $3) ON CONFLICT (public_key) DO NOTHING",
+        )
+        .bind(&canonical_pubkey)
+        .bind(matched)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    if let Some(hash) = &ip_hash {
+        crate::ban_evasion::record_sighting(&state.db, &canonical_pubkey, hash, now).await;
+    }
 
     // Compute session scope (lobby-survey.md Feature 1): a session is
     // "lobby"-scoped when the lobby is enabled and the user's persisted PoW

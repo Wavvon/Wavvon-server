@@ -644,11 +644,14 @@ pub async fn join_with_invite(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Auto-approve: set approval_status = 'approved' for this user
-    sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
-        .bind(&user.public_key)
-        .execute(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    sqlx::query(
+        "UPDATE users SET approval_status = 'approved' WHERE public_key = $1
+         AND NOT EXISTS (SELECT 1 FROM admission_flags WHERE public_key = $1)",
+    )
+    .bind(&user.public_key)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Always call the shared helper, even when the invite carries no
     // explicit `grant_role_id` — it falls back to `default_invite_role_id`
