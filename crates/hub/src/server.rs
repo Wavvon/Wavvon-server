@@ -754,6 +754,23 @@ pub fn create_router_full(
         )
         // ---- Survey ----
         .route("/survey/current", get(routes::survey::get_current))
+        .route(
+            "/application",
+            get(routes::application::get_application).post(routes::application::submit),
+        )
+        .route("/application/status", get(routes::application::get_status))
+        .route(
+            "/admin/application",
+            get(routes::application::admin_get).put(routes::application::admin_put),
+        )
+        .route(
+            "/admin/application/responses/{pubkey}",
+            get(routes::application::admin_get_response),
+        )
+        .route(
+            "/hub/pending/{pubkey}/reject",
+            post(routes::application::reject),
+        )
         .route("/survey/submit", post(routes::survey::submit_survey))
         .route(
             "/admin/survey",

@@ -33,6 +33,11 @@ pub const CAPABILITIES: &[&str] = &[
     // `ban_evasion_match`. Gated so a client shows the hint only where the
     // field can be present; on an older hub its absence means nothing.
     "admission.banevasion",
+    // The join application (join-forms.md): `GET /application` serves the
+    // form to anyone, a pending joiner submits it and follows its decision,
+    // and moderators read it and reject with a reason. Gated so a client
+    // offers the form only where the hub will take it.
+    "admission.application",
     // `GET /alliances/{id}/people` lists the members of one allied hub who
     // opted in (`PATCH /me` `findable_by_allies`) under an alliance whose
     // manager allowed it (`PUT /alliances/{id}/people-visibility`). Gated so a

@@ -257,9 +257,17 @@ pub async fn list_pending(
     // Oldest first — the queue is worked from the front, so the cursor moves
     // forward rather than back like the newest-first lists.
     let rows = sqlx::query_as::<_, PendingUserRow>(
-        "SELECT u.public_key, u.display_name, u.first_seen_at, f.matched_pubkey
+        "SELECT u.public_key, u.display_name, u.first_seen_at, f.matched_pubkey,
+                a.id IS NOT NULL AS has_application
          FROM users u LEFT JOIN admission_flags f ON f.public_key = u.public_key
+         LEFT JOIN LATERAL (
+             SELECT sr.id, sr.rejected FROM survey_responses sr
+             JOIN surveys s ON s.id = sr.survey_id AND s.purpose = 'application'
+             WHERE sr.pubkey = u.public_key
+             ORDER BY sr.submitted_at DESC LIMIT 1
+         ) a ON TRUE
          WHERE u.approval_status = 'pending'
+           AND a.rejected IS NOT TRUE
            AND ($1::text IS NULL OR (u.first_seen_at, u.public_key) >
                 ((SELECT first_seen_at FROM users WHERE public_key = $1), $1))
          ORDER BY u.first_seen_at, u.public_key
@@ -278,6 +286,7 @@ pub async fn list_pending(
                 display_name: r.display_name,
                 first_seen_at: r.first_seen_at,
                 ban_evasion_match: r.matched_pubkey,
+                has_application: r.has_application,
             })
             .collect(),
     ))
@@ -297,6 +306,13 @@ pub async fn approve_user(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::routes::application::mark_approved(
+        &state.db,
+        &target_key,
+        crate::auth::handlers::unix_timestamp(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     // The moderator has seen the flag and decided; it has done its job.
     sqlx::query("DELETE FROM admission_flags WHERE public_key = $1")
         .bind(&target_key)
@@ -540,6 +556,9 @@ pub struct PendingUser {
     /// The banned identity whose last address this joiner arrived from, when
     /// that is why they are waiting (ban_evasion.rs). A hint, not a verdict.
     pub ban_evasion_match: Option<String>,
+    /// Whether they filled the hub's join application; its answers are at
+    /// `GET /admin/application/responses/{pubkey}`.
+    pub has_application: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -548,6 +567,7 @@ struct PendingUserRow {
     display_name: Option<String>,
     first_seen_at: i64,
     matched_pubkey: Option<String>,
+    has_application: bool,
 }
 
 pub async fn upsert_setting(

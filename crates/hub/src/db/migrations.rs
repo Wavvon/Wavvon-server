@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 3;
+pub const SCHEMA_VERSION: i32 = 4;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -136,6 +136,33 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                     public_key     TEXT PRIMARY KEY REFERENCES users(public_key) ON DELETE CASCADE,
                     matched_pubkey TEXT NOT NULL,
                     flagged_at     BIGINT NOT NULL
+                )",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+        }
+        // Join forms (join-forms.md): the survey tables carry two forms told
+        // apart by `purpose`, the onboarding survey and the pre-join
+        // application. Questions gain help text and the limits the new kinds
+        // need; a multi-select answer keeps its choices in a table of its own,
+        // since `survey_answers` holds one choice per question. An application
+        // response records its decision, which starts its deletion clock.
+        4 => {
+            for ddl in [
+                "ALTER TABLE surveys ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'onboarding'",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS help TEXT",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS multiline BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS max_len INTEGER",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS min_choices INTEGER",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS max_choices INTEGER",
+                "ALTER TABLE survey_responses ADD COLUMN IF NOT EXISTS decided_at BIGINT",
+                "ALTER TABLE survey_responses ADD COLUMN IF NOT EXISTS rejection_reason TEXT",
+                "ALTER TABLE survey_responses ADD COLUMN IF NOT EXISTS rejected BOOLEAN NOT NULL DEFAULT FALSE",
+                "CREATE TABLE IF NOT EXISTS survey_answer_choices (
+                    response_id TEXT NOT NULL REFERENCES survey_responses(id) ON DELETE CASCADE,
+                    question_id TEXT NOT NULL,
+                    choice_id   TEXT NOT NULL,
+                    PRIMARY KEY (response_id, question_id, choice_id)
                 )",
             ] {
                 sqlx::query(ddl).execute(&mut *conn).await?;

@@ -441,8 +441,13 @@ pub async fn verify(
         _ => None,
     };
 
+    // An enabled join application is an approval gate of its own: the
+    // application is the request a moderator reads (join-forms.md).
+    let application = crate::routes::application::is_enabled(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     let initial_status = if ban_match.is_some()
-        || (require_approval && existing_users > 0 && req.is_hub != Some(true))
+        || ((require_approval || application) && existing_users > 0 && req.is_hub != Some(true))
     {
         "pending"
     } else {
