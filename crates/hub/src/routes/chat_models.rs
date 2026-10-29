@@ -286,13 +286,6 @@ pub enum ChatEvent {
         stream_id: String,
         sharer_pubkey: String,
     },
-    /// v2 signaling envelope (offer/answer/ICE/viewer-joined/viewer-left).
-    /// `to_pubkey` is the sole intended recipient; the WS dispatcher
-    /// skips every connection that isn't that pubkey.
-    ScreenShareSignal {
-        channel_id: String,
-        to_pubkey: String,
-    },
     /// Notify a specific cross-channel subscriber that their subscribed stream ended.
     /// `to_pubkey` is the subscriber; this is delivered only to their connection.
     StreamSubscriptionEnded {
@@ -377,7 +370,6 @@ impl ChatEvent {
             | ChatEvent::Typing { channel_id, .. }
             | ChatEvent::ScreenShareStarted { channel_id, .. }
             | ChatEvent::ScreenShareStopped { channel_id, .. }
-            | ChatEvent::ScreenShareSignal { channel_id, .. }
             | ChatEvent::Forum { channel_id }
             | ChatEvent::VoiceZone { channel_id }
             | ChatEvent::Video { channel_id }
@@ -474,13 +466,6 @@ pub enum WsClientMessage {
         kind: String,
         mime: String,
         has_audio: bool,
-        /// v2: "chunks" (default, v1 relay) or "webrtc". Absent = "chunks" for
-        /// old clients. Additive — old hubs and clients ignore this field.
-        #[serde(default)]
-        transport: Option<String>,
-        /// v2: track metadata for webcam + screen multiplexing. Additive.
-        #[serde(default)]
-        tracks: Option<Vec<TrackMeta>>,
     },
     #[serde(rename = "screen_share_chunk")]
     ScreenShareChunk {
@@ -491,45 +476,6 @@ pub enum WsClientMessage {
     },
     #[serde(rename = "screen_share_stop")]
     ScreenShareStop {
-        channel_id: String,
-        stream_id: String,
-    },
-    // ---- Screen share v2: WebRTC signaling envelopes (client → hub) ----
-    /// Sharer sends an SDP offer to a specific viewer.
-    #[serde(rename = "screen_share_offer")]
-    ScreenShareOffer {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        /// Opaque SDP text — hub does not parse this.
-        sdp: String,
-    },
-    /// Viewer sends an SDP answer to the sharer.
-    #[serde(rename = "screen_share_answer")]
-    ScreenShareAnswer {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        sdp: String,
-    },
-    /// Either peer trickles an ICE candidate to the other.
-    #[serde(rename = "screen_share_ice")]
-    ScreenShareIce {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        /// JSON string: `{ candidate, sdpMid, sdpMLineIndex }` — opaque to hub.
-        candidate: String,
-    },
-    /// Viewer signals to the sharer that it wants a peer connection.
-    #[serde(rename = "screen_share_viewer_join")]
-    ScreenShareViewerJoin {
-        channel_id: String,
-        stream_id: String,
-    },
-    /// Viewer tears down its peer connection.
-    #[serde(rename = "screen_share_viewer_leave")]
-    ScreenShareViewerLeave {
         channel_id: String,
         stream_id: String,
     },
@@ -674,8 +620,7 @@ pub enum WsClientMessage {
     /// Generic mini-app <-> bot relay (mini-apps.md "the mini-app
     /// connects to the hub's existing /ws endpoint ... and exchanges
     /// messages with the bot ... through the normal WS relay"). `payload` is
-    /// an opaque JSON-encoded string -- the hub never inspects it, same
-    /// convention as `screen_share_ice`'s `candidate` field.
+    /// an opaque JSON-encoded string -- the hub never inspects it.
     ///
     /// From a mini-app session (non-bot connection): hub forwards to every
     /// active WS session for `app_id`, tagged with the sender's pubkey.
@@ -852,49 +797,6 @@ pub enum WsServerMessage {
         channel_id: String,
         stream_id: String,
         sharer_pubkey: String,
-    },
-
-    // ---- Screen share v2: hub→client forwarded signaling envelopes ----
-    /// SDP offer forwarded to the target viewer (from_pubkey = sharer).
-    #[serde(rename = "screen_share_offer_in")]
-    ScreenShareOfferIn {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        sdp: String,
-        from_pubkey: String,
-    },
-    /// SDP answer forwarded to the sharer (from_pubkey = viewer).
-    #[serde(rename = "screen_share_answer_in")]
-    ScreenShareAnswerIn {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        sdp: String,
-        from_pubkey: String,
-    },
-    /// ICE candidate forwarded to the target peer.
-    #[serde(rename = "screen_share_ice_in")]
-    ScreenShareIceIn {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        candidate: String,
-        from_pubkey: String,
-    },
-    /// Hub notifies the sharer that a viewer wants to negotiate.
-    #[serde(rename = "screen_share_viewer_joined")]
-    ScreenShareViewerJoined {
-        channel_id: String,
-        stream_id: String,
-        from_pubkey: String,
-    },
-    /// Hub notifies the sharer that a viewer left.
-    #[serde(rename = "screen_share_viewer_left")]
-    ScreenShareViewerLeft {
-        channel_id: String,
-        stream_id: String,
-        from_pubkey: String,
     },
 
     // ---- Video signaling: hub → client ----
@@ -1182,16 +1084,6 @@ pub enum WsServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         last_error: Option<String>,
     },
-}
-
-/// Track metadata carried in `ScreenShareStart.tracks` (v2, additive).
-/// Old clients that don't know this field ignore it.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TrackMeta {
-    /// RTP `m=` mid value (a string matching `RTCRtpTransceiver.mid`).
-    pub mid: String,
-    /// "screen" or "webcam".
-    pub kind: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

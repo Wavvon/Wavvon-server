@@ -303,12 +303,6 @@ pub(super) async fn handle_socket(
                                     if vtp != &cs.public_key { continue; }
                                 }
                             }
-                            // v2 signaling: targeted to to_pubkey only.
-                            if let crate::routes::chat_models::ChatEvent::ScreenShareSignal {
-                                to_pubkey, ..
-                            } = &event {
-                                if to_pubkey != &cs.public_key { continue; }
-                            }
                             // StreamSubscriptionEnded: targeted.
                             if let crate::routes::chat_models::ChatEvent::StreamSubscriptionEnded {
                                 to_pubkey, ..
@@ -700,10 +694,9 @@ pub(super) async fn handle_socket(
             }
         });
 
-        // Remove the disconnecting user as a viewer/subscriber from all
+        // Remove the disconnecting user as a cross-channel subscriber from all
         // remaining shares (they may have been watching someone else's share).
         for active in shares.values_mut() {
-            active.viewers.remove(&public_key);
             active.cross_channel_subscribers.remove(&public_key);
         }
 
@@ -941,21 +934,6 @@ async fn dispatch_client_msg(
         }
         WsClientMessage::ScreenShareStop { .. } => {
             screen::handle_screen_share_stop(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareViewerJoin { .. } => {
-            screen::handle_screen_share_viewer_join(cs, state, ws_tx, msg).await
-        }
-        WsClientMessage::ScreenShareViewerLeave { .. } => {
-            screen::handle_screen_share_viewer_leave(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareOffer { .. } => {
-            screen::handle_screen_share_offer(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareAnswer { .. } => {
-            screen::handle_screen_share_answer(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareIce { .. } => {
-            screen::handle_screen_share_ice(cs, state, msg).await
         }
         WsClientMessage::StreamList => screen::handle_stream_list(cs, state, ws_tx).await,
         WsClientMessage::StreamSubscribe { .. } => {
