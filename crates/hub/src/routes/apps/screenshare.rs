@@ -104,7 +104,6 @@ pub async fn screenshare_start(
             .entry((req.channel_id.clone(), sharer.clone()))
             .or_insert_with(|| ActiveShare {
                 streams: HashMap::new(),
-                viewers: HashSet::new(),
                 cross_channel_subscribers: HashSet::new(),
             });
         active.streams.insert(
