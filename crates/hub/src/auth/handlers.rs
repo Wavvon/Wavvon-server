@@ -419,7 +419,7 @@ pub async fn verify(
     // seated pending, for a moderator to decide (ban_evasion.rs). Only at
     // first seat: a member who shares an address with someone later banned
     // keeps their standing.
-    let ip_hash = client_ip.map(|axum::Extension(crate::rate_limit::ClientIp(ip))| {
+    let ip_hash = client_ip.and_then(|axum::Extension(crate::rate_limit::ClientIp(ip))| {
         crate::ban_evasion::ip_hash(&state, ip)
     });
     let ban_match = match &ip_hash {

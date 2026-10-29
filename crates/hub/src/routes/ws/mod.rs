@@ -45,8 +45,9 @@ pub async fn ws_handler(
 
     // A token outlives many connections, so the sign-in alone would leave the
     // last-seen address weeks stale; every socket refreshes it.
-    if let Some(axum::Extension(crate::rate_limit::ClientIp(ip))) = client_ip {
-        let hash = crate::ban_evasion::ip_hash(&state, ip);
+    if let Some(hash) = client_ip.and_then(|axum::Extension(crate::rate_limit::ClientIp(ip))| {
+        crate::ban_evasion::ip_hash(&state, ip)
+    }) {
         let now = crate::auth::handlers::unix_timestamp();
         crate::ban_evasion::record_sighting(&state.db, &public_key, &hash, now).await;
     }
