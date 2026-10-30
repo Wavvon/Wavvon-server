@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 4;
+pub const SCHEMA_VERSION: i32 = 5;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -167,6 +167,23 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             ] {
                 sqlx::query(ddl).execute(&mut *conn).await?;
             }
+        }
+        // A session remembers the device key that signed in, since its
+        // `public_key` is the canonical identity (the master, for a paired
+        // device) and a revocation names the device. Sessions issued before
+        // this have no device on record, so those of anyone who has ever
+        // revoked a device are dropped; their clients sign in again.
+        5 => {
+            sqlx::query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_pubkey TEXT")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "DELETE FROM sessions WHERE public_key IN (
+                    SELECT u.public_key FROM users u
+                    JOIN subkey_revocations r ON r.master_pubkey = u.master_pubkey)",
+            )
+            .execute(conn)
+            .await?;
         }
         _ => unreachable!("no schema step {version}"),
     }

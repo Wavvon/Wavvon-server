@@ -445,16 +445,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 ));
             };
 
-            // Reject revoked keys.
-            let revoked_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = $1",
-            )
-            .bind(&pk)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
-
-            if revoked_count > 0 {
+            if crate::auth::handlers::session_is_revoked(&state.db, token, &pk).await? {
                 return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
             }
 
