@@ -303,6 +303,7 @@ pub async fn dispatch_slash(
             reply_count: 0,
             embeds: reply.embeds,
             game: app_response.game,
+            masquerade: None,
             components: reply.components.filter(|rows| !rows.is_empty()),
         };
 
@@ -372,6 +373,7 @@ pub async fn insert_ephemeral_error(
         reply_count: 0,
         embeds: None,
         game: None,
+        masquerade: None,
         components: None,
     };
 
@@ -655,6 +657,7 @@ async fn apply_component_response(
             // on that type to read from.
             embeds: None,
             game: None,
+            masquerade: None,
             components: None,
         };
 
@@ -690,8 +693,9 @@ async fn load_updated_message(
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     ) = sqlx::query_as(
-        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at, m.embeds, m.game, m.components
+        "SELECT m.channel_id, m.sender, u.display_name, m.content, m.created_at, m.edited_at, m.embeds, m.game, m.components, m.masquerade
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -715,6 +719,7 @@ async fn load_updated_message(
         embeds: crate::routes::messages::parse_json(row.6),
         game: crate::routes::messages::parse_json(row.7),
         components: crate::routes::messages::parse_json(row.8),
+        masquerade: crate::routes::messages::parse_json(row.9),
     })
 }
 

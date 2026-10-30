@@ -350,23 +350,40 @@ pub async fn post_webhook_message(
     let msg_id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp_ms();
 
-    // The sender identity is the webhook id (which has a users row).
-    // Override display name if the request provides a username.
-    let display_name = req
-        .username
-        .as_deref()
-        .unwrap_or(&webhook.display_name)
-        .to_string();
+    // The sender identity is the webhook id (which has a users row). A
+    // username or avatar_url in the request is a masquerade, stored with the
+    // message: it used to reach only the live broadcast, so history showed
+    // the webhook's own name, and the avatar was dropped altogether.
+    let masquerade = if req.username.is_some() || req.avatar_url.is_some() {
+        Some(
+            crate::routes::chat_models::Masquerade {
+                name: req
+                    .username
+                    .clone()
+                    .unwrap_or_else(|| webhook.display_name.clone()),
+                avatar_url: req.avatar_url.clone(),
+            }
+            .validated()?,
+        )
+    } else {
+        None
+    };
+    let masquerade_json = masquerade
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO messages(id, channel_id, sender, content, created_at)
-         VALUES($1,$2,$3,$4,$5)",
+        "INSERT INTO messages(id, channel_id, sender, content, created_at, masquerade)
+         VALUES($1,$2,$3,$4,$5,$6)",
     )
     .bind(&msg_id)
     .bind(&webhook.channel_id)
     .bind(&webhook_id)
     .bind(content)
     .bind(now)
+    .bind(&masquerade_json)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -375,7 +392,7 @@ pub async fn post_webhook_message(
         id: msg_id.clone(),
         channel_id: webhook.channel_id.clone(),
         sender: webhook_id.clone(),
-        sender_name: Some(display_name),
+        sender_name: Some(webhook.display_name.clone()),
         content: content.to_string(),
         created_at: now,
         edited_at: None,
@@ -392,6 +409,7 @@ pub async fn post_webhook_message(
         embeds: None,
         game: None,
         components: None,
+        masquerade,
     };
 
     {

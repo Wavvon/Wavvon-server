@@ -894,7 +894,8 @@ pub async fn get_alliance_channel_messages(
 
         let rows = sqlx::query_as::<_, LocalMessageRow>(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
-                    m.content, m.attachments, m.created_at, m.edited_at, m.embeds, m.game
+                    m.content, m.attachments, m.created_at, m.edited_at, m.embeds, m.game,
+                    m.masquerade
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1
                AND ($2::text IS NULL OR (m.created_at, m.id) <
@@ -943,6 +944,7 @@ pub async fn get_alliance_channel_messages(
                     .as_deref()
                     .filter(|s| !s.is_empty())
                     .and_then(|s| serde_json::from_str(s).ok()),
+                masquerade: crate::routes::messages::parse_json(r.masquerade),
                 // Like reply context: shown on the owning hub, where a click
                 // has an app to reach.
                 components: None,

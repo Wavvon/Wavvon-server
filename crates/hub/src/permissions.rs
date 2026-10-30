@@ -63,6 +63,10 @@ permission_catalogue! {
     MESSAGES_READ => "messages.read", HubAndChannel,
     MESSAGES_SEND => "messages.send", HubAndChannel,
     MESSAGES_MANAGE => "messages.manage", HubAndChannel,
+    /// Post a message under another name and avatar (a bridge relaying
+    /// someone from another network). The real sender stays on the message
+    /// and clients show it, so this cannot pass for a member.
+    MESSAGES_MASQUERADE => "messages.masquerade", HubAndChannel,
 
     // ── Forum ───────────────────────────────────────────────────────────
     FORUM_POSTS_CREATE => "forum.posts.create", HubAndChannel,
