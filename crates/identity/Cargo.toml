@@ -58,3 +58,4 @@ curve25519-dalek = "4"
 
 [dev-dependencies]
 base64 = { workspace = true }
+proptest = "1"
