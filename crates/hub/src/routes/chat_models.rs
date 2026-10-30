@@ -197,6 +197,16 @@ impl Masquerade {
             avatar_url: self.avatar_url,
         })
     }
+
+    /// Replaces the avatar URL with the hub's own copy (`/uploads/...`), so a
+    /// reader's client never contacts the third-party host. An avatar the hub
+    /// cannot fetch is dropped, and the name stays.
+    pub async fn with_hosted_avatar(mut self) -> Self {
+        if let Some(url) = self.avatar_url.take() {
+            self.avatar_url = crate::routes::preview::store_remote_image(&url).await;
+        }
+        self
+    }
 }
 
 /// Minimal preview of a parent message. We embed it in replies so the

@@ -262,6 +262,7 @@ fn infer_mime_from_ext(filename: &str) -> &'static str {
         "png" => "image/png",
         "gif" => "image/gif",
         "webp" => "image/webp",
+        "avif" => "image/avif",
         "svg" => "image/svg+xml",
         "mp4" => "video/mp4",
         "pdf" => "application/pdf",

@@ -41,7 +41,9 @@ async fn the_url_token_is_the_credential() {
 
 /// A webhook's `username` and `avatar_url` are a masquerade stored with the
 /// message: they used to reach only the live broadcast, so history showed the
-/// webhook's own name and the avatar went nowhere.
+/// webhook's own name. The avatar is kept only as the hub's own copy, so one
+/// the hub may not fetch (here a loopback address) is dropped, never stored as
+/// a third-party URL.
 #[tokio::test]
 async fn a_webhook_masquerade_is_kept_in_history() {
     let (server, owner_token) = common::setup_with_owner().await;
@@ -65,7 +67,7 @@ async fn a_webhook_masquerade_is_kept_in_history() {
         .json(&json!({
             "content": "hello from elsewhere",
             "username": "Ada",
-            "avatar_url": "https://example.com/ada.png",
+            "avatar_url": "https://127.0.0.1/ada.png",
         }))
         .await
         .assert_status_ok();
@@ -81,7 +83,7 @@ async fn a_webhook_masquerade_is_kept_in_history() {
     let m = &msgs.as_array().unwrap()[0];
     assert_eq!(m["sender_name"], "Bridge");
     assert_eq!(m["masquerade"]["name"], "Ada");
-    assert_eq!(m["masquerade"]["avatar_url"], "https://example.com/ada.png");
+    assert!(m["masquerade"].get("avatar_url").is_none());
 }
 
 /// Masquerading needs `messages.masquerade`: a plain member is refused, and a

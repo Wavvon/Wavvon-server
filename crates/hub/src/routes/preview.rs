@@ -495,6 +495,34 @@ async fn proxy_image(state: &AppState, page_url: &str, image: &str) -> Option<St
     Some(format!("{}/preview/image/{id}", base.trim_end_matches('/')))
 }
 
+/// Fetches an image on the hub, under the same rules as preview images, and
+/// keeps it in the uploads directory under a name derived from its source URL
+/// (so the same avatar is stored once). Returns its hub-relative URL,
+/// `/uploads/<name>`, or `None` when it cannot be fetched or is not a raster
+/// image within `MAX_IMAGE_BYTES`.
+pub(crate) async fn store_remote_image(url: &str) -> Option<String> {
+    let (bytes, content_type) = fetch_capped(url, MAX_IMAGE_BYTES + 1).await.ok()?;
+    let content_type = content_type?.split(';').next()?.trim().to_ascii_lowercase();
+    if bytes.len() > MAX_IMAGE_BYTES || !IMAGE_TYPES.contains(&content_type.as_str()) {
+        return None;
+    }
+    let ext = content_type
+        .trim_start_matches("image/")
+        .replace("jpeg", "jpg");
+    use sha2::{Digest, Sha256};
+    let name = format!(
+        "remote-{}.{ext}",
+        hex::encode(&Sha256::digest(url.as_bytes())[..16])
+    );
+    let dir = crate::routes::uploads::uploads_dir();
+    tokio::fs::create_dir_all(&dir).await.ok()?;
+    let path = format!("{}/{name}", dir.trim_end_matches('/'));
+    if tokio::fs::metadata(&path).await.is_err() {
+        tokio::fs::write(&path, &bytes).await.ok()?;
+    }
+    Some(format!("/uploads/{name}"))
+}
+
 /// `GET /preview/image/{id}`: an image the hub fetched for a link preview.
 /// No auth: an `<img>` cannot send a bearer token, and only images a member's
 /// authenticated `/preview` already fetched are ever served, so this is not
