@@ -16,13 +16,14 @@ use sha2::{Digest, Sha512};
 use std::sync::OnceLock;
 use wavvon_identity::{
     auth_challenge_signing_bytes, dm_envelope_signing_bytes, dm_member_change_signing_bytes,
-    federated_plaintext_dm_signing_bytes, group_dm_envelope_signing_bytes,
-    outgoing_webhook_signing_key, recovery_attestation_signing_bytes,
-    recovery_request_signing_bytes, sender_key_dist_signing_bytes, unwrap_blob_key,
-    voice_grant_signing_bytes, voice_key_unwrap, voice_key_wrap_with_nonce, voice_packet_open,
-    voice_packet_seal, webhook_delivery_signing_bytes, webhook_hmac_sha256, wrap_blob_key,
+    dr_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
+    group_dm_envelope_signing_bytes, outgoing_webhook_signing_key,
+    recovery_attestation_signing_bytes, recovery_request_signing_bytes,
+    sender_key_dist_signing_bytes, unwrap_blob_key, voice_grant_signing_bytes, voice_key_unwrap,
+    voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal,
+    webhook_delivery_signing_bytes, webhook_hmac_sha256, wrap_blob_key, wrap_blob_key_with,
     DhKeyRecord, HomeHubList, MasterIdentity, PairingClaim, PairingComplete, PairingOffer,
-    PairingStatus, RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    PairingStatus, PublicHubEntry, PublicHubProfile, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 fn doc() -> &'static Value {
@@ -377,6 +378,23 @@ fn pairing_status_complete_without_wrapped_dh_seed_parses_as_none() {
     }
 }
 
+#[test]
+fn ecies_wrap_vector() {
+    let v = vec_("ecies_wrap");
+    let wrapped = wrap_blob_key_with(
+        &arr(&s(v, "blob_key")),
+        &s(v, "recipient_pubkey"),
+        arr(&s(v, "eph_secret")),
+        arr(&s(v, "nonce")),
+    )
+    .unwrap();
+    expect("ecies_wrap", "wrapped", &bytes(&wrapped));
+
+    let subkey_seed = r(&doc()["fixtures"]["subkey_seed"]);
+    let unwrapped = unwrap_blob_key(&wrapped, &arr::<32>(&subkey_seed)).unwrap();
+    assert_eq!(hex::encode(unwrapped), s(v, "blob_key"));
+}
+
 /// The enrolling device wraps the canonical X25519 scalar (not the Ed25519
 /// seed) with `wrap_blob_key` for the claiming subkey, which unwraps it with
 /// its own seed — the same primitive `wrapped_blob_key_hex` uses.
@@ -408,6 +426,19 @@ fn dm_envelope_vector() {
         &s(v, "sender_dh_pubkey"),
     );
     check_signed("dm_envelope", "signature", &sb);
+}
+
+#[test]
+fn dr_envelope_vector() {
+    let v = vec_("dr_envelope");
+    let sb = dr_envelope_signing_bytes(
+        &s(v, "conversation_id"),
+        n(v, "message_index") as u32,
+        n(v, "prev_count") as u32,
+        &s(v, "ciphertext"),
+        &s(v, "dh_pubkey"),
+    );
+    check_signed("dr_envelope", "signature", &sb);
 }
 
 #[test]
@@ -672,4 +703,12 @@ fn voice_packet_open_rejects_tampered_header() {
         &packet,
     );
     assert!(result.is_err());
+}
+
+#[test]
+fn public_hub_profile_vector() {
+    let v = vec_("public_hub_profile");
+    let hubs: Vec<PublicHubEntry> = serde_json::from_value(inp(v, "public_hubs")).unwrap();
+    let sb = PublicHubProfile::signing_bytes(&s(v, "pubkey"), &hubs, n(v, "issued_at"));
+    check_signed("public_hub_profile", "signature", &sb);
 }

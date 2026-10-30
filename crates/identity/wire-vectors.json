@@ -14,7 +14,10 @@
     "voice_sender_key": "c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0",
     "voice_nonce_salt": "aabbccdd",
     "voice_wrap_nonce": "0102030405060708090a0b0c",
-    "opus_frame": "6f7075732d6672616d652d766563746f72"
+    "opus_frame": "6f7075732d6672616d652d766563746f72",
+    "ecies_eph_secret": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+    "ecies_nonce": "c0c1c2c3c4c5c6c7c8c9cacb",
+    "ecies_blob_key": "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef"
   },
   "vectors": {
     "master_pubkey": {
@@ -66,6 +69,28 @@
       },
       "signing_bytes": "776176766f6e2f686f6d652d6875622d6c6973742f7631004000000037396235353632653866653635346639343037386231313265386139386261373930316638353361653639356265643765306533393130626164303439363634010000001300000068747470733a2f2f6875622e6578616d706c6500f15365000000000100000000000000",
       "signature": "193d446382d6dde14c0d85cf3b92a13858c7daa702bf284688af0514019de5665dbe52be683d41f85fa004c2b0c8be329ac608dbb18a4c03e9e0fd4380db0907"
+    },
+    "public_hub_profile": {
+      "description": "PublicHubProfile, tag wavvon/public-hub-profile/v1: pubkey, issued_at (u64 LE), entry count (u32 LE), then per entry hub_url, hub_name, joined_at (u64 LE). display_name and avatar are not signed.",
+      "inputs": {
+        "pubkey": "@master_pub",
+        "issued_at": 1700000000,
+        "public_hubs": [
+          {
+            "hub_url": "https://hub.example",
+            "hub_name": "Example Hub",
+            "joined_at": 1690000000
+          },
+          {
+            "hub_url": "https://other.example",
+            "hub_name": "Other",
+            "joined_at": 1695000000
+          }
+        ],
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f7075626c69632d6875622d70726f66696c652f763100400000003739623535363265386665363534663934303738623131326538613938626137393031663835336165363935626564376530653339313062616430343936363400f1536500000000020000001300000068747470733a2f2f6875622e6578616d706c650b0000004578616d706c6520487562805abb64000000001500000068747470733a2f2f6f746865722e6578616d706c65050000004f74686572c0a5076500000000",
+      "signature": "9f7ea02f84a3590bb2f9d670aafa0c245c607624b1d6328069d337fc881ae7002ac4190b55da6031e8f137b979b15ea5a351009ae9cf11509723f36c431cf104"
     },
     "subkey_cert": {
       "description": "SubkeyCert signed by the master key, no expiry, no fallback hubs.",
@@ -129,6 +154,16 @@
       "signing_bytes": "776176766f6e2f70616972696e672d636c61696d2f76310006000000746f6b3132334000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630060000006c6170746f70",
       "proof": "cea1002c8bcad922848865158e5e7b2a7241929fcb13ce4a288e52cfecf912b71e2527ee0929198c2450027fb06ae04ac5f82acfffca28494feca7d253e22709"
     },
+    "ecies_wrap": {
+      "description": "ECIES wrap behind PairingComplete.wrapped_blob_key_hex and wrapped_dh_seed_hex, with the ephemeral X25519 secret and the AES-GCM nonce fixed. Output: eph_x25519_pub[32] || nonce[12] || ciphertext+tag[48]. The recipient unwraps with subkey_seed.",
+      "inputs": {
+        "blob_key": "@ecies_blob_key",
+        "recipient_pubkey": "@subkey_pub",
+        "eph_secret": "@ecies_eph_secret",
+        "nonce": "@ecies_nonce"
+      },
+      "wrapped": "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23cc0c1c2c3c4c5c6c7c8c9cacbb1f9260522804ce8d1b77c71b46ef23908cafcc0db96d1ff899645f59f4863208ad6b0be8d3ea8204a2cf79cea36655a"
+    },
     "dh_key_record": {
       "description": "DhKeyRecord binding the master pubkey to its X25519 key.",
       "inputs": {
@@ -151,6 +186,19 @@
       },
       "signing_bytes": "776176766f6e2f646d2d636970686572746578742f76310007000000636f6e76313233140000003633363937303638363537323734363537383734180000003031303230333034303530363037303830393061306230634000000034613338303764303634643037373138316363303730393839653736383931643230646361353535393534386463326337376331613530323733383832623338",
       "signature": "6d41d6b3f9f4c5b5d87a7d819f4e9b2e1a1340c3aa97cf044037f926c63710dd3edeb5bc66d9dfa89fc0d9fe2a67b8a28c6c5908f42b947b3551c04dbf113709"
+    },
+    "dr_envelope": {
+      "description": "Double-ratchet DM envelope, tag wavvon/dm-ciphertext/v2. message_index and prev_count are u32 LE; ciphertext and dh_pubkey are passed as their hex strings. No nonce: it is derived from the message key.",
+      "inputs": {
+        "conversation_id": "conv123",
+        "message_index": 7,
+        "prev_count": 3,
+        "ciphertext": "63697068657274657874",
+        "dh_pubkey": "@master_dh_pub",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f646d2d636970686572746578742f76320007000000636f6e7631323307000000030000001400000036333639373036383635373237343635373837344000000034613338303764303634643037373138316363303730393839653736383931643230646361353535393534386463326337376331613530323733383832623338",
+      "signature": "ec785f82324fc2929119872fd005f90836f8b05e961e4df569bb9036c600f68af3ff8492020c296a5c3fca8ddb9de584ef49e7a2bc4bdcb83b88bfb8c6ea8b0c"
     },
     "group_dm_envelope": {
       "description": "GroupEncryptedEnvelope, sender_key_version 1, iteration 2. ciphertext and nonce are hex strings.",

@@ -5,6 +5,9 @@ secret:
     # Test fixtures: session/bot/pairing tokens are literals on purpose, and
     # every one of them is meaningless outside its own test database.
     - "**/tests/**"
+    # Wire-format vectors: every seed, key and nonce in them is published on
+    # purpose so other implementations can reproduce the outputs.
+    - "crates/identity/wire-vectors.json"
     # Config templates ship placeholder credentials by definition.
     - "**/*.example"
     - ".claude/skills/**"
