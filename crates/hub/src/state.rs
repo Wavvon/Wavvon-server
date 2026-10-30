@@ -507,6 +507,8 @@ pub struct AppState {
 
     /// Mirror of `Settings::allow_private_webhooks`; see `webhook_url`.
     pub allow_private_webhooks: bool,
+    /// Mirror of `Settings::metrics`: whether `GET /metrics` answers.
+    pub metrics_enabled: bool,
 
     /// Mirror of `Settings::http_video_stream_budget`. Max concurrent video
     /// streams started over `POST /screenshare/start` across the whole hub;

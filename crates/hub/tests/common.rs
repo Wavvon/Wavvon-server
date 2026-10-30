@@ -395,6 +395,7 @@ pub fn base_state(db: PgPool) -> AppState {
         owner_pubkey: None,
         apps_allow_camera: false,
         allow_private_webhooks: false,
+        metrics_enabled: false,
         http_video_stream_budget: 2,
         webauthn: make_test_webauthn(),
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
@@ -424,6 +425,7 @@ pub async fn setup_allowing_private_webhooks() -> TestHarness {
     let (db, guard) = create_test_db().await;
     let state = Arc::new(AppState {
         allow_private_webhooks: true,
+        metrics_enabled: false,
         ..base_state(db)
     });
     let app = server::create_router_full(state.clone(), "*", false, None);
