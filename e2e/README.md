@@ -49,6 +49,20 @@ POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17
 | `alliancestress`, `alliancechurn`, `alliancedrift` | Alliances under load, membership churn, and state drift between hubs. |
 | `farm`, `crossfarm` | A farm hosting its own hubs, and an alliance across two farms. |
 
+## The API contract
+
+`node e2e/contract.mjs` boots one hub and calls every documented GET without
+path parameters as its owner, checking the status and the JSON body against
+Wavvon-docs' `openapi.yaml` at the commit in `openapi.ref` (`OPENAPI_SPEC=<file>`
+uses a local spec instead). A required query is filled from its documented
+`example`; an operation without one is skipped and listed. A field the hub sends
+and the spec lacks is a failure, as is a wrong status or type. Known drift goes
+in `contract-allowlist.json`, which may only shrink: an allowlisted mismatch
+that stops happening fails too. CI runs it after the test suite.
+
+A change to a response and the spec change that documents it land together:
+merge the spec on Wavvon-docs `main`, then move `openapi.ref` in the PR.
+
 ## What is *not* here
 
 Anything needing a second checkout lives in the monorepo's own `e2e-topology/`,
