@@ -123,6 +123,7 @@ jobs:
       - name: API contract against the running hub
         env:
           E2E_HUB_BIN: target/debug/wavvon-hub
+          E2E_PSQL_DIRECT: "1"
         run: node e2e/contract.mjs
 
       - name: No test may skip itself in CI
