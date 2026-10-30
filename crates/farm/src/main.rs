@@ -20,6 +20,7 @@ struct SavedFarmIdentity {
 
 fn load_or_create_keypair(path: &Path) -> Result<(SigningKey, bool)> {
     if path.exists() {
+        wavvon_identity::restrict_secret(path);
         let json = std::fs::read_to_string(path).context("Failed to read farm_identity.json")?;
         let saved: SavedFarmIdentity =
             serde_json::from_str(&json).context("Failed to parse farm_identity.json")?;
@@ -36,7 +37,7 @@ fn load_or_create_keypair(path: &Path) -> Result<(SigningKey, bool)> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create identity directory")?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(&saved)?)
+        wavvon_identity::write_secret(path, serde_json::to_string_pretty(&saved)?)
             .context("Failed to write farm_identity.json")?;
         Ok((keypair, true))
     }

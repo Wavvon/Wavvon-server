@@ -190,15 +190,10 @@ fn write_persisted(path: &Path, state: &Persisted) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, serde_json::to_string(state)?)
-        .with_context(|| format!("writing {}", path.display()))?;
     // The password is in here. On Unix the file is the only thing standing
     // between another local user and the hub's database.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
+    wavvon_identity::write_secret(path, serde_json::to_string(state)?)
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
