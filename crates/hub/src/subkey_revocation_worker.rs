@@ -115,7 +115,12 @@ async fn sync_one(state: &AppState, master_pubkey: &str, home_hub_url: &str) {
         .execute(&state.db)
         .await
         {
-            applied += r.rows_affected() as usize;
+            if r.rows_affected() > 0 {
+                applied += 1;
+                state
+                    .close_sessions_of_revoked(&entry.master_pubkey, &entry.subkey_pubkey)
+                    .await;
+            }
         }
     }
 

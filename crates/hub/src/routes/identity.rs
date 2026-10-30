@@ -399,6 +399,9 @@ pub async fn post_revocation(
     .execute(&state.db)
     .await
     .map_err(db_err)?;
+    state
+        .close_sessions_of_revoked(&entry.master_pubkey, &entry.subkey_pubkey)
+        .await;
 
     Ok(StatusCode::OK)
 }

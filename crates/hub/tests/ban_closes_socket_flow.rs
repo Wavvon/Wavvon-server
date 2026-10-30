@@ -117,3 +117,58 @@ async fn a_ban_closes_the_members_open_socket() {
 async fn a_kick_closes_the_members_open_socket() {
     moderate("/moderation/kick").await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revocation_closes_the_devices_open_socket() {
+    let (base, _state, _guard) = start_hub().await;
+    let device = Identity::generate();
+    let token = authenticate(&base, &device).await;
+    let master = device.master().unwrap();
+    let (master_pk, device_pk) = (master.public_key_hex(), device.public_key_hex());
+
+    let client = reqwest::Client::new();
+    let bytes = wavvon_identity::SubkeyCert::signing_bytes(
+        &master_pk,
+        &device_pk,
+        "phone",
+        1_700_000_000,
+        None,
+        &[],
+    );
+    let cert = wavvon_identity::SubkeyCert {
+        master_pubkey: master_pk.clone(),
+        subkey_pubkey: device_pk.clone(),
+        device_label: "phone".to_string(),
+        issued_at: 1_700_000_000,
+        not_after: None,
+        fallback_hubs: vec![],
+        signature: hex::encode(master.sign(&bytes).to_bytes()),
+    };
+    let r = client
+        .post(format!("{base}/identity/{master_pk}/devices"))
+        .bearer_auth(&token)
+        .json(&cert)
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "devices: {}", r.status());
+
+    let bytes = wavvon_identity::RevocationEntry::signing_bytes(&master_pk, &device_pk, 1);
+    let revocation = wavvon_identity::RevocationEntry {
+        master_pubkey: master_pk.clone(),
+        subkey_pubkey: device_pk,
+        revoked_at: 1,
+        signature: hex::encode(master.sign(&bytes).to_bytes()),
+    };
+    let closed = closed_by_server(&base, &token, async {
+        let r = client
+            .post(format!("{base}/identity/{master_pk}/revocations"))
+            .json(&revocation)
+            .send()
+            .await
+            .unwrap();
+        assert!(r.status().is_success(), "revocations: {}", r.status());
+    })
+    .await;
+    assert!(closed, "the revocation left the device's socket open");
+}

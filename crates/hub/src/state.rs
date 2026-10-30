@@ -559,6 +559,28 @@ impl AppState {
         self.ws_key_senders.write().await.remove(pubkey);
     }
 
+    /// Close the sockets of the identity a revoked device belongs to. Tokens
+    /// are refused from here on, but an open socket was authenticated once,
+    /// at its handshake. Sockets are keyed by identity, not device, so the
+    /// owner's other devices drop too and reconnect on their own.
+    pub async fn close_sessions_of_revoked(&self, master: &str, subkey: &str) {
+        match sqlx::query_scalar::<_, String>(
+            "SELECT public_key FROM users WHERE master_pubkey = $1 OR public_key = $2",
+        )
+        .bind(master)
+        .bind(subkey)
+        .fetch_all(&self.db)
+        .await
+        {
+            Ok(owners) => {
+                for pk in owners {
+                    self.close_sessions_of(&pk).await;
+                }
+            }
+            Err(e) => tracing::warn!("closing sockets of a revoked device failed: {e}"),
+        }
+    }
+
     /// Deliver a targeted WS message to **every** session a pubkey has open,
     /// and report how many took it.
     ///
