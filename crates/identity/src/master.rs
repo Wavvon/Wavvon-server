@@ -3,6 +3,7 @@ use bip39::{Language, Mnemonic};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 const MASTER_HKDF_INFO: &[u8] = b"wavvon/master/v1";
 
@@ -16,8 +17,8 @@ impl MasterIdentity {
     /// domain-separates this output so the master pubkey is distinct.
     pub fn derive_from_entropy(entropy: &[u8; 32]) -> Result<Self> {
         let hk = Hkdf::<Sha256>::new(None, entropy);
-        let mut okm = [0u8; 32];
-        hk.expand(MASTER_HKDF_INFO, &mut okm)
+        let mut okm = Zeroizing::new([0u8; 32]);
+        hk.expand(MASTER_HKDF_INFO, okm.as_mut())
             .map_err(|e| anyhow!("HKDF expand failed: {e}"))?;
         Ok(Self {
             signing_key: SigningKey::from_bytes(&okm),
@@ -27,9 +28,9 @@ impl MasterIdentity {
     pub fn derive_from_phrase(phrase: &str) -> Result<Self> {
         let mnemonic =
             Mnemonic::parse_in(Language::English, phrase).context("Invalid recovery phrase")?;
-        let entropy = mnemonic.to_entropy();
-        let entropy_array: [u8; 32] = entropy
-            .try_into()
+        let entropy = Zeroizing::new(mnemonic.to_entropy());
+        let entropy_array = <[u8; 32]>::try_from(entropy.as_slice())
+            .map(Zeroizing::new)
             .map_err(|_| anyhow!("Recovery phrase must produce exactly 32 bytes"))?;
         Self::derive_from_entropy(&entropy_array)
     }
@@ -48,7 +49,7 @@ impl MasterIdentity {
 
     /// Raw 32-byte seed of the master signing key.
     /// Used to derive the prefs blob encryption key.
-    pub fn secret_seed(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+    pub fn secret_seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing_key.to_bytes())
     }
 }

@@ -30,13 +30,16 @@ hex = "0.4"
 sha2 = "0.10"
 
 # BIP39 mnemonic recovery phrases (24 words ↔ secret key)
-bip39 = "2"
+bip39 = { version = "2", features = ["zeroize"] }
 
 # hkdf — HMAC-based Key Derivation Function (RFC 5869). Like .NET's
 # HKDF.DeriveKey: expands one secret into multiple distinct keys via a
 # domain-separation label. Used to derive the master keypair from the
 # same BIP39 entropy that already backs the per-device subkey.
 hkdf = "0.12"
+
+# Wipes secret bytes handed out of this crate when they are dropped
+zeroize = "1"
 
 # hmac — HMAC-SHA256 for outgoing-webhook delivery signatures.
 hmac = "0.12"
