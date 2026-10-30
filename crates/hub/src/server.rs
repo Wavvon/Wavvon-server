@@ -1001,6 +1001,10 @@ pub fn create_router_full(
         .route("/polls/{poll_id}/vote", post(routes::polls::vote_poll))
         // ---- Link preview ----
         .route("/preview", get(routes::preview::get_preview))
+        .route(
+            "/preview/image/{id}",
+            get(routes::preview::get_preview_image),
+        )
         .layer(build_cors_layer(cors_origins))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(attach_request_id))
