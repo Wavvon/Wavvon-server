@@ -15,6 +15,43 @@ use std::fs;
 use std::path::Path;
 
 pub use ecies::{unwrap_blob_key, wrap_blob_key};
+
+/// Write a file only its owner can read. On Unix it is created with mode
+/// 0o600 from the start rather than chmod-ed after, so the secret is never
+/// readable by other local accounts, and an existing file is narrowed too.
+pub fn write_secret(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    create_secret(path)?.write_all(contents.as_ref())
+}
+
+/// Create (or truncate) a file the way [`write_secret`] does, for a caller
+/// that streams into it.
+pub fn create_secret(path: impl AsRef<Path>) -> std::io::Result<fs::File> {
+    let path = path.as_ref();
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let file = options.mode(0o600).open(path)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    options.open(path)
+}
+
+/// Narrow a secret file written before [`write_secret`] existed to owner-only
+/// (Unix). Best effort: a file the hub can read but not chmod still loads.
+pub fn restrict_secret(path: impl AsRef<Path>) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path.as_ref(), fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
 pub use master::MasterIdentity;
 pub use pow::{compute_security_level, leading_zero_bits, verify_security_level};
 pub use subkey::DeviceSubkey;
@@ -77,11 +114,12 @@ impl Identity {
             fs::create_dir_all(parent).context("Failed to create identity directory")?;
         }
 
-        fs::write(path, json).context("Failed to write identity file")?;
+        write_secret(path, json).context("Failed to write identity file")?;
         Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Self> {
+        restrict_secret(path);
         let json = fs::read_to_string(path).context("Failed to read identity file")?;
         let data: SavedIdentity =
             serde_json::from_str(&json).context("Failed to parse identity file")?;

@@ -1830,7 +1830,8 @@ async fn backup(out_path: &str, db_url: &str) -> anyhow::Result<()> {
     println!("Dumping the database…");
     db::dump::dump(db_url, &dump_path, &schema)?;
 
-    let file = std::fs::File::create(out_path)?;
+    // The archive carries the hub's secret key and the whole database.
+    let file = wavvon_identity::create_secret(out_path)?;
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
 

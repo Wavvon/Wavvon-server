@@ -77,10 +77,7 @@ async fn generate_and_persist(port: u16) -> anyhow::Result<SelfSignedVoiceCert> 
             .certificate_chain()
             .store_pemfile(&cert_path)
             .await?;
-        identity
-            .private_key()
-            .store_secret_pemfile(&key_path)
-            .await?;
+        wavvon_identity::write_secret(&key_path, identity.private_key().to_secret_pem())?;
         // Meta written last: its presence is the commit marker the loader
         // requires, so a torn write of the pair is never loaded.
         tokio::fs::write(&meta_path, created_at.to_string()).await?;
@@ -110,6 +107,7 @@ async fn load_or_create_self_signed(port: u16) -> anyhow::Result<SelfSignedVoice
             .trim()
             .parse()
             .ok()?;
+        wavvon_identity::restrict_secret(&key_path);
         let identity = WtIdentity::load_pemfiles(&cert_path, &key_path)
             .await
             .ok()?;
