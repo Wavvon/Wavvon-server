@@ -160,7 +160,7 @@ pub async fn send_message_with(
     let masquerade = match req.masquerade.clone() {
         Some(m) => {
             perms.require(permissions::MESSAGES_MASQUERADE)?;
-            Some(m.validated()?)
+            Some(m.validated()?.with_hosted_avatar().await)
         }
         None => None,
     };

@@ -363,7 +363,9 @@ pub async fn post_webhook_message(
                     .unwrap_or_else(|| webhook.display_name.clone()),
                 avatar_url: req.avatar_url.clone(),
             }
-            .validated()?,
+            .validated()?
+            .with_hosted_avatar()
+            .await,
         )
     } else {
         None
