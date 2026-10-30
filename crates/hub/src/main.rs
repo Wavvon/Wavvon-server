@@ -1308,6 +1308,7 @@ async fn main() -> Result<()> {
         owner_pubkey: settings.owner_pubkey.clone(),
         apps_allow_camera: settings.apps_allow_camera,
         allow_private_webhooks: settings.allow_private_webhooks,
+        metrics_enabled: settings.metrics,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),

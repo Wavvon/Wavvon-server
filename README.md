@@ -49,7 +49,7 @@ crate.
 - **Moderation** — custom roles and permissions, ban / mute / timeout /
   kick, channel bans, content reporting queue, auto-mod webhook.
 - **Bots** — invite by public key, slash commands, webhook delivery.
-- **Operable** — `GET /health`, Prometheus `GET /metrics`, structured
+- **Operable** — `GET /health`, opt-in Prometheus `GET /metrics`, structured
   JSON logs, optional OTLP traces, backup/restore CLI, hub key
   rotation, additive-only migrations.
 

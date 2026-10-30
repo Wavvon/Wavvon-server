@@ -167,6 +167,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "Set to `true` to let outgoing webhooks and app `webhook_url`s use plain http and          private/loopback hosts. Off by default: both are https-only and refuse private          ranges, because any member holding apps.register could otherwise aim the hub at          localhost or a cloud metadata address (SSRF). Enable only on a LAN-only hub.",
     ),
     (
+        "WAVVON_METRICS",
+        "false",
+        "Set to `true` to serve the Prometheus `GET /metrics` endpoint. Off by default:          the counters are aggregate, but they tell anyone who asks how many members are          online, in voice and posting. When on, keep the route behind a firewall or a          reverse proxy that only your scraper reaches.",
+    ),
+    (
         "WAVVON_BOTS_ALLOW_VIDEO",
         "false",
         "Set to `true` to allow bots granted `can_inject_video` to push frames into the \
@@ -310,6 +315,10 @@ pub struct Settings {
     ///
     /// Env: WAVVON_ALLOW_PRIVATE_WEBHOOKS
     pub allow_private_webhooks: bool,
+    /// Serve `GET /metrics`. Opt-in (decisions.md, "Observability").
+    ///
+    /// Env: WAVVON_METRICS
+    pub metrics: bool,
     /// Operator kill-switch for `can_inject_video` bot video streams.
     /// Max concurrent video streams started over HTTP, hub-wide.
     /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
@@ -377,6 +386,7 @@ pub fn load() -> Result<Settings> {
         .set_default("trusted_proxy", false)?
         .set_default("apps_allow_camera", false)?
         .set_default("allow_private_webhooks", false)?
+        .set_default("metrics", false)?
         .set_default("http_video_stream_budget", 2u32)?
         .set_default("db_max_connections", 5u32)?
         .set_default("lan_mode", false)?

@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::response::IntoResponse;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 
 use crate::state::AppState;
 
-pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// Not found unless the operator set `WAVVON_METRICS=true`: a hub that has
+/// not opted in looks the same as one built without the route.
+pub async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+    if !state.metrics_enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let online_users = state.online_users.read().await.len();
     let voice_participants: usize = state
         .voice_channels
@@ -23,8 +29,6 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .count();
     let uptime_secs = state.started_at.elapsed().as_secs();
 
-    let db_size = std::fs::metadata("hub.db").map(|m| m.len()).unwrap_or(0);
-
     let messages_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
         .fetch_one(&state.db)
         .await
@@ -40,9 +44,7 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
          # HELP wavvon_messages_total Total messages stored\n\
          # TYPE wavvon_messages_total counter\nwavvon_messages_total {messages_total}\n\
          # HELP wavvon_uptime_seconds Hub uptime in seconds\n\
-         # TYPE wavvon_uptime_seconds gauge\nwavvon_uptime_seconds {uptime_secs}\n\
-         # HELP wavvon_db_size_bytes SQLite database file size\n\
-         # TYPE wavvon_db_size_bytes gauge\nwavvon_db_size_bytes {db_size}\n"
+         # TYPE wavvon_uptime_seconds gauge\nwavvon_uptime_seconds {uptime_secs}\n"
     );
 
     axum::response::Response::builder()
