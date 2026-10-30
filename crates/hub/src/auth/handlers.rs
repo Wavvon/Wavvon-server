@@ -30,6 +30,13 @@ pub async fn resolve_canonical_identity(
     auth_pubkey: &str,
     cert: Option<&SubkeyCert>,
 ) -> Result<(String, Option<String>), (StatusCode, String)> {
+    // Checked here, against the key that signed the challenge: the session is
+    // written under the canonical key, which for a paired device is the
+    // master, so a revocation (which names the device) can't be found from it.
+    if is_revoked(db, auth_pubkey).await? {
+        return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
+    }
+
     let cert = match cert {
         None => return Ok((auth_pubkey.to_string(), None)),
         Some(c) => c,
@@ -42,6 +49,12 @@ pub async fn resolve_canonical_identity(
             StatusCode::UNAUTHORIZED,
             "Cert subkey_pubkey doesn't match auth pubkey".to_string(),
         ));
+    }
+    if cert
+        .not_after
+        .is_some_and(|exp| unix_timestamp() as u64 >= exp)
+    {
+        return Err((StatusCode::UNAUTHORIZED, "Cert expired".to_string()));
     }
     let master = cert.master_pubkey.clone();
 
@@ -70,6 +83,36 @@ pub async fn resolve_canonical_identity(
 
     // Brand-new paired device.
     Ok((master.clone(), Some(master)))
+}
+
+/// Whether `key` is a revoked device key. Fails closed: a lookup error refuses
+/// the request instead of reading as "not revoked".
+pub async fn is_revoked(db: &PgPool, key: &str) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM subkey_revocations WHERE subkey_pubkey = $1)")
+        .bind(key)
+        .fetch_one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+}
+
+/// Whether a token's holder has been revoked since it was issued: either the
+/// device that signed in (`sessions.device_pubkey`) or the key the token
+/// speaks for. Fails closed like [`is_revoked`].
+pub async fn session_is_revoked(
+    db: &PgPool,
+    token: &str,
+    pubkey: &str,
+) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM subkey_revocations
+         WHERE subkey_pubkey = $2
+            OR subkey_pubkey = (SELECT device_pubkey FROM sessions WHERE token = $1))",
+    )
+    .bind(token)
+    .bind(pubkey)
+    .fetch_one(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
 }
 
 /// Length of an auth challenge. The federation client signs a peer's
@@ -675,13 +718,14 @@ pub async fn verify(
     });
 
     sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope, device_pubkey) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&token)
     .bind(&canonical_pubkey)
     .bind(now)
     .bind(Option::<i64>::None)
     .bind(&scope)
+    .bind(&req.public_key)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -945,14 +989,7 @@ pub async fn validate_ws_token(
             }
         };
 
-    // Subkey revocation check.
-    let revoked_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = $1")
-            .bind(&pk)
-            .fetch_one(db)
-            .await
-            .unwrap_or(0);
-    if revoked_count > 0 {
+    if session_is_revoked(db, token, &pk).await? {
         return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
     }
 
