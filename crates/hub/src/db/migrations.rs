@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 5;
+pub const SCHEMA_VERSION: i32 = 6;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -184,6 +184,13 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             )
             .execute(conn)
             .await?;
+        }
+        // Masquerade: the name and avatar a bridge or webhook shows on one
+        // message, as JSON {name, avatar_url}.
+        6 => {
+            sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS masquerade TEXT")
+                .execute(conn)
+                .await?;
         }
         _ => unreachable!("no schema step {version}"),
     }

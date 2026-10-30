@@ -157,6 +157,19 @@ pub async fn send_message_with(
         None
     };
 
+    let masquerade = match req.masquerade.clone() {
+        Some(m) => {
+            perms.require(permissions::MESSAGES_MASQUERADE)?;
+            Some(m.validated()?)
+        }
+        None => None,
+    };
+    let masquerade_json = masquerade
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
+
     // If a reply_to is provided, sanity-check the parent exists in this
     // same channel. Cross-channel replies would surprise everyone.
     if let Some(parent_id) = &req.reply_to {
@@ -222,6 +235,7 @@ pub async fn send_message_with(
                     reply_count: 0,
                     embeds: None,
                     game: None,
+                    masquerade: None,
                     components: None,
                 };
                 return Ok((StatusCode::OK, Json(placeholder)));
@@ -360,7 +374,7 @@ pub async fn send_message_with(
     }
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at, game) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at, game, masquerade) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -370,6 +384,7 @@ pub async fn send_message_with(
     .bind(&req.reply_to)
     .bind(now)
     .bind(&game_json)
+    .bind(&masquerade_json)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -429,6 +444,7 @@ pub async fn send_message_with(
         embeds: None,
         game: req.game,
         components: None,
+        masquerade,
     };
 
     {
@@ -646,7 +662,7 @@ async fn load_message(
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
                 m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
-                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -677,6 +693,7 @@ async fn load_message(
         embeds: parse_json(row.embeds),
         game: parse_json(row.game),
         components: parse_json(row.components),
+        masquerade: parse_json(row.masquerade),
     })
 }
 
@@ -702,7 +719,7 @@ pub async fn get_messages(
         // Thread mode: replies to this root, oldest first, so the cursor
         // pages forward.
         sqlx::query_as::<_, MessageRow>(
-            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
                AND ($3::text IS NULL OR (m.created_at, m.id) >
@@ -745,7 +762,7 @@ pub async fn get_messages(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
                      ORDER BY m.created_at DESC, m.id DESC"
@@ -758,7 +775,7 @@ pub async fn get_messages(
             }
             None => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
                        AND ($2::text IS NULL OR (m.created_at, m.id) <
@@ -806,6 +823,7 @@ pub async fn get_messages(
                 reply_count: r.reply_count,
                 embeds: parse_json(r.embeds),
                 game: parse_json(r.game),
+                masquerade: parse_json(r.masquerade),
                 components: parse_json(r.components),
             }
         })
@@ -829,6 +847,7 @@ struct MessageRow {
     embeds: Option<String>,
     game: Option<String>,
     components: Option<String>,
+    masquerade: Option<String>,
 }
 
 /// Read one of the optional JSON columns on `messages` (embeds, game,

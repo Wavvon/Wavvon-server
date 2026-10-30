@@ -45,6 +45,7 @@ pub(super) struct LocalMessageRow {
     pub edited_at: Option<i64>,
     pub embeds: Option<String>,
     pub game: Option<String>,
+    pub masquerade: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]

@@ -160,6 +160,43 @@ pub struct SendMessageRequest {
     /// only -- `routes/messages.rs` rejects it for any other sender.
     #[serde(default)]
     pub game: Option<crate::routes::app_models::GameLaunchCard>,
+    /// Another name and avatar to show on this message; needs
+    /// `messages.masquerade`.
+    #[serde(default)]
+    pub masquerade: Option<Masquerade>,
+}
+
+/// The name and avatar a bridge or webhook shows on one message instead of
+/// its own. `sender` stays the real author, and clients show both.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Masquerade {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+impl Masquerade {
+    /// A name of 1 to 32 characters and, if any, an http(s) avatar URL of at
+    /// most 512 characters; anything else is refused rather than trimmed.
+    pub fn validated(self) -> Result<Self, (axum::http::StatusCode, String)> {
+        let bad = |m: &str| Err((axum::http::StatusCode::BAD_REQUEST, m.to_string()));
+        let name = self.name.trim().to_string();
+        if name.is_empty() || name.chars().count() > 32 {
+            return bad("masquerade.name must be 1 to 32 characters");
+        }
+        if let Some(url) = &self.avatar_url {
+            let http = url.starts_with("https://") || url.starts_with("http://");
+            if !http || url.len() > 512 {
+                return bad(
+                    "masquerade.avatar_url must be an http(s) URL of at most 512 characters",
+                );
+            }
+        }
+        Ok(Self {
+            name,
+            avatar_url: self.avatar_url,
+        })
+    }
 }
 
 /// Minimal preview of a parent message. We embed it in replies so the
@@ -222,6 +259,10 @@ pub struct MessageResponse {
     /// `messages.components`; a click comes back as `component_interaction`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<Vec<crate::routes::app_models::ComponentRow>>,
+    /// Shown instead of the sender's own name and avatar; persisted on
+    /// `messages.masquerade`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masquerade: Option<Masquerade>,
 }
 
 #[derive(Deserialize)]

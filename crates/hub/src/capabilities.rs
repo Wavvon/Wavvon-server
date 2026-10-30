@@ -108,6 +108,9 @@ pub const CAPABILITIES: &[&str] = &[
     // advertising only `list.cursor` would page an endpoint that ignores the
     // cursor and hand back the first page over and over.
     "list.cursor.lists",
+    // A message may carry `masquerade { name, avatar_url }`, shown instead
+    // of the sender's own, with the real sender beside it (bridges, webhooks).
+    "messages.masquerade",
     // The permission catalogue is served by the hub and no longer copied into
     // each client: GET /permissions lists every id with its scope, and
     // GET /users/{pubkey}/permissions/why explains one answer. A client that
