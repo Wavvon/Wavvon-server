@@ -15,7 +15,7 @@ use std::fs;
 use std::path::Path;
 use zeroize::{Zeroize, Zeroizing};
 
-pub use ecies::{unwrap_blob_key, wrap_blob_key};
+pub use ecies::{unwrap_blob_key, wrap_blob_key, wrap_blob_key_with};
 
 /// Write a file only its owner can read. On Unix it is created with mode
 /// 0o600 from the start rather than chmod-ed after, so the secret is never
