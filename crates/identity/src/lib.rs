@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
 use std::path::Path;
+use zeroize::{Zeroize, Zeroizing};
 
 pub use ecies::{unwrap_blob_key, wrap_blob_key};
 
@@ -98,35 +99,41 @@ impl Identity {
     /// other private key material — it round-trips through
     /// `SigningKey::from_bytes`, so anyone holding it can reconstruct this
     /// identity in full.
-    pub fn secret_key_hex(&self) -> String {
-        hex::encode(self.signing_key.to_bytes())
+    pub fn secret_key_hex(&self) -> Zeroizing<String> {
+        let seed = Zeroizing::new(self.signing_key.to_bytes());
+        Zeroizing::new(hex::encode(seed.as_ref()))
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let data = SavedIdentity {
-            secret_key: hex::encode(self.signing_key.to_bytes()),
+        let mut data = SavedIdentity {
+            secret_key: self.secret_key_hex().to_string(),
             security_nonce: Some(self.security_nonce),
             security_level: Some(self.security_level),
         };
-        let json = serde_json::to_string_pretty(&data)?;
+        let json = serde_json::to_string_pretty(&data).map(Zeroizing::new);
+        data.secret_key.zeroize();
+        let json = json?;
 
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).context("Failed to create identity directory")?;
         }
 
-        write_secret(path, json).context("Failed to write identity file")?;
+        write_secret(path, json.as_bytes()).context("Failed to write identity file")?;
         Ok(())
     }
 
     pub fn load(path: &Path) -> Result<Self> {
         restrict_secret(path);
-        let json = fs::read_to_string(path).context("Failed to read identity file")?;
-        let data: SavedIdentity =
+        let json =
+            Zeroizing::new(fs::read_to_string(path).context("Failed to read identity file")?);
+        let mut data: SavedIdentity =
             serde_json::from_str(&json).context("Failed to parse identity file")?;
-        let secret_bytes = hex::decode(&data.secret_key).context("Invalid hex in identity file")?;
+        let secret_bytes = hex::decode(&data.secret_key).map(Zeroizing::new);
+        data.secret_key.zeroize();
+        let secret_bytes = secret_bytes.context("Invalid hex in identity file")?;
 
-        let secret_array: [u8; 32] = secret_bytes
-            .try_into()
+        let secret_array = <[u8; 32]>::try_from(secret_bytes.as_slice())
+            .map(Zeroizing::new)
             .map_err(|_| anyhow::anyhow!("Secret key must be exactly 32 bytes"))?;
 
         let signing_key = SigningKey::from_bytes(&secret_array);
@@ -171,14 +178,14 @@ impl Identity {
     /// Phase-1 helper toward multi-device pairing — the secret bytes
     /// double as BIP39 entropy and as the seed input to HKDF.
     pub fn master(&self) -> Result<MasterIdentity> {
-        let entropy = self.signing_key.to_bytes();
+        let entropy = Zeroizing::new(self.signing_key.to_bytes());
         MasterIdentity::derive_from_entropy(&entropy)
     }
 
     /// Wrap this identity as subkey 0 with a user-facing label.
     /// Non-upgraded hubs see the same pubkey they always saw.
     pub fn as_subkey_zero(&self, label: String) -> DeviceSubkey {
-        let entropy = self.signing_key.to_bytes();
+        let entropy = Zeroizing::new(self.signing_key.to_bytes());
         DeviceSubkey::subkey_zero_from_entropy(&entropy, label)
     }
 
@@ -186,7 +193,7 @@ impl Identity {
     /// Uses the standard ed25519→x25519 conversion:
     /// SHA-512(seed)[0..32] → clamp → X25519 scalar.
     pub fn dh_keypair(&self) -> (x25519_dalek::StaticSecret, x25519_dalek::PublicKey) {
-        let seed = self.signing_key.to_bytes();
+        let seed = Zeroizing::new(self.signing_key.to_bytes());
         let secret = ed25519_seed_to_x25519_secret(&seed);
         let public = x25519_dalek::PublicKey::from(&secret);
         (secret, public)
@@ -199,13 +206,14 @@ impl Identity {
 /// a raw Ed25519 seed without constructing a full `Identity`.
 pub(crate) fn ed25519_seed_to_x25519_secret(seed: &[u8; 32]) -> x25519_dalek::StaticSecret {
     use sha2::{Digest, Sha512};
-    let hash = Sha512::digest(seed);
-    let mut scalar = [0u8; 32];
+    let mut hash = Sha512::digest(seed);
+    let mut scalar = Zeroizing::new([0u8; 32]);
     scalar.copy_from_slice(&hash[..32]);
+    hash.as_mut_slice().zeroize();
     scalar[0] &= 248;
     scalar[31] &= 127;
     scalar[31] |= 64;
-    x25519_dalek::StaticSecret::from(scalar)
+    x25519_dalek::StaticSecret::from(*scalar)
 }
 
 impl fmt::Display for Identity {

@@ -1,5 +1,6 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
+use zeroize::Zeroizing;
 
 pub struct DeviceSubkey {
     signing_key: SigningKey,
@@ -34,8 +35,8 @@ impl DeviceSubkey {
 
     /// Raw 32-byte secret. Persist this and reconstruct via
     /// `from_secret_bytes` to round-trip a paired device's subkey.
-    pub fn secret_bytes(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+    pub fn secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing_key.to_bytes())
     }
 
     pub fn from_secret_bytes(secret: &[u8; 32], label: String) -> Self {
@@ -55,7 +56,7 @@ impl DeviceSubkey {
 
     /// Raw 32-byte seed of this device's signing key.
     /// Used to unwrap the prefs blob key during pairing.
-    pub fn secret_seed(&self) -> [u8; 32] {
-        self.signing_key.to_bytes()
+    pub fn secret_seed(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(self.signing_key.to_bytes())
     }
 }

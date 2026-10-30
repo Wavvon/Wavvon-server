@@ -470,9 +470,9 @@ fn persisted(identity: &Identity, display_name: &str, token: &str) -> PersistedI
         // is the raw key for tooling that wants to reconstruct the Identity
         // directly; session token is ephemeral and only useful for the
         // current hub run.
-        secret_key_hex: identity.secret_key_hex(),
+        secret_key_hex: identity.secret_key_hex().to_string(),
         session_token: token.to_string(),
-        recovery_phrase: identity.recovery_phrase(),
+        recovery_phrase: identity.recovery_phrase().to_string(),
     }
 }
 

@@ -469,6 +469,7 @@ dependencies = [
  "bitcoin_hashes",
  "serde",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]
@@ -6119,6 +6120,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
