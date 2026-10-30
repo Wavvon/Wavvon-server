@@ -18,9 +18,35 @@ async fn attach_request_id(req: Request, next: Next) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
     tracing::trace!(request_id = %id, method = %req.method(), uri = %req.uri(), "request");
     let mut resp = next.run(req).await;
+    if resp.status() == axum::http::StatusCode::INTERNAL_SERVER_ERROR {
+        resp = scrub_internal_error(resp, &id).await;
+    }
     if let Ok(v) = id.parse::<axum::http::HeaderValue>() {
         resp.headers_mut().insert("x-request-id", v);
     }
+    resp
+}
+
+/// Handlers answer a failed query with the database's own error text, which
+/// names tables, columns and constraints. That detail goes to the log under
+/// the request id; the caller gets the id alone, which is enough to find it.
+async fn scrub_internal_error(resp: Response, id: &str) -> Response {
+    let (parts, body) = resp.into_parts();
+    let detail = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    tracing::error!(request_id = %id, %detail, "internal error");
+    let mut resp = Response::from_parts(
+        parts,
+        axum::body::Body::from(format!("Internal server error (request {id})")),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp.headers_mut()
+        .remove(axum::http::header::CONTENT_LENGTH);
     resp
 }
 
