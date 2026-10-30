@@ -14,6 +14,22 @@ use crate::state::AppState;
 const MAX_BODY_BYTES: usize = 64 * 1024; // 64 KB
 const CACHE_TTL_SECS: u64 = 30 * 60; // 30 minutes
 const FETCH_TIMEOUT_SECS: u64 = 5;
+const MAX_IMAGE_BYTES: usize = 1024 * 1024; // 1 MB
+const MAX_CACHED_IMAGES: usize = 128;
+/// SVG is left out on purpose: it is a document that can carry script.
+const IMAGE_TYPES: [&str; 5] = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+];
+
+/// Preview images by id: (content type, bytes, fetched at). Bounded by count
+/// and by `MAX_IMAGE_BYTES`, so at most 128 MB.
+type ImageCache = Mutex<HashMap<String, (String, Vec<u8>, Instant)>>;
+static PREVIEW_IMAGES: std::sync::LazyLock<ImageCache> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkPreview {
@@ -222,43 +238,14 @@ fn html_decode(s: &str) -> String {
 const PREVIEW_RATE_LIMIT: u32 = 10;
 const PREVIEW_RATE_WINDOW_SECS: u64 = 60;
 
-pub async fn get_preview(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Query(params): Query<PreviewQuery>,
-) -> Result<Json<LinkPreview>, (StatusCode, String)> {
-    // Per-user rate limit: 10 preview fetches per 60 seconds.
-    // Cache hits are counted too — they're cheap, but the outer window
-    // keeps one user from monopolising the endpoint.
-    {
-        let mut map = state
-            .rate_limiters
-            .preview
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let now = std::time::Instant::now();
-        let window = std::time::Duration::from_secs(PREVIEW_RATE_WINDOW_SECS);
-
-        // Opportunistic eviction (same pattern as the messages limiter).
-        const EVICTION_THRESHOLD: usize = 5_000;
-        if map.len() >= EVICTION_THRESHOLD {
-            map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
-        }
-
-        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
-        if now.duration_since(entry.1) > window {
-            *entry = (0, now);
-        }
-        if entry.0 >= PREVIEW_RATE_LIMIT {
-            return Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                "preview_rate_limited".to_string(),
-            ));
-        }
-        entry.0 += 1;
-    }
-
-    let url_str = params.url.trim().to_string();
+/// Fetches `url_str` under the SSRF rules (http(s) only, no private or
+/// loopback address, the connection pinned to the address that was checked)
+/// and returns at most `max` bytes of the body with its content type.
+async fn fetch_capped(
+    url_str: &str,
+    max: usize,
+) -> Result<(Vec<u8>, Option<String>), (StatusCode, String)> {
+    let url_str = url_str.to_string();
 
     // Validate scheme
     let is_https = if url_str.starts_with("https://") {
@@ -320,19 +307,6 @@ pub async fn get_preview(
     let validated_addrs = resolve_and_check_ssrf(&host, port)
         .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
-    // Check cache
-    {
-        let cache = state
-            .preview_cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some((cached, inserted_at)) = cache.get(&url_str) {
-            if inserted_at.elapsed().as_secs() < CACHE_TTL_SECS {
-                return Ok(Json(cached.clone()));
-            }
-        }
-    }
-
     // Build a one-shot client that is pinned to the first validated address.
     // This prevents DNS-rebinding: the hostname in the URL resolves to the
     // address we already validated, not whatever the DNS says at connect time.
@@ -383,14 +357,20 @@ pub async fn get_preview(
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch_error: {e}")))?;
 
-    // Read up to MAX_BODY_BYTES
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // Read up to `max` bytes
     let bytes = {
         use futures_util::StreamExt;
         let mut body = resp.bytes_stream();
-        let mut buf = Vec::with_capacity(MAX_BODY_BYTES);
+        let mut buf = Vec::with_capacity(max);
         while let Some(chunk) = body.next().await {
             let chunk = chunk.map_err(|e| (StatusCode::BAD_GATEWAY, format!("read_error: {e}")))?;
-            let remaining = MAX_BODY_BYTES - buf.len();
+            let remaining = max - buf.len();
             if chunk.len() >= remaining {
                 buf.extend_from_slice(&chunk[..remaining]);
                 break;
@@ -400,9 +380,68 @@ pub async fn get_preview(
         }
         buf
     };
+    Ok((bytes, content_type))
+}
+
+pub async fn get_preview(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(params): Query<PreviewQuery>,
+) -> Result<Json<LinkPreview>, (StatusCode, String)> {
+    // Per-user rate limit: 10 preview fetches per 60 seconds.
+    // Cache hits are counted too — they're cheap, but the outer window
+    // keeps one user from monopolising the endpoint.
+    {
+        let mut map = state
+            .rate_limiters
+            .preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let window = std::time::Duration::from_secs(PREVIEW_RATE_WINDOW_SECS);
+
+        // Opportunistic eviction (same pattern as the messages limiter).
+        const EVICTION_THRESHOLD: usize = 5_000;
+        if map.len() >= EVICTION_THRESHOLD {
+            map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
+        }
+
+        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        if now.duration_since(entry.1) > window {
+            *entry = (0, now);
+        }
+        if entry.0 >= PREVIEW_RATE_LIMIT {
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                "preview_rate_limited".to_string(),
+            ));
+        }
+        entry.0 += 1;
+    }
+
+    let url_str = params.url.trim().to_string();
+
+    // Check cache
+    {
+        let cache = state
+            .preview_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((cached, inserted_at)) = cache.get(&url_str) {
+            if inserted_at.elapsed().as_secs() < CACHE_TTL_SECS {
+                return Ok(Json(cached.clone()));
+            }
+        }
+    }
+
+    let (bytes, _) = fetch_capped(&url_str, MAX_BODY_BYTES).await?;
 
     let html = String::from_utf8_lossy(&bytes);
-    let (title, description, image_url) = parse_og_tags(&html);
+    let (title, description, og_image) = parse_og_tags(&html);
+    let image_url = match og_image {
+        Some(image) => proxy_image(&state, &url_str, &image).await,
+        None => None,
+    };
 
     let preview = LinkPreview {
         url: url_str.clone(),
@@ -421,4 +460,84 @@ pub async fn get_preview(
     }
 
     Ok(Json(preview))
+}
+
+/// Fetches a preview's image on the hub and returns the hub's own URL for it,
+/// so a reader's client never contacts the third-party host. `None` (no image
+/// on the card) when the hub has no public URL to offer, or the image is not
+/// a raster type within `MAX_IMAGE_BYTES`.
+async fn proxy_image(state: &AppState, page_url: &str, image: &str) -> Option<String> {
+    let base = state.canonical_url.read().await.clone()?;
+    let absolute = reqwest::Url::parse(page_url).ok()?.join(image).ok()?;
+    let (bytes, content_type) = fetch_capped(absolute.as_str(), MAX_IMAGE_BYTES + 1)
+        .await
+        .ok()?;
+    let content_type = content_type?.split(';').next()?.trim().to_ascii_lowercase();
+    if bytes.len() > MAX_IMAGE_BYTES || !IMAGE_TYPES.contains(&content_type.as_str()) {
+        return None;
+    }
+    use sha2::{Digest, Sha256};
+    let id = hex::encode(&Sha256::digest(absolute.as_str().as_bytes())[..16]);
+    {
+        let mut images = PREVIEW_IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+        images.retain(|_, (_, _, at)| at.elapsed().as_secs() < CACHE_TTL_SECS);
+        if images.len() >= MAX_CACHED_IMAGES {
+            let oldest = images
+                .iter()
+                .min_by_key(|(_, (_, _, at))| *at)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                images.remove(&oldest);
+            }
+        }
+        images.insert(id.clone(), (content_type, bytes, Instant::now()));
+    }
+    Some(format!("{}/preview/image/{id}", base.trim_end_matches('/')))
+}
+
+/// `GET /preview/image/{id}`: an image the hub fetched for a link preview.
+/// No auth: an `<img>` cannot send a bearer token, and only images a member's
+/// authenticated `/preview` already fetched are ever served, so this is not
+/// an open proxy.
+pub async fn get_preview_image(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let images = PREVIEW_IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    match images.get(&id) {
+        Some((content_type, bytes, at)) if at.elapsed().as_secs() < CACHE_TTL_SECS => (
+            [
+                (header::CONTENT_TYPE, content_type.clone()),
+                (
+                    header::CACHE_CONTROL,
+                    format!("public, max-age={CACHE_TTL_SECS}"),
+                ),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            ],
+            bytes.clone(),
+        )
+            .into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_fetched_image_is_served_with_its_type_and_an_unknown_one_is_not() {
+        PREVIEW_IMAGES.lock().unwrap().insert(
+            "abc".to_string(),
+            ("image/png".to_string(), vec![1, 2, 3], Instant::now()),
+        );
+        let resp = get_preview_image(axum::extract::Path("abc".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "image/png");
+        assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+
+        let resp = get_preview_image(axum::extract::Path("nope".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }

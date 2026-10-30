@@ -155,3 +155,14 @@ async fn preview_rate_limit_is_per_user() {
         .await
         .assert_status(axum::http::StatusCode::TOO_MANY_REQUESTS);
 }
+
+// The image route answers without a session (an <img> sends none) and serves
+// only what an authenticated /preview fetched.
+#[tokio::test]
+async fn preview_image_is_public_and_unknown_ids_are_not_found() {
+    let server = common::setup().await;
+    server
+        .get("/preview/image/0123456789abcdef")
+        .await
+        .assert_status_not_found();
+}
