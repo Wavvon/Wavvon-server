@@ -226,9 +226,8 @@ async fn verify(
         .await
         .json();
     let ch = challenge["challenge"].as_str().unwrap();
-    let sig = who.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(ch).unwrap(),
-    ));
+    let sig = who
+        .sign(&wavvon_identity::auth_challenge_signing_bytes(&hex::decode(ch).unwrap()).unwrap());
     server
         .post("/auth/verify")
         .json(&json!({

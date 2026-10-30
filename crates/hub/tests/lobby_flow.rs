@@ -16,9 +16,10 @@ async fn auth_verify_raw(server: &TestServer, identity: &Identity) -> Value {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge.challenge).unwrap(),
-    ));
+    let signature = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -140,9 +141,10 @@ async fn verify_response_includes_scope_field() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = user.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge.challenge).unwrap(),
-    ));
+    let signature = user.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
 
     let resp = server
         .post("/auth/verify")
@@ -370,9 +372,10 @@ async fn hub_peer_join_is_never_lobby_confined_even_below_level() {
         .json(&json!({ "public_key": peer_pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = peer_hub.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge.challenge).unwrap(),
-    ));
+    let signature = peer_hub.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -428,9 +431,10 @@ async fn min_security_level_still_hard_rejects_when_lobby_disabled() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = newcomer.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge.challenge).unwrap(),
-    ));
+    let signature = newcomer.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({

@@ -416,11 +416,23 @@ pub const AUTH_CHALLENGE_SCHEME: &str = "tagged-v1";
 /// What a client signs to answer an auth challenge. Domain-tagged: the same
 /// key signs envelopes, certs and invite material, and a bare signature over
 /// whatever bytes a server sends lets that server collect one of those.
-pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Vec<u8> {
+/// Refuses any challenge that is not [`AUTH_CHALLENGE_LEN`] bytes, so every
+/// signer inherits the check instead of each remembering it.
+pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Result<Vec<u8>> {
+    if challenge.len() != AUTH_CHALLENGE_LEN {
+        return Err(anyhow!(
+            "auth challenge is {} bytes, expected {AUTH_CHALLENGE_LEN}",
+            challenge.len()
+        ));
+    }
     let mut buf = b"wavvon/auth-challenge/v1\0".to_vec();
     buf.extend_from_slice(challenge);
-    buf
+    Ok(buf)
 }
+
+/// Length of an auth challenge. A hub or farm issues exactly this many random
+/// bytes, and nothing else is signed as an answer.
+pub const AUTH_CHALLENGE_LEN: usize = 32;
 
 /// Checks an answer to an auth challenge. Only the tagged form verifies: a
 /// signature over the bare challenge is what a hostile hub would collect to
@@ -432,7 +444,7 @@ pub fn verify_auth_challenge(
 ) -> Result<()> {
     verify_signature(
         public_key_hex,
-        &auth_challenge_signing_bytes(challenge),
+        &auth_challenge_signing_bytes(challenge)?,
         signature,
     )
 }

@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
 use sqlx::PgPool;
-use wavvon_identity::SubkeyCert;
+use wavvon_identity::{SubkeyCert, AUTH_CHALLENGE_LEN};
 
 use crate::auth::models::{ChallengeRequest, ChallengeResponse, VerifyRequest, VerifyResponse};
 use crate::state::{AppState, PendingChallenge};
@@ -114,10 +114,6 @@ pub async fn session_is_revoked(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
 }
-
-/// Length of an auth challenge. The federation client signs a peer's
-/// challenge only at exactly this length (see `FederationClient::authenticate`).
-pub const AUTH_CHALLENGE_LEN: usize = 32;
 
 pub async fn challenge(
     State(state): State<Arc<AppState>>,

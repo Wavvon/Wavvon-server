@@ -52,9 +52,8 @@ async fn auth_with_cert(
         .await;
     let challenge: ChallengeResponse = resp.json();
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = subkey.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let signature =
+        subkey.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let mut body = serde_json::json!({
         "public_key": pub_key,
@@ -81,9 +80,10 @@ async fn auth_legacy(server: &TestServer, identity: &Identity) -> String {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge.challenge).unwrap(),
-    ));
+    let signature = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({

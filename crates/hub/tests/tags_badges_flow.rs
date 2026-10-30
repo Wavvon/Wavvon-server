@@ -40,9 +40,8 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
     let challenge: ChallengeResponse = resp.json();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let resp = server
         .post("/auth/verify")
