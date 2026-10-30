@@ -154,9 +154,8 @@ async fn verify_happy_path_returns_farm_token() {
 
     // 2. Sign the challenge.
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let sig =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
     let sig_hex = hex::encode(sig.to_bytes());
 
     // 3. Verify.
@@ -194,9 +193,8 @@ async fn verify_rejects_bad_signature() {
     // Sign with a different identity (wrong key).
     let wrong_identity = Identity::generate();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let bad_sig = wrong_identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let bad_sig = wrong_identity
+        .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let vr = server
         .post("/auth/verify")
@@ -256,9 +254,7 @@ async fn verify_two_outstanding_challenges_both_succeed_when_echoed() {
     let challenge1_bytes = hex::decode(&challenge1_hex).unwrap();
     let sig1_hex = hex::encode(
         identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(
-                &challenge1_bytes,
-            ))
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge1_bytes).unwrap())
             .to_bytes(),
     );
     let vr1 = server
@@ -276,9 +272,7 @@ async fn verify_two_outstanding_challenges_both_succeed_when_echoed() {
     let challenge2_bytes = hex::decode(&challenge2_hex).unwrap();
     let sig2_hex = hex::encode(
         identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(
-                &challenge2_bytes,
-            ))
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge2_bytes).unwrap())
             .to_bytes(),
     );
     let vr2 = server
@@ -315,9 +309,7 @@ async fn renew_returns_new_token_with_different_jti() {
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
     let sig_hex = hex::encode(
         identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(
-                &challenge_bytes,
-            ))
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
             .to_bytes(),
     );
     let vr = server
@@ -377,9 +369,7 @@ async fn revoke_check_returns_false_for_active_session() {
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
     let sig_hex = hex::encode(
         identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(
-                &challenge_bytes,
-            ))
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
             .to_bytes(),
     );
     let vr = server
@@ -563,9 +553,10 @@ async fn challenge_and_sign(server: &TestServer, id: &Identity) -> (String, Stri
         .as_str()
         .unwrap()
         .to_string();
-    let sig = id.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge_hex).unwrap(),
-    ));
+    let sig = id.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge_hex).unwrap())
+            .unwrap(),
+    );
     (challenge_hex, hex::encode(sig.to_bytes()))
 }
 

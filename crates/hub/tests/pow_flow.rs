@@ -19,9 +19,8 @@ async fn do_auth_with_pow(
         .await;
     let challenge: ChallengeResponse = resp.json();
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let mut body = json!({
         "public_key": pub_key,

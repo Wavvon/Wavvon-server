@@ -223,9 +223,9 @@ async fn auth_as_subkey(server: &axum_test::TestServer, subkey: &DeviceSubkey) -
         .as_str()
         .unwrap()
         .to_string();
-    let signature = subkey.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge).unwrap(),
-    ));
+    let signature = subkey.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge).unwrap()).unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&serde_json::json!({

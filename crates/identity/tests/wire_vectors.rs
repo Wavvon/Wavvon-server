@@ -510,8 +510,12 @@ fn recovery_request_and_attestation_bytes_differ() {
 #[test]
 fn auth_challenge_vector() {
     let v = vec_("auth_challenge");
-    let sb = auth_challenge_signing_bytes(&bytes(&s(v, "challenge")));
+    let sb = auth_challenge_signing_bytes(&bytes(&s(v, "challenge"))).unwrap();
     check_signed("auth_challenge", "signature", &sb);
+
+    for len in [0, 31, 33, 64] {
+        assert!(auth_challenge_signing_bytes(&vec![0u8; len]).is_err());
+    }
 }
 
 #[test]

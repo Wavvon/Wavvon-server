@@ -203,9 +203,10 @@ async fn leaving_an_invite_only_hub_re_arms_the_invite_gate() {
         .await
         .json();
     let challenge_hex = challenge["challenge"].as_str().expect("challenge");
-    let signature = member.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(challenge_hex).unwrap(),
-    ));
+    let signature = member.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(challenge_hex).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({

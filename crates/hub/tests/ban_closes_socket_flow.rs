@@ -43,9 +43,10 @@ async fn authenticate(base: &str, identity: &Identity) -> String {
         .json()
         .await
         .unwrap();
-    let sig = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&resp.challenge).unwrap(),
-    ));
+    let sig = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&resp.challenge).unwrap())
+            .unwrap(),
+    );
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))
         .json(&json!({

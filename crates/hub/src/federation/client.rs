@@ -59,12 +59,8 @@ impl FederationClient {
         // could pick the bytes of an invite token and get it signed. A
         // Wavvon hub issues exactly AUTH_CHALLENGE_LEN random bytes, and
         // every structured object the hub signs is longer (each carries at
-        // least a hex key or a UUID), so that length is all we sign.
-        anyhow::ensure!(
-            challenge_bytes.len() == crate::auth::handlers::AUTH_CHALLENGE_LEN,
-            "Peer sent a {}-byte auth challenge; refusing to sign it",
-            challenge_bytes.len()
-        );
+        // least a hex key or a UUID), so that length is all we sign;
+        // `auth_challenge_signing_bytes` refuses any other.
         anyhow::ensure!(
             challenge.scheme.as_deref() == Some(wavvon_identity::AUTH_CHALLENGE_SCHEME),
             "Peer named auth challenge scheme {:?}; refusing to sign",
@@ -72,7 +68,7 @@ impl FederationClient {
         );
         let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
             &challenge_bytes,
-        ));
+        )?);
 
         let verify: VerifyResponse = self
             .http

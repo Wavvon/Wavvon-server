@@ -726,9 +726,10 @@ async fn http_authenticate(hub_url: &str, identity: &Identity) -> String {
         .json()
         .await
         .unwrap();
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge.challenge).unwrap(),
-    ));
+    let signature = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))
         .json(&json!({

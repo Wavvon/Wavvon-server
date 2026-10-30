@@ -92,9 +92,7 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
     let sig_hex = hex::encode(
         identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(
-                &challenge_bytes,
-            ))
+            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
             .to_bytes(),
     );
     let vr = server

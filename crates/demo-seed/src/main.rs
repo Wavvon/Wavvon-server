@@ -184,7 +184,7 @@ async fn authenticate(
     let challenge_bytes = hex::decode(&resp.challenge).context("challenge is not valid hex")?;
     let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
         &challenge_bytes,
-    ));
+    )?);
     let sig_hex = hex::encode(signature.to_bytes());
 
     // Step 3: verify

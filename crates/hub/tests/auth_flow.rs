@@ -22,9 +22,8 @@ async fn full_auth_flow() {
 
     // 2. Sign the challenge
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
     let signature_hex = hex::encode(signature.to_bytes());
 
     // 3. Verify (get token)
@@ -73,9 +72,12 @@ async fn concurrent_challenges_for_same_key_do_not_stomp() {
     // Verify the FIRST challenge (issued before the second overwrote it in
     // the old scheme) — must still succeed.
     for challenge in [&first, &second] {
-        let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-            &hex::decode(&challenge.challenge).unwrap(),
-        ));
+        let signature = identity.sign(
+            &wavvon_identity::auth_challenge_signing_bytes(
+                &hex::decode(&challenge.challenge).unwrap(),
+            )
+            .unwrap(),
+        );
         let resp = server
             .post("/auth/verify")
             .json(&json!({
@@ -104,9 +106,10 @@ async fn challenge_cannot_be_verified_by_a_different_key() {
         .await
         .json();
 
-    let signature = mallory.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(&challenge.challenge).unwrap(),
-    ));
+    let signature = mallory.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -608,7 +611,7 @@ async fn auth_accepts_only_the_tagged_answer() {
         assert_eq!(ch["scheme"], wavvon_identity::AUTH_CHALLENGE_SCHEME);
         let bytes = hex::decode(ch["challenge"].as_str().unwrap()).unwrap();
         let msg = if tagged {
-            wavvon_identity::auth_challenge_signing_bytes(&bytes)
+            wavvon_identity::auth_challenge_signing_bytes(&bytes).unwrap()
         } else {
             bytes.clone()
         };
@@ -634,7 +637,7 @@ async fn auth_accepts_only_the_tagged_answer() {
         .json(&json!({ "public_key": pk }))
         .await
         .json();
-    let wrong = wavvon_identity::auth_challenge_signing_bytes(&[7u8; 32]);
+    let wrong = wavvon_identity::auth_challenge_signing_bytes(&[7u8; 32]).unwrap();
     server
         .post("/auth/verify")
         .json(&json!({

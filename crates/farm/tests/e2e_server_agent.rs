@@ -167,9 +167,8 @@ async fn authenticate(client: &Client, base: &str, identity: &Identity) -> Strin
     let body: Value = resp.json().await.unwrap();
     let challenge_hex = body["challenge"].as_str().unwrap();
     let challenge_bytes = hex::decode(challenge_hex).unwrap();
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     // Verify
     let resp = client
@@ -634,9 +633,10 @@ async fn totp_setup_confirm_and_login_enforcement() {
         .unwrap();
     let body: Value = resp.json().await.unwrap();
     let challenge_hex = body["challenge"].as_str().unwrap();
-    let sig = admin.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(challenge_hex).unwrap(),
-    ));
+    let sig = admin.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(challenge_hex).unwrap())
+            .unwrap(),
+    );
 
     let resp = client
         .post(format!("{base}/auth/verify"))
@@ -667,9 +667,8 @@ async fn totp_setup_confirm_and_login_enforcement() {
         .unwrap();
     let body2: Value = resp2.json().await.unwrap();
     let ch2 = body2["challenge"].as_str().unwrap();
-    let sig2 = admin.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &hex::decode(ch2).unwrap(),
-    ));
+    let sig2 = admin
+        .sign(&wavvon_identity::auth_challenge_signing_bytes(&hex::decode(ch2).unwrap()).unwrap());
 
     let code2 = totp_code_from_secret(&secret);
     let resp2 = client

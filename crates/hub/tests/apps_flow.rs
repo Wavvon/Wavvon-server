@@ -424,9 +424,8 @@ async fn a_program_joins_through_the_one_admission_gate() {
         .await
         .json();
     let challenge_bytes = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
-    let signature = program.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let signature =
+        program.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let refused = server
         .post("/auth/verify")
@@ -455,9 +454,8 @@ async fn a_program_joins_through_the_one_admission_gate() {
         .await
         .json();
     let challenge_bytes = hex::decode(challenge["challenge"].as_str().unwrap()).unwrap();
-    let signature = program.sign(&wavvon_identity::auth_challenge_signing_bytes(
-        &challenge_bytes,
-    ));
+    let signature =
+        program.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let admitted = server
         .post("/auth/verify")

@@ -21,7 +21,7 @@ async fn authenticate_as_hub(server: &axum_test::TestServer, hub: &Identity) -> 
         .json(&json!({
             "public_key": pub_key,
             "challenge": challenge["challenge"],
-            "signature": hex::encode(hub.sign(&wavvon_identity::auth_challenge_signing_bytes(&bytes)).to_bytes()),
+            "signature": hex::encode(hub.sign(&wavvon_identity::auth_challenge_signing_bytes(&bytes).unwrap()).to_bytes()),
             "is_hub": true,
         }))
         .await
