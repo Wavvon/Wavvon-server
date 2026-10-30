@@ -120,6 +120,11 @@ jobs:
       # Every skip prints `WAVVON-TEST-SKIPPED:` — one token, deliberately
       # unlike anything else in the output, so this cannot false-positive on a
       # log line that merely says "skip".
+      - name: API contract against the running hub
+        env:
+          E2E_HUB_BIN: target/debug/wavvon-hub
+        run: node e2e/contract.mjs
+
       - name: No test may skip itself in CI
         run: |
           if grep -n "WAVVON-TEST-SKIPPED:" cargo-test.log; then
