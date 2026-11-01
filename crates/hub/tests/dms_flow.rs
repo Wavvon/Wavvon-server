@@ -2328,3 +2328,33 @@ async fn an_add_with_a_bad_signature_is_refused() {
             .unwrap();
     assert_eq!(members, 3);
 }
+
+#[tokio::test]
+async fn encrypted_dm_refuses_attachments_outside_the_ciphertext() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let bob = Identity::generate();
+    let charlie = Identity::generate();
+    let alice_token = common::authenticate(&server, &alice).await;
+    common::authenticate(&server, &bob).await;
+    common::authenticate(&server, &charlie).await;
+
+    let resp = server
+        .post("/conversations")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "members": [bob.public_key_hex(), charlie.public_key_hex()] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let conv: ConversationResponse = resp.json();
+
+    let envelope = make_group_envelope(&alice, &conv.id, 1, 0);
+    let resp = server
+        .post(&format!("/conversations/{}/messages", conv.id))
+        .authorization_bearer(&alice_token)
+        .json(&json!({
+            "group_encrypted_envelope": envelope,
+            "attachments": [{ "name": "a.png", "mime": "image/png", "data_b64": "iVBORw0K" }],
+        }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+}
