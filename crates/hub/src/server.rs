@@ -1077,14 +1077,27 @@ pub fn create_router_full(
     // All named API routes above take priority; only truly unmatched paths
     // reach the fallback.  The fallback itself is NOT a `.route()` call so
     // it does not appear in the OpenAPI coverage check.
-    // The nosniff layer goes on last so it also covers the fallback service.
+    // The nosniff and default-CSP layers go on last so it also covers the fallback service.
     let app = if let Some(cfg) = web_client {
         let fallback = crate::web_client::build_fallback(cfg);
         api_router.fallback_service(fallback)
     } else {
         api_router
     };
-    app.layer(from_fn(add_nosniff))
+    app.layer(from_fn(add_default_csp))
+        .layer(from_fn(add_nosniff))
+}
+
+/// Anything that did not set its own policy is API output or user bytes, and
+/// neither is ever a document that should run script or load anything.
+async fn add_default_csp(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .entry(axum::http::header::CONTENT_SECURITY_POLICY)
+        .or_insert(axum::http::HeaderValue::from_static(
+            "default-src 'none'; sandbox",
+        ));
+    resp
 }
 
 /// Stops browsers from second-guessing a response's declared content type.
