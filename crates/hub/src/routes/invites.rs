@@ -739,11 +739,13 @@ pub async fn get_join_page_or_info(
 
     if wants_html {
         if let Some(bytes) = index_html {
-            return (
-                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                bytes.to_vec(),
-            )
-                .into_response();
+            return crate::web_client::with_html_csp(
+                (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    bytes.to_vec(),
+                )
+                    .into_response(),
+            );
         }
     }
 
