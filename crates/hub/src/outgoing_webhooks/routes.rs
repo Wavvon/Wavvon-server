@@ -53,7 +53,7 @@ pub async fn create_webhook(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(permissions::WEBHOOKS_OUTGOING_MANAGE)?;
 
-    crate::webhook_url::validate_webhook_url(&req.url, state.allow_private_webhooks)?;
+    crate::webhook_url::validate_webhook_url(&req.url, state.allow_private_webhooks).await?;
 
     let id = new_webhook_id();
     let now = crate::auth::handlers::unix_timestamp();
@@ -163,7 +163,7 @@ pub async fn update_webhook(
     }
 
     if let Some(url) = &req.url {
-        crate::webhook_url::validate_webhook_url(url, state.allow_private_webhooks)?;
+        crate::webhook_url::validate_webhook_url(url, state.allow_private_webhooks).await?;
         sqlx::query("UPDATE outgoing_webhooks SET url = $1 WHERE id = $2")
             .bind(url)
             .bind(&id)

@@ -157,7 +157,7 @@ pub async fn put_my_app_profile(
     require_app_registrar(&state, &user).await?;
 
     if let Some(url) = meta.webhook_url.as_deref().filter(|u| !u.is_empty()) {
-        crate::webhook_url::validate_webhook_url(url, state.allow_private_webhooks)?;
+        crate::webhook_url::validate_webhook_url(url, state.allow_private_webhooks).await?;
     }
 
     let now = crate::auth::handlers::unix_timestamp();
