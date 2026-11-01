@@ -168,7 +168,24 @@ pub async fn update_role(
     Path(role_id): Path<String>,
     Json(req): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, (StatusCode, String)> {
-    require_not_builtin(&role_id)?;
+    // @everyone's permissions are the hub's floor and an admin must be able
+    // to tune them; its identity (name, priority, look) stays fixed.
+    if role_id == "builtin-everyone" {
+        let only_permissions = req.name.is_none()
+            && req.priority.is_none()
+            && req.display_separately.is_none()
+            && req.color.is_none()
+            && req.icon.is_none()
+            && req.category_id.is_none();
+        if !only_permissions {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Only the permissions of the everyone role can be changed".to_string(),
+            ));
+        }
+    } else {
+        require_not_builtin(&role_id)?;
+    }
 
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(ROLES_MANAGE)?;
