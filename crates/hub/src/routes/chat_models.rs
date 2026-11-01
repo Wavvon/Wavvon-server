@@ -164,6 +164,10 @@ pub struct SendMessageRequest {
     /// `messages.masquerade`.
     #[serde(default)]
     pub masquerade: Option<Masquerade>,
+    /// A sticker this hub holds (`POST /channels/{id}/stickers` makes it hold
+    /// one). The message may carry text as well.
+    #[serde(default)]
+    pub sticker_id: Option<String>,
 }
 
 /// The name and avatar a bridge or webhook shows on one message instead of
@@ -273,6 +277,9 @@ pub struct MessageResponse {
     /// `messages.masquerade`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub masquerade: Option<Masquerade>,
+    /// The sticker sent with this message, persisted as `messages.sticker_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<crate::routes::stickers::StickerRef>,
 }
 
 #[derive(Deserialize)]

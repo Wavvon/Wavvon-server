@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 7;
+pub const SCHEMA_VERSION: i32 = 8;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -205,6 +205,54 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             )
             .execute(conn)
             .await?;
+        }
+        // Stickers (stickers.md, sticker-storage.md). `sha256` is the hash of
+        // the normalized WebP, so one image is one row however often it is
+        // sent. `pack_id` decides pack sticker or cached copy. The grant is a
+        // one-time seed, not baseline: the baseline would hand it back to
+        // @everyone on every start after an admin revoked it (#246).
+        8 => {
+            for ddl in [
+                "CREATE TABLE IF NOT EXISTS sticker_packs (
+                    id         TEXT PRIMARY KEY,
+                    name       TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at BIGINT NOT NULL
+                )",
+                "CREATE TABLE IF NOT EXISTS stickers (
+                    id              TEXT PRIMARY KEY,
+                    sha256          TEXT NOT NULL UNIQUE,
+                    name            TEXT NOT NULL,
+                    mime            TEXT NOT NULL,
+                    size_bytes      BIGINT NOT NULL,
+                    width           INTEGER NOT NULL,
+                    height          INTEGER NOT NULL,
+                    pack_id         TEXT REFERENCES sticker_packs(id) ON DELETE SET NULL,
+                    origin_hub_url  TEXT,
+                    origin_hub_name TEXT,
+                    uploader        TEXT NOT NULL,
+                    created_at      BIGINT NOT NULL,
+                    last_used_at    BIGINT NOT NULL,
+                    removed_at      BIGINT,
+                    evicted_at      BIGINT
+                )",
+                "CREATE INDEX IF NOT EXISTS idx_stickers_pack ON stickers(pack_id)",
+                "CREATE TABLE IF NOT EXISTS sticker_blocklist (
+                    sha256     TEXT PRIMARY KEY,
+                    blocked_by TEXT NOT NULL,
+                    reason     TEXT,
+                    created_at BIGINT NOT NULL
+                )",
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS sticker_id TEXT REFERENCES stickers(id)",
+                "CREATE INDEX IF NOT EXISTS idx_messages_sticker ON messages(sticker_id)
+                 WHERE sticker_id IS NOT NULL",
+                "INSERT INTO role_permissions (role_id, permission)
+                 SELECT 'builtin-everyone', 'stickers.external'
+                 WHERE EXISTS (SELECT 1 FROM roles WHERE id = 'builtin-everyone')
+                 ON CONFLICT (role_id, permission) DO NOTHING",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
         }
         _ => unreachable!("no schema step {version}"),
     }

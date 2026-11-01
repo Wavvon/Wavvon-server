@@ -15,7 +15,7 @@
 //
 // Usage:  node e2e/run.mjs [stage...]
 //         stages: hubs alliance voice certs permissions pgupgrade challenge alliancesplit
-//                 alliancedelegate alliancepeople alliancestress alliancechurn alliancedrift farm crossfarm
+//                 alliancedelegate alliancepeople alliancestress alliancechurn alliancedrift stickers farm crossfarm
 //                 (default: all)
 //         E2E_VERBOSE=1 to stream every process's output.
 
@@ -26,9 +26,10 @@ import {
 } from "./lib.mjs";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 
 const want = new Set(process.argv.slice(2).length ? process.argv.slice(2)
-  : ["hubs","alliance","voice","certs","permissions","pgupgrade","challenge","alliancesplit","alliancepeople","alliancestress","alliancechurn","alliancedrift","farm","crossfarm"]);
+  : ["hubs","alliance","voice","certs","permissions","pgupgrade","challenge","alliancesplit","alliancepeople","alliancestress","alliancechurn","alliancedrift","stickers","farm","crossfarm"]);
 
 if (!existsSync(hubBinary())) {
   console.error(`No hub binary at ${hubBinary()}\n  cargo build -p wavvon-hub`);
@@ -2640,6 +2641,149 @@ try {
       // list that reads as "nobody is there".
       const other = await people(hub3.url, world.erin.token, world.key2);
       checkEq(other.status, 409, `hub 2 shares nothing: ${JSON.stringify(other.body)}`);
+    });
+  }
+
+  if (want.has("stickers")) {
+    // Two hubs, as any federated pair: A publishes a pack, B's member sends
+    // one of its stickers. B's fetch from A is hub to hub, over a real socket
+    // and a real resolver. Both hubs run default config, so B's member is a
+    // stranger who joined by invite and holds only what @everyone holds: the
+    // owner would bypass the permission this stage is about.
+    const ownerA = identity();
+    const ownerB = identity();
+    const hubA = await hub("hub-stk-a", ownerA);
+    // Both hubs sit on localhost, which the fetcher refuses unless the
+    // operator opts in, exactly as for webhooks.
+    const hubB = await hub("hub-stk-b", ownerB, { WAVVON_ALLOW_PRIVATE_WEBHOOKS: "true" });
+    const tokenA = (await authenticate(hubA.url, ownerA)).body.token;
+    const tokenB = (await authenticate(hubB.url, ownerB)).body.token;
+    const auth = (t) => ({ Authorization: `Bearer ${t}` });
+
+    const crcTable = Array.from({ length: 256 }, (_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+    const crc32 = (buf) => {
+      let c = 0xffffffff;
+      for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+      return (c ^ 0xffffffff) >>> 0;
+    };
+    const pngChunk = (type, data) => {
+      const len = Buffer.alloc(4);
+      len.writeUInt32BE(data.length);
+      const body = Buffer.concat([Buffer.from(type), data]);
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(crc32(body));
+      return Buffer.concat([len, body, crc]);
+    };
+    // A w x h RGB PNG with a gradient, so two seeds are two images.
+    const png = (w, h, seed) => {
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(w, 0);
+      ihdr.writeUInt32BE(h, 4);
+      ihdr[8] = 8;
+      ihdr[9] = 2;
+      const stride = 1 + w * 3;
+      const raw = Buffer.alloc(stride * h);
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const o = y * stride + 1 + x * 3;
+          raw[o] = seed;
+          raw[o + 1] = (x * 4) & 255;
+          raw[o + 2] = (y * 4) & 255;
+        }
+      }
+      return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        pngChunk("IHDR", ihdr),
+        pngChunk("IDAT", deflateSync(raw)),
+        pngChunk("IEND", Buffer.alloc(0)),
+      ]);
+    };
+
+    const renamed = await json(`${hubA.url}/hub`, {
+      method: "PATCH", headers: auth(tokenA), body: JSON.stringify({ name: "Origin Hub" }),
+    });
+    checkEq(renamed.status, 200, `name hub A: ${JSON.stringify(renamed.body)}`);
+    const pack = await json(`${hubA.url}/stickers/packs`, {
+      method: "POST", headers: auth(tokenA), body: JSON.stringify({ name: "Test pack" }),
+    });
+    checkEq(pack.status, 201, `create pack: ${JSON.stringify(pack.body)}`);
+    const upload = async (seed) => {
+      const form = new FormData();
+      form.append("name", `s${seed}`);
+      form.append("file", new Blob([png(48, 48, seed)], { type: "image/png" }), `s${seed}.png`);
+      const res = await fetch(`${hubA.url}/stickers/packs/${pack.body.id}/stickers`, {
+        method: "POST", headers: auth(tokenA), body: form,
+      });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+
+    const invite = await json(`${hubB.url}/invites`, {
+      method: "POST", headers: auth(tokenB), body: JSON.stringify({}),
+    });
+    const stranger = identity();
+    const joined = await authenticate(hubB.url, stranger, { invite_code: invite.body.code });
+    checkEq(joined.status, 200, `stranger joins hub B: ${JSON.stringify(joined.body)}`);
+    const tokenS = joined.body.token;
+    const channel = await json(`${hubB.url}/channels`, {
+      method: "POST", headers: auth(tokenB), body: JSON.stringify({ name: "chat" }),
+    });
+    checkEq(channel.status, 201, `channel on B: ${JSON.stringify(channel.body)}`);
+
+    const ask = (sha, origin = hubA.url) => json(`${hubB.url}/channels/${channel.body.id}/stickers`, {
+      method: "POST", headers: auth(tokenS),
+      body: JSON.stringify({ sha256: sha, origin_hub_url: origin }),
+    });
+    const say = (stickerId) => json(`${hubB.url}/channels/${channel.body.id}/messages`, {
+      method: "POST", headers: auth(tokenS),
+      body: JSON.stringify({ content: "", sticker_id: stickerId }),
+    });
+    const bytes = async (url) => Buffer.from(await (await fetch(url)).arrayBuffer());
+    const held = {};
+
+    await scenario("a stranger on hub B sends a sticker from hub A's pack", async () => {
+      const s = await upload(10);
+      checkEq(s.status, 201, `upload to A's pack: ${JSON.stringify(s.body)}`);
+      held.sticker = s.body;
+      const r = await ask(s.body.sha256);
+      checkEq(r.status, 201, `B fetches it from A: ${JSON.stringify(r.body)}`);
+      checkEq(r.body.origin_hub_url, hubA.url, "B records where it came from");
+      checkEq(r.body.origin_hub_name, "Origin Hub", "and A's own name from its /info");
+      const sent = await say(r.body.id);
+      checkEq(sent.status, 201, `the message goes through: ${JSON.stringify(sent.body)}`);
+      checkEq(sent.body.sticker.sha256, s.body.sha256, "the message carries the sticker");
+      check(
+        (await bytes(`${hubA.url}${s.body.url}`)).equals(await bytes(`${hubB.url}${r.body.url}`)),
+        "B serves exactly the bytes A published",
+      );
+      const again = await ask(s.body.sha256);
+      checkEq(again.status, 200, "the second send finds it already here");
+      checkEq(again.body.id, r.body.id, "as the same row");
+    });
+
+    await scenario("a hash the origin lacks, or an origin that is gone, is a 502", async () => {
+      const missing = await ask("f".repeat(64));
+      checkEq(missing.status, 502, `unknown hash: ${JSON.stringify(missing.body)}`);
+      const dead = await ask("e".repeat(64), "http://localhost:9");
+      checkEq(dead.status, 502, `dead origin: ${JSON.stringify(dead.body)}`);
+    });
+
+    await scenario("export off on the origin: a hub that does not hold it cannot get it", async () => {
+      const s = await upload(20);
+      checkEq(s.status, 201, "second sticker published");
+      const off = await json(`${hubA.url}/hub`, {
+        method: "PATCH", headers: auth(tokenA), body: JSON.stringify({ stickers_export: false }),
+      });
+      checkEq(off.status, 200, `export off: ${JSON.stringify(off.body)}`);
+      const direct = await fetch(`${hubA.url}/federation/stickers/${s.body.sha256}`);
+      checkEq(direct.status, 403, "the federation route answers 403");
+      const r = await ask(s.body.sha256);
+      checkEq(r.status, 502, `B cannot fetch it: ${JSON.stringify(r.body)}`);
+      const kept = await ask(held.sticker.sha256);
+      checkEq(kept.status, 200, "copies B already holds are B's content");
     });
   }
 } catch (e) {

@@ -169,6 +169,17 @@ pub fn create_router_full(
             async move { rate_limit::enforce(l, req, next).await }
         }));
 
+    let sticker_limiter = RateLimiter::new(Config::STICKER_FEDERATION, trusted_proxy);
+    let sticker_federation_routes = Router::new()
+        .route(
+            "/federation/stickers/{sha256}",
+            get(routes::stickers::federation_sticker),
+        )
+        .layer(from_fn(move |req, next| {
+            let l = sticker_limiter.clone();
+            async move { rate_limit::enforce(l, req, next).await }
+        }));
+
     let api_router = Router::new()
         .route("/health", get(routes::health::get_health))
         .route("/info", get(routes::health::info))
@@ -244,6 +255,7 @@ pub fn create_router_full(
         )
         .merge(auth_routes)
         .merge(write_routes)
+        .merge(sticker_federation_routes)
         .route(
             "/me",
             get(routes::me::me)
@@ -982,6 +994,47 @@ pub fn create_router_full(
         .route(
             "/soundboard/{id}/played",
             post(routes::soundboard::mark_played),
+        )
+        // ---- Stickers (stickers.md) ----
+        .route(
+            "/stickers/packs",
+            get(routes::stickers::list_packs).post(routes::stickers::create_pack),
+        )
+        .route(
+            "/stickers/packs/{pack_id}",
+            axum::routing::patch(routes::stickers::rename_pack)
+                .delete(routes::stickers::delete_pack),
+        )
+        .route(
+            "/stickers/packs/{pack_id}/stickers",
+            post(routes::stickers::add_pack_sticker)
+                .layer(DefaultBodyLimit::max(routes::stickers::BODY_LIMIT)),
+        )
+        .route(
+            "/stickers/packs/{pack_id}/stickers/{sticker_id}",
+            delete(routes::stickers::remove_pack_sticker),
+        )
+        .route("/stickers/{sha256}", get(routes::stickers::serve_sticker))
+        .route(
+            "/channels/{channel_id}/stickers",
+            post(routes::stickers::ensure_sticker),
+        )
+        .route(
+            "/admin/stickers",
+            get(routes::stickers_admin::list_stickers),
+        )
+        .route("/admin/stickers/usage", get(routes::stickers_admin::usage))
+        .route(
+            "/admin/stickers/blocklist",
+            get(routes::stickers_admin::list_blocklist),
+        )
+        .route(
+            "/admin/stickers/blocklist/{sha256}",
+            delete(routes::stickers_admin::unblock),
+        )
+        .route(
+            "/admin/stickers/{id}",
+            delete(routes::stickers_admin::delete_sticker),
         )
         // ---- Message pinning ----
         .route(

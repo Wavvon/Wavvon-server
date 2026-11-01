@@ -251,8 +251,9 @@ export async function authenticate(hubUrl, id, extra = {}) {
 
 // ── booting the things under test ───────────────────────────────────────
 
-/** Boot a hub with its own database, port pair, work dir and owner. */
-export async function hub(name, owner) {
+/** Boot a hub with its own database, port pair, work dir and owner.
+ *  `extraEnv` is for a stage that needs a setting the others must not have. */
+export async function hub(name, owner, extraEnv = {}) {
   const httpPort = port();
   const voicePort = port();
   // `localhost`, not `127.0.0.1`: identical for the HTTP assertions here, but
@@ -275,6 +276,7 @@ export async function hub(name, owner) {
     // API-only: nothing here drives a browser, and a hub that insists on a
     // web-client directory it has not got refuses to start.
     WAVVON_WEB_CLIENT_DIR: "",
+    ...extraEnv,
   };
   const boot = async () => {
     const entry = start(name, hubBinary(), [], { cwd, env });

@@ -412,6 +412,7 @@ pub async fn post_webhook_message(
         game: None,
         components: None,
         masquerade,
+        sticker: None,
     };
 
     {

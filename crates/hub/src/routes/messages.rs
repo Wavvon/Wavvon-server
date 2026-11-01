@@ -196,6 +196,14 @@ pub async fn send_message_with(
         }
     }
 
+    // A sticker must be one this hub holds, live, and a copy of another hub's
+    // needs `stickers.external` on this channel. `perms` is the channel's own
+    // verdict, so a per-channel revoke applies here too.
+    let sticker = match &req.sticker_id {
+        Some(sid) => Some(crate::routes::stickers::check_for_send(&state.db, sid, &perms).await?),
+        None => None,
+    };
+
     // Slash command dispatch (external bot system): if the message starts with
     // '/' and a registered app handles the command, the app responds via its
     // webhook. We do NOT store the original slash message by default — the bot
@@ -237,6 +245,7 @@ pub async fn send_message_with(
                     game: None,
                     masquerade: None,
                     components: None,
+                    sticker: None,
                 };
                 return Ok((StatusCode::OK, Json(placeholder)));
             }
@@ -374,7 +383,7 @@ pub async fn send_message_with(
     }
 
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at, game, masquerade) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at, game, masquerade, sticker_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(&id)
     .bind(&channel_id)
@@ -385,6 +394,7 @@ pub async fn send_message_with(
     .bind(now)
     .bind(&game_json)
     .bind(&masquerade_json)
+    .bind(&req.sticker_id)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -445,6 +455,7 @@ pub async fn send_message_with(
         game: req.game,
         components: None,
         masquerade,
+        sticker,
     };
 
     {
@@ -662,7 +673,7 @@ async fn load_message(
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
                 m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
-                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
+                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -676,6 +687,12 @@ async fn load_message(
         load_reply_context(&state.db, parent_id).await?
     } else {
         None
+    };
+    let sticker = match &row.sticker_id {
+        Some(sid) => crate::routes::stickers::load_refs(&state.db, std::slice::from_ref(sid))
+            .await?
+            .remove(sid),
+        None => None,
     };
     Ok(MessageResponse {
         id: row.id,
@@ -694,6 +711,7 @@ async fn load_message(
         game: parse_json(row.game),
         components: parse_json(row.components),
         masquerade: parse_json(row.masquerade),
+        sticker,
     })
 }
 
@@ -719,7 +737,7 @@ pub async fn get_messages(
         // Thread mode: replies to this root, oldest first, so the cursor
         // pages forward.
         sqlx::query_as::<_, MessageRow>(
-            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
+            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
                AND ($3::text IS NULL OR (m.created_at, m.id) >
@@ -762,7 +780,7 @@ pub async fn get_messages(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
                      ORDER BY m.created_at DESC, m.id DESC"
@@ -775,7 +793,7 @@ pub async fn get_messages(
             }
             None => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
                        AND ($2::text IS NULL OR (m.created_at, m.id) <
@@ -802,6 +820,8 @@ pub async fn get_messages(
 
     let mut reactions_map = batch_load_reactions(&state.db, &msg_ids, &user.public_key).await?;
     let mut reply_map = batch_load_reply_contexts(&state.db, &reply_ids).await?;
+    let sticker_ids: Vec<String> = rows.iter().filter_map(|r| r.sticker_id.clone()).collect();
+    let sticker_map = crate::routes::stickers::load_refs(&state.db, &sticker_ids).await?;
 
     let messages: Vec<MessageResponse> = rows
         .into_iter()
@@ -825,6 +845,10 @@ pub async fn get_messages(
                 game: parse_json(r.game),
                 masquerade: parse_json(r.masquerade),
                 components: parse_json(r.components),
+                sticker: r
+                    .sticker_id
+                    .as_deref()
+                    .and_then(|id| sticker_map.get(id).cloned()),
             }
         })
         .collect();
@@ -848,6 +872,7 @@ struct MessageRow {
     game: Option<String>,
     components: Option<String>,
     masquerade: Option<String>,
+    sticker_id: Option<String>,
 }
 
 /// Read one of the optional JSON columns on `messages` (embeds, game,

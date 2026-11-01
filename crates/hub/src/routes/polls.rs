@@ -155,6 +155,7 @@ async fn post_poll_card(
         embeds: None,
         game: None,
         masquerade: None,
+        sticker: None,
         components: None,
     };
 

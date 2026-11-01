@@ -199,6 +199,8 @@ pub async fn update_hub(
         upsert_setting(&state.db, "name_color_mode", mode).await?;
     }
 
+    req.stickers.apply(&state.db).await?;
+
     let json: std::sync::Arc<str> = std::sync::Arc::from(
         serde_json::to_string(&crate::routes::chat_models::WsServerMessage::HubUpdated)
             .unwrap()
@@ -443,6 +445,7 @@ pub async fn get_hub_settings(
         max_attachment_bytes,
         max_upload_bytes,
         max_preview_image_bytes,
+        stickers: crate::routes::stickers::read_settings(&state.db).await,
     }))
 }
 
@@ -557,6 +560,9 @@ pub struct HubSettings {
     /// Largest image a link preview will fetch and re-serve, in bytes.
     #[serde(default = "default_preview_image_cap")]
     pub max_preview_image_bytes: u64,
+    /// Sticker packs, copies and their disk budgets (sticker-storage.md §4).
+    #[serde(flatten)]
+    pub stickers: crate::routes::stickers::StickerSettings,
 }
 
 fn default_preview_image_cap() -> u64 {
@@ -692,6 +698,10 @@ pub struct UpdateHubRequest {
     /// "none").
     #[serde(default)]
     pub name_color_mode: Option<String>,
+    /// The `stickers_*` limits and `stickers_export`; see
+    /// [`crate::routes::stickers::StickerSettingsPatch`].
+    #[serde(flatten)]
+    pub stickers: crate::routes::stickers::StickerSettingsPatch,
 }
 
 #[derive(Serialize, Deserialize)]
