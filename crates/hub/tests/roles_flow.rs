@@ -159,6 +159,39 @@ async fn cannot_modify_builtin_roles() {
 }
 
 #[tokio::test]
+async fn everyone_role_permissions_are_editable_but_nothing_else() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    let resp = server
+        .patch("/roles/builtin-everyone")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Renamed" }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    let resp = server
+        .patch("/roles/builtin-everyone")
+        .authorization_bearer(&member_token)
+        .json(&json!({ "permissions": ["channels.manage"] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    let resp = server
+        .patch("/roles/builtin-everyone")
+        .authorization_bearer(&token)
+        .json(&json!({ "permissions": ["messages.send"] }))
+        .await;
+    resp.assert_status_ok();
+    let role: RoleResponse = resp.json();
+    assert_eq!(role.name, "everyone");
+    assert_eq!(role.permissions, vec!["messages.send".to_string()]);
+}
+
+#[tokio::test]
 async fn permission_gating_on_channels() {
     let server = common::setup().await;
     let owner = Identity::generate();
