@@ -304,6 +304,7 @@ pub async fn dispatch_slash(
             embeds: reply.embeds,
             game: app_response.game,
             masquerade: None,
+            sticker: None,
             components: reply.components.filter(|rows| !rows.is_empty()),
         };
 
@@ -374,6 +375,7 @@ pub async fn insert_ephemeral_error(
         embeds: None,
         game: None,
         masquerade: None,
+        sticker: None,
         components: None,
     };
 
@@ -658,6 +660,7 @@ async fn apply_component_response(
             embeds: None,
             game: None,
             masquerade: None,
+            sticker: None,
             components: None,
         };
 
@@ -720,6 +723,7 @@ async fn load_updated_message(
         game: crate::routes::messages::parse_json(row.7),
         components: crate::routes::messages::parse_json(row.8),
         masquerade: crate::routes::messages::parse_json(row.9),
+        sticker: None,
     })
 }
 

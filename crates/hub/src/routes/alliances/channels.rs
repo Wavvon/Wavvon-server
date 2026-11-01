@@ -366,6 +366,14 @@ pub async fn post_alliance_channel_message(
     (StatusCode, String),
 > {
     models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
+    // The image would have to be proxied to the allied hub's readers too, which
+    // v1 does not do (stickers.md §7).
+    if req.sticker_id.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "stickers cannot be sent to alliance channels yet".to_string(),
+        ));
+    }
     // A peer hub holds no role here: it posts on the strength of the alliance
     // share, capped by what `everyone` may do in that channel (below).
     let peer = models::caller_is_peer(&state, &user.public_key).await?;
@@ -945,6 +953,7 @@ pub async fn get_alliance_channel_messages(
                     .filter(|s| !s.is_empty())
                     .and_then(|s| serde_json::from_str(s).ok()),
                 masquerade: crate::routes::messages::parse_json(r.masquerade),
+                sticker: None,
                 // Like reply context: shown on the owning hub, where a click
                 // has an app to reach.
                 components: None,

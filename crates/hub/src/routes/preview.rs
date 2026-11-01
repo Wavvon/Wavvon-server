@@ -97,7 +97,11 @@ fn is_global_v4(v4: Ipv4Addr) -> bool {
 /// Perform SSRF-safe DNS resolution without blocking the runtime. Returns the
 /// validated SocketAddrs (all checked to be global) so the caller can pin the
 /// connection to them, preventing DNS-rebinding between check and connect.
-async fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>, &'static str> {
+async fn resolve_and_check_ssrf(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, &'static str> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
         .map_err(|_| "dns_failed")?
@@ -107,7 +111,7 @@ async fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>
         return Err("dns_failed");
     }
 
-    if addrs.iter().any(|a| is_private_ip(a.ip())) {
+    if !allow_private && addrs.iter().any(|a| is_private_ip(a.ip())) {
         return Err("ssrf_blocked");
     }
 
@@ -244,6 +248,18 @@ async fn fetch_capped(
     url_str: &str,
     max: usize,
 ) -> Result<(Vec<u8>, Option<String>), (StatusCode, String)> {
+    fetch_capped_opts(url_str, max, false).await
+}
+
+/// [`fetch_capped`] with the operator opt-in for private and loopback
+/// addresses (`WAVVON_ALLOW_PRIVATE_WEBHOOKS`: LAN hubs, test harnesses). The
+/// connection is still pinned to the resolved addresses and redirects are
+/// still followed by hand; only the "must be global" verdict is waived.
+pub(crate) async fn fetch_capped_opts(
+    url_str: &str,
+    max: usize,
+    allow_private: bool,
+) -> Result<(Vec<u8>, Option<String>), (StatusCode, String)> {
     let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
     let mut url = reqwest::Url::parse(url_str).map_err(|_| bad("invalid_url"))?;
     let mut hops = 0;
@@ -255,12 +271,14 @@ async fn fetch_capped(
             .host_str()
             .ok_or_else(|| bad("missing_host"))?
             .to_string();
-        if host.eq_ignore_ascii_case("localhost") {
+        if !allow_private && host.eq_ignore_ascii_case("localhost") {
             return Err(bad("ssrf_blocked"));
         }
         let port = url.port_or_known_default().unwrap_or(80);
         let bare = host.trim_start_matches('[').trim_end_matches(']');
-        let validated = resolve_and_check_ssrf(bare, port).await.map_err(bad)?;
+        let validated = resolve_and_check_ssrf(bare, port, allow_private)
+            .await
+            .map_err(bad)?;
 
         // no_proxy(): a system proxy must not forward to addresses that passed
         // the check. Redirects are off: this loop is the redirect policy.
@@ -325,14 +343,10 @@ async fn fetch_capped(
     Ok((bytes, content_type))
 }
 
-pub async fn get_preview(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Query(params): Query<PreviewQuery>,
-) -> Result<Json<LinkPreview>, (StatusCode, String)> {
-    // Per-user rate limit: 10 preview fetches per 60 seconds.
-    // Cache hits are counted too — they're cheap, but the outer window
-    // keeps one user from monopolising the endpoint.
+/// Per-user budget for anything that makes this hub fetch a URL on a member's
+/// behalf: link previews and sticker copies share it. It bounds outbound
+/// traffic; it is not a storage quota.
+pub(crate) fn check_fetch_rate(state: &AppState, key: &str) -> Result<(), (StatusCode, String)> {
     {
         let mut map = state
             .rate_limiters
@@ -348,7 +362,7 @@ pub async fn get_preview(
             map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
         }
 
-        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        let entry = map.entry(key.to_string()).or_insert((0, now));
         if now.duration_since(entry.1) > window {
             *entry = (0, now);
         }
@@ -360,6 +374,15 @@ pub async fn get_preview(
         }
         entry.0 += 1;
     }
+    Ok(())
+}
+
+pub async fn get_preview(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(params): Query<PreviewQuery>,
+) -> Result<Json<LinkPreview>, (StatusCode, String)> {
+    check_fetch_rate(&state, &user.public_key)?;
 
     let url_str = params.url.trim().to_string();
 
@@ -595,7 +618,7 @@ mod tests {
     #[tokio::test]
     async fn private_targets_are_refused_before_any_connection() {
         assert_eq!(
-            resolve_and_check_ssrf("localhost", 80).await,
+            resolve_and_check_ssrf("localhost", 80, false).await,
             Err("ssrf_blocked")
         );
         for u in [

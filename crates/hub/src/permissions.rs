@@ -90,6 +90,15 @@ permission_catalogue! {
     /// Resolved against the **destination** channel, not the source.
     VOICE_MOVE_MEMBERS => "voice.move_members", HubAndChannel,
 
+    // ── Stickers ────────────────────────────────────────────────────────
+    /// Packs and their stickers, including "add to a pack" from chat.
+    STICKERS_PACKS_MANAGE => "stickers.packs.manage", Hub,
+    /// Make this hub fetch a sticker from another hub, and send one that is in
+    /// no pack. Revoked from everyone it means "our own packs only".
+    STICKERS_EXTERNAL => "stickers.external", HubAndChannel,
+    /// The stored-sticker admin page: delete, block, unblock.
+    STICKERS_MODERATE => "stickers.moderate", Hub,
+
     // ── Moderation ──────────────────────────────────────────────────────
     MODERATION_KICK => "moderation.kick", Hub,
     MODERATION_MUTE => "moderation.mute", HubAndChannel,

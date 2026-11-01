@@ -125,6 +125,10 @@ pub const CAPABILITIES: &[&str] = &[
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
     "recovery.attest.requests",
+    // Sticker packs, copies fetched from the hub that published them, and
+    // `sticker_id` on a message (stickers.md). Gated so a client offers the
+    // picker only where `POST /channels/{id}/stickers` exists.
+    "stickers",
     // A member of an allied hub can join voice in a channel this hub shares
     // with that alliance: the mint route on their hub, the grant field on
     // `/auth/verify` here, and the visitor scope behind it (alliances.md).

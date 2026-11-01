@@ -47,6 +47,7 @@ POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17
 | `alliancepeople` | Three hubs: browsing an ally's people through your own hub shows only members who opted in, needs both switches, and is refused to a hub outside the alliance. |
 | `alliancedelegate` | Who may act on *one* alliance: the per-alliance grant list, the channel permission sharing also needs, and the widening a delegate must not manage. |
 | `alliancestress`, `alliancechurn`, `alliancedrift` | Alliances under load, membership churn, and state drift between hubs. |
+| `stickers` | Two hubs: a stranger on B sends a sticker from A's pack, so B fetches it from A over the real network; 502 for a missing hash or a dead origin, 403 with export off. |
 | `farm`, `crossfarm` | A farm hosting its own hubs, and an alliance across two farms. |
 
 ## The API contract

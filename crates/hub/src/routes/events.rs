@@ -303,6 +303,7 @@ async fn post_card_message(
         embeds: None,
         game: None,
         masquerade: None,
+        sticker: None,
         components: None,
     };
 

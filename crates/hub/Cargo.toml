@@ -22,6 +22,9 @@ axum = { workspace = true }
 tower = "0.5"
 tower-http = { workspace = true }
 hex = "0.4"
+# Sticker ingest (sticker_image.rs): pure-Rust decode of PNG/JPEG/GIF/WebP/APNG and
+# lossless WebP encode, so every release target (musl included) builds it.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 hmac = "0.12"
 rand = "0.8"
 sha2 = "0.10"

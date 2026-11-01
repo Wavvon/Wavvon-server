@@ -123,6 +123,14 @@ impl Config {
         }
     }
 
+    /// `GET /federation/stickers/{sha256}`: public and unauthenticated, so
+    /// bounded per address. A hub fetching a pack for its members spends one
+    /// token per sticker.
+    pub const STICKER_FEDERATION: Config = Config {
+        burst: 60,
+        refill_per_sec: 5.0,
+    };
+
     /// Moderate limits for write endpoints: 30 burst, 10/s sustained.
     pub const WRITE: Config = Config {
         burst: 30,
