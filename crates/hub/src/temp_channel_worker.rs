@@ -16,7 +16,7 @@
 //!    `GRACE_SECS` grace period, using the same manual multi-table delete `delete_channel`
 //!    uses (there's no DB-level `ON DELETE CASCADE` on `messages.channel_id`
 //!    -- only `channel_permission_overwrites`, `channel_pins`, and
-//!    `upload_files` cascade automatically).
+//!    `attachments` cascade automatically).
 //!
 //! A join clears a temp channel's `empty_since` back to `NULL` (see
 //! `handle_voice_join`), so a room that gets rejoined within the grace

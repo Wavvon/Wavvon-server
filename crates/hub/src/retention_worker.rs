@@ -51,6 +51,10 @@ pub async fn run_sweep(state: &AppState) {
     .execute(&state.db)
     .await;
 
+    // After the message and post deletes above, so the blobs they orphaned go
+    // in the same pass.
+    crate::attachments::sweep(&state.db, now).await;
+
     // Expire stale key-rotation requests (recovery-attestation.md §4
     // "Expiry: 14-day sweep"). A request that never gathers enough
     // attestations to reach admin review shouldn't linger indefinitely --

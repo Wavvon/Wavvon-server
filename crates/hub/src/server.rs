@@ -977,7 +977,14 @@ pub fn create_router_full(
             post(routes::uploads::upload_file)
                 .layer(DefaultBodyLimit::max(routes::uploads::UPLOAD_BODY_LIMIT)),
         )
-        .route("/uploads/{filename}", get(routes::uploads::serve_upload))
+        .route(
+            "/uploads/{id}",
+            get(routes::uploads::serve_upload).delete(routes::uploads::delete_upload),
+        )
+        .route(
+            "/alliances/{alliance_id}/uploads/{id}",
+            get(routes::alliances::get_alliance_upload),
+        )
         // ---- Soundboard (soundboard.md §1) ----
         .route(
             "/soundboard",

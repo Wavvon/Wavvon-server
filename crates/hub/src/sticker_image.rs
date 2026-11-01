@@ -25,6 +25,33 @@ pub const MAX_DIM: u32 = 512;
 /// Largest input side accepted for decoding; bigger is refused before any
 /// pixel is allocated.
 const MAX_INPUT_DIM: u32 = 2048;
+
+/// What one caller of the pipeline allows: the output bound and the decode
+/// bound. Fixed per caller, never a setting (see the module doc).
+#[derive(Clone, Copy)]
+pub struct Profile {
+    pub max_dim: u32,
+    pub max_input_dim: u32,
+    /// Decoded pixels of a still, so a 8192 x 8192 bomb is refused although
+    /// each side is in bounds.
+    pub max_input_pixels: u64,
+    pub what: &'static str,
+}
+
+pub const STICKER: Profile = Profile {
+    max_dim: MAX_DIM,
+    max_input_dim: MAX_INPUT_DIM,
+    max_input_pixels: (MAX_INPUT_DIM as u64) * (MAX_INPUT_DIM as u64),
+    what: "sticker",
+};
+
+/// Message attachments: shown at up to 4096 px on the long edge.
+pub const ATTACHMENT: Profile = Profile {
+    max_dim: 4096,
+    max_input_dim: 8192,
+    max_input_pixels: 40 * 1024 * 1024,
+    what: "image",
+};
 const MAX_FRAMES: usize = 60;
 /// Decoded pixels across all frames of one animation (RGBA, so 4 bytes each).
 const MAX_ANIM_PIXELS: u64 = 16 * 1024 * 1024;
@@ -61,20 +88,37 @@ fn bad(e: impl std::fmt::Display) -> IngestError {
 
 /// Normalizes `input` off the async runtime, behind a hub-wide semaphore.
 pub async fn canonicalize(input: Vec<u8>, max_bytes: usize) -> Result<Canonical, IngestError> {
+    canonicalize_with(input, max_bytes, STICKER).await
+}
+
+pub async fn canonicalize_with(
+    input: Vec<u8>,
+    max_bytes: usize,
+    profile: Profile,
+) -> Result<Canonical, IngestError> {
     let _permit = DECODE_PERMITS
         .acquire()
         .await
         .map_err(|_| IngestError::NotAnImage("decoder unavailable".into()))?;
-    tokio::task::spawn_blocking(move || canonicalize_blocking(&input, max_bytes))
+    tokio::task::spawn_blocking(move || canonicalize_profile(&input, max_bytes, profile))
         .await
         .map_err(|_| IngestError::NotAnImage("decoder crashed".into()))?
 }
 
 pub fn canonicalize_blocking(input: &[u8], max_bytes: usize) -> Result<Canonical, IngestError> {
+    canonicalize_profile(input, max_bytes, STICKER)
+}
+
+pub fn canonicalize_profile(
+    input: &[u8],
+    max_bytes: usize,
+    p: Profile,
+) -> Result<Canonical, IngestError> {
     if input.len() > max_bytes {
         return Err(IngestError::TooLarge(format!(
-            "file exceeds the {} KB sticker limit",
-            max_bytes / 1024
+            "file exceeds the {} KB {} limit",
+            max_bytes / 1024,
+            p.what
         )));
     }
     let format = image::guess_format(input).map_err(bad)?;
@@ -82,16 +126,17 @@ pub fn canonicalize_blocking(input: &[u8], max_bytes: usize) -> Result<Canonical
         format,
         ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::WebP
     ) {
-        return Err(IngestError::NotAnImage(
-            "stickers must be PNG, JPEG, GIF, WebP or APNG".into(),
-        ));
+        return Err(IngestError::NotAnImage(format!(
+            "{}s must be PNG, JPEG, GIF, WebP or APNG",
+            p.what
+        )));
     }
 
-    let frames = decode(input, format)?;
+    let frames = decode(input, format, &p)?;
     let (w, h) = frames[0].0.dimensions();
 
     // Already canonical: in bounds, so only the metadata chunks go.
-    if format == ImageFormat::WebP && w <= MAX_DIM && h <= MAX_DIM {
+    if format == ImageFormat::WebP && w <= p.max_dim && h <= p.max_dim {
         if let Some(bytes) = strip_webp_metadata(input) {
             return Ok(Canonical {
                 bytes,
@@ -101,7 +146,7 @@ pub fn canonicalize_blocking(input: &[u8], max_bytes: usize) -> Result<Canonical
         }
     }
 
-    let (nw, nh) = fit(w, h);
+    let (nw, nh) = fit(w, h, p.max_dim);
     let frames: Vec<(RgbaImage, u64)> = frames
         .into_iter()
         .map(|(img, ms)| {
@@ -122,7 +167,8 @@ pub fn canonicalize_blocking(input: &[u8], max_bytes: usize) -> Result<Canonical
     };
     if bytes.len() > max_bytes {
         return Err(IngestError::TooLarge(format!(
-            "converted sticker exceeds the {} KB limit",
+            "converted {} exceeds the {} KB limit",
+            p.what,
             max_bytes / 1024
         )));
     }
@@ -133,38 +179,48 @@ pub fn canonicalize_blocking(input: &[u8], max_bytes: usize) -> Result<Canonical
     })
 }
 
-fn fit(w: u32, h: u32) -> (u32, u32) {
-    if w <= MAX_DIM && h <= MAX_DIM {
+fn fit(w: u32, h: u32, max_dim: u32) -> (u32, u32) {
+    if w <= max_dim && h <= max_dim {
         return (w, h);
     }
-    let scale = MAX_DIM as f64 / w.max(h) as f64;
+    let scale = max_dim as f64 / w.max(h) as f64;
     (
         ((w as f64 * scale).round() as u32).max(1),
         ((h as f64 * scale).round() as u32).max(1),
     )
 }
 
-fn limits() -> Limits {
+fn limits(p: &Profile) -> Limits {
     let mut l = Limits::default();
-    l.max_image_width = Some(MAX_INPUT_DIM);
-    l.max_image_height = Some(MAX_INPUT_DIM);
-    l.max_alloc = Some(256 * 1024 * 1024);
+    l.max_image_width = Some(p.max_input_dim);
+    l.max_image_height = Some(p.max_input_dim);
+    l.max_alloc = Some(512 * 1024 * 1024);
     l
 }
 
 /// Every frame composited to the full canvas, with its delay in ms. One entry
 /// means a still.
-fn decode(input: &[u8], format: ImageFormat) -> Result<Vec<(RgbaImage, u64)>, IngestError> {
+fn decode(
+    input: &[u8],
+    format: ImageFormat,
+    p: &Profile,
+) -> Result<Vec<(RgbaImage, u64)>, IngestError> {
     let cursor = || Cursor::new(input);
     macro_rules! dim_check {
         ($d:expr) => {{
             let (w, h) = $d.dimensions();
-            if w == 0 || h == 0 || w > MAX_INPUT_DIM || h > MAX_INPUT_DIM {
+            if w == 0
+                || h == 0
+                || w > p.max_input_dim
+                || h > p.max_input_dim
+                || w as u64 * h as u64 > p.max_input_pixels
+            {
                 return Err(IngestError::TooLarge(format!(
-                    "image is {w}x{h}; the limit is {MAX_INPUT_DIM}x{MAX_INPUT_DIM}"
+                    "image is {w}x{h}; the limit is {0}x{0}",
+                    p.max_input_dim
                 )));
             }
-            $d.set_limits(limits()).map_err(bad)?;
+            $d.set_limits(limits(p)).map_err(bad)?;
         }};
     }
     macro_rules! still {
@@ -458,5 +514,44 @@ mod tests {
             canonicalize_blocking(&gif(61), 4 * 1024 * 1024).unwrap_err(),
             IngestError::TooLarge(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod attachment_profile_tests {
+    use super::*;
+
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 1, 255])
+        });
+        let mut out = Vec::new();
+        img.write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn attachments_keep_up_to_4096_px_and_stickers_do_not() {
+        let big = png(4200, 8);
+        let c = canonicalize_profile(&big, usize::MAX, ATTACHMENT).unwrap();
+        assert_eq!((c.width, c.height), (4096, 8));
+        let c = canonicalize_profile(&png(1000, 8), usize::MAX, ATTACHMENT).unwrap();
+        assert_eq!((c.width, c.height), (1000, 8));
+        let s = canonicalize_profile(&png(1000, 8), usize::MAX, STICKER).unwrap();
+        assert_eq!(s.width, 512);
+    }
+
+    #[test]
+    fn a_decompression_bomb_is_refused_before_decoding() {
+        // In bounds on each side, over the pixel budget together.
+        let mut flat = Vec::new();
+        image::GrayImage::from_pixel(8000, 8000, image::Luma([5]))
+            .write_to(&mut Cursor::new(&mut flat), ImageFormat::Png)
+            .unwrap();
+        let err = canonicalize_profile(&flat, usize::MAX, ATTACHMENT);
+        assert!(matches!(err, Err(IngestError::TooLarge(_))));
+        let err = canonicalize_profile(&png(8300, 4), usize::MAX, ATTACHMENT);
+        assert!(matches!(err, Err(IngestError::TooLarge(_))));
     }
 }

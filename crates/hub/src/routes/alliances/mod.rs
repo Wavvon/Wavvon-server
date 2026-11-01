@@ -9,7 +9,7 @@ mod voice;
 // Re-export all public items so server.rs paths remain unchanged.
 pub use channels::{
     delete_alliance_forum_post, delete_alliance_forum_reply, get_alliance_channel_messages,
-    get_alliance_forum_post, get_alliance_forum_posts, list_shared_channels,
+    get_alliance_forum_post, get_alliance_forum_posts, get_alliance_upload, list_shared_channels,
     post_alliance_channel_message, post_alliance_forum_post, post_alliance_forum_reply,
     react_alliance_forum, share_channel, unshare_channel,
 };

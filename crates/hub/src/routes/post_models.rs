@@ -16,7 +16,6 @@ pub struct PostRow {
     pub reply_count: i64,
     pub last_activity_at: i64,
     pub deleted_at: Option<i64>,
-    pub attachments: String,
     /// Origin hub public key hex when authored via the alliance forum
     /// write-proxy (forum.md §9); `None` for locally-authored posts.
     pub author_hub: Option<String>,
@@ -32,7 +31,6 @@ pub struct ReplyRow {
     pub edited_at: Option<i64>,
     pub reply_to_id: Option<String>,
     pub deleted_at: Option<i64>,
-    pub attachments: String,
     /// Origin hub public key hex when authored via the alliance forum
     /// write-proxy (forum.md §9); `None` for locally-authored replies.
     pub author_hub: Option<String>,
@@ -49,14 +47,7 @@ pub struct ReactionCount {
     pub me: bool,
 }
 
-/// File attachment metadata stored as JSON in the DB.
-#[derive(Serialize, Deserialize, Clone, Debug, sqlx::FromRow)]
-pub struct Attachment {
-    pub url: String,
-    pub name: String,
-    pub mime: String,
-    pub size: i64,
-}
+pub use crate::attachments::AttachmentRef;
 
 // ── Post tags (forum.md §10) ────────────────────────────────────────────────
 
@@ -133,7 +124,7 @@ pub struct PostSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unread_reply_count: Option<i64>,
     pub reactions: Vec<ReactionCount>,
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<AttachmentRef>,
     /// Origin hub public key hex when this post came in through the alliance
     /// forum write-proxy (forum.md §9 "Proxied writes"); `None` for
     /// locally-authored posts. Hub-asserted, not cryptographically proven --
@@ -173,7 +164,7 @@ pub struct ReplyView {
     pub reply_to_id: Option<String>,
     pub is_deleted: bool,
     pub reactions: Vec<ReactionCount>,
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<AttachmentRef>,
     /// Origin hub public key hex when this reply came in through the
     /// alliance forum write-proxy; see `PostSummary::author_hub`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -185,8 +176,12 @@ pub struct ReplyView {
 pub struct CreatePostRequest {
     pub title: String,
     pub body: String,
+    /// Ids from `POST /channels/{id}/upload`. Outside URLs are no longer taken.
     #[serde(default)]
-    pub attachments: Option<Vec<Attachment>>,
+    pub attachment_ids: Vec<String>,
+    /// The retired form; see `SendMessageRequest::attachments`.
+    #[serde(default)]
+    pub attachments: Option<Vec<serde_json::Value>>,
     /// Tag ids to assign at creation (forum.md §10.2). Every id must belong
     /// to this channel's tag set; capped at 5; enforced against
     /// `forum_require_tag` on the channel.
@@ -214,7 +209,10 @@ pub struct CreateReplyRequest {
     #[serde(default)]
     pub reply_to_id: Option<String>,
     #[serde(default)]
-    pub attachments: Option<Vec<Attachment>>,
+    pub attachment_ids: Vec<String>,
+    /// The retired form; see `SendMessageRequest::attachments`.
+    #[serde(default)]
+    pub attachments: Option<Vec<serde_json::Value>>,
 }
 
 /// Edit a reply body.
@@ -318,13 +316,6 @@ pub struct FederatedRetractRequest {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn parse_attachments(json: &str) -> Vec<Attachment> {
-    if json.is_empty() || json == "[]" {
-        return Vec::new();
-    }
-    serde_json::from_str(json).unwrap_or_default()
-}
-
 /// Convert a PostRow to a PostSummary. `viewer_can_moderate` controls whether
 /// the author field is preserved for tombstoned rows. Reactions and attachments
 /// are always passed in by the caller (fetched separately).
@@ -333,6 +324,7 @@ pub fn post_to_summary(
     viewer_can_moderate: bool,
     reactions: Vec<ReactionCount>,
     tags: Vec<TagRef>,
+    attachments: Vec<AttachmentRef>,
 ) -> PostSummary {
     let is_deleted = row.deleted_at.is_some();
     PostSummary {
@@ -357,7 +349,7 @@ pub fn post_to_summary(
         is_deleted,
         unread_reply_count: None,
         reactions,
-        attachments: parse_attachments(&row.attachments),
+        attachments,
         author_hub: if is_deleted && !viewer_can_moderate {
             None
         } else {
@@ -372,6 +364,7 @@ pub fn reply_to_view(
     row: &ReplyRow,
     viewer_can_moderate: bool,
     reactions: Vec<ReactionCount>,
+    attachments: Vec<AttachmentRef>,
 ) -> ReplyView {
     let is_deleted = row.deleted_at.is_some();
     ReplyView {
@@ -392,7 +385,7 @@ pub fn reply_to_view(
         reply_to_id: row.reply_to_id.clone(),
         is_deleted,
         reactions,
-        attachments: parse_attachments(&row.attachments),
+        attachments,
         author_hub: if is_deleted && !viewer_can_moderate {
             None
         } else {

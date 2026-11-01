@@ -132,9 +132,9 @@ where
     serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
-/// One inline attachment carried with a message. We embed bytes directly
-/// (base64) rather than introducing a separate storage subsystem; the per-
-/// message size cap below keeps this from getting out of hand.
+/// One inline attachment of a DM. Channel messages, posts and replies carry
+/// uploaded files instead (`crate::attachments`); a DM keeps this shape until
+/// its files move to disk too.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Attachment {
     pub name: String,
@@ -151,8 +151,13 @@ pub struct Attachment {
 #[derive(Serialize, Deserialize)]
 pub struct SendMessageRequest {
     pub content: String,
+    /// Ids from `POST /channels/{id}/upload`, shown in this order.
     #[serde(default)]
-    pub attachments: Vec<Attachment>,
+    pub attachment_ids: Vec<String>,
+    /// The retired inline form. Present only so a client still sending it is
+    /// refused with a sentence instead of losing its files silently.
+    #[serde(default, skip_serializing)]
+    pub attachments: Vec<serde_json::Value>,
     /// Optional parent message id to thread under.
     #[serde(default)]
     pub reply_to: Option<String>,
@@ -245,7 +250,7 @@ pub struct MessageResponse {
     #[serde(default)]
     pub edited_at: Option<i64>,
     #[serde(default)]
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<crate::attachments::AttachmentRef>,
     #[serde(default)]
     pub reactions: Vec<ReactionSummary>,
     #[serde(default)]

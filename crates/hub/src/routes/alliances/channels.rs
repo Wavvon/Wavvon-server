@@ -526,7 +526,12 @@ pub async fn get_alliance_forum_posts(
             params.tag.as_deref(),
         )
         .await
-        .map(Json)
+        .map(|mut posts| {
+            for a in posts.iter_mut().flat_map(|p| p.attachments.iter_mut()) {
+                a.via_alliance(&alliance_id);
+            }
+            Json(posts)
+        })
         .map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -583,7 +588,17 @@ pub async fn get_alliance_forum_post(
             params.limit,
         )
         .await
-        .map(Json)
+        .map(|mut post| {
+            let own = post.summary.attachments.iter_mut();
+            let replies = post
+                .replies
+                .iter_mut()
+                .flat_map(|r| r.attachments.iter_mut());
+            for a in own.chain(replies) {
+                a.via_alliance(&alliance_id);
+            }
+            Json(post)
+        })
         .map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
@@ -856,6 +871,88 @@ pub async fn delete_alliance_forum_reply(
         })
 }
 
+/// GET /alliances/{alliance_id}/uploads/{id}
+///
+/// Streams an attachment from whichever member hub holds it, so a reader of an
+/// allied channel never contacts a hub it did not choose. Public like
+/// `/uploads/{id}`: an `<img>` sends no token, and this adds nothing the
+/// holding hub does not already serve. The reader's own headers are applied
+/// whatever the holder sent, and only a re-encoded image stays inline.
+pub async fn get_alliance_upload(
+    State(state): State<Arc<AppState>>,
+    Path((alliance_id, id)): Path<(String, String)>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::http::{header, HeaderValue};
+    let known: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM alliances WHERE id = $1)")
+        .bind(&alliance_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if !known || id.contains('/') {
+        return Err((StatusCode::NOT_FOUND, "File not found".to_string()));
+    }
+    let members: Vec<String> = sqlx::query_scalar(
+        "SELECT hub_url FROM alliance_members WHERE alliance_id = $1 AND hub_public_key != $2",
+    )
+    .bind(&alliance_id)
+    .bind(state.hub_identity.public_key_hex())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    for hub_url in members {
+        let Ok(resp) = state.federation_client.get_upload(&hub_url, &id).await else {
+            continue;
+        };
+        let status = resp.status();
+        if !status.is_success() && status != StatusCode::GONE {
+            continue;
+        }
+        let header_of = |name| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        };
+        let ctype = header_of(header::CONTENT_TYPE).unwrap_or_default();
+        let inline = ctype == "image/webp"
+            && header_of(header::CONTENT_DISPOSITION).is_some_and(|d| d.starts_with("inline"));
+        let disposition = if inline {
+            "inline".to_string()
+        } else {
+            header_of(header::CONTENT_DISPOSITION)
+                .filter(|d| d.starts_with("attachment"))
+                .unwrap_or_else(|| "attachment".to_string())
+        };
+        let mut out =
+            axum::response::Response::new(axum::body::Body::from_stream(resp.bytes_stream()));
+        *out.status_mut() = status;
+        let h = out.headers_mut();
+        for (name, value) in [
+            (header::CONTENT_TYPE, ctype),
+            (header::CONTENT_DISPOSITION, disposition),
+        ] {
+            if let Ok(v) = HeaderValue::from_str(&value) {
+                h.insert(name, v);
+            }
+        }
+        h.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+        h.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; sandbox"),
+        );
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("private, max-age=31536000, immutable"),
+        );
+        return Ok(out);
+    }
+    Err((StatusCode::NOT_FOUND, "File not found".to_string()))
+}
+
 /// What the caller may do in a channel this hub owns and shares: a member's
 /// own channel permissions, or, for a federating peer that holds no role
 /// here, the `everyone` floor. Sharing a channel never widens it, so one
@@ -902,7 +999,7 @@ pub async fn get_alliance_channel_messages(
 
         let rows = sqlx::query_as::<_, LocalMessageRow>(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
-                    m.content, m.attachments, m.created_at, m.edited_at, m.embeds, m.game,
+                    m.content, m.created_at, m.edited_at, m.embeds, m.game,
                     m.masquerade
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1
@@ -919,9 +1016,13 @@ pub async fn get_alliance_channel_messages(
 
         let mut out: Vec<crate::routes::chat_models::MessageResponse> =
             Vec::with_capacity(rows.len());
+        let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+        let mut attachments =
+            crate::attachments::load(&state.db, crate::attachments::Owner::Message, &ids).await?;
         for r in rows {
             let reactions =
                 crate::routes::messages::load_reactions(&state.db, &r.id, &user.public_key).await?;
+            let attachments = attachments.remove(&r.id).unwrap_or_default();
             out.push(crate::routes::chat_models::MessageResponse {
                 id: r.id,
                 channel_id: r.channel_id,
@@ -930,12 +1031,7 @@ pub async fn get_alliance_channel_messages(
                 content: r.content,
                 created_at: r.created_at,
                 edited_at: r.edited_at,
-                attachments: r
-                    .attachments
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .and_then(|s| serde_json::from_str(s).ok())
-                    .unwrap_or_default(),
+                attachments,
                 reactions,
                 // Reply context not federated yet -- shows fine on the owning
                 // hub, just no preview here.
@@ -992,7 +1088,12 @@ pub async fn get_alliance_channel_messages(
             page.cursor(),
         )
         .await
-        .map(Json)
+        .map(|mut messages| {
+            for a in messages.iter_mut().flat_map(|m| m.attachments.iter_mut()) {
+                a.via_alliance(&alliance_id);
+            }
+            Json(messages)
+        })
         .map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
