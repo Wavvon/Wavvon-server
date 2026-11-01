@@ -643,3 +643,39 @@ async fn settings_have_bounds_and_the_capability_is_advertised() {
         .iter()
         .any(|c| c == "attachments.stored"));
 }
+
+#[tokio::test]
+async fn a_jpeg_stays_a_jpeg_without_its_metadata() {
+    let server = common::setup().await;
+    let token = common::authenticate(&server, &Identity::generate()).await;
+    let ch = channel(&server, &token, "text").await;
+
+    let n = nonce();
+    let img = image::RgbImage::from_fn(640, 480, |x, y| {
+        image::Rgb([(x % 251) as u8 ^ n[0], (y % 251) as u8 ^ n[1], n[2]])
+    });
+    let mut jpeg = Vec::new();
+    img.write_to(&mut Cursor::new(&mut jpeg), ImageFormat::Jpeg)
+        .unwrap();
+    // An APP1 (Exif) segment right after SOI, standing in for camera metadata.
+    let exif = b"Exif\0\0wavvon-test-marker";
+    let mut tagged = jpeg[..2].to_vec();
+    tagged.extend_from_slice(&[0xFF, 0xE1]);
+    tagged.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+    tagged.extend_from_slice(exif);
+    tagged.extend_from_slice(&jpeg[2..]);
+
+    let up = upload(&server, &token, &ch, "photo.jpg", tagged).await;
+    assert_eq!(up["mime"], "image/jpeg");
+    assert_eq!(up["kind"], "image");
+
+    let got = server.get(up["url"].as_str().unwrap()).await;
+    got.assert_status_ok();
+    assert_eq!(header(&got, "content-type"), "image/jpeg");
+    assert_eq!(header(&got, "content-disposition"), "inline");
+    let body = got.as_bytes();
+    assert_eq!(&body[..2], &[0xFF, 0xD8]);
+    assert!(!body
+        .windows(b"wavvon-test-marker".len())
+        .any(|w| w == b"wavvon-test-marker"));
+}

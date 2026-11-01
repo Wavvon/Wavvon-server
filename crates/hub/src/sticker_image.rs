@@ -35,6 +35,9 @@ pub struct Profile {
     /// Decoded pixels of a still, so a 8192 x 8192 bomb is refused although
     /// each side is in bounds.
     pub max_input_pixels: u64,
+    /// A photo stays a (lossy, re-encoded) JPEG: the only WebP encoder here is
+    /// lossless, which makes a photo several times larger than its JPEG.
+    pub jpeg_stays_jpeg: bool,
     pub what: &'static str,
 }
 
@@ -42,6 +45,7 @@ pub const STICKER: Profile = Profile {
     max_dim: MAX_DIM,
     max_input_dim: MAX_INPUT_DIM,
     max_input_pixels: (MAX_INPUT_DIM as u64) * (MAX_INPUT_DIM as u64),
+    jpeg_stays_jpeg: false,
     what: "sticker",
 };
 
@@ -50,6 +54,7 @@ pub const ATTACHMENT: Profile = Profile {
     max_dim: 4096,
     max_input_dim: 8192,
     max_input_pixels: 40 * 1024 * 1024,
+    jpeg_stays_jpeg: true,
     what: "image",
 };
 const MAX_FRAMES: usize = 60;
@@ -64,6 +69,7 @@ static DECODE_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_ne
 #[derive(Debug)]
 pub struct Canonical {
     pub bytes: Vec<u8>,
+    pub mime: &'static str,
     pub width: u32,
     pub height: u32,
 }
@@ -140,6 +146,7 @@ pub fn canonicalize_profile(
         if let Some(bytes) = strip_webp_metadata(input) {
             return Ok(Canonical {
                 bytes,
+                mime: "image/webp",
                 width: w,
                 height: h,
             });
@@ -160,7 +167,10 @@ pub fn canonicalize_profile(
             }
         })
         .collect();
-    let bytes = if frames.len() == 1 {
+    let jpeg = p.jpeg_stays_jpeg && format == ImageFormat::Jpeg;
+    let bytes = if jpeg {
+        encode_jpeg(&frames[0].0)?
+    } else if frames.len() == 1 {
         encode_still(&frames[0].0)?
     } else {
         encode_animation(&frames, nw, nh)?
@@ -174,6 +184,7 @@ pub fn canonicalize_profile(
     }
     Ok(Canonical {
         bytes,
+        mime: if jpeg { "image/jpeg" } else { "image/webp" },
         width: nw,
         height: nh,
     })
@@ -281,6 +292,16 @@ fn collect_frames(frames: image::Frames<'_>) -> Result<Vec<(RgbaImage, u64)>, In
     if out.is_empty() {
         return Err(IngestError::NotAnImage("image has no frames".into()));
     }
+    Ok(out)
+}
+
+/// Re-encoding drops EXIF (location included) and anything appended to the file.
+fn encode_jpeg(img: &RgbaImage) -> Result<Vec<u8>, IngestError> {
+    let rgb = image::DynamicImage::ImageRgba8(img.clone()).to_rgb8();
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+        .encode_image(&rgb)
+        .map_err(bad)?;
     Ok(out)
 }
 

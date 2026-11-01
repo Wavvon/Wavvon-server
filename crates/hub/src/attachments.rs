@@ -689,8 +689,8 @@ fn ingest_err(e: IngestError) -> ApiErr {
 }
 
 /// The caller has already checked the input against the upload cap; the
-/// re-encoded output is not capped (a lossless WebP of a photo can be larger
-/// than the JPEG it came from) and counts against the disk budget instead.
+/// re-encoded output is not capped (a lossless WebP of a large PNG can grow)
+/// and counts against the disk budget instead.
 pub async fn ingest(db: &PgPool, up: Upload) -> Result<AttachmentRef, ApiErr> {
     let name = clean_name(&up.name);
     let sniffed = sniff(&up.bytes);
@@ -709,7 +709,7 @@ pub async fn ingest(db: &PgPool, up: Upload) -> Result<AttachmentRef, ApiErr> {
             .map_err(ingest_err)?;
         (
             c.bytes,
-            "image/webp",
+            c.mime,
             "image",
             Some(c.width as i32),
             Some(c.height as i32),

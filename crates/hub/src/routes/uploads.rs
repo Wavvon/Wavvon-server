@@ -144,7 +144,7 @@ pub async fn serve_upload(
     let mut resp = Response::new(axum::body::Body::from(served.bytes));
     let h = resp.headers_mut();
     let (ctype, disposition) = if served.inline {
-        ("image/webp".to_string(), "inline".to_string())
+        (served.mime, "inline".to_string())
     } else {
         let ctype = if served.mime == "text/plain" {
             "text/plain; charset=utf-8".to_string()

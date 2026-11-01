@@ -431,6 +431,15 @@ pub async fn post_alliance_channel_message(
         ));
     }
 
+    // An upload lives on this hub and the hop carries text only, so the files
+    // would vanish on the way; refuse rather than post the message without them.
+    if !req.attachment_ids.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "attachments cannot be sent to another hub's alliance channel yet".to_string(),
+        ));
+    }
+
     // Otherwise, find the peer that owns this channel and proxy.
     // The owning hub sees neither this hub's mutes nor its rate limits, so
     // they are applied here, before the hop.
@@ -915,7 +924,7 @@ pub async fn get_alliance_upload(
                 .map(str::to_string)
         };
         let ctype = header_of(header::CONTENT_TYPE).unwrap_or_default();
-        let inline = ctype == "image/webp"
+        let inline = matches!(ctype.as_str(), "image/webp" | "image/jpeg")
             && header_of(header::CONTENT_DISPOSITION).is_some_and(|d| d.starts_with("inline"));
         let disposition = if inline {
             "inline".to_string()
