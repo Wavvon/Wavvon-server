@@ -491,3 +491,37 @@ async fn audit_log_reads_newest_first_and_pages_backwards() {
     assert_eq!(page(None, Some(actor), 200).await.len(), 3);
     assert!(page(None, Some("0".repeat(64)), 200).await.is_empty());
 }
+
+#[tokio::test]
+async fn preview_image_cap_defaults_and_rejects_values_outside_the_bounds() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+    let get = || async {
+        let s: serde_json::Value = server
+            .get("/hub/settings")
+            .authorization_bearer(&token)
+            .await
+            .json();
+        s["max_preview_image_bytes"].clone()
+    };
+    assert_eq!(get().await, 4 * 1024 * 1024);
+
+    for bad in [1024u64, 17 * 1024 * 1024] {
+        server
+            .patch("/hub")
+            .authorization_bearer(&token)
+            .json(&json!({ "max_preview_image_bytes": bad }))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(get().await, 4 * 1024 * 1024);
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({ "max_preview_image_bytes": 16 * 1024 * 1024 }))
+        .await
+        .assert_status_ok();
+    assert_eq!(get().await, 16 * 1024 * 1024);
+}

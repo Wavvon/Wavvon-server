@@ -162,6 +162,18 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "max_attachment_bytes", &bytes.to_string()).await?;
     }
+    if let Some(bytes) = req.max_preview_image_bytes {
+        if !(MIN_MAX_PREVIEW_IMAGE_BYTES..=MAX_MAX_PREVIEW_IMAGE_BYTES).contains(&bytes) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "max_preview_image_bytes must be between {} and {} bytes",
+                    MIN_MAX_PREVIEW_IMAGE_BYTES, MAX_MAX_PREVIEW_IMAGE_BYTES
+                ),
+            ));
+        }
+        upsert_setting(&state.db, "max_preview_image_bytes", &bytes.to_string()).await?;
+    }
     if let Some(bytes) = req.max_upload_bytes {
         if !(MIN_MAX_UPLOAD_BYTES..=MAX_MAX_UPLOAD_BYTES).contains(&bytes) {
             return Err((
@@ -413,6 +425,7 @@ pub async fn get_hub_settings(
 
     let max_attachment_bytes = read_attachment_cap(&state.db).await;
     let max_upload_bytes = read_upload_cap(&state.db).await;
+    let max_preview_image_bytes = read_preview_image_cap(&state.db).await;
 
     let name_color_mode = crate::routes::users::name_color_mode(&state.db).await;
 
@@ -429,6 +442,7 @@ pub async fn get_hub_settings(
         name_color_mode,
         max_attachment_bytes,
         max_upload_bytes,
+        max_preview_image_bytes,
     }))
 }
 
@@ -448,6 +462,20 @@ pub async fn read_upload_cap(db: &sqlx::PgPool) -> u64 {
         .and_then(|v| v.parse().ok())
         .filter(|b| *b >= MIN_MAX_UPLOAD_BYTES && *b <= MAX_MAX_UPLOAD_BYTES)
         .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES)
+}
+
+/// Largest image a link preview will fetch and re-serve (an `og:image` or a
+/// direct image link); the default is above the old 1 MB so ordinary GIFs fit.
+pub const DEFAULT_MAX_PREVIEW_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MIN_MAX_PREVIEW_IMAGE_BYTES: u64 = 256 * 1024;
+pub const MAX_MAX_PREVIEW_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+pub async fn read_preview_image_cap(db: &sqlx::PgPool) -> u64 {
+    read_setting(db, "max_preview_image_bytes")
+        .await
+        .and_then(|v| v.parse().ok())
+        .filter(|b| *b >= MIN_MAX_PREVIEW_IMAGE_BYTES && *b <= MAX_MAX_PREVIEW_IMAGE_BYTES)
+        .unwrap_or(DEFAULT_MAX_PREVIEW_IMAGE_BYTES)
 }
 
 /// Default attachment cap: the value that used to be the compile-time
@@ -526,6 +554,13 @@ pub struct HubSettings {
     /// Largest file `POST /channels/{id}/upload` accepts, in bytes.
     #[serde(default = "default_upload_cap")]
     pub max_upload_bytes: u64,
+    /// Largest image a link preview will fetch and re-serve, in bytes.
+    #[serde(default = "default_preview_image_cap")]
+    pub max_preview_image_bytes: u64,
+}
+
+fn default_preview_image_cap() -> u64 {
+    DEFAULT_MAX_PREVIEW_IMAGE_BYTES
 }
 
 fn default_upload_cap() -> u64 {
@@ -647,6 +682,10 @@ pub struct UpdateHubRequest {
     /// `MAX_MAX_UPLOAD_BYTES`].
     #[serde(default)]
     pub max_upload_bytes: Option<u64>,
+    /// Largest link-preview image, in bytes. Must be within
+    /// [`MIN_MAX_PREVIEW_IMAGE_BYTES`, `MAX_MAX_PREVIEW_IMAGE_BYTES`].
+    #[serde(default)]
+    pub max_preview_image_bytes: Option<u64>,
     /// Priority order for resolving a member's displayed name color (member
     /// name colors feature). Must be one of `NAME_COLOR_MODES`
     /// ("user_over_role", "role_over_user", "role_only", "user_only",
