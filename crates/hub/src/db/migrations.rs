@@ -49,6 +49,9 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     check_not_newer(found)?;
 
     baseline(pool).await?;
+    if found == 0 {
+        seed_everyone_defaults(pool).await?;
+    }
 
     for version in found + 1..=SCHEMA_VERSION {
         let mut tx = pool.begin().await?;
@@ -193,6 +196,31 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                 .await?;
         }
         _ => unreachable!("no schema step {version}"),
+    }
+    Ok(())
+}
+
+/// The permissions every member starts with, granted once when the database is
+/// created. Run on every start (as the baseline once did), it handed back any
+/// of these an admin had revoked from @everyone at each restart.
+///
+/// `voice.join` here is the whole "nothing changes until someone denies it"
+/// property of an independent voice gate.
+async fn seed_everyone_defaults(pool: &PgPool) -> Result<()> {
+    for perm in [
+        MESSAGES_SEND,
+        MESSAGES_READ,
+        FORUM_POSTS_CREATE,
+        EVENTS_CREATE,
+        VOICE_JOIN,
+    ] {
+        sqlx::query(
+            "INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', $1)
+             ON CONFLICT (role_id, permission) DO NOTHING",
+        )
+        .bind(perm)
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
@@ -602,32 +630,6 @@ async fn baseline(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-
-    // Seed built-in permissions, in the rebuilt catalogue's ids.
-    //
-    // `builtin-owner` loses its `admin` row and gains nothing in its place
-    // (permissions.md §6): its power comes from `is_owner`, which is
-    // membership of the role itself. The rows it used to carry beside `admin`
-    // were redundant with the wildcard and are gone with it.
-    //
-    // `builtin-everyone` keeps the baseline every member needs, including
-    // `voice.join` — that one row is the whole "nothing changes until someone
-    // denies it" property of an independent voice gate.
-    for (role, perm) in [
-        ("builtin-everyone", MESSAGES_SEND),
-        ("builtin-everyone", MESSAGES_READ),
-        ("builtin-everyone", FORUM_POSTS_CREATE),
-        ("builtin-everyone", EVENTS_CREATE),
-        ("builtin-everyone", VOICE_JOIN),
-    ] {
-        sqlx::query(
-            "INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2) ON CONFLICT (role_id, permission) DO NOTHING",
-        )
-        .bind(role)
-        .bind(perm)
-        .execute(pool)
-        .await?;
-    }
 
     // Role-based channel permission overwrites (Nested Channels §3). One row
     // per (channel, role, permission). Absence of a row = inherit. Depends on

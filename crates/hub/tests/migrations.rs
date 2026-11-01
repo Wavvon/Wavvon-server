@@ -328,3 +328,39 @@ async fn a_newer_database_is_refused_before_anything_runs() {
     .unwrap();
     assert_eq!(friends, 0, "the baseline must not have run");
 }
+
+#[tokio::test]
+async fn revoked_everyone_default_stays_revoked_after_restart() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    sqlx::query(
+        "DELETE FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = 'messages.send'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A restart runs the migrations again.
+    db::migrations::run(&pool).await.unwrap();
+
+    let granted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = 'messages.send'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(granted, 0, "an admin's revocation must survive a restart");
+}
+
+#[tokio::test]
+async fn fresh_db_grants_everyone_defaults() {
+    let (pool, _guard) = common::create_test_db().await;
+    let perms: Vec<String> = sqlx::query_scalar(
+        "SELECT permission FROM role_permissions WHERE role_id = 'builtin-everyone'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(perms.contains(&"messages.send".to_string()));
+    assert!(perms.contains(&"voice.join".to_string()));
+}
