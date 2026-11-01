@@ -131,6 +131,16 @@ pub async fn send_dm(
         ));
     }
 
+    // An encrypted message carries its attachments inside the ciphertext
+    // (e2e-encryption.md, "Attachment encryption"). Any beside it would be
+    // stored readable under a message the sender believes is private.
+    if (is_encrypted || is_group_encrypted) && !req.attachments.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "attachments_must_be_encrypted".to_string(),
+        ));
+    }
+
     // Same per-message attachment cap as channel messages.
     // Operator-configurable since 2026-08-21 (hub_settings
     // `max_attachment_bytes`); the old constant is now only the default.
@@ -665,14 +675,17 @@ pub async fn receive_federated_dm(
 
     ensure_user_stub(&state.db, &req.sender, req.created_at).await?;
 
-    let attachments_json = if req.attachments.is_empty() {
+    let is_encrypted = req.encrypted_envelope.is_some();
+    let is_group_encrypted = req.group_encrypted_envelope.is_some();
+
+    // Cleartext attachments beside an envelope are dropped, not refused: a
+    // refusal would leave the sending hub's outbox retrying a row that can
+    // never succeed. Fixed clients carry them inside the ciphertext.
+    let attachments_json = if req.attachments.is_empty() || is_encrypted || is_group_encrypted {
         None
     } else {
         serde_json::to_string(&req.attachments).ok()
     };
-
-    let is_encrypted = req.encrypted_envelope.is_some();
-    let is_group_encrypted = req.group_encrypted_envelope.is_some();
 
     if is_encrypted {
         let env = req.encrypted_envelope.as_ref().ok_or((

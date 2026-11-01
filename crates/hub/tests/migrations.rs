@@ -364,3 +364,36 @@ async fn fresh_db_grants_everyone_defaults() {
     assert!(perms.contains(&"messages.send".to_string()));
     assert!(perms.contains(&"voice.join".to_string()));
 }
+
+#[tokio::test]
+async fn step_7_drops_cleartext_attachments_of_encrypted_dms() {
+    let (pool, _guard) = common::create_test_db().await;
+    for (id, enc, group) in [
+        ("enc", true, false),
+        ("grp", false, true),
+        ("plain", false, false),
+    ] {
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, created_at, attachments, is_encrypted, is_group_encrypted)
+             VALUES ($1, 'c', 's', 0, '[{}]', $2, $3)",
+        )
+        .bind(id)
+        .bind(enc)
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE schema_version SET version = 6")
+        .execute(&pool)
+        .await
+        .unwrap();
+    db::migrations::run(&pool).await.unwrap();
+
+    let kept: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM dm_messages WHERE attachments IS NOT NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kept, vec!["plain".to_string()]);
+}

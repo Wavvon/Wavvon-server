@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 6;
+pub const SCHEMA_VERSION: i32 = 7;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -194,6 +194,17 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS masquerade TEXT")
                 .execute(conn)
                 .await?;
+        }
+        // Attachments stored in clear beside an encrypted DM envelope, from
+        // clients that sent them outside the ciphertext. Clients no longer
+        // show them; they were never meant to be readable here.
+        7 => {
+            sqlx::query(
+                "UPDATE dm_messages SET attachments = NULL
+                 WHERE (is_encrypted OR is_group_encrypted) AND attachments IS NOT NULL",
+            )
+            .execute(conn)
+            .await?;
         }
         _ => unreachable!("no schema step {version}"),
     }
