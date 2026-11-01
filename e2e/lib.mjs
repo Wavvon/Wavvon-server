@@ -55,10 +55,10 @@ export function freshDb(name) {
 
 /** `E2E_PSQL_DIRECT=1` uses a `psql` on PATH against `PG`, as CI does, where
  *  PostgreSQL is a service container rather than the dev box's `wavvon-pg`. */
-export function psql(sql) {
+export function psql(sql, db) {
   const client = process.env.E2E_PSQL_DIRECT
-    ? `psql ${PG}/postgres`
-    : "docker exec wavvon-pg psql -U postgres";
+    ? `psql ${PG}/${db ?? "postgres"}`
+    : `docker exec wavvon-pg psql -U postgres${db ? ` -d ${db}` : ""}`;
   execSync(`${client} -c ${JSON.stringify(sql)}`, { stdio: "pipe" });
 }
 

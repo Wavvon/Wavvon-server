@@ -48,6 +48,7 @@ POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17
 | `alliancedelegate` | Who may act on *one* alliance: the per-alliance grant list, the channel permission sharing also needs, and the widening a delegate must not manage. |
 | `alliancestress`, `alliancechurn`, `alliancedrift` | Alliances under load, membership churn, and state drift between hubs. |
 | `stickers` | Two hubs: a stranger on B sends a sticker from A's pack, so B fetches it from A over the real network; 502 for a missing hash or a dead origin, 403 with export off. |
+| `attachments` | One hub: served headers (only a re-encoded image inline, everything sandboxed, `as_file` and executables download-only, a lying extension refused), the budget at its floor expiring the oldest, the migration step on a database a previous release left, and backup/restore carrying the blob files. |
 | `farm`, `crossfarm` | A farm hosting its own hubs, and an alliance across two farms. |
 
 ## The API contract

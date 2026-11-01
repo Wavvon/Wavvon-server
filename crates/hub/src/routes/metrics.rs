@@ -34,6 +34,11 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         .await
         .unwrap_or(0);
 
+    let attachments = crate::attachments::usage(&state.db).await;
+    let attachments_used = attachments.used_bytes;
+    let attachments_cap = attachments.cap_bytes;
+    let attachments_evictions = attachments.evictions;
+
     let body = format!(
         "# HELP wavvon_online_users Currently connected users\n\
          # TYPE wavvon_online_users gauge\nwavvon_online_users {online_users}\n\
@@ -43,6 +48,12 @@ pub async fn metrics(State(state): State<Arc<AppState>>) -> Response {
          # TYPE wavvon_active_video_channels gauge\nwavvon_active_video_channels {active_video_channels}\n\
          # HELP wavvon_messages_total Total messages stored\n\
          # TYPE wavvon_messages_total counter\nwavvon_messages_total {messages_total}\n\
+         # HELP wavvon_attachments_bytes Bytes of stored attachment blobs\n\
+         # TYPE wavvon_attachments_bytes gauge\nwavvon_attachments_bytes {attachments_used}\n\
+         # HELP wavvon_attachments_cap_bytes Configured attachment disk budget\n\
+         # TYPE wavvon_attachments_cap_bytes gauge\nwavvon_attachments_cap_bytes {attachments_cap}\n\
+         # HELP wavvon_attachments_evictions_total Blobs evicted for space since start\n\
+         # TYPE wavvon_attachments_evictions_total counter\nwavvon_attachments_evictions_total {attachments_evictions}\n\
          # HELP wavvon_uptime_seconds Hub uptime in seconds\n\
          # TYPE wavvon_uptime_seconds gauge\nwavvon_uptime_seconds {uptime_secs}\n"
     );

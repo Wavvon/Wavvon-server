@@ -780,6 +780,20 @@ async fn two_hubs_alliance_descendant_message_via_federation() {
     assert_eq!(descendant_entry.channel_type, "text");
     assert!(!descendant_entry.is_category);
 
+    // Files uploaded to Hub B cannot ride the text-only hop to Hub A: refused,
+    // not posted without them.
+    let resp = client
+        .post(format!(
+            "{hub_b_url}/alliances/{}/channels/{}/messages",
+            alliance.id, descendant.id
+        ))
+        .bearer_auth(&token_b)
+        .json(&json!({ "content": "with a file", "attachment_ids": ["some-upload"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
     // Hub B: post a message on the descendant channel via the alliance
     // proxy. Hub B doesn't own it, so this federates to Hub A.
     let resp = client

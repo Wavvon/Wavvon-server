@@ -447,7 +447,9 @@ pub async fn update_channel(
         }
         if let Some(ref fid) = req.banner_file_id {
             let valid: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM upload_files WHERE id = $1 AND channel_id = $2 AND mime_type IN ('image/png','image/jpeg','image/gif','image/webp')",
+                "SELECT a.id FROM attachments a JOIN attachment_blobs b ON b.sha256 = a.sha256
+                 WHERE a.id = $1 AND a.channel_id = $2 AND b.kind = 'image'
+                   AND a.removed_at IS NULL AND a.expired_at IS NULL",
             )
             .bind(fid)
             .bind(&channel_id)

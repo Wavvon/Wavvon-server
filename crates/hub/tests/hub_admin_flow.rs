@@ -299,53 +299,6 @@ async fn attachment_cap_rejects_values_outside_the_bounds() {
     assert_eq!(settings["max_attachment_bytes"], 3 * 1024 * 1024);
 }
 
-#[tokio::test]
-async fn a_message_over_the_configured_cap_is_refused() {
-    let server = common::setup().await;
-    let owner = Identity::generate();
-    let token = common::authenticate(&server, &owner).await;
-
-    let chan: serde_json::Value = server
-        .post("/channels")
-        .authorization_bearer(&token)
-        .json(&json!({ "name": "uploads" }))
-        .await
-        .json();
-    let channel_id = chan["id"].as_str().unwrap().to_string();
-
-    // Tighten the cap, then send just over it. Proves the send path reads the
-    // setting rather than the old constant — with the constant still in force
-    // this 200 KB payload would sail through.
-    server
-        .patch("/hub")
-        .authorization_bearer(&token)
-        .json(&json!({ "max_attachment_bytes": 128 * 1024 }))
-        .await
-        .assert_status_ok();
-
-    let payload = "A".repeat(200 * 1024);
-    let resp = server
-        .post(&format!("/channels/{channel_id}/messages"))
-        .authorization_bearer(&token)
-        .json(&json!({
-            "content": "too big",
-            "attachments": [{ "name": "big.bin", "mime": "application/octet-stream", "data_b64": payload }],
-        }))
-        .await;
-    resp.assert_status(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
-
-    // And a small one still goes through under the same tightened cap.
-    server
-        .post(&format!("/channels/{channel_id}/messages"))
-        .authorization_bearer(&token)
-        .json(&json!({
-            "content": "small enough",
-            "attachments": [{ "name": "ok.bin", "mime": "application/octet-stream", "data_b64": "A".repeat(1024) }],
-        }))
-        .await
-        .assert_status_success();
-}
-
 // ---------------------------------------------------------------------------
 // Farewell label — shown by a client when someone removes this hub from their
 // device (decisions.md, "Leave hub does not leave").

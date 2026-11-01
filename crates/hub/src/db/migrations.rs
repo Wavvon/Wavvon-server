@@ -29,7 +29,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 8;
+pub const SCHEMA_VERSION: i32 = 9;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -254,7 +254,145 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                 sqlx::query(ddl).execute(&mut *conn).await?;
             }
         }
+        // Attachments on disk (attachments.md). Existing inline and forum
+        // attachments become expired rows, name kept and no blob: nothing is
+        // converted (alpha, no backward compatibility). The old columns and
+        // `upload_files` go, and banners must be uploaded again. Irreversible.
+        9 => {
+            for ddl in [
+                "CREATE TABLE IF NOT EXISTS attachment_blobs (
+                    sha256         TEXT PRIMARY KEY,
+                    kind           TEXT NOT NULL,
+                    mime           TEXT NOT NULL,
+                    size_bytes     BIGINT NOT NULL,
+                    width          INTEGER,
+                    height         INTEGER,
+                    created_at     BIGINT NOT NULL,
+                    last_linked_at BIGINT NOT NULL
+                )",
+                "CREATE INDEX IF NOT EXISTS idx_attachment_blobs_linked
+                    ON attachment_blobs(last_linked_at)",
+                "CREATE TABLE IF NOT EXISTS attachments (
+                    id         TEXT PRIMARY KEY,
+                    sha256     TEXT REFERENCES attachment_blobs(sha256) ON DELETE SET NULL,
+                    name       TEXT NOT NULL,
+                    uploader   TEXT NOT NULL,
+                    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+                    message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+                    post_id    TEXT REFERENCES posts(id) ON DELETE CASCADE,
+                    reply_id   TEXT REFERENCES post_replies(id) ON DELETE CASCADE,
+                    as_file    BOOLEAN NOT NULL DEFAULT FALSE,
+                    position   INTEGER NOT NULL DEFAULT 0,
+                    created_at BIGINT NOT NULL,
+                    removed_at BIGINT,
+                    expired_at BIGINT
+                )",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id)
+                    WHERE message_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_post ON attachments(post_id)
+                    WHERE post_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_reply ON attachments(reply_id)
+                    WHERE reply_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_sha ON attachments(sha256)
+                    WHERE sha256 IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_orphans ON attachments(created_at)
+                    WHERE message_id IS NULL AND post_id IS NULL AND reply_id IS NULL",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+            expire_inline(&mut *conn, "messages", "message_id", 1000).await?;
+            expire_inline(&mut *conn, "posts", "post_id", 1).await?;
+            expire_inline(&mut *conn, "post_replies", "reply_id", 1).await?;
+            for ddl in [
+                "ALTER TABLE messages DROP COLUMN IF EXISTS attachments",
+                "ALTER TABLE posts DROP COLUMN IF EXISTS attachments",
+                "ALTER TABLE post_replies DROP COLUMN IF EXISTS attachments",
+                "UPDATE channels SET banner_file_id = NULL WHERE banner_file_id IS NOT NULL",
+                "DROP TABLE IF EXISTS upload_files",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+        }
         _ => unreachable!("no schema step {version}"),
+    }
+    Ok(())
+}
+
+/// One expired row per inline or forum attachment of `table`, name kept. Read
+/// one row at a time: an inline attachment is base64 and a table of them does
+/// not fit in memory. A column that does not parse is skipped, not fatal: the
+/// hub wrote it, and a start that stops on one old row helps nobody.
+/// `ts_divisor` turns the owner's timestamp into seconds.
+async fn expire_inline(
+    conn: &mut PgConnection,
+    table: &str,
+    owner_col: &str,
+    ts_divisor: i64,
+) -> Result<()> {
+    let has_column: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = current_schema()
+                         AND table_name = $1 AND column_name = 'attachments')",
+    )
+    .bind(table)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !has_column {
+        return Ok(());
+    }
+    let channel_expr = if table == "post_replies" {
+        "(SELECT p.channel_id FROM posts p WHERE p.id = t.post_id)"
+    } else {
+        "t.channel_id"
+    };
+    let author = match table {
+        "messages" => "t.sender",
+        _ => "t.author_pubkey",
+    };
+    let ids: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT t.id FROM {table} t
+         WHERE t.attachments IS NOT NULL AND t.attachments NOT IN ('', '[]')"
+    ))
+    .fetch_all(&mut *conn)
+    .await?;
+    let now = crate::auth::handlers::unix_timestamp();
+    for id in ids {
+        let (json, channel_id, uploader, created_at): (String, Option<String>, String, i64) =
+            sqlx::query_as(&format!(
+                "SELECT t.attachments, {channel_expr}, {author}, t.created_at
+                 FROM {table} t WHERE t.id = $1"
+            ))
+            .bind(&id)
+            .fetch_one(&mut *conn)
+            .await?;
+        let Some(channel_id) = channel_id else {
+            continue;
+        };
+        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else {
+            continue;
+        };
+        for (pos, item) in items.iter().enumerate() {
+            let name = item
+                .get("name")
+                .and_then(|n| n.as_str())
+                .filter(|n| !n.is_empty())
+                .unwrap_or("file");
+            sqlx::query(&format!(
+                "INSERT INTO attachments
+                    (id, name, uploader, channel_id, {owner_col}, position, created_at, expired_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+            ))
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(name)
+            .bind(&uploader)
+            .bind(&channel_id)
+            .bind(&id)
+            .bind(pos as i32)
+            .bind(created_at / ts_divisor)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+        }
     }
     Ok(())
 }
@@ -556,22 +694,6 @@ async fn baseline(pool: &PgPool) -> Result<()> {
             channel_id   TEXT NOT NULL,
             last_read_at BIGINT NOT NULL,
             PRIMARY KEY (user_pubkey, channel_id)
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // File uploads.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS upload_files (
-            id              TEXT PRIMARY KEY,
-            filename        TEXT NOT NULL,
-            original_name   TEXT NOT NULL,
-            mime_type       TEXT NOT NULL,
-            size_bytes      BIGINT NOT NULL,
-            uploader_pubkey TEXT NOT NULL,
-            channel_id      TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-            created_at      BIGINT NOT NULL
         )",
     )
     .execute(pool)

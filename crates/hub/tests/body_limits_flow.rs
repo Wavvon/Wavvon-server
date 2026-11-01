@@ -32,8 +32,8 @@ async fn an_upload_over_two_megabytes_reaches_the_hubs_own_cap() {
     let form = MultipartForm::new().add_part(
         "file",
         Part::bytes(vec![0u8; 3 * MB])
-            .file_name("big.png")
-            .mime_type("image/png"),
+            .file_name("big.bin")
+            .mime_type("application/octet-stream"),
     );
     let resp = server
         .post(&format!("/channels/{channel_id}/upload"))
@@ -41,14 +41,7 @@ async fn an_upload_over_two_megabytes_reaches_the_hubs_own_cap() {
         .multipart(form)
         .await;
     resp.assert_status(StatusCode::CREATED);
-
-    let filename = resp.json::<Value>()["filename"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let _ = std::fs::remove_file(
-        std::path::Path::new(&wavvon_hub::routes::uploads::uploads_dir()).join(filename),
-    );
+    assert_eq!(resp.json::<Value>()["size"], 3 * MB as u64);
 }
 
 #[tokio::test]
@@ -71,52 +64,6 @@ async fn an_upload_over_the_cap_gets_the_hubs_message() {
     resp.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
     assert!(
         resp.text().contains("25MB"),
-        "the hub's own check should answer, got {:?}",
-        resp.text()
-    );
-}
-
-#[tokio::test]
-async fn an_attachment_under_a_raised_cap_is_accepted() {
-    let server = common::setup().await;
-    let token = common::authenticate(&server, &Identity::generate()).await;
-    let channel_id = channel(&server, &token).await;
-
-    server
-        .patch("/hub")
-        .authorization_bearer(&token)
-        .json(&json!({ "max_attachment_bytes": 5 * MB }))
-        .await
-        .assert_status_ok();
-
-    let resp = server
-        .post(&format!("/channels/{channel_id}/messages"))
-        .authorization_bearer(&token)
-        .json(&json!({
-            "content": "big screenshot",
-            "attachments": [{ "name": "shot.png", "mime": "image/png", "data_b64": "A".repeat(4 * MB) }],
-        }))
-        .await;
-    resp.assert_status(StatusCode::CREATED);
-}
-
-#[tokio::test]
-async fn an_attachment_at_the_ceiling_gets_the_hubs_message() {
-    let server = common::setup().await;
-    let token = common::authenticate(&server, &Identity::generate()).await;
-    let channel_id = channel(&server, &token).await;
-
-    let resp = server
-        .post(&format!("/channels/{channel_id}/messages"))
-        .authorization_bearer(&token)
-        .json(&json!({
-            "content": "too big",
-            "attachments": [{ "name": "shot.png", "mime": "image/png", "data_b64": "A".repeat(9 * MB) }],
-        }))
-        .await;
-    resp.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
-    assert!(
-        resp.text().contains("cap"),
         "the hub's own check should answer, got {:?}",
         resp.text()
     );

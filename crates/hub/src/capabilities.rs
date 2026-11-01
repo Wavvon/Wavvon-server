@@ -61,6 +61,11 @@ pub const CAPABILITIES: &[&str] = &[
     // here, in beta, because the alternative is an admin panel that looks
     // alive and cannot work.
     "apps.register",
+    // Attachments are uploaded first (`POST /channels/{id}/upload`), stored on
+    // disk and sent as `attachment_ids`; messages, posts and replies carry
+    // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
+    // it takes inline `attachments` only, so a client hides the attach button.
+    "attachments.stored",
     // Voice works only in `voice` channels (decisions.md, "Voice lives in
     // voice channels"): the hub refuses a voice join, a voice move, an AFK
     // channel or an alliance voice grant anywhere else, and a text channel

@@ -1,5 +1,6 @@
 pub mod afk_worker;
 pub mod apps;
+pub mod attachments;
 pub mod auth;
 pub mod ban_evasion;
 pub mod banlist_worker;

@@ -10,11 +10,11 @@ use crate::auth::middleware::{AuthUser, PeerHub};
 use crate::permissions;
 use crate::routes::chat_models::ChatEvent;
 use crate::routes::post_models::{
-    post_to_summary, reply_to_view, Attachment, CreatePostRequest, CreateReplyRequest,
-    CreateTagRequest, EditPostRequest, EditReplyRequest, EditTagRequest,
-    FederatedCreatePostRequest, FederatedCreateReplyRequest, FederatedReactionRequest,
-    FederatedRetractRequest, ForumTag, PostDetail, PostListParams, PostRow, PostSearchHit,
-    PostSummary, ReactionCount, ReplyListParams, ReplyRow, ReplyView, SearchParams, TagRef,
+    post_to_summary, reply_to_view, CreatePostRequest, CreateReplyRequest, CreateTagRequest,
+    EditPostRequest, EditReplyRequest, EditTagRequest, FederatedCreatePostRequest,
+    FederatedCreateReplyRequest, FederatedReactionRequest, FederatedRetractRequest, ForumTag,
+    PostDetail, PostListParams, PostRow, PostSearchHit, PostSummary, ReactionCount,
+    ReplyListParams, ReplyRow, ReplyView, SearchParams, TagRef,
 };
 use crate::state::AppState;
 
@@ -64,7 +64,7 @@ async fn require_post(
         "SELECT id, channel_id, author_pubkey, title, body,
                 created_at, edited_at, is_pinned, is_locked,
                 reply_count, last_activity_at, deleted_at,
-                COALESCE(attachments, '[]') AS attachments, author_hub
+                author_hub
          FROM posts WHERE id = $1",
     )
     .bind(post_id)
@@ -88,7 +88,7 @@ async fn require_reply(
     let row = sqlx::query_as::<_, ReplyRow>(
         "SELECT id, post_id, author_pubkey, body,
                 created_at, edited_at, reply_to_id, deleted_at,
-                COALESCE(attachments, '[]') AS attachments, author_hub
+                author_hub
          FROM post_replies WHERE id = $1",
     )
     .bind(reply_id)
@@ -302,14 +302,6 @@ async fn validate_post_tags(
     Ok(deduped)
 }
 
-fn encode_attachments(attachments: &Option<Vec<Attachment>>) -> String {
-    attachments
-        .as_deref()
-        .filter(|a| !a.is_empty())
-        .map(|a| serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string()))
-        .unwrap_or_else(|| "[]".to_string())
-}
-
 // ── GET /channels/:cid/posts ─────────────────────────────────────────────────
 
 pub async fn list_posts(
@@ -345,7 +337,7 @@ pub async fn list_posts_with(
         "SELECT id, channel_id, author_pubkey, title, body,
                 created_at, edited_at, is_pinned, is_locked,
                 reply_count, last_activity_at, deleted_at,
-                COALESCE(attachments, '[]') AS attachments, author_hub
+                author_hub
          FROM posts
          WHERE channel_id = ",
     );
@@ -382,12 +374,15 @@ pub async fn list_posts_with(
     // per-post (pre-existing behavior, unchanged here).
     let post_ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
     let mut tags_by_post = batch_load_post_tags(&state.db, &post_ids).await;
+    let mut attachments_by_post =
+        crate::attachments::load(&state.db, crate::attachments::Owner::Post, &post_ids).await?;
 
     let mut posts: Vec<_> = Vec::with_capacity(rows.len());
     for row in &rows {
         let reactions = load_post_reactions(&state.db, &row.id, &user.public_key).await;
         let tags = tags_by_post.remove(&row.id).unwrap_or_default();
-        let mut summary = post_to_summary(row, can_moderate, reactions, tags);
+        let attachments = attachments_by_post.remove(&row.id).unwrap_or_default();
+        let mut summary = post_to_summary(row, can_moderate, reactions, tags, attachments);
 
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM post_replies
@@ -443,9 +438,17 @@ pub async fn create_post(
     let requested_tags = req.tag_ids.clone().unwrap_or_default();
     let tag_ids = validate_post_tags(&state.db, &channel_id, &requested_tags, require_tag).await?;
 
+    crate::attachments::reject_legacy(req.attachments.as_ref().is_some_and(|a| !a.is_empty()))?;
+    crate::attachments::check_ids(
+        &state.db,
+        &req.attachment_ids,
+        &user.public_key,
+        &channel_id,
+    )
+    .await?;
+
     let id = Uuid::new_v4().to_string();
     let now = unix_timestamp();
-    let attachments_json = encode_attachments(&req.attachments);
 
     let mut tx = state
         .db
@@ -454,20 +457,26 @@ pub async fn create_post(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     sqlx::query(
-        "INSERT INTO posts (id, channel_id, author_pubkey, title, body, attachments, created_at, last_activity_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO posts (id, channel_id, author_pubkey, title, body, created_at, last_activity_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&id)
     .bind(&channel_id)
     .bind(&user.public_key)
     .bind(&title)
     .bind(&body)
-    .bind(&attachments_json)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::link(
+        &mut tx,
+        crate::attachments::Owner::Post,
+        &id,
+        &req.attachment_ids,
+    )
+    .await?;
 
     for tag_id in &tag_ids {
         sqlx::query("INSERT INTO post_tags (post_id, tag_id) VALUES ($1, $2)")
@@ -486,7 +495,9 @@ pub async fn create_post(
     let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
     let reactions = load_post_reactions(&state.db, &id, &user.public_key).await;
     let tags = load_post_tags(&state.db, &id).await;
-    let summary = post_to_summary(&row, can_moderate, reactions, tags);
+    let attachments =
+        crate::attachments::load_one(&state.db, crate::attachments::Owner::Post, &id).await?;
+    let summary = post_to_summary(&row, can_moderate, reactions, tags, attachments);
     let detail = PostDetail {
         body: Some(row.body.clone()),
         replies: Vec::new(),
@@ -535,7 +546,9 @@ pub async fn get_post_with(
     let row = require_post(&state.db, &channel_id, &post_id).await?;
     let reactions = load_post_reactions(&state.db, &post_id, &user.public_key).await;
     let tags = load_post_tags(&state.db, &post_id).await;
-    let mut summary = post_to_summary(&row, can_moderate, reactions, tags);
+    let attachments =
+        crate::attachments::load_one(&state.db, crate::attachments::Owner::Post, &post_id).await?;
+    let mut summary = post_to_summary(&row, can_moderate, reactions, tags, attachments);
 
     // Populate unread_reply_count using the caller's read cursor.
     let unread: i64 = sqlx::query_scalar(
@@ -558,7 +571,7 @@ pub async fn get_post_with(
     let reply_rows: Vec<ReplyRow> = if let Some(after_id) = &params.after {
         sqlx::query_as::<_, ReplyRow>(
             "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at,
-                    COALESCE(attachments, '[]') AS attachments, author_hub
+                    author_hub
              FROM post_replies
              WHERE post_id = $1
                -- The cursor is the same tuple the page is ordered by: created_at
@@ -576,7 +589,7 @@ pub async fn get_post_with(
     } else {
         sqlx::query_as::<_, ReplyRow>(
             "SELECT id, post_id, author_pubkey, body, created_at, edited_at, reply_to_id, deleted_at,
-                    COALESCE(attachments, '[]') AS attachments, author_hub
+                    author_hub
              FROM post_replies
              WHERE post_id = $1
              ORDER BY created_at ASC, id ASC
@@ -598,9 +611,13 @@ pub async fn get_post_with(
     };
 
     let mut replies = Vec::with_capacity(reply_rows.len());
+    let reply_ids: Vec<String> = reply_rows.iter().map(|r| r.id.clone()).collect();
+    let mut reply_attachments =
+        crate::attachments::load(&state.db, crate::attachments::Owner::Reply, &reply_ids).await?;
     for r in &reply_rows {
         let r_reactions = load_reply_reactions(&state.db, &r.id, &user.public_key).await;
-        replies.push(reply_to_view(r, can_moderate, r_reactions));
+        let attachments = reply_attachments.remove(&r.id).unwrap_or_default();
+        replies.push(reply_to_view(r, can_moderate, r_reactions, attachments));
     }
 
     Ok(Json(PostDetail {
@@ -702,7 +719,9 @@ pub async fn edit_post(
     let updated_row = require_post(&state.db, &channel_id, &post_id).await?;
     let reactions = load_post_reactions(&state.db, &post_id, &user.public_key).await;
     let tags = load_post_tags(&state.db, &post_id).await;
-    let summary = post_to_summary(&updated_row, can_moderate, reactions, tags);
+    let attachments =
+        crate::attachments::load_one(&state.db, crate::attachments::Owner::Post, &post_id).await?;
+    let summary = post_to_summary(&updated_row, can_moderate, reactions, tags, attachments);
     let detail = PostDetail {
         body: Some(updated_row.body.clone()),
         replies: Vec::new(),
@@ -808,24 +827,46 @@ pub async fn create_reply(
         }
     }
 
+    crate::attachments::reject_legacy(req.attachments.as_ref().is_some_and(|a| !a.is_empty()))?;
+    crate::attachments::check_ids(
+        &state.db,
+        &req.attachment_ids,
+        &user.public_key,
+        &channel_id,
+    )
+    .await?;
+
     let id = Uuid::new_v4().to_string();
     let now = unix_timestamp();
-    let attachments_json = encode_attachments(&req.attachments);
 
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     sqlx::query(
-        "INSERT INTO post_replies (id, post_id, author_pubkey, body, attachments, created_at, reply_to_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO post_replies (id, post_id, author_pubkey, body, created_at, reply_to_id)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&id)
     .bind(&post_id)
     .bind(&user.public_key)
     .bind(&body)
-    .bind(&attachments_json)
     .bind(now)
     .bind(&req.reply_to_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::link(
+        &mut tx,
+        crate::attachments::Owner::Reply,
+        &id,
+        &req.attachment_ids,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Update denormalized counters on the parent post.
     sqlx::query(
@@ -840,7 +881,9 @@ pub async fn create_reply(
     let reply_row = require_reply(&state.db, &post_id, &id).await?;
     let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
     let reactions = load_reply_reactions(&state.db, &id, &user.public_key).await;
-    let view = reply_to_view(&reply_row, can_moderate, reactions);
+    let attachments =
+        crate::attachments::load_one(&state.db, crate::attachments::Owner::Reply, &id).await?;
+    let view = reply_to_view(&reply_row, can_moderate, reactions, attachments);
 
     broadcast_forum_event(
         &state,
@@ -894,7 +937,10 @@ pub async fn edit_reply(
 
     let updated = require_reply(&state.db, &post_id, &reply_id).await?;
     let reactions = load_reply_reactions(&state.db, &reply_id, &user.public_key).await;
-    let view = reply_to_view(&updated, can_moderate, reactions);
+    let attachments =
+        crate::attachments::load_one(&state.db, crate::attachments::Owner::Reply, &reply_id)
+            .await?;
+    let view = reply_to_view(&updated, can_moderate, reactions, attachments);
 
     broadcast_forum_event(
         &state,
@@ -1694,7 +1740,7 @@ pub async fn federated_create_post(
     // `FederatedCreatePostRequest` carries no tag field, so a remote-hub
     // create can never assign the owner's tags. The owner's own
     // `manage_posts` mods can tag it locally afterward.
-    let summary = post_to_summary(&row, false, Vec::new(), Vec::new());
+    let summary = post_to_summary(&row, false, Vec::new(), Vec::new(), Vec::new());
     let detail = PostDetail {
         body: Some(row.body.clone()),
         replies: Vec::new(),
@@ -1790,7 +1836,7 @@ pub async fn federated_create_reply(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     let reply_row = require_reply(&state.db, &post_id, &id).await?;
-    let view = reply_to_view(&reply_row, false, Vec::new());
+    let view = reply_to_view(&reply_row, false, Vec::new(), Vec::new());
 
     broadcast_forum_event(
         &state,

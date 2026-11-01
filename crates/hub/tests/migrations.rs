@@ -397,3 +397,103 @@ async fn step_7_drops_cleartext_attachments_of_encrypted_dms() {
             .unwrap();
     assert_eq!(kept, vec!["plain".to_string()]);
 }
+
+#[tokio::test]
+async fn step_9_turns_inline_and_forum_attachments_into_expired_rows() {
+    let (pool, _guard) = common::create_test_db().await;
+    // Put the database back where a hub of the previous release leaves it.
+    for ddl in [
+        "DROP TABLE attachments",
+        "DROP TABLE attachment_blobs",
+        "ALTER TABLE messages ADD COLUMN attachments TEXT",
+        "ALTER TABLE posts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE post_replies ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+        "CREATE TABLE upload_files (id TEXT PRIMARY KEY, filename TEXT NOT NULL, original_name TEXT NOT NULL,
+            mime_type TEXT NOT NULL, size_bytes BIGINT NOT NULL, uploader_pubkey TEXT NOT NULL,
+            channel_id TEXT NOT NULL, created_at BIGINT NOT NULL)",
+        "UPDATE schema_version SET version = 8",
+        "INSERT INTO users (public_key, first_seen_at) VALUES ('u', 1)",
+        "INSERT INTO channels (id, name, created_by, created_at, banner_file_id) VALUES ('ch', 'c', 'u', 1, 'old-file')",
+        "INSERT INTO messages (id, channel_id, sender, content, created_at, attachments)
+         VALUES ('m1', 'ch', 'u', 'hi', 5000, '[{\"name\":\"photo.jpg\",\"mime\":\"image/jpeg\",\"data_b64\":\"AAAA\"},{\"name\":\"b.txt\",\"mime\":\"text/plain\",\"data_b64\":\"AA\"}]'),
+                ('m2', 'ch', 'u', 'broken', 6000, 'not json')",
+        "INSERT INTO posts (id, channel_id, author_pubkey, title, body, created_at, last_activity_at, attachments)
+         VALUES ('p1', 'ch', 'u', 't', 'b', 7, 7, '[{\"url\":\"https://x.example/f.pdf\",\"name\":\"f.pdf\",\"mime\":\"application/pdf\",\"size\":1}]')",
+        "INSERT INTO post_replies (id, post_id, author_pubkey, body, created_at, attachments)
+         VALUES ('r1', 'p1', 'u', 'b', 8, '[{\"url\":\"https://x.example/g.png\",\"name\":\"g.png\",\"mime\":\"image/png\",\"size\":1}]')",
+    ] {
+        sqlx::query(ddl).execute(&pool).await.unwrap_or_else(|e| panic!("{ddl}: {e}"));
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    #[derive(sqlx::FromRow)]
+    struct Row(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i32,
+        bool,
+        bool,
+        i64,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT name, message_id, post_id, reply_id, position, expired_at IS NOT NULL,
+                    sha256 IS NULL, created_at
+             FROM attachments ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(names, ["b.txt", "f.pdf", "g.png", "photo.jpg"]);
+    assert!(rows.iter().all(|r| r.5 && r.6), "expired, and no blob");
+    let photo = rows.iter().find(|r| r.0 == "photo.jpg").unwrap();
+    assert_eq!((photo.1.as_deref(), photo.4, photo.7), (Some("m1"), 0, 5));
+    assert_eq!(
+        rows.iter().find(|r| r.0 == "f.pdf").unwrap().2.as_deref(),
+        Some("p1")
+    );
+    assert_eq!(
+        rows.iter().find(|r| r.0 == "g.png").unwrap().3.as_deref(),
+        Some("r1")
+    );
+
+    for (table, col) in [
+        ("messages", "attachments"),
+        ("posts", "attachments"),
+        ("post_replies", "attachments"),
+    ] {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+        )
+        .bind(table)
+        .bind(col)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 0, "{table}.{col} is gone");
+    }
+    let upload_files: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('upload_files')::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(upload_files.is_none());
+    let banner: Option<String> =
+        sqlx::query_scalar("SELECT banner_file_id FROM channels WHERE id = 'ch'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(banner.is_none(), "banners must be uploaded again");
+
+    // A restart must neither bring upload_files back nor repeat the step.
+    db::migrations::run(&pool).await.unwrap();
+    let again: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(again, 4);
+}

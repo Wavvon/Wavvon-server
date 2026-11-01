@@ -346,6 +346,13 @@ async fn build_harness_with_web_client(
 /// `AppState { cors_origins: x, ..common::base_state(db) }`.
 #[allow(dead_code)]
 pub fn base_state(db: PgPool) -> AppState {
+    // Attachments write blobs; never into the crate directory.
+    static UPLOADS: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    UPLOADS.get_or_init(|| {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("WAVVON_UPLOADS_DIR", dir.path());
+        dir
+    });
     let (chat_tx, _) = broadcast::channel(256);
     let (voice_event_tx, _) = broadcast::channel(16);
 

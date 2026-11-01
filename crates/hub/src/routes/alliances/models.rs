@@ -40,7 +40,6 @@ pub(super) struct LocalMessageRow {
     pub sender: String,
     pub sender_name: Option<String>,
     pub content: String,
-    pub attachments: Option<String>,
     pub created_at: i64,
     pub edited_at: Option<i64>,
     pub embeds: Option<String>,

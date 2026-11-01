@@ -200,6 +200,7 @@ pub async fn update_hub(
     }
 
     req.stickers.apply(&state.db).await?;
+    req.attachments.apply(&state.db).await?;
 
     let json: std::sync::Arc<str> = std::sync::Arc::from(
         serde_json::to_string(&crate::routes::chat_models::WsServerMessage::HubUpdated)
@@ -446,6 +447,8 @@ pub async fn get_hub_settings(
         max_upload_bytes,
         max_preview_image_bytes,
         stickers: crate::routes::stickers::read_settings(&state.db).await,
+        attachments: crate::attachments::read_settings(&state.db).await,
+        attachments_usage: crate::attachments::usage(&state.db).await,
     }))
 }
 
@@ -563,6 +566,12 @@ pub struct HubSettings {
     /// Sticker packs, copies and their disk budgets (sticker-storage.md §4).
     #[serde(flatten)]
     pub stickers: crate::routes::stickers::StickerSettings,
+    /// Attachment limits and retention (attachments.md §5).
+    #[serde(flatten)]
+    pub attachments: crate::attachments::AttachmentSettings,
+    /// Disk used against the cap, and the warning the admin page shows.
+    #[serde(default)]
+    pub attachments_usage: crate::attachments::Usage,
 }
 
 fn default_preview_image_cap() -> u64 {
@@ -702,6 +711,10 @@ pub struct UpdateHubRequest {
     /// [`crate::routes::stickers::StickerSettingsPatch`].
     #[serde(flatten)]
     pub stickers: crate::routes::stickers::StickerSettingsPatch,
+    /// `max_attachments_per_message` and the `attachments_*` budget; see
+    /// [`crate::attachments::AttachmentSettingsPatch`].
+    #[serde(flatten)]
+    pub attachments: crate::attachments::AttachmentSettingsPatch,
 }
 
 #[derive(Serialize, Deserialize)]
