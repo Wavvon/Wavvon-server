@@ -897,7 +897,7 @@ pub async fn get_alliance_upload(
         .fetch_one(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if !known || id.contains('/') {
+    if !known || uuid::Uuid::parse_str(&id).is_err() {
         return Err((StatusCode::NOT_FOUND, "File not found".to_string()));
     }
     let members: Vec<String> = sqlx::query_scalar(
