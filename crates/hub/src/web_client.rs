@@ -71,12 +71,15 @@ impl WebClientConfig {
 /// - `connect-src https: wss:` and `img-src/media-src https:`: the client is
 ///   multi-hub, so other hubs' APIs, sockets, WebTransport relays, uploads and
 ///   stickers live on origins nobody can list in advance. Banner and hub-icon
-///   URLs are likewise operator-chosen.
+///   URLs are likewise operator-chosen. Plain `http:`/`ws:` are allowed too:
+///   a hub on a LAN or a dev box has no TLS, and since `https:` already admits
+///   any host, dropping them would protect nothing (an https page still
+///   upgrades or blocks them as mixed content).
 /// - `frame-src https:`: mini-apps are served from their own origin (the
 ///   iframe is sandboxed by the client).
 /// - `blob:`/`data:`: object-URL previews of pending attachments, inlined
 ///   small assets.
-pub const HTML_CSP: &str = "default-src 'none'; script-src 'self' 'sha256-J2mFV7BCOcjSxOBL55Scfp1mmsMYgEpU5I1c/ap5vPA=' 'wasm-unsafe-eval'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' blob: data: https:; media-src 'self' blob: https:; font-src 'self' data:; connect-src 'self' https: wss:; worker-src 'self' blob:; frame-src 'self' https:; manifest-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'none'";
+pub const HTML_CSP: &str = "default-src 'none'; script-src 'self' 'sha256-J2mFV7BCOcjSxOBL55Scfp1mmsMYgEpU5I1c/ap5vPA=' 'wasm-unsafe-eval'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' blob: data: https: http:; media-src 'self' blob: https: http:; font-src 'self' data:; connect-src 'self' https: wss: http: ws:; worker-src 'self' blob:; frame-src 'self' https:; manifest-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'none'";
 
 /// Add [`HTML_CSP`] to a web-client response.
 pub fn with_html_csp(mut resp: Response) -> Response {
