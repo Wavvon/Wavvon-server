@@ -14,8 +14,8 @@ use crate::state::AppState;
 const MAX_BODY_BYTES: usize = 64 * 1024; // 64 KB
 const CACHE_TTL_SECS: u64 = 30 * 60; // 30 minutes
 const FETCH_TIMEOUT_SECS: u64 = 5;
-const MAX_IMAGE_BYTES: usize = 1024 * 1024; // 1 MB
-const MAX_CACHED_IMAGES: usize = 128;
+const MAX_AVATAR_BYTES: usize = 1024 * 1024; // 1 MB
+const MAX_CACHED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
 /// SVG is left out on purpose: it is a document that can carry script.
 const IMAGE_TYPES: [&str; 5] = [
     "image/png",
@@ -25,8 +25,8 @@ const IMAGE_TYPES: [&str; 5] = [
     "image/avif",
 ];
 
-/// Preview images by id: (content type, bytes, fetched at). Bounded by count
-/// and by `MAX_IMAGE_BYTES`, so at most 128 MB.
+/// Preview images by id: (content type, bytes, fetched at). Bounded by total
+/// bytes (`MAX_CACHED_IMAGE_BYTES`), oldest evicted first.
 type ImageCache = Mutex<HashMap<String, (String, Vec<u8>, Instant)>>;
 static PREVIEW_IMAGES: std::sync::LazyLock<ImageCache> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -376,13 +376,20 @@ pub async fn get_preview(
         }
     }
 
-    let (bytes, _) = fetch_capped(&url_str, MAX_BODY_BYTES).await?;
+    let (bytes, content_type) = fetch_capped(&url_str, MAX_BODY_BYTES).await?;
 
-    let html = String::from_utf8_lossy(&bytes);
-    let (title, description, og_image) = parse_og_tags(&html);
-    let image_url = match og_image {
-        Some(image) => proxy_image(&state, &url_str, &image).await,
-        None => None,
+    let (title, description, image_url) = if is_image_type(content_type.as_deref()) {
+        // Fetched a second time under the image cap: the first read stopped at
+        // MAX_BODY_BYTES, and a GIF is usually larger than that.
+        (None, None, proxy_image(&state, &url_str, &url_str).await)
+    } else {
+        let html = String::from_utf8_lossy(&bytes);
+        let (title, description, og_image) = parse_og_tags(&html);
+        let image_url = match og_image {
+            Some(image) => proxy_image(&state, &url_str, &image).await,
+            None => None,
+        };
+        (title, description, image_url)
     };
 
     let preview = LinkPreview {
@@ -404,35 +411,63 @@ pub async fn get_preview(
     Ok(Json(preview))
 }
 
+fn is_image_type(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|c| c.split(';').next())
+        .is_some_and(|c| IMAGE_TYPES.contains(&c.trim().to_ascii_lowercase().as_str()))
+}
+
+/// The normalised content type when the response is an allowed raster type
+/// that fits `cap`; `None` otherwise.
+fn accepted_image_type(content_type: Option<&str>, len: usize, cap: usize) -> Option<String> {
+    let ct = content_type?.split(';').next()?.trim().to_ascii_lowercase();
+    (len <= cap && IMAGE_TYPES.contains(&ct.as_str())).then_some(ct)
+}
+
+type CachedImage = (String, Vec<u8>, Instant);
+
+/// Adds an image, dropping expired entries and then the oldest until the total
+/// stays within `max_total`.
+fn insert_image(
+    images: &mut HashMap<String, CachedImage>,
+    id: String,
+    entry: CachedImage,
+    max_total: usize,
+) {
+    images.retain(|_, (_, _, at)| at.elapsed().as_secs() < CACHE_TTL_SECS);
+    images.remove(&id);
+    let mut total: usize = images.values().map(|(_, b, _)| b.len()).sum();
+    while total + entry.1.len() > max_total {
+        let Some(oldest) = images
+            .iter()
+            .min_by_key(|(_, (_, _, at))| *at)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        if let Some((_, b, _)) = images.remove(&oldest) {
+            total -= b.len();
+        }
+    }
+    images.insert(id, entry);
+}
+
 /// Fetches a preview's image on the hub and returns the hub's own URL for it,
 /// so a reader's client never contacts the third-party host. `None` (no image
 /// on the card) when the hub has no public URL to offer, or the image is not
-/// a raster type within `MAX_IMAGE_BYTES`.
+/// a raster type within the `max_preview_image_bytes` setting.
 async fn proxy_image(state: &AppState, page_url: &str, image: &str) -> Option<String> {
     let base = state.canonical_url.read().await.clone()?;
     let absolute = reqwest::Url::parse(page_url).ok()?.join(image).ok()?;
-    let (bytes, content_type) = fetch_capped(absolute.as_str(), MAX_IMAGE_BYTES + 1)
-        .await
-        .ok()?;
-    let content_type = content_type?.split(';').next()?.trim().to_ascii_lowercase();
-    if bytes.len() > MAX_IMAGE_BYTES || !IMAGE_TYPES.contains(&content_type.as_str()) {
-        return None;
-    }
+    let cap = crate::routes::hub::read_preview_image_cap(&state.db).await as usize;
+    let (bytes, content_type) = fetch_capped(absolute.as_str(), cap + 1).await.ok()?;
+    let content_type = accepted_image_type(content_type.as_deref(), bytes.len(), cap)?;
     use sha2::{Digest, Sha256};
     let id = hex::encode(&Sha256::digest(absolute.as_str().as_bytes())[..16]);
     {
         let mut images = PREVIEW_IMAGES.lock().unwrap_or_else(|e| e.into_inner());
-        images.retain(|_, (_, _, at)| at.elapsed().as_secs() < CACHE_TTL_SECS);
-        if images.len() >= MAX_CACHED_IMAGES {
-            let oldest = images
-                .iter()
-                .min_by_key(|(_, (_, _, at))| *at)
-                .map(|(k, _)| k.clone());
-            if let Some(oldest) = oldest {
-                images.remove(&oldest);
-            }
-        }
-        images.insert(id.clone(), (content_type, bytes, Instant::now()));
+        let entry = (content_type, bytes, Instant::now());
+        insert_image(&mut images, id.clone(), entry, MAX_CACHED_IMAGE_BYTES);
     }
     Some(format!("{}/preview/image/{id}", base.trim_end_matches('/')))
 }
@@ -441,11 +476,11 @@ async fn proxy_image(state: &AppState, page_url: &str, image: &str) -> Option<St
 /// keeps it in the uploads directory under a name derived from its source URL
 /// (so the same avatar is stored once). Returns its hub-relative URL,
 /// `/uploads/<name>`, or `None` when it cannot be fetched or is not a raster
-/// image within `MAX_IMAGE_BYTES`.
+/// image within `MAX_AVATAR_BYTES`.
 pub(crate) async fn store_remote_image(url: &str) -> Option<String> {
-    let (bytes, content_type) = fetch_capped(url, MAX_IMAGE_BYTES + 1).await.ok()?;
+    let (bytes, content_type) = fetch_capped(url, MAX_AVATAR_BYTES + 1).await.ok()?;
     let content_type = content_type?.split(';').next()?.trim().to_ascii_lowercase();
-    if bytes.len() > MAX_IMAGE_BYTES || !IMAGE_TYPES.contains(&content_type.as_str()) {
+    if bytes.len() > MAX_AVATAR_BYTES || !IMAGE_TYPES.contains(&content_type.as_str()) {
         return None;
     }
     let ext = content_type
@@ -571,6 +606,38 @@ mod tests {
         ] {
             assert_eq!(fetch_capped(u, 10).await.unwrap_err().1, "ssrf_blocked");
         }
+    }
+
+    #[test]
+    fn image_types_are_recognised_with_parameters() {
+        assert!(is_image_type(Some("image/gif")));
+        assert!(is_image_type(Some("Image/GIF; charset=x")));
+        assert!(!is_image_type(Some("image/svg+xml")));
+        assert!(!is_image_type(Some("text/html")));
+        assert!(!is_image_type(None));
+    }
+
+    #[test]
+    fn an_image_over_the_cap_or_of_a_wrong_type_is_refused() {
+        assert_eq!(
+            accepted_image_type(Some("image/gif"), 100, 100).as_deref(),
+            Some("image/gif")
+        );
+        assert!(accepted_image_type(Some("image/gif"), 101, 100).is_none());
+        assert!(accepted_image_type(Some("text/html"), 10, 100).is_none());
+        assert!(accepted_image_type(None, 10, 100).is_none());
+    }
+
+    #[test]
+    fn image_cache_stays_under_its_byte_bound_and_evicts_oldest() {
+        let mut m = HashMap::new();
+        for i in 0..10 {
+            let e = ("image/gif".to_string(), vec![0u8; 400], Instant::now());
+            insert_image(&mut m, format!("k{i}"), e, 1000);
+            assert!(m.values().map(|(_, b, _)| b.len()).sum::<usize>() <= 1000);
+        }
+        assert_eq!(m.len(), 2);
+        assert!(m.contains_key("k9") && m.contains_key("k8"));
     }
 
     #[tokio::test]
