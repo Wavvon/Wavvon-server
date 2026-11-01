@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -46,60 +46,60 @@ pub struct PreviewQuery {
     pub url: String,
 }
 
-/// Returns true if the IP address falls within a private/loopback/link-local range.
-/// Covers IPv4 private ranges, IPv6 unique-local (fc00::/7), IPv6 link-local
-/// (fe80::/10), and IPv4-mapped IPv6 (::ffff:x.x.x.x treated as their embedded v4).
+/// Returns true unless the address is a global unicast one: deny by default,
+/// so loopback, private, link-local, CGNAT, benchmarking, reserved, multicast,
+/// broadcast, unspecified, NAT64 and the like are all refused. IPv4-mapped and
+/// NAT64-embedded IPv6 forms are judged by their embedded v4 address.
 ///
-/// `pub(crate)` so other outbound-URL validators (e.g.
-/// `outgoing_webhooks::routes`) can reuse the same private-range rule instead
-/// of duplicating it.
+/// `pub(crate)` so other outbound-URL validators (e.g. `webhook_url`) share
+/// the same rule instead of duplicating it.
 pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => is_private_v4(v4),
+        IpAddr::V4(v4) => !is_global_v4(v4),
         IpAddr::V6(v6) => {
-            // ::1 loopback
-            if v6.is_loopback() {
-                return true;
-            }
-            // IPv4-mapped: ::ffff:x.x.x.x — validate the embedded v4 address
             if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_v4(v4);
+                return !is_global_v4(v4);
             }
-            let segs = v6.segments();
-            // fc00::/7 — unique local (fc00:: through fdff::)
-            if segs[0] & 0xfe00 == 0xfc00 {
+            let s = v6.segments();
+            // 64:ff9b::/96 NAT64 well-known prefix: judge the embedded v4.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = [s[6].to_be_bytes(), s[7].to_be_bytes()];
+                return !is_global_v4(Ipv4Addr::new(a[0], a[1], b[0], b[1]));
+            }
+            // Only 2000::/3 is global unicast today; everything else (::, ::1,
+            // fc00::/7, fe80::/10, ff00::/8, 64:ff9b:1::/48, ...) is refused.
+            if s[0] & 0xe000 != 0x2000 {
                 return true;
             }
-            // fe80::/10 — link local
-            if segs[0] & 0xffc0 == 0xfe80 {
-                return true;
-            }
-            false
+            // Documentation (2001:db8::/32) and 6to4 (2002::/16, embeds v4).
+            (s[0] == 0x2001 && s[1] == 0x0db8) || s[0] == 0x2002
         }
     }
 }
 
-fn is_private_v4(v4: Ipv4Addr) -> bool {
-    let octets = v4.octets();
-    // 127.0.0.0/8 loopback
-    octets[0] == 127
-    // 10.0.0.0/8
-    || octets[0] == 10
-    // 172.16.0.0/12
-    || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
-    // 192.168.0.0/16
-    || (octets[0] == 192 && octets[1] == 168)
-    // 169.254.0.0/16 (link-local)
-    || (octets[0] == 169 && octets[1] == 254)
+fn is_global_v4(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    !(o[0] == 0 // 0.0.0.0/8
+        || o[0] == 10
+        || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64.0.0/10 CGNAT
+        || o[0] == 127
+        || (o[0] == 169 && o[1] == 254)
+        || (o[0] == 172 && (o[1] & 0xf0) == 16)
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2) // TEST-NET-1
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18.0.0/15
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100) // TEST-NET-2
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113) // TEST-NET-3
+        || o[0] >= 224) // multicast, 240.0.0.0/4 reserved, broadcast
 }
 
-/// Perform SSRF-safe DNS resolution. Returns the list of validated SocketAddrs
-/// (all checked to be non-private) so the caller can connect to a specific one,
-/// preventing DNS-rebinding between the check and the connection.
-fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>, &'static str> {
-    let addr_str = format!("{host}:{port}");
-    let addrs: Vec<SocketAddr> = addr_str
-        .to_socket_addrs()
+/// Perform SSRF-safe DNS resolution without blocking the runtime. Returns the
+/// validated SocketAddrs (all checked to be global) so the caller can pin the
+/// connection to them, preventing DNS-rebinding between check and connect.
+async fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>, &'static str> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
         .map_err(|_| "dns_failed")?
         .collect();
 
@@ -107,10 +107,8 @@ fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>, &'st
         return Err("dns_failed");
     }
 
-    for addr in &addrs {
-        if is_private_ip(addr.ip()) {
-            return Err("ssrf_blocked");
-        }
+    if addrs.iter().any(|a| is_private_ip(a.ip())) {
+        return Err("ssrf_blocked");
     }
 
     Ok(addrs)
@@ -238,124 +236,68 @@ fn html_decode(s: &str) -> String {
 const PREVIEW_RATE_LIMIT: u32 = 10;
 const PREVIEW_RATE_WINDOW_SECS: u64 = 60;
 
-/// Fetches `url_str` under the SSRF rules (http(s) only, no private or
-/// loopback address, the connection pinned to the address that was checked)
-/// and returns at most `max` bytes of the body with its content type.
+/// Fetches `url_str` under the SSRF rules (http(s) only, no non-global
+/// address, the connection pinned to the addresses that were checked) and
+/// returns at most `max` bytes of the body with its content type. Redirects are
+/// followed by hand (max 3) so every hop is re-resolved, re-checked and pinned.
 async fn fetch_capped(
     url_str: &str,
     max: usize,
 ) -> Result<(Vec<u8>, Option<String>), (StatusCode, String)> {
-    let url_str = url_str.to_string();
-
-    // Validate scheme
-    let is_https = if url_str.starts_with("https://") {
-        true
-    } else if url_str.starts_with("http://") {
-        false
-    } else {
-        return Err((StatusCode::BAD_REQUEST, "invalid_scheme".to_string()));
-    };
-
-    // Extract host and optional port from the URL string.
-    // Strip scheme, then take the authority part (up to first '/', '?', '#').
-    let after_scheme = if is_https {
-        &url_str["https://".len()..]
-    } else {
-        &url_str["http://".len()..]
-    };
-
-    let authority_end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    let authority = &after_scheme[..authority_end];
-
-    if authority.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "missing_host".to_string()));
-    }
-
-    // Split host:port — account for IPv6 like [::1]:8080
-    let (host, port) = if authority.starts_with('[') {
-        // IPv6 literal
-        let bracket_end = authority.find(']').unwrap_or(authority.len());
-        let host_part = &authority[1..bracket_end];
-        let port_part = authority
-            .get(bracket_end + 2..)
-            .and_then(|p| p.parse::<u16>().ok());
-        let default_port = if is_https { 443u16 } else { 80u16 };
-        (host_part.to_string(), port_part.unwrap_or(default_port))
-    } else if let Some(colon) = authority.rfind(':') {
-        let port_str = &authority[colon + 1..];
-        if let Ok(p) = port_str.parse::<u16>() {
-            (authority[..colon].to_string(), p)
-        } else {
-            let default_port = if is_https { 443u16 } else { 80u16 };
-            (authority.to_string(), default_port)
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
+    let mut url = reqwest::Url::parse(url_str).map_err(|_| bad("invalid_url"))?;
+    let mut hops = 0;
+    let resp = loop {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(bad("invalid_scheme"));
         }
-    } else {
-        let default_port = if is_https { 443u16 } else { 80u16 };
-        (authority.to_string(), default_port)
+        let host = url
+            .host_str()
+            .ok_or_else(|| bad("missing_host"))?
+            .to_string();
+        if host.eq_ignore_ascii_case("localhost") {
+            return Err(bad("ssrf_blocked"));
+        }
+        let port = url.port_or_known_default().unwrap_or(80);
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let validated = resolve_and_check_ssrf(bare, port).await.map_err(bad)?;
+
+        // no_proxy(): a system proxy must not forward to addresses that passed
+        // the check. Redirects are off: this loop is the redirect policy.
+        let client = reqwest::Client::builder()
+            .resolve_to_addrs(&host, &validated)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("client_build_error: {e}"),
+                )
+            })?;
+        let resp = client
+            .get(url.clone())
+            .header("User-Agent", "Mozilla/5.0 Wavvon-Hub LinkPreview/1.0")
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch_error: {e}")))?;
+
+        if !resp.status().is_redirection() {
+            break resp;
+        }
+        let next = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|l| url.join(l).ok());
+        hops += 1;
+        match next {
+            Some(n) if hops <= 3 => url = n,
+            // Too many hops or no usable Location: stop and read this response.
+            _ => break resp,
+        }
     };
-
-    // Reject "localhost" hostname directly
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err((StatusCode::BAD_REQUEST, "ssrf_blocked".to_string()));
-    }
-
-    // SSRF check — DNS resolve once, validate all IPs, keep the result.
-    // We then pin reqwest to one of the validated addresses so a second DNS
-    // lookup at connection time cannot return a different (private) IP.
-    let validated_addrs = resolve_and_check_ssrf(&host, port)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-
-    // Build a one-shot client that is pinned to the first validated address.
-    // This prevents DNS-rebinding: the hostname in the URL resolves to the
-    // address we already validated, not whatever the DNS says at connect time.
-    //
-    // no_proxy(): disable HTTP_PROXY / HTTPS_PROXY env vars so a system proxy
-    // cannot forward requests to private IPs that passed the DNS check.
-    //
-    // Custom redirect policy: cap at 3 hops and block redirects to private IP
-    // literals (covers 301 → http://127.0.0.1/ attacks). Hostname-based
-    // redirects are allowed — a follow-on DNS resolution would require async
-    // code that is unavailable in the policy callback; the small hop cap limits
-    // exposure. IPv6 bracket notation is handled by stripping [ ].
-    let pinned_addr = validated_addrs[0];
-    let pinned_client = reqwest::Client::builder()
-        .resolve(&host, pinned_addr)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 3 {
-                return attempt.stop();
-            }
-            if let Some(h) = attempt.url().host_str() {
-                let bare = h.trim_start_matches('[').trim_end_matches(']');
-                if bare.eq_ignore_ascii_case("localhost") {
-                    return attempt.stop();
-                }
-                if let Ok(ip) = bare.parse::<IpAddr>() {
-                    if is_private_ip(ip) {
-                        return attempt.stop();
-                    }
-                }
-            }
-            attempt.follow()
-        }))
-        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("client_build_error: {e}"),
-            )
-        })?;
-
-    // Fetch with timeout
-    let resp = pinned_client
-        .get(&url_str)
-        .header("User-Agent", "Mozilla/5.0 Wavvon-Hub LinkPreview/1.0")
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch_error: {e}")))?;
 
     let content_type = resp
         .headers()
@@ -553,6 +495,83 @@ pub async fn get_preview_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blocked(s: &str) -> bool {
+        is_private_ip(s.parse().unwrap())
+    }
+
+    #[test]
+    fn non_global_addresses_are_blocked() {
+        for ip in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "10.0.0.1",
+            "100.64.0.1",
+            "100.127.255.255",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.0.0.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "224.0.0.1",
+            "239.255.255.255",
+            "240.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "fc00::1",
+            "fd12::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:10.0.0.1",
+            "::ffff:100.64.0.1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "64:ff9b::c0a8:1",
+            "2001:db8::1",
+            "64:ff9b:1::1",
+        ] {
+            assert!(blocked(ip), "{ip} should be blocked");
+        }
+    }
+
+    #[test]
+    fn public_addresses_are_allowed() {
+        for ip in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "198.17.0.1",
+            "198.20.0.1",
+            "223.255.255.255",
+            "2606:4700:4700::1111",
+            "::ffff:8.8.8.8",
+            "64:ff9b::808:808",
+        ] {
+            assert!(!blocked(ip), "{ip} should be allowed");
+        }
+    }
+
+    #[tokio::test]
+    async fn private_targets_are_refused_before_any_connection() {
+        assert_eq!(
+            resolve_and_check_ssrf("localhost", 80).await,
+            Err("ssrf_blocked")
+        );
+        for u in [
+            "http://user@127.0.0.1/",
+            "http://0.0.0.0/",
+            "http://[::]/",
+            "http://100.64.0.1/",
+        ] {
+            assert_eq!(fetch_capped(u, 10).await.unwrap_err().1, "ssrf_blocked");
+        }
+    }
 
     #[tokio::test]
     async fn a_fetched_image_is_served_with_its_type_and_an_unknown_one_is_not() {

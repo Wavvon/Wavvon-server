@@ -36,6 +36,18 @@ pub async fn list_emojis(State(state): State<Arc<AppState>>) -> Json<Vec<EmojiIn
     )
 }
 
+/// True when `mime` is on the raster allow-list (no SVG: it is a document
+/// that can carry script) and the bytes start with that format's signature.
+fn signature_matches(mime: &str, bytes: &[u8]) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(&[0xff, 0xd8, 0xff]),
+        "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    }
+}
+
 pub async fn get_emoji_image(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -52,10 +64,20 @@ pub async fn get_emoji_image(
         .decode(&data_b64)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Rows stored before the allow-list may carry any type: never serve those
+    // as anything but an opaque download.
+    let safe = signature_matches(&mime, &bytes);
+    let (mime, disposition) = if safe {
+        (mime, "inline")
+    } else {
+        ("application/octet-stream".to_string(), "attachment")
+    };
     Ok((
         [
             (header::CONTENT_TYPE, mime),
             (header::CACHE_CONTROL, "public, max-age=86400".into()),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff".into()),
+            (header::CONTENT_DISPOSITION, disposition.into()),
         ],
         bytes,
     ))
@@ -78,6 +100,16 @@ pub async fn create_emoji(
 
     if req.name.is_empty() || req.data_b64.len() > 90_000 {
         return Err((StatusCode::BAD_REQUEST, "Invalid emoji".into()));
+    }
+
+    let bytes = STANDARD
+        .decode(&req.data_b64)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid emoji".to_string()))?;
+    if !signature_matches(&req.mime, &bytes) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Emoji must be a PNG, WebP, GIF or JPEG image".into(),
+        ));
     }
 
     let id = uuid::Uuid::new_v4().to_string();
@@ -117,4 +149,24 @@ pub async fn delete_emoji(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signature_matches as ok;
+
+    #[test]
+    fn only_matching_raster_signatures_pass() {
+        assert!(ok("image/png", b"\x89PNG\r\n\x1a\nrest"));
+        assert!(ok("image/jpeg", &[0xff, 0xd8, 0xff, 0xe0]));
+        assert!(ok("image/gif", b"GIF89a..."));
+        assert!(ok("image/webp", b"RIFF\0\0\0\0WEBPVP8 "));
+        assert!(!ok("image/png", b"GIF89a..."));
+        assert!(!ok("image/webp", b"RIFF\0\0\0\0WAVEfmt "));
+        assert!(!ok("text/html", b"<html>"));
+        assert!(!ok(
+            "image/svg+xml",
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>"
+        ));
+    }
 }
