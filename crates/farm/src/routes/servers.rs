@@ -1,6 +1,6 @@
 /// Server agent routes — registration tokens, agent WebSocket, admin server list.
 ///
-/// POST /farm/admin/server-token — generate a one-time registration token (admin)
+/// POST /farm/admin/server-token — generate a server registration token (admin)
 /// GET  /farm/admin/servers      — list registered server agents (admin)
 /// GET  /ws/agent               — WebSocket upgrade for remote server agents (token in first frame)
 use std::collections::HashMap;
@@ -55,7 +55,8 @@ pub async fn generate_server_token(
         hex::encode(bytes)
     };
 
-    // Random 32-byte one-time token — shown once, stored only as a SHA-256 hash.
+    // Random 32-byte token — shown once, stored only as a SHA-256 hash. It is
+    // the agent's credential and is presented again on every reconnect.
     let token_bytes = {
         let mut bytes = vec![0u8; 32];
         rand::thread_rng().fill_bytes(&mut bytes);

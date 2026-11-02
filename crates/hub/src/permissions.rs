@@ -130,7 +130,7 @@ permission_catalogue! {
     HUB_SETTINGS => "hub.settings", Hub,
     HUB_APPEARANCE => "hub.appearance", Hub,
     HUB_ADMISSION => "hub.admission", Hub,
-    /// Nothing about an invite is a channel; it asked for `manage_channels`
+    /// Nothing about an invite is a channel; it used to ask for `channels.manage`
     /// only by accident (permissions.md §3, Hub).
     INVITES_MANAGE => "invites.manage", Hub,
 
@@ -295,11 +295,8 @@ impl UserPermissions {
     /// the channel-overwrite path says "on this channel" and the hub-wide path
     /// does not.
     ///
-    /// `has()` short-circuits on `admin`, so an admin or owner clears every
-    /// entry for free. That is the exemption §1.6 describes as `is_owner`,
-    /// arriving for free while `admin` still exists — when the wildcard is
-    /// deleted this must start consulting owner-as-property instead, or the
-    /// owner will be unable to grant anything they were not separately given.
+    /// `has()` short-circuits on `is_owner`, so the owner clears every entry
+    /// for free: the exemption §1.6 describes.
     pub fn first_not_held<'a>(
         &self,
         requested: impl IntoIterator<Item = &'a str>,
@@ -310,7 +307,7 @@ impl UserPermissions {
     /// [`first_not_held`](Self::first_not_held) as a 403, for the hub-wide
     /// callers that all want the same message.
     ///
-    /// Without this, `manage_roles` is a wildcard. Every guard on these paths
+    /// Without this, `roles.manage` is a wildcard. Every guard on these paths
     /// bounds *rank*, and the escalation does not need rank: a role beneath
     /// your own priority can carry permissions above it, and handing it to
     /// yourself is one more call.
@@ -402,7 +399,7 @@ async fn fetch_permissions(
 // on a channel = hub-wide baseline, then fold in the ancestor chain
 // root -> target, applying each level's rows for the roles the user holds.
 // Within one level, allow wins over deny; deeper levels win over shallower
-// ones; `admin` is never removed by a deny. See docs/docs/nested-channels-ux.md §3.
+// ones; the owner is never affected by a deny (`has()` checks `is_owner` first). See docs/docs/nested-channels-ux.md §3.
 
 #[derive(sqlx::FromRow, Clone)]
 pub struct OverwriteRow {
@@ -494,7 +491,7 @@ pub async fn fetch_overwrites(
 /// - within one channel level, allow wins over deny for the same permission
 ///   (across whichever roles hold a row at that level);
 /// - a deeper (later-in-`chain`) level's decision overrides a shallower one;
-/// - `admin` is never removed by a deny.
+/// - the owner is unaffected by a deny: ownership is read in `has()`, not folded here.
 pub fn fold_overwrites(
     baseline: &HashSet<String>,
     chain: &[String],

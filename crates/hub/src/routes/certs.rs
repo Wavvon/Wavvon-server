@@ -298,6 +298,7 @@ pub async fn get_revocations(
 pub struct CertSettingsResponse {
     pub cert_mode: String,
     pub cert_auto_issue: bool,
+    // Wire name kept for clients; the stored setting is `cert_standing_days`.
     pub cert_min_age_days: i64,
     pub cert_validity_days: i64,
     pub cert_trusted_issuers: Vec<String>,
