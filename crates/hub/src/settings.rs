@@ -280,9 +280,10 @@ pub struct Settings {
     /// Set to "none" to disable search entirely (NullSearch).
     /// Env: WAVVON_SEARCH_BACKEND
     pub search_backend: Option<String>,
-    /// PostgreSQL connection URL. Unset means the serving hub starts its own
-    /// embedded PostgreSQL; the CLI subcommands fall back to
-    /// [`DEFAULT_DATABASE_URL`], loudly.
+    /// PostgreSQL connection URL. Unset means the hub's own embedded
+    /// PostgreSQL, for the server and the CLI subcommands alike; only
+    /// `doctor`, which starts nothing, falls back to [`DEFAULT_DATABASE_URL`]
+    /// when that server is not running.
     /// Env: WAVVON_DATABASE_URL
     pub database_url: Option<String>,
     /// PostgreSQL connection-pool size. Env: WAVVON_DB_MAX_CONNECTIONS
