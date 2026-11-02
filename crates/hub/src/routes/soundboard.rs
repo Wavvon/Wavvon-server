@@ -5,7 +5,7 @@
 //! outgoing stream -- the hub never touches the audio itself. `POST
 //! /soundboard/:id/played` is attribution UX only: it broadcasts a
 //! `soundboard_played` WS event so listeners see a "🔊 X played *name*"
-//! chip, gated by the same channel-scoped `use_soundboard` permission that
+//! chip, gated by the same channel-scoped `voice.soundboard.use` permission that
 //! is the actual enforcement (see Decisions in the design doc).
 
 use std::sync::Arc;
@@ -107,7 +107,7 @@ pub async fn get_clip_audio(
 }
 
 /// POST /soundboard -- multipart upload: `name` (text), optional `emoji`
-/// (text), `audio` (Opus-in-Ogg file). Requires `manage_soundboard`.
+/// (text), `audio` (Opus-in-Ogg file). Requires `voice.soundboard.manage`.
 pub async fn upload_clip(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -257,7 +257,7 @@ pub async fn upload_clip(
     ))
 }
 
-/// DELETE /soundboard/:id -- requires `manage_soundboard`.
+/// DELETE /soundboard/:id -- requires `voice.soundboard.manage`.
 pub async fn delete_clip(
     State(state): State<Arc<AppState>>,
     user: AuthUser,

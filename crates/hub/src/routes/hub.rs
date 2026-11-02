@@ -13,7 +13,7 @@ use crate::routes::role_models::RoleResponse;
 use crate::state::AppState;
 
 /// Update the hub's branding: name, description, icon (all optional).
-/// Requires the caller to have the admin permission.
+/// Requires `hub.settings`.
 pub async fn update_hub(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -667,7 +667,7 @@ pub struct UpdateHubRequest {
     /// Hub-level invite role policy default (invite role policies). Role to
     /// grant a new user who joins via an invite that doesn't itself carry an
     /// explicit `grant_role_id`. Must reference an existing role that does
-    /// not carry the `admin` permission. Empty string clears the setting.
+    /// not be a takeover role (owner, or one carrying `roles.manage`). Empty string clears the setting.
     #[serde(default)]
     pub default_invite_role_id: Option<String>,
     /// IANA timezone name (e.g. "Europe/Rome") used for hub-local birthday

@@ -105,8 +105,8 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
     ),
     (
         wavvon_hub_env::DATABASE_URL,
-        DEFAULT_DATABASE_URL,
-        "PostgreSQL connection URL (required). Example: postgres://user:pass@host/dbname",
+        "built-in PostgreSQL",
+        "PostgreSQL connection URL. Unset: the hub starts and supervises its own PostgreSQL in the working directory. Example: postgres://user:pass@host/dbname",
     ),
     (
         wavvon_hub_env::DB_MAX_CONNECTIONS,
@@ -280,8 +280,10 @@ pub struct Settings {
     /// Set to "none" to disable search entirely (NullSearch).
     /// Env: WAVVON_SEARCH_BACKEND
     pub search_backend: Option<String>,
-    /// PostgreSQL connection URL. Falls back to [`DEFAULT_DATABASE_URL`]
-    /// when unset — with a warning, and only until embedded PostgreSQL lands.
+    /// PostgreSQL connection URL. Unset means the hub's own embedded
+    /// PostgreSQL, for the server and the CLI subcommands alike; only
+    /// `doctor`, which starts nothing, falls back to [`DEFAULT_DATABASE_URL`]
+    /// when that server is not running.
     /// Env: WAVVON_DATABASE_URL
     pub database_url: Option<String>,
     /// PostgreSQL connection-pool size. Env: WAVVON_DB_MAX_CONNECTIONS
