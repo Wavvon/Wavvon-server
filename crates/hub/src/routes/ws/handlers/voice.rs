@@ -1017,23 +1017,6 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
         _ => return DispatchResult::Continue,
     };
 
-    let can_create = {
-        let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
-        perms
-            .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
-            .unwrap_or(false)
-    };
-    if !can_create {
-        let err = WsServerMessage::Error {
-            context: "voice_zone_create".to_string(),
-            message: "Requires manage_voice permission.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
-    }
-
     let ch_id = match cs.voice_channel.clone() {
         Some(ch) => ch,
         None => {
@@ -1047,6 +1030,23 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
             return DispatchResult::Continue;
         }
     };
+
+    // Checked on the room, not the hub: a channel-level grant or deny of
+    // channels.manage is what an admin set for this room.
+    let can_create = crate::permissions::channel_permissions(&state.db, &cs.public_key, &ch_id)
+        .await
+        .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
+        .unwrap_or(false);
+    if !can_create {
+        let err = WsServerMessage::Error {
+            context: "voice_zone_create".to_string(),
+            message: "Requires the channels.manage permission.".to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
 
     let zone = crate::state::VoiceZone {
         zone_id: zone_id.clone(),
@@ -1113,12 +1113,11 @@ pub(in crate::routes::ws) async fn handle_voice_zone_destroy(
             .map(|z| z.creator_pubkey == cs.public_key)
             .unwrap_or(false)
     };
-    let can_destroy = can_destroy || {
-        let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
-        perms
+    let can_destroy = can_destroy
+        || crate::permissions::channel_permissions(&state.db, &cs.public_key, &ch_id)
+            .await
             .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
-            .unwrap_or(false)
-    };
+            .unwrap_or(false);
     if !can_destroy {
         return DispatchResult::Continue;
     }

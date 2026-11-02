@@ -27,6 +27,10 @@ pub(super) struct ConnState {
     pub session_id: String,
     /// Voice channel the client is currently in, if any.
     pub voice_channel: Option<String>,
+    /// Voice room whose speaking events this connection receives without
+    /// being in it (`voice_watch`). Never grants anything `voice_channel`
+    /// does: zones, positions and whispers all read the latter.
+    pub watched_voice_channel: Option<String>,
     /// Pending screen-share chunk header waiting for the binary frame.
     /// Fields: (channel_id, stream_id, seq, is_init).
     pub pending_chunk: Option<(String, String, u32, bool)>,
@@ -64,6 +68,7 @@ impl ConnState {
             alliance_voice_channel,
             session_id,
             voice_channel: None,
+            watched_voice_channel: None,
             pending_chunk: None,
             subscribed,
             notified_streams: HashSet::new(),

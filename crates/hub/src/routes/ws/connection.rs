@@ -474,8 +474,9 @@ pub(super) async fn handle_socket(
                         WsServerMessage::VoiceParticipantJoined { .. }
                             | WsServerMessage::VoiceParticipantLeft { .. }
                     );
-                    let in_same_channel =
-                        cs.voice_channel.as_deref() == Some(channel_id.as_str());
+                    let in_same_channel = cs.voice_channel.as_deref()
+                        == Some(channel_id.as_str())
+                        || cs.watched_voice_channel.as_deref() == Some(channel_id.as_str());
                     if is_roster_event || (in_same_channel && !is_self) {
                         let json = serde_json::to_string(&msg).unwrap();
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {
@@ -871,7 +872,7 @@ async fn dispatch_client_msg(
                     })
                     .unwrap_or(false);
             if visible {
-                cs.voice_channel = Some(channel_id);
+                cs.watched_voice_channel = Some(channel_id);
             }
             DispatchResult::Continue
         }
@@ -891,7 +892,7 @@ async fn dispatch_client_msg(
             DispatchResult::Continue
         }
         WsClientMessage::VoiceUnwatch => {
-            cs.voice_channel = None;
+            cs.watched_voice_channel = None;
             DispatchResult::Continue
         }
         WsClientMessage::VoiceLeave { .. } => voice::handle_voice_leave(cs, state, msg).await,
