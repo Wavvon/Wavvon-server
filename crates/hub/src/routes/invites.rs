@@ -12,19 +12,12 @@ use crate::routes::invite_models::{invite_status, CreateInviteRequest, InviteRes
 use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
-/// Short expiry forced onto invites that grant an admin-holding role (or
-/// `builtin-owner`) when the creator didn't already ask for something
+/// Short expiry forced onto invites that grant a takeover role (see
+/// `role_is_a_takeover_token`) when the creator didn't already ask for something
 /// shorter. A role-granting invite is a takeover token — it shouldn't sit
 /// around unused indefinitely (task #34).
 const TAKEOVER_GRANT_DEFAULT_EXPIRY_SECS: i64 = 24 * 3600;
 
-/// True if holding `role_id` alone grants the `admin` permission.
-/// `builtin-owner` is seeded with an explicit `admin` row (see
-/// `db::migrations::run`), so no separate special-case is needed here.
-///
-/// `pub(crate)` so `routes::hub::update_hub` can reuse it to reject an
-/// admin-holding role as `default_invite_role_id` (hub-level invite role
-/// policy).
 /// Does this role amount to a takeover if handed out on a bearer code?
 ///
 /// It used to ask whether the role carried `admin`, and with the wildcard gone
@@ -104,11 +97,11 @@ pub async fn create_invite(
         // An invite that grants a role is deferred role assignment, so it
         // needs the same escalation ceiling (permissions.md §1.6). Without it
         // this is the widest door of the four: creating an invite needs
-        // `manage_channels`, not `manage_roles`, so whoever can invite people
+        // `invites.manage`, not `roles.manage`, so whoever can invite people
         // could mint a role-granting code and redeem it as a second identity.
         // The admin-takeover clamp below is not a substitute — it only looks
-        // for `admin`, and the point of the catalogue is that `admin` goes
-        // away while ~40 named permissions remain.
+        // for `roles.manage`, while ~40 other named permissions remain
+        // that this ceiling covers.
         let carried: Vec<String> =
             sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
                 .bind(role_id)
@@ -376,7 +369,7 @@ pub async fn validate_and_use_invite(
 ///
 /// Default-role guard: no inviter priority is meaningful here (a hub-level
 /// setting has no "creator"), so instead this defends against the role
-/// having been deleted, or having gained the `admin` permission, since the
+/// having been deleted, or having become a takeover role, since the
 /// setting was configured — either silently skips the default rather than
 /// failing the redemption.
 pub async fn apply_invite_role_grant(
@@ -437,8 +430,8 @@ pub async fn apply_invite_role_grant(
                 return Ok(()); // the default role was deleted since it was configured
             }
             if role_is_a_takeover_token(db, &default_role_id).await? {
-                // Defense in depth: the role gained `admin` since it was set
-                // as the default — refuse to silently hand out admin.
+                // Defense in depth: the role became a takeover role since it was
+                // set as the default — refuse to silently hand it out.
                 return Ok(());
             }
 
@@ -465,7 +458,7 @@ pub async fn apply_invite_role_grant(
 /// that has no users yet (task #31/#34). Fresh hubs default to
 /// `invite_only=true`, which would otherwise leave no way for anyone —
 /// including the intended owner — to ever register: creating an invite
-/// requires `manage_channels`, which requires already having a role, which
+/// requires `invites.manage`, which requires already having a role, which
 /// requires already having registered. This bypasses that deadlock by
 /// minting the invite directly at the DB layer (not through
 /// `create_invite`'s permission/priority-guarded HTTP path), which is also

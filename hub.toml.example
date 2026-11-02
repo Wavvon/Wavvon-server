@@ -31,11 +31,9 @@ voice_udp_port = 3001
 
 # Apply a channel/role template on first boot (when channels table is empty).
 # template_url  = "https://example.com/my-template.json"
-# bootstrap_token = ""
 
 # ── Database ─────────────────────────────────────────────────────────────────
-# PostgreSQL connection. Leave unset to use the local default:
-# postgres://postgres:postgres@localhost:5432/wavvon
+# PostgreSQL connection. Leave unset and the hub starts its own PostgreSQL.
 # database_url = "postgresql://wavvon:YOUR_DB_PASSWORD@localhost/hub_prod"
 
 # ── Search ───────────────────────────────────────────────────────────────────

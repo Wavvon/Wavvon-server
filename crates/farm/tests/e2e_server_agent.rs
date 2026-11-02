@@ -6,7 +6,7 @@
 ///
 ///   1. Farm starts on a random localhost port.
 ///   2. User authenticates → becomes farm admin.
-///   3. Admin generates a one-time server-registration token.
+///   3. Admin generates a server-registration token.
 ///   4. Mock agent connects via WebSocket, sends `hello`.
 ///   5. GET /farm/admin/servers confirms the agent is listed as connected.
 ///   6. POST /farm/hubs → farm delegates spawn to the connected agent.

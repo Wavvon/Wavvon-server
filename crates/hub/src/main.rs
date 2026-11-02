@@ -1433,7 +1433,9 @@ async fn main() -> Result<()> {
             loop {
                 interval.tick().await;
                 let online = hb_state.online_users.read().await.len() as u64;
-                let db_size = 0u64; // PostgreSQL: size reported separately by the DB server
+                // Not measured yet: the farm shows 0 for every hub. The database lives in
+                // PostgreSQL, so the figure would need a size query, not a file stat.
+                let db_size = 0u64;
                 let uptime = hb_state.started_at.elapsed().as_secs();
                 let payload = serde_json::json!({
                     "hub_id": hb_farm_hub_id,

@@ -655,7 +655,7 @@ pub async fn admin_get_survey(
 /// themselves the mapped roles with nobody in the loop — so it is a role-grant
 /// path like `create_role`, `assign_role` and a role-granting invite, and it
 /// takes the same escalation ceiling (permissions.md §1.6). It used to refuse
-/// only roles holding `admin`; with the wildcard gone that check had nothing
+/// only roles holding the retired `admin` wildcard; with it gone that check had nothing
 /// left to look for, and the ceiling is what it was reaching for all along.
 async fn validate_role_mappings(
     db: &sqlx::PgPool,

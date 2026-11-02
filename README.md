@@ -95,8 +95,8 @@ WAVVON_DATABASE_URL=postgres://user:pass@localhost:5432/wavvon ./wavvon-hub-linu
 cargo run --release -p wavvon-hub
 ```
 
-Without `WAVVON_DATABASE_URL` the hub connects to
-`postgres://postgres:postgres@localhost:5432/wavvon`.
+Without `WAVVON_DATABASE_URL` the hub starts and supervises its own
+PostgreSQL in its working directory.
 
 ### Make yourself the owner
 
@@ -125,12 +125,12 @@ variables — env vars win.
 
 | Setting | Env var | Default | Purpose |
 |---|---|---|---|
-| `database_url` | `WAVVON_DATABASE_URL` | `postgres://postgres:postgres@localhost:5432/wavvon` | PostgreSQL connection |
+| `database_url` | `WAVVON_DATABASE_URL` | built-in PostgreSQL | PostgreSQL connection |
 | `http_port` | `WAVVON_HTTP_PORT` | `3000` | HTTP + WebSocket API |
 | `voice_udp_port` | `WAVVON_VOICE_UDP_PORT` | `3001` | Voice relay (UDP) |
 | `tls_cert` / `tls_key` | `WAVVON_TLS_CERT` / `WAVVON_TLS_KEY` | — | Enable HTTPS (set both) |
 | `owner_pubkey` | `WAVVON_OWNER_PUBKEY` | — | Hub owner identity |
-| `template_url` / `bootstrap_token` | `WAVVON_TEMPLATE_URL` / `WAVVON_BOOTSTRAP_TOKEN` | — | First-boot channel/role template |
+| `template_url` | `WAVVON_TEMPLATE_URL` | — | First-boot channel/role template |
 | `log_format` | `WAVVON_LOG_FORMAT` | `text` | `text` or `json` |
 | `otlp_endpoint` | `WAVVON_OTLP_ENDPOINT` | — | OpenTelemetry traces |
 | `search_backend` | `WAVVON_SEARCH_BACKEND` | `tantivy` | `tantivy` or `none` |
