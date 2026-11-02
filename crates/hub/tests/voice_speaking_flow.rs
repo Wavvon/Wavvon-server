@@ -179,3 +179,61 @@ async fn watching_a_room_does_not_put_you_in_it() {
     );
     assert!(state.voice_zones.read().await.is_empty());
 }
+
+// `session_roster` was accepted at zone creation and then refused every
+// position update, so a zone created with it could never be used.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_zone_with_an_unsupported_auth_mode_is_refused() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = authenticate(&base, &Identity::generate()).await;
+
+    let channel: Value = reqwest::Client::new()
+        .post(format!("{base}/channels"))
+        .bearer_auth(&owner)
+        .json(&json!({ "name": "arena", "channel_type": "voice" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let channel_id = channel["id"].as_str().unwrap().to_string();
+
+    let url = format!("{}/ws?token={owner}", base.replace("http://", "ws://"));
+    let mut ws = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    let _ = ws.next().await;
+    ws.send(Message::Text(
+        json!({ "type": "voice_join", "channel_id": channel_id, "udp_port": 0 }).to_string(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        json!({
+            "type": "voice_zone_create",
+            "zone_id": "z1",
+            "name": "arena",
+            "attenuation": {},
+            "auth_mode": "session_roster",
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let refused = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(t))) if t.contains("voice_zone_create") => return t,
+                Some(Ok(_)) => {}
+                _ => return String::new(),
+            }
+        }
+    })
+    .await
+    .unwrap_or_default();
+    assert!(
+        refused.contains("Unsupported zone auth_mode"),
+        "zone was not refused: {refused}"
+    );
+    assert!(state.voice_zones.read().await.is_empty());
+}
