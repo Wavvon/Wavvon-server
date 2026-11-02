@@ -119,3 +119,63 @@ async fn a_non_participant_cannot_speak_in_a_room() {
         "a speaking indicator reached the room from outside it"
     );
 }
+
+// `voice_watch` used to set the same connection state `voice_join` sets, so a
+// member who only watched a room could create zones in it and post positions
+// into them. Watching subscribes to speaking events and grants nothing else.
+#[tokio::test(flavor = "multi_thread")]
+async fn watching_a_room_does_not_put_you_in_it() {
+    let (base, state, _guard) = start_hub().await;
+    let owner = authenticate(&base, &Identity::generate()).await;
+
+    let channel: Value = reqwest::Client::new()
+        .post(format!("{base}/channels"))
+        .bearer_auth(&owner)
+        .json(&json!({ "name": "lounge" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let channel_id = channel["id"].as_str().unwrap().to_string();
+
+    let url = format!("{}/ws?token={owner}", base.replace("http://", "ws://"));
+    let mut watcher = tokio_tungstenite::connect_async(&url).await.unwrap().0;
+    let _ = watcher.next().await;
+    watcher
+        .send(Message::Text(
+            json!({ "type": "voice_watch", "channel_id": channel_id }).to_string(),
+        ))
+        .await
+        .unwrap();
+    watcher
+        .send(Message::Text(
+            json!({
+                "type": "voice_zone_create",
+                "zone_id": "z1",
+                "name": "arena",
+                "attenuation": {},
+            })
+            .to_string(),
+        ))
+        .await
+        .unwrap();
+
+    let refused = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match watcher.next().await {
+                Some(Ok(Message::Text(t))) if t.contains("voice_zone_create") => return t,
+                Some(Ok(_)) => {}
+                _ => return String::new(),
+            }
+        }
+    })
+    .await
+    .unwrap_or_default();
+    assert!(
+        refused.contains("Must be in voice"),
+        "a watcher was treated as in the room: {refused}"
+    );
+    assert!(state.voice_zones.read().await.is_empty());
+}
