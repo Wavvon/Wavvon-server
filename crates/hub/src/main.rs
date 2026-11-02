@@ -577,10 +577,7 @@ async fn main() -> Result<()> {
     }
 
     if subcommand.as_deref() == Some("rotate-key") {
-        let new_key_path = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "hub_identity_new.json".to_string());
-        rotate_hub_key(Path::new("hub_identity.json"), Path::new(&new_key_path))?;
+        rotate_hub_key(Path::new("hub_identity.json"))?;
         println!("Key rotation complete. hub_identity.json now contains the new key.");
         println!("hub_rotation.json contains the signed rotation payload.");
         println!("Restart the hub for the change to take effect.");
@@ -2007,7 +2004,7 @@ fn copy_dir_all(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result
 /// Generate a new hub keypair, sign a rotation payload with the old key,
 /// write it to `hub_rotation.json`, and replace `hub_identity.json` with
 /// the new key. The operator must restart the hub afterwards.
-fn rotate_hub_key(current_path: &Path, _new_path: &Path) -> anyhow::Result<()> {
+fn rotate_hub_key(current_path: &Path) -> anyhow::Result<()> {
     let old_identity =
         Identity::load(current_path).context("Failed to load current hub identity")?;
 
