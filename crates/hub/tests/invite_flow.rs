@@ -528,6 +528,42 @@ async fn first_boot_owner_invite_grants_owner_and_is_one_time() {
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
 }
 
+/// An operator who switches `invite_only` off before redeeming the owner
+/// invite has not handed the hub to whoever arrives first: once the owner
+/// invite exists, ownership comes from it alone.
+#[tokio::test]
+async fn first_arrival_without_the_owner_invite_is_not_owner() {
+    let server = common::setup_raw().await;
+    let db = &server.state().db;
+    let code = wavvon_hub::routes::invites::maybe_mint_first_boot_owner_invite(db)
+        .await
+        .unwrap()
+        .expect("a fresh, ownerless hub should mint a first-boot invite");
+
+    sqlx::query("UPDATE hub_settings SET value = 'false' WHERE key = 'invite_only'")
+        .execute(db)
+        .await
+        .unwrap();
+
+    let stranger = Identity::generate();
+    let stranger_token = authenticate_with_invite(&server, &stranger, None).await;
+    let roles: Vec<RoleResponse> = server
+        .get(&format!("/users/{}/roles", stranger.public_key_hex()))
+        .authorization_bearer(&stranger_token)
+        .await
+        .json();
+    assert!(!roles.iter().any(|r| r.id == "builtin-owner"));
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_with_invite(&server, &owner, Some(code.as_str())).await;
+    let roles: Vec<RoleResponse> = server
+        .get(&format!("/users/{}/roles", owner.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert!(roles.iter().any(|r| r.id == "builtin-owner"));
+}
+
 /// The end-to-end bootstrap flow demo-seed relies on (task: fix demo-seed vs
 /// invite-first defaults): a brand-new, ownerless, `invite_only=true` hub
 /// mints its first-boot owner invite; the admin identity redeems it (single
