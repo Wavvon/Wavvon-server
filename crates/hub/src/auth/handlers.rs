@@ -783,7 +783,17 @@ pub async fn verify(
 
     if !is_member && !peer {
         admit_member(&state.db, &canonical_pubkey).await?;
-        if existing_users == 0 {
+        // Once the first-boot owner invite exists, ownership comes from that
+        // invite (its role grant, below) and nowhere else. Without this, an
+        // operator who switched `invite_only` off before claiming the hub
+        // handed it to whoever authenticated first.
+        let owner_invite_minted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM hub_settings WHERE key = 'first_boot_owner_invite_code' AND value <> '')",
+        )
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if existing_users == 0 && !owner_invite_minted {
             sqlx::query(
                 "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
                  VALUES ($1, 'builtin-owner', $2)
