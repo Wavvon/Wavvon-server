@@ -132,7 +132,7 @@ pub struct VoiceZone {
     /// "2d" | "3d"
     pub coordinate_system: String,
     pub attenuation: AttenuationConfig,
-    /// "creator_only" | "any_channel_member" | "session_roster"
+    /// "creator_only" | "any_channel_member"
     pub auth_mode: String,
     pub creator_pubkey: String,
     pub session_id: Option<String>,

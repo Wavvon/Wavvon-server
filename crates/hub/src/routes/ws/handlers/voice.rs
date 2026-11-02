@@ -1048,6 +1048,20 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
         return DispatchResult::Continue;
     }
 
+    // `session_roster` was accepted here and then refused every position
+    // update, so a zone created with it could never be used. Refuse it up
+    // front until a session roster exists to check against.
+    if !matches!(auth_mode.as_str(), "creator_only" | "any_channel_member") {
+        let err = WsServerMessage::Error {
+            context: "voice_zone_create".to_string(),
+            message: format!("Unsupported zone auth_mode \"{auth_mode}\"."),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
     let zone = crate::state::VoiceZone {
         zone_id: zone_id.clone(),
         channel_id: ch_id.clone(),
@@ -1141,8 +1155,12 @@ pub(in crate::routes::ws) async fn handle_voice_zone_destroy(
     DispatchResult::Continue
 }
 
+/// A client moving smoothly sends at most ~30 updates a second; anything
+/// faster is dropped rather than queued.
+const MIN_POSITION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
+
 pub(in crate::routes::ws) async fn handle_voice_position_update(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
 ) -> DispatchResult {
@@ -1160,12 +1178,20 @@ pub(in crate::routes::ws) async fn handle_voice_position_update(
         return DispatchResult::Continue;
     }
 
+    let now = std::time::Instant::now();
+    if cs
+        .last_position_update
+        .is_some_and(|last| now.duration_since(last) < MIN_POSITION_INTERVAL)
+    {
+        return DispatchResult::Continue;
+    }
+    cs.last_position_update = Some(now);
+
     let allowed = {
         let zones = state.voice_zones.read().await;
         if let Some(z) = zones.get(&(ch_id.clone(), zone_id.clone())) {
             match z.auth_mode.as_str() {
                 "creator_only" => z.creator_pubkey == cs.public_key,
-                "session_roster" => false,
                 _ => true,
             }
         } else {
