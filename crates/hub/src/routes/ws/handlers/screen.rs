@@ -343,15 +343,16 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
         _ => return DispatchResult::Continue,
     };
 
+    // Watching needs the access the source channel gives to the room itself:
+    // reading it or joining its voice (#282). An unknown channel answers the
+    // same as a forbidden one.
     let can_view: bool = cs.subscribed.contains(&source_channel_id)
-        || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE id = $1")
-            .bind(&source_channel_id)
-            .fetch_optional(&state.db)
+        || crate::permissions::channel_permissions(&state.db, &cs.public_key, &source_channel_id)
             .await
-            .ok()
-            .flatten()
-            .unwrap_or(0)
-            > 0;
+            .map(|p| {
+                p.has(crate::permissions::MESSAGES_READ) || p.has(crate::permissions::VOICE_JOIN)
+            })
+            .unwrap_or(false);
 
     if !can_view {
         let err = WsServerMessage::Error {

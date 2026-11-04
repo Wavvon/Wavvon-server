@@ -696,3 +696,41 @@ async fn streams_on_request_late_joiner_gets_no_init() {
         "pong"
     );
 }
+
+/// #282: knowing a channel id and a stream id is not access. A member who can
+/// neither read the source channel nor join its voice is refused the stream.
+#[tokio::test]
+async fn stream_subscribe_needs_access_to_the_source_channel() {
+    let (base, state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &owner_token, "private").await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    revoke_from_everyone(&state, "messages.read").await;
+    revoke_from_everyone(&state, "voice.join").await;
+
+    let (mut owner_tx, _owner_rx) = connect_ws(&base, &owner_token).await;
+    send_text(
+        &mut owner_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-private",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!state.screen_shares.read().await.is_empty());
+
+    let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "stream_subscribe", "source_channel_id": ch.id, "stream_id": "s-private" }),
+    )
+    .await;
+    let reply = next_text(&mut viewer_rx).await;
+    assert_eq!(reply["type"], "error");
+    assert_eq!(reply["context"], "stream_subscribe");
+}
