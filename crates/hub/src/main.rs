@@ -74,7 +74,6 @@ fn print_help() {
 
 /// Run --doctor pre-flight checks. Returns true if all checks pass.
 async fn run_doctor() -> bool {
-    use std::net::TcpListener;
     use tokio::net::UdpSocket;
 
     let settings = match wavvon_hub::settings::load() {
@@ -89,8 +88,14 @@ async fn run_doctor() -> bool {
     let mut all_pass = true;
 
     // Check TCP port
-    match TcpListener::bind(format!("0.0.0.0:{}", settings.http_port)) {
-        Ok(_) => println!("PASS  HTTP port {}: bindable", settings.http_port),
+    match wavvon_hub::listen::http_listener(settings.bind_addr, settings.http_port) {
+        Ok(l) => println!(
+            "PASS  HTTP port {}: bindable on {}",
+            settings.http_port,
+            l.local_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_default()
+        ),
         Err(e) => {
             println!("FAIL  HTTP port {}: {e}", settings.http_port);
             all_pass = false;
@@ -1515,7 +1520,9 @@ async fn main() -> Result<()> {
         settings.trusted_proxy,
         web_client_cfg,
     );
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
+    let std_listener = wavvon_hub::listen::http_listener(settings.bind_addr, http_port)
+        .with_context(|| format!("Failed to bind {}:{http_port}", settings.bind_addr))?;
+    let bound = std_listener.local_addr()?;
 
     let serve = async {
         if let (Some(cert), Some(key)) =
@@ -1529,15 +1536,15 @@ async fn main() -> Result<()> {
                     .with_context(|| {
                         format!("Failed to load TLS cert/key from {cert:?} / {key:?}")
                     })?;
-            tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
-            axum_server::bind_rustls(addr, rustls_config)
+            tracing::info!("Hub server listening on https://{bound} (TLS enabled)");
+            axum_server::from_tcp_rustls(std_listener, rustls_config)
                 .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         } else {
             tracing::info!(
-                "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
+                "Hub server listening on http://{bound} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
             );
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let listener = tokio::net::TcpListener::from_std(std_listener)?;
             axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

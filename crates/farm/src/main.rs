@@ -249,11 +249,11 @@ async fn main() -> Result<()> {
     wavvon_farm::monitor::spawn(state.clone());
 
     let app = server::create_router_with_cors(state, &cfg.cors_origins);
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
+    let listener = tokio::net::TcpListener::from_std(dual_stack_listener(http_port)?)?;
     tracing::info!(
-        "Farm server listening on http://0.0.0.0:{http_port} (set WAVVON_FARM_URL for the external URL)"
+        "Farm server listening on http://{} (set WAVVON_FARM_URL for the external URL)",
+        listener.local_addr()?
     );
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
 
     if let Some(provider) = otlp_provider {
@@ -261,4 +261,32 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// IPv6 and IPv4 on one socket, as the hub does (Wavvon-server#280): binding
+/// `0.0.0.0` alone leaves IPv6 clients unanswered. Falls back to IPv4 only on
+/// a host without IPv6.
+fn dual_stack_listener(port: u16) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let bind = |ip: IpAddr| -> std::io::Result<std::net::TcpListener> {
+        let addr = SocketAddr::new(ip, port);
+        let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+        if ip.is_ipv6() {
+            socket.set_only_v6(false)?;
+        }
+        #[cfg(unix)]
+        socket.set_reuse_address(true)?;
+        socket.bind(&addr.into())?;
+        socket.listen(1024)?;
+        socket.set_nonblocking(true)?;
+        Ok(socket.into())
+    };
+    match bind(IpAddr::V6(Ipv6Addr::UNSPECIFIED)) {
+        Err(e) if e.kind() != std::io::ErrorKind::AddrInUse => {
+            tracing::warn!("IPv6 unavailable ({e}); listening on IPv4 only");
+            bind(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        }
+        r => r,
+    }
 }
