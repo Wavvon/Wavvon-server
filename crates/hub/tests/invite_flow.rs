@@ -1583,3 +1583,131 @@ async fn a_role_an_invite_grants_can_still_be_deleted() {
         .unwrap();
     assert_eq!(left, 0);
 }
+
+fn landing_png() -> String {
+    use base64::Engine;
+    let img = image::RgbaImage::from_fn(64, 32, |x, y| image::Rgba([x as u8, y as u8, 90, 255]));
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(out)
+    )
+}
+
+/// The invite landing shows the hub as its owner dressed it, to someone who
+/// has not joined: image, colours, description and the counts.
+#[tokio::test]
+async fn invite_preview_carries_the_landing_appearance() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "description": "Friday raids",
+            "landing_image": landing_png(),
+            "landing_colors": ["#112233", "#aabbcc"],
+        }))
+        .await
+        .assert_status_success();
+
+    let invite: serde_json::Value = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await
+        .json();
+    let code = invite["code"].as_str().unwrap();
+
+    // No token: a visitor reads it before joining.
+    let preview: serde_json::Value = server
+        .get(&format!("/join/{code}"))
+        .add_header("accept", "application/json")
+        .await
+        .json();
+    assert_eq!(preview["description"], "Friday raids");
+    assert_eq!(preview["landing"]["colors"], json!(["#112233", "#aabbcc"]));
+    assert!(preview["online_count"].is_i64());
+    let path = preview["landing"]["image"].as_str().expect("image path");
+
+    let image = server.get(path).await;
+    image.assert_status_success();
+    let mime = image.header("content-type");
+    assert!(mime.to_str().unwrap().starts_with("image/"));
+    assert!(!image.as_bytes().is_empty());
+
+    let settings: HubSettings = server
+        .get("/hub/settings")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert_eq!(settings.landing.image.as_deref(), Some(path));
+
+    // Clearing both leaves a preview without a landing.
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "landing_image": "", "landing_colors": [] }))
+        .await
+        .assert_status_success();
+    let preview: serde_json::Value = server
+        .get(&format!("/join/{code}"))
+        .add_header("accept", "application/json")
+        .await
+        .json();
+    assert_eq!(preview["landing"], json!({}));
+    server
+        .get(path)
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn landing_appearance_refuses_bad_input_and_non_admins() {
+    use base64::Engine;
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let oversized = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(vec![0u8; 1100 * 1024])
+    );
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "landing_image": oversized }))
+        .await
+        .assert_status(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "landing_image": "data:image/png;base64,bm90IGFuIGltYWdl" }))
+        .await
+        .assert_status(axum::http::StatusCode::BAD_REQUEST);
+
+    for colors in [json!(["#112233"]), json!(["red", "blue"])] {
+        server
+            .patch("/hub")
+            .authorization_bearer(&owner_token)
+            .json(&json!({ "landing_colors": colors }))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    let invite: serde_json::Value = server
+        .post("/invites")
+        .authorization_bearer(&owner_token)
+        .json(&json!({}))
+        .await
+        .json();
+    let member = Identity::generate();
+    let member_token = authenticate_with_invite(&server, &member, invite["code"].as_str()).await;
+    server
+        .patch("/hub")
+        .authorization_bearer(&member_token)
+        .json(&json!({ "landing_colors": ["#000000", "#ffffff"] }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+}

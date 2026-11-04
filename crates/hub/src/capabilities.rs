@@ -81,6 +81,10 @@ pub const CAPABILITIES: &[&str] = &[
     // sign it with its subkey. Gated because an older hub verifies the
     // signature against the canonical key alone and refuses the send.
     "dms.plaintext.signercert",
+    // `PATCH /hub` takes `landing_image` and `landing_colors`, and the
+    // invite preview carries them with `description` and `online_count`.
+    // An admin page must not offer fields an older hub would silently drop.
+    "hub.landing",
     // `DELETE /me` — a member can remove themselves from the hub: profile and
     // roles cleared, the pubkey kept as the anchor moderation and message
     // history point at. Gated because a client must not offer "leave this
