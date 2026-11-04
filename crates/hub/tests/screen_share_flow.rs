@@ -532,3 +532,167 @@ async fn camera_needs_its_own_permission() {
         .get(&room.id)
         .is_none_or(|set| set.is_empty()));
 }
+
+/// Ping and return the first text frame, so a test can tell whether anything
+/// was queued for this connection before the pong.
+async fn first_after_ping(
+    tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TsMessage,
+    >,
+    rx: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+) -> Value {
+    send_text(tx, json!({ "type": "ping", "nonce": 7 })).await;
+    next_text(rx).await
+}
+
+async fn send_chunk(
+    tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TsMessage,
+    >,
+    channel_id: &str,
+    seq: u64,
+    bytes: &[u8],
+) {
+    send_text(
+        tx,
+        json!({
+            "type": "screen_share_chunk",
+            "channel_id": channel_id,
+            "stream_id": "s-req",
+            "seq": seq,
+            "is_init": seq == 0,
+        }),
+    )
+    .await;
+    tx.send(TsMessage::Binary(bytes.to_vec())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
+
+/// #276: a connection that was opened with `?streams=on_request` hears that a stream
+/// started, but gets its bytes only between `stream_subscribe` and
+/// `stream_unsubscribe` -- in its own channel too.
+#[tokio::test]
+async fn streams_on_request_flow_only_once_opened() {
+    let (base, _state, _guard) = start_hub().await;
+    let sharer_token = authenticate_http(&base, &Identity::generate()).await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &sharer_token, "general").await;
+
+    let (mut viewer_tx, mut viewer_rx) =
+        connect_ws(&base, &format!("{viewer_token}&streams=on_request")).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+
+    let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-req",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    let started = next_text(&mut viewer_rx).await;
+    assert_eq!(started["type"], "screen_share_started");
+
+    send_chunk(&mut sharer_tx, &ch.id, 0, b"INIT").await;
+    send_chunk(&mut sharer_tx, &ch.id, 1, b"ONE").await;
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong",
+        "nothing flows before the stream is opened"
+    );
+
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "stream_subscribe", "source_channel_id": ch.id, "stream_id": "s-req" }),
+    )
+    .await;
+    assert_eq!(next_text(&mut viewer_rx).await["type"], "stream_subscribed");
+    assert_eq!(next_text(&mut viewer_rx).await["is_init"], true);
+    assert!(matches!(next_raw(&mut viewer_rx).await, TsMessage::Binary(b) if &b[..] == b"INIT"));
+
+    send_chunk(&mut sharer_tx, &ch.id, 2, b"TWO").await;
+    assert_eq!(next_text(&mut viewer_rx).await["seq"], 2);
+    assert!(matches!(next_raw(&mut viewer_rx).await, TsMessage::Binary(b) if &b[..] == b"TWO"));
+
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "stream_unsubscribe", "source_channel_id": ch.id, "stream_id": "s-req" }),
+    )
+    .await;
+    send_chunk(&mut sharer_tx, &ch.id, 3, b"THREE").await;
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong",
+        "nothing flows after the stream is closed"
+    );
+}
+
+/// #276: a late joiner on request is told about the stream but is not handed
+/// its init segment until it opens it.
+#[tokio::test]
+async fn streams_on_request_late_joiner_gets_no_init() {
+    let (base, _state, _guard) = start_hub().await;
+    let sharer_token = authenticate_http(&base, &Identity::generate()).await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &sharer_token, "general").await;
+
+    let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-req",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    send_chunk(&mut sharer_tx, &ch.id, 0, b"INIT").await;
+
+    let (mut viewer_tx, mut viewer_rx) =
+        connect_ws(&base, &format!("{viewer_token}&streams=on_request")).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut viewer_rx).await["type"],
+        "screen_share_started"
+    );
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong"
+    );
+}

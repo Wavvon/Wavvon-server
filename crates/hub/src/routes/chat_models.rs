@@ -480,6 +480,11 @@ pub struct PaginationParams {
 #[derive(Deserialize)]
 pub struct WsParams {
     pub token: String,
+    /// `on_request`: this connection receives a stream's bytes only after
+    /// opening it with `stream_subscribe`, in its own channels too (#276).
+    /// A query parameter rather than a message because the hub replays
+    /// in-progress shares before it reads anything from the socket.
+    pub streams: Option<String>,
 }
 
 #[derive(Deserialize)]

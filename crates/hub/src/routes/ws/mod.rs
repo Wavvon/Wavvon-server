@@ -32,6 +32,7 @@ pub async fn ws_handler(
     // (session expiry, revocation, approval_status, bans).
     let auth = crate::auth::handlers::validate_ws_token(&state, &params.token).await?;
     let public_key = auth.public_key;
+    let streams_on_request = params.streams.as_deref() == Some("on_request");
 
     // An alliance-voice visitor is confined to the one channel their grant
     // admitted them to. Resolved here, once, rather than per message: an
@@ -64,6 +65,7 @@ pub async fn ws_handler(
             public_key,
             auth.mini_app_channel_id,
             alliance_voice_channel,
+            streams_on_request,
         )
     }))
 }

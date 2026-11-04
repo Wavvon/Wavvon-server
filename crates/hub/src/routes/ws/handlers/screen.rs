@@ -67,6 +67,9 @@ pub(in crate::routes::ws) async fn handle_subscribe(
             }
             cs.notified_streams
                 .insert((channel_id.clone(), stream_id.clone()));
+            if cs.streams_on_request {
+                continue;
+            }
             if let Some(init_bytes) = &meta.init_chunk {
                 let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
                     channel_id: channel_id.clone(),
@@ -327,7 +330,7 @@ pub(in crate::routes::ws) async fn handle_stream_list(
 }
 
 pub(in crate::routes::ws) async fn handle_stream_subscribe(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     ws_tx: &mut WsTx,
     msg: WsClientMessage,
@@ -367,9 +370,14 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
             ch == &source_channel_id && active.streams.contains_key(&stream_id)
         });
         entry.and_then(|((_, sharer), active)| {
-            active
-                .cross_channel_subscribers
-                .insert(cs.public_key.clone());
+            if cs.streams_on_request {
+                cs.opened_streams
+                    .insert((source_channel_id.clone(), stream_id.clone()));
+            } else {
+                active
+                    .cross_channel_subscribers
+                    .insert(cs.public_key.clone());
+            }
             let meta = active.streams.get(&stream_id)?;
             Some((
                 sharer.clone(),
@@ -429,7 +437,7 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
 }
 
 pub(in crate::routes::ws) async fn handle_stream_unsubscribe(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
 ) -> DispatchResult {
@@ -441,6 +449,10 @@ pub(in crate::routes::ws) async fn handle_stream_unsubscribe(
         _ => return DispatchResult::Continue,
     };
 
+    if cs.streams_on_request {
+        cs.opened_streams.remove(&(source_channel_id, stream_id));
+        return DispatchResult::Continue;
+    }
     let mut shares = state.screen_shares.write().await;
     if let Some((_, active)) = shares.iter_mut().find(|((ch, _), active)| {
         ch == &source_channel_id && active.streams.contains_key(&stream_id)
