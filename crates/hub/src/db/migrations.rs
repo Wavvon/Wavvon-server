@@ -23,13 +23,14 @@
 // asked to `DROP DATABASE`. Removals wait for a major.
 
 use crate::permissions::{
-    ALL_PERMISSIONS, EVENTS_CREATE, FORUM_POSTS_CREATE, MESSAGES_READ, MESSAGES_SEND, VOICE_JOIN,
+    ALL_PERMISSIONS, EVENTS_CREATE, FORUM_POSTS_CREATE, MESSAGES_READ, MESSAGES_SEND, VOICE_CAMERA,
+    VOICE_JOIN, VOICE_SCREEN_SHARE,
 };
 use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 9;
+pub const SCHEMA_VERSION: i32 = 10;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -313,6 +314,20 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                 sqlx::query(ddl).execute(&mut *conn).await?;
             }
         }
+        // Screen share and camera split out of `voice.join` (#277). Granted to
+        // @everyone once, so an existing hub behaves as before until an admin
+        // restricts them; a one-time step, not the seed, for the reason in #246.
+        10 => {
+            for perm in [VOICE_SCREEN_SHARE, VOICE_CAMERA] {
+                sqlx::query(
+                    "INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', $1)
+                     ON CONFLICT (role_id, permission) DO NOTHING",
+                )
+                .bind(perm)
+                .execute(&mut *conn)
+                .await?;
+            }
+        }
         _ => unreachable!("no schema step {version}"),
     }
     Ok(())
@@ -410,6 +425,8 @@ async fn seed_everyone_defaults(pool: &PgPool) -> Result<()> {
         FORUM_POSTS_CREATE,
         EVENTS_CREATE,
         VOICE_JOIN,
+        VOICE_SCREEN_SHARE,
+        VOICE_CAMERA,
     ] {
         sqlx::query(
             "INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', $1)

@@ -80,11 +80,17 @@ permission_catalogue! {
     CHANNELS_PERMISSIONS => "channels.permissions", HubAndChannel,
 
     // ── Voice ───────────────────────────────────────────────────────────
-    /// Entering voice on a channel, and screen share. Independent of
-    /// `messages.read` in both directions: a channel everyone reads where only
-    /// one role may join, and a lobby anyone may talk in with no readable
-    /// text. Neither was expressible before it.
+    /// Entering voice on a channel. Independent of `messages.read` in both
+    /// directions: a channel everyone reads where only one role may join, and
+    /// a lobby anyone may talk in with no readable text. Neither was
+    /// expressible before it.
     VOICE_JOIN => "voice.join", HubAndChannel,
+    /// Starting a screen share, on top of `voice.join`. Its own permission so
+    /// a hub can let everyone talk while only some may stream: a raid of
+    /// accounts all sharing a fake screen otherwise meets no gate.
+    VOICE_SCREEN_SHARE => "voice.screen_share", HubAndChannel,
+    /// Turning a camera on in voice, on top of `voice.join`.
+    VOICE_CAMERA => "voice.camera", HubAndChannel,
     VOICE_SOUNDBOARD_USE => "voice.soundboard.use", HubAndChannel,
     VOICE_SOUNDBOARD_MANAGE => "voice.soundboard.manage", Hub,
     /// Resolved against the **destination** channel, not the source.
@@ -728,6 +734,8 @@ mod tests {
             "messages.read",
             "messages.send",
             "voice.join",
+            "voice.screen_share",
+            "voice.camera",
             "channels.manage",
             "events.create",
             "moderation.mute",

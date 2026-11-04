@@ -145,6 +145,11 @@ pub const CAPABILITIES: &[&str] = &[
     // learns of a raised hand by polling, and the member granted the floor
     // never learns it, so a client offers the raise-hand flow only here.
     "voice.hands",
+    // `voice.screen_share` and `voice.camera` are separate grants from
+    // `voice.join` (#277). A client may hide the share and camera buttons where
+    // the member lacks them only on a hub that says so; an older hub gates
+    // both on `voice.join` alone.
+    "voice.media.permissions",
     // `min_talk_power` gates transmitting, not joining, and the floor is
     // granted by a moderator rather than taken with `raise-hand`. Two things
     // a client may only do once it sees this string: read `may_speak` on

@@ -68,7 +68,9 @@ pub async fn screenshare_start(
     let perms = crate::permissions::channel_permissions(&state.db, &sharer, &req.channel_id)
         .await
         .map_err(|_| (StatusCode::FORBIDDEN, "You cannot share here".to_string()))?;
-    if !perms.has(crate::permissions::VOICE_JOIN) {
+    if !perms.has(crate::permissions::VOICE_JOIN)
+        || !perms.has(crate::permissions::VOICE_SCREEN_SHARE)
+    {
         return Err((
             StatusCode::FORBIDDEN,
             "You cannot share into this channel".into(),
