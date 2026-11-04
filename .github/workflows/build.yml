@@ -28,6 +28,9 @@ jobs:
         # unenforced until 2026-08-08.
         postgres: ["16-alpine", "14-alpine"]
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
     services:
       postgres:
