@@ -145,6 +145,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
 
     let birthdays_enabled = crate::routes::hub::birthdays_enabled(&state.db).await;
     let max_attachment_bytes = crate::routes::hub::read_attachment_cap(&state.db).await;
+    let stream_limits = crate::routes::hub::read_stream_limits(&state.db).await;
 
     Json(InfoResponse {
         name: branding.name,
@@ -179,6 +180,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         timezone,
         birthdays_enabled,
         max_attachment_bytes,
+        stream_limits,
         canonical_url: state.canonical_url.read().await.clone(),
     })
 }
@@ -289,6 +291,11 @@ pub struct InfoResponse {
     /// uploading it — a client with its own hardcoded copy silently ignores
     /// an operator who raised or lowered the limit.
     pub max_attachment_bytes: u64,
+    /// The most a screen share or camera may declare (#278), public so the
+    /// share dialog can disable choices above it before anyone tries one.
+    /// An absent field is no cap.
+    #[serde(default)]
+    pub stream_limits: crate::routes::hub::StreamLimits,
     /// The address this hub says clients should use for it.
     ///
     /// Behind a farm this is the hub's canonical slug URL and it **changes**

@@ -157,17 +157,34 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
     ws_tx: &mut WsTx,
     msg: WsClientMessage,
 ) -> DispatchResult {
-    let (channel_id, stream_id, kind, mime, has_audio) = match msg {
+    let (channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps) = match msg {
         WsClientMessage::ScreenShareStart {
             channel_id,
             stream_id,
             kind,
             mime,
             has_audio,
-            ..
-        } => (channel_id, stream_id, kind, mime, has_audio),
+            width,
+            height,
+            fps,
+            kbps,
+        } => (
+            channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps,
+        ),
         _ => return DispatchResult::Continue,
     };
+
+    let limits = crate::routes::hub::read_stream_limits(&state.db).await;
+    if let Some(what) = limits.exceeded_by(width, height, fps, kbps) {
+        let err = WsServerMessage::Error {
+            context: "screen_share_start".to_string(),
+            message: format!("This hub caps a stream's {what}; choose a lower setting."),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
 
     // Channel-scoped VOICE_JOIN: a screen share is something you do once
     // present in the call, so it follows admission to the call and not
