@@ -424,3 +424,41 @@ async fn delegate_cannot_assign_a_role_carrying_a_permission_they_lack() {
         .await
         .assert_status_ok();
 }
+
+/// The member list orders its role sections by priority, so the roster says
+/// which priority each member's hoisted role has.
+#[tokio::test]
+async fn member_list_carries_the_hoisted_role_priority() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let role: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Mods", "permissions": [], "priority": 40, "display_separately": true }))
+        .await
+        .json();
+
+    let member = Identity::generate();
+    common::authenticate(&server, &member).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            member.public_key_hex(),
+            role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    let users: Vec<serde_json::Value> = server
+        .get("/users")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    let row = users
+        .iter()
+        .find(|u| u["public_key"] == member.public_key_hex())
+        .unwrap();
+    assert_eq!(row["group_role"], "Mods");
+    assert_eq!(row["group_role_priority"], 40);
+}
