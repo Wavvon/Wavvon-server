@@ -32,6 +32,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "HTTP / WebSocket port the hub listens on",
     ),
     (
+        "WAVVON_BIND_ADDR",
+        "::",
+        "Address the HTTP listener binds. `::` listens on IPv6 and IPv4 at once (IPv4-only hosts fall back to 0.0.0.0); 0.0.0.0 for IPv4 only, or one interface's address",
+    ),
+    (
         wavvon_hub_env::VOICE_UDP_PORT,
         "3001",
         "UDP port for the voice relay",
@@ -233,6 +238,8 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
 pub struct Settings {
     /// HTTP port the hub listens on. Env: WAVVON_HTTP_PORT
     pub http_port: u16,
+    /// Address the HTTP listener binds. Env: WAVVON_BIND_ADDR
+    pub bind_addr: std::net::IpAddr,
     /// UDP port for voice traffic. Env: WAVVON_VOICE_UDP_PORT
     pub voice_udp_port: u16,
     /// Path to TLS certificate PEM. Both cert and key must be set to enable HTTPS.
@@ -382,6 +389,7 @@ pub fn effective_public_url(
 pub fn load() -> Result<Settings> {
     let settings = config::Config::builder()
         .set_default("http_port", 3000)?
+        .set_default("bind_addr", "::")?
         .set_default("voice_udp_port", 3001)?
         .set_default("cors_origins", "*")?
         .set_default("log_format", "text")?

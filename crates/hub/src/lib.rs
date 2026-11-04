@@ -14,6 +14,7 @@ pub mod embedded_pg;
 pub mod farm_siblings;
 pub mod federation;
 pub mod lan;
+pub mod listen;
 pub mod outgoing_webhooks;
 pub mod permissions;
 pub mod rate_limit;

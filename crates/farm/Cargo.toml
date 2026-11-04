@@ -29,6 +29,7 @@ base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 wavvon-identity = { path = "../identity" }
 wavvon-hub-env = { path = "../hub-env" }
+socket2 = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures-util = "0.3"
 hyper = "1"
