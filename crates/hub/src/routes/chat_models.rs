@@ -534,6 +534,16 @@ pub enum WsClientMessage {
         kind: String,
         mime: String,
         has_audio: bool,
+        /// What the sharer intends to send, checked against the hub's
+        /// `stream_limits` (#278). Optional: older clients declare nothing.
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        #[serde(default)]
+        fps: Option<u32>,
+        #[serde(default)]
+        kbps: Option<u32>,
     },
     #[serde(rename = "screen_share_chunk")]
     ScreenShareChunk {

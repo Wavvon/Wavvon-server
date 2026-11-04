@@ -130,6 +130,11 @@ pub const CAPABILITIES: &[&str] = &[
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
     "recovery.attest.requests",
+    // `/info` and `GET /hub/settings` carry `stream_limits` (max width, height,
+    // fps, kbps; each absent when uncapped), `PATCH /hub` sets them, and a
+    // `screen_share_start` declaring more is refused (#278). An older hub has
+    // no caps to show and ignores the declared values.
+    "screenshare.limits",
     // A WebSocket opened with `?streams=on_request` receives a stream's bytes
     // only after opening it with `stream_subscribe`, in its own voice channel
     // too, and `stream_unsubscribe` closes it again (#276). Gated so a client

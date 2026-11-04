@@ -734,3 +734,65 @@ async fn stream_subscribe_needs_access_to_the_source_channel() {
     assert_eq!(reply["type"], "error");
     assert_eq!(reply["context"], "stream_subscribe");
 }
+
+/// #278: a hub caps the quality a share may declare. The cap is public on
+/// `/info`, a share above it is refused, one within it or declaring nothing
+/// (an older client) goes ahead.
+#[tokio::test]
+async fn stream_limits_are_public_and_enforced() {
+    let (base, state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &owner_token, "general").await;
+    let http = reqwest::Client::new();
+
+    let res = http
+        .patch(format!("{base}/hub"))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "stream_limits": { "max_height": 1080, "max_fps": 60 } }))
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success(), "{}", res.status());
+    let info: Value = http
+        .get(format!("{base}/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        info["stream_limits"],
+        json!({ "max_height": 1080, "max_fps": 60 })
+    );
+
+    let token = authenticate_http(&base, &Identity::generate()).await;
+    let (mut tx, mut rx) = connect_ws(&base, &token).await;
+    let start = |id: &str, extra: Value| {
+        let mut m = json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": id,
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        });
+        m.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        m
+    };
+
+    send_text(&mut tx, start("s-4k", json!({ "height": 2160, "fps": 60 }))).await;
+    let err = wait_for_type(&mut rx, "error").await;
+    assert_eq!(err["context"], "screen_share_start");
+    assert!(state.screen_shares.read().await.is_empty());
+
+    send_text(&mut tx, start("s-ok", json!({ "height": 1080, "fps": 60 }))).await;
+    send_text(&mut tx, start("s-old", json!({}))).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let shares = state.screen_shares.read().await;
+    let streams: Vec<&String> = shares.values().flat_map(|a| a.streams.keys()).collect();
+    assert!(streams.iter().any(|s| *s == "s-ok"), "{streams:?}");
+    assert!(streams.iter().any(|s| *s == "s-old"), "{streams:?}");
+}

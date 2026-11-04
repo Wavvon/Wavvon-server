@@ -150,6 +150,16 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "afk_timeout_secs", &secs.to_string()).await?;
     }
+    if let Some(limits) = req.stream_limits {
+        for (key, value) in limits.keyed() {
+            upsert_setting(
+                &state.db,
+                key,
+                &value.map(|v| v.to_string()).unwrap_or_default(),
+            )
+            .await?;
+        }
+    }
     if let Some(bytes) = req.max_attachment_bytes {
         if !(MIN_MAX_ATTACHMENT_BYTES..=MAX_MAX_ATTACHMENT_BYTES).contains(&bytes) {
             return Err((
@@ -446,6 +456,7 @@ pub async fn get_hub_settings(
         max_attachment_bytes,
         max_upload_bytes,
         max_preview_image_bytes,
+        stream_limits: read_stream_limits(&state.db).await,
         stickers: crate::routes::stickers::read_settings(&state.db).await,
         attachments: crate::attachments::read_settings(&state.db).await,
         attachments_usage: crate::attachments::usage(&state.db).await,
@@ -518,6 +529,70 @@ pub async fn read_attachment_cap(db: &sqlx::PgPool) -> u64 {
         .unwrap_or(DEFAULT_MAX_ATTACHMENT_BYTES)
 }
 
+/// The most a screen share or camera may declare (#278). Each limit is unset
+/// by default, meaning no cap; a hub on a small machine sets them so a few
+/// 4K/120 fps shares cannot saturate it, since it relays every stream to
+/// every viewer who opened it.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq)]
+pub struct StreamLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kbps: Option<u32>,
+}
+
+impl StreamLimits {
+    fn keyed(self) -> [(&'static str, Option<u32>); 4] {
+        [
+            ("stream_max_width", self.max_width),
+            ("stream_max_height", self.max_height),
+            ("stream_max_fps", self.max_fps),
+            ("stream_max_kbps", self.max_kbps),
+        ]
+    }
+
+    /// The first limit a declared stream exceeds, by name. A value the
+    /// client did not declare is not checked: older clients declare none.
+    pub fn exceeded_by(
+        &self,
+        width: Option<u32>,
+        height: Option<u32>,
+        fps: Option<u32>,
+        kbps: Option<u32>,
+    ) -> Option<&'static str> {
+        let over =
+            |v: Option<u32>, max: Option<u32>| matches!((v, max), (Some(v), Some(m)) if v > m);
+        [
+            ("width", over(width, self.max_width)),
+            ("height", over(height, self.max_height)),
+            ("frame rate", over(fps, self.max_fps)),
+            ("bitrate", over(kbps, self.max_kbps)),
+        ]
+        .into_iter()
+        .find_map(|(name, over)| over.then_some(name))
+    }
+}
+
+/// Read per share, like the other caps, so changing one needs no restart.
+pub async fn read_stream_limits(db: &sqlx::PgPool) -> StreamLimits {
+    let read = |key: &'static str| async move {
+        read_setting(db, key)
+            .await
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+    };
+    StreamLimits {
+        max_width: read("stream_max_width").await,
+        max_height: read("stream_max_height").await,
+        max_fps: read("stream_max_fps").await,
+        max_kbps: read("stream_max_kbps").await,
+    }
+}
+
 /// Default idle threshold for the AFK sweep when a channel is configured but
 /// the timeout was never set explicitly (matches Discord's 5-minute default).
 pub const DEFAULT_AFK_TIMEOUT_SECS: u32 = 300;
@@ -569,6 +644,9 @@ pub struct HubSettings {
     /// Attachment limits and retention (attachments.md §5).
     #[serde(flatten)]
     pub attachments: crate::attachments::AttachmentSettings,
+    /// Caps on a stream's declared quality; an absent field is no cap.
+    #[serde(default)]
+    pub stream_limits: StreamLimits,
     /// Disk used against the cap, and the warning the admin page shows.
     #[serde(default)]
     pub attachments_usage: crate::attachments::Usage,
@@ -693,6 +771,10 @@ pub struct UpdateHubRequest {
     /// constants for why there is a ceiling at all.
     #[serde(default)]
     pub max_attachment_bytes: Option<u64>,
+    /// Replaces all four stream limits; a field left out, or 0, clears that
+    /// limit.
+    #[serde(default)]
+    pub stream_limits: Option<StreamLimits>,
     /// Largest file upload, in bytes. Clamped to [`MIN_MAX_UPLOAD_BYTES`,
     /// `MAX_MAX_UPLOAD_BYTES`].
     #[serde(default)]
