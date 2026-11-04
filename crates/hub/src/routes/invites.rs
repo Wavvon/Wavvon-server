@@ -565,9 +565,26 @@ async fn get_join_info(
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| state.hub_name.clone());
 
+    // Connected members, minus the invisible ones, as the roster reports them.
+    let connected: Vec<String> = state.online_users.read().await.keys().cloned().collect();
+    let online_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE public_key = ANY($1)
+         AND presence_status IS DISTINCT FROM 'invisible'",
+    )
+    .bind(&connected)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let description = crate::routes::hub::read_setting(&state.db, "hub_description")
+        .await
+        .filter(|d| !d.is_empty());
+
     Ok(Json(serde_json::json!({
         "hub_name": hub_name,
+        "description": description,
         "member_count": member_count,
+        "online_count": online_count,
+        "landing": crate::routes::hub::read_landing(&state.db).await,
         "code": invite.code,
     })))
 }

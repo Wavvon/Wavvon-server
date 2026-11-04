@@ -57,6 +57,15 @@ pub const ATTACHMENT: Profile = Profile {
     jpeg_stays_jpeg: true,
     what: "image",
 };
+
+/// The invite landing image: a backdrop, never shown larger than a screen.
+pub const LANDING: Profile = Profile {
+    max_dim: 1920,
+    max_input_dim: 8192,
+    max_input_pixels: 40 * 1024 * 1024,
+    jpeg_stays_jpeg: true,
+    what: "landing image",
+};
 const MAX_FRAMES: usize = 60;
 /// Decoded pixels across all frames of one animation (RGBA, so 4 bytes each).
 const MAX_ANIM_PIXELS: u64 = 16 * 1024 * 1024;

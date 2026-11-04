@@ -187,6 +187,7 @@ pub fn create_router_full(
         .route("/hub", axum::routing::patch(routes::hub::update_hub))
         .route("/hub/members", get(routes::hub::list_members))
         .route("/hub/settings", get(routes::hub::get_hub_settings))
+        .route("/hub/landing-image", get(routes::hub::landing_image))
         .route("/hub/pending", get(routes::hub::list_pending))
         .route(
             "/hub/pending/{pubkey}/approve",

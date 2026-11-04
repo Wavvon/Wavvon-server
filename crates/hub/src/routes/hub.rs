@@ -150,6 +150,21 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "afk_timeout_secs", &secs.to_string()).await?;
     }
+    if let Some(image) = req.landing_image.as_deref() {
+        set_landing_image(&state.db, image).await?;
+    }
+    if let Some(colors) = req.landing_colors {
+        let valid = |c: &String| {
+            c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|d| d.is_ascii_hexdigit())
+        };
+        if !(colors.is_empty() || colors.len() == 2 && colors.iter().all(valid)) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "landing_colors must be two #rrggbb colours, or empty to clear".to_string(),
+            ));
+        }
+        upsert_setting(&state.db, "landing_colors", &colors.join(",")).await?;
+    }
     if let Some(limits) = req.stream_limits {
         for (key, value) in limits.keyed() {
             upsert_setting(
@@ -457,6 +472,7 @@ pub async fn get_hub_settings(
         max_upload_bytes,
         max_preview_image_bytes,
         stream_limits: read_stream_limits(&state.db).await,
+        landing: read_landing(&state.db).await,
         stickers: crate::routes::stickers::read_settings(&state.db).await,
         attachments: crate::attachments::read_settings(&state.db).await,
         attachments_usage: crate::attachments::usage(&state.db).await,
@@ -578,6 +594,98 @@ impl StreamLimits {
 }
 
 /// Read per share, like the other caps, so changing one needs no restart.
+/// Largest landing image accepted, before re-encoding. Its base64 has to fit
+/// the JSON body limit of `PATCH /hub`.
+pub const LANDING_MAX_BYTES: usize = 1024 * 1024;
+pub const LANDING_IMAGE_PATH: &str = "/hub/landing-image";
+
+/// How the invite landing looks: readable without membership.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Landing {
+    /// Path of the image on this hub, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colors: Option<[String; 2]>,
+}
+
+pub async fn read_landing(db: &sqlx::PgPool) -> Landing {
+    let image = read_setting(db, "landing_image_mime")
+        .await
+        .filter(|m| !m.is_empty())
+        .map(|_| LANDING_IMAGE_PATH.to_string());
+    let colors = read_setting(db, "landing_colors").await.and_then(|v| {
+        let (a, b) = v.split_once(',')?;
+        Some([a.to_string(), b.to_string()])
+    });
+    Landing { image, colors }
+}
+
+async fn set_landing_image(db: &sqlx::PgPool, data_url: &str) -> Result<(), (StatusCode, String)> {
+    use base64::Engine;
+    if data_url.is_empty() {
+        upsert_setting(db, "landing_image_mime", "").await?;
+        return upsert_setting(db, "landing_image", "").await;
+    }
+    let bad = || {
+        (
+            StatusCode::BAD_REQUEST,
+            "landing_image must be a base64 data: URL".to_string(),
+        )
+    };
+    let (head, body) = data_url.split_once(',').ok_or_else(bad)?;
+    if !(head.starts_with("data:") && head.ends_with(";base64")) {
+        return Err(bad());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|_| bad())?;
+    let image = crate::sticker_image::canonicalize_with(
+        bytes,
+        LANDING_MAX_BYTES,
+        crate::sticker_image::LANDING,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::sticker_image::IngestError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m),
+        crate::sticker_image::IngestError::NotAnImage(m) => (StatusCode::BAD_REQUEST, m),
+    })?;
+    upsert_setting(
+        db,
+        "landing_image",
+        &base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+    )
+    .await?;
+    upsert_setting(db, "landing_image_mime", image.mime).await
+}
+
+/// GET /hub/landing-image. Public: the invite landing shows it before joining.
+pub async fn landing_image(
+    State(state): State<Arc<AppState>>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::http::header;
+    use base64::Engine;
+    let not_found = || (StatusCode::NOT_FOUND, "No landing image".to_string());
+    let mime = read_setting(&state.db, "landing_image_mime")
+        .await
+        .filter(|m| !m.is_empty())
+        .ok_or_else(not_found)?;
+    let bytes = read_setting(&state.db, "landing_image")
+        .await
+        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+        .ok_or_else(not_found)?;
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "public, max-age=300")
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
 pub async fn read_stream_limits(db: &sqlx::PgPool) -> StreamLimits {
     let read = |key: &'static str| async move {
         read_setting(db, key)
@@ -647,6 +755,8 @@ pub struct HubSettings {
     /// Caps on a stream's declared quality; an absent field is no cap.
     #[serde(default)]
     pub stream_limits: StreamLimits,
+    #[serde(default)]
+    pub landing: Landing,
     /// Disk used against the cap, and the warning the admin page shows.
     #[serde(default)]
     pub attachments_usage: crate::attachments::Usage,
@@ -775,6 +885,13 @@ pub struct UpdateHubRequest {
     /// limit.
     #[serde(default)]
     pub stream_limits: Option<StreamLimits>,
+    /// Invite landing image as a `data:` URL; re-encoded and capped at
+    /// `LANDING_MAX_BYTES`. Empty string clears it.
+    #[serde(default)]
+    pub landing_image: Option<String>,
+    /// Two `#rrggbb` colours for the invite landing; empty clears them.
+    #[serde(default)]
+    pub landing_colors: Option<Vec<String>>,
     /// Largest file upload, in bytes. Clamped to [`MIN_MAX_UPLOAD_BYTES`,
     /// `MAX_MAX_UPLOAD_BYTES`].
     #[serde(default)]
