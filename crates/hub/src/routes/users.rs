@@ -164,6 +164,10 @@ pub struct UserInfo {
     /// to this user. Used by the client to group members in the sidebar.
     #[serde(default)]
     pub group_role: Option<String>,
+    /// Priority of `group_role`, so a client can order its sections the way
+    /// the role list is ordered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_role_priority: Option<i64>,
     /// "MM-DD", never a year. `null` when unset or when `birthdays_enabled`
     /// is false hub-wide.
     #[serde(default)]
@@ -214,6 +218,10 @@ pub async fn list_users(
                  INNER JOIN member_roles ur ON r.id = ur.role_id
                  WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
                  ORDER BY r.priority DESC LIMIT 1) AS group_role,
+                (SELECT r.priority FROM roles r
+                 INNER JOIN member_roles ur ON r.id = ur.role_id
+                 WHERE ur.user_public_key = u.public_key AND r.display_separately = TRUE
+                 ORDER BY r.priority DESC LIMIT 1) AS group_role_priority,
                 (SELECT r.color FROM roles r
                  INNER JOIN member_roles ur ON r.id = ur.role_id
                  WHERE ur.user_public_key = u.public_key AND r.color IS NOT NULL
@@ -258,6 +266,7 @@ pub async fn list_users(
                 display_name: r.display_name,
                 avatar: r.avatar,
                 group_role: r.group_role,
+                group_role_priority: r.group_role_priority,
                 birthday: if show_birthdays { r.birthday } else { None },
                 name_color,
             }
@@ -278,6 +287,7 @@ struct UserRowWithRole {
     birthday: Option<String>,
     name_color: Option<String>,
     group_role: Option<String>,
+    group_role_priority: Option<i64>,
     role_color: Option<String>,
 }
 
