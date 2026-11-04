@@ -58,7 +58,10 @@ async fn authenticate(base: &str, identity: &Identity) -> String {
         .await
         .unwrap();
 
-    let sig = identity.sign(&hex::decode(&resp.challenge).unwrap());
+    let sig = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&resp.challenge).unwrap())
+            .unwrap(),
+    );
 
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))
@@ -98,6 +101,26 @@ async fn close_ws(mut ws: WsStream) {
     // Give the underlying OS socket a chance to deliver the FIN.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     drop(ws);
+}
+
+/// Wait until the hub has counted `pk`'s live sessions down to `n` (0 =
+/// offline). The hub notices a close asynchronously, and a fixed sleep after
+/// `close_ws` raced it on a loaded CI runner.
+async fn wait_for_sessions(state: &AppState, pk: &str, n: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let count = state
+            .online_users
+            .read()
+            .await
+            .get(pk)
+            .copied()
+            .unwrap_or(0);
+        if count == n || std::time::Instant::now() > deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +166,7 @@ async fn h2_presence_refcount_two_sessions() {
 
     // Close session A cleanly.
     close_ws(ws_a).await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    wait_for_sessions(&state, &pk, 1).await;
 
     assert!(
         state.online_users.read().await.contains_key(&pk),
@@ -157,7 +180,7 @@ async fn h2_presence_refcount_two_sessions() {
 
     // Close session B.
     close_ws(ws_b).await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    wait_for_sessions(&state, &pk, 0).await;
 
     assert!(
         !state.online_users.read().await.contains_key(&pk),
@@ -173,7 +196,7 @@ async fn h2_presence_refcount_two_sessions() {
 /// and offline once all sessions close.
 #[tokio::test]
 async fn h2_users_endpoint_reflects_refcount() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
     let identity = Identity::generate();
     let pk = identity.public_key_hex();
 
@@ -217,7 +240,7 @@ async fn h2_users_endpoint_reflects_refcount() {
 
     // Close session A cleanly.
     close_ws(ws_a).await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    wait_for_sessions(&state, &pk, 1).await;
 
     let users: Vec<Value> = client
         .get(format!("{base}/users"))
@@ -236,7 +259,7 @@ async fn h2_users_endpoint_reflects_refcount() {
 
     // Close session B.
     close_ws(ws_b).await;
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    wait_for_sessions(&state, &pk, 0).await;
 
     let token_c = authenticate(&base, &identity).await;
     let users: Vec<Value> = client
@@ -697,7 +720,7 @@ async fn away_and_dnd_users_still_report_online_with_status() {
 
 #[tokio::test]
 async fn status_is_not_surfaced_for_offline_users() {
-    let (base, _state, _guard) = start_hub().await;
+    let (base, state, _guard) = start_hub().await;
     let alice = Identity::generate();
     let bob = Identity::generate();
     let alice_token = authenticate(&base, &alice).await;
@@ -712,7 +735,7 @@ async fn status_is_not_surfaced_for_offline_users() {
     .await;
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     close_ws(ws_alice).await;
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_for_sessions(&state, &alice.public_key_hex(), 0).await;
 
     // The stored status survives in the DB but /users must not surface it
     // while she is offline.

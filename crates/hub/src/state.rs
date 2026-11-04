@@ -95,9 +95,6 @@ pub struct ScreenStreamMeta {
 pub struct ActiveShare {
     /// stream_id → metadata
     pub streams: HashMap<String, ScreenStreamMeta>,
-    /// Set of viewer pubkeys currently negotiating or watching this share
-    /// via WebRTC (v2). Used for join/leave routing and WS-disconnect cleanup.
-    pub viewers: HashSet<String>,
     /// Pubkeys that subscribed to this share from a *different* channel via
     /// StreamSubscribe — they receive chunks without being in the source channel.
     pub cross_channel_subscribers: HashSet<String>,
@@ -135,7 +132,7 @@ pub struct VoiceZone {
     /// "2d" | "3d"
     pub coordinate_system: String,
     pub attenuation: AttenuationConfig,
-    /// "creator_only" | "any_channel_member" | "session_roster"
+    /// "creator_only" | "any_channel_member"
     pub auth_mode: String,
     pub creator_pubkey: String,
     pub session_id: Option<String>,
@@ -510,6 +507,8 @@ pub struct AppState {
 
     /// Mirror of `Settings::allow_private_webhooks`; see `webhook_url`.
     pub allow_private_webhooks: bool,
+    /// Mirror of `Settings::metrics`: whether `GET /metrics` answers.
+    pub metrics_enabled: bool,
 
     /// Mirror of `Settings::http_video_stream_budget`. Max concurrent video
     /// streams started over `POST /screenshare/start` across the whole hub;
@@ -530,8 +529,6 @@ pub struct AppState {
     pub webauthn_reg_challenges: RwLock<HashMap<String, RegChallenge>>,
     /// In-flight authentication challenges: session_id → AuthChallenge.
     pub webauthn_auth_challenges: RwLock<HashMap<String, AuthChallenge>>,
-    /// Device token TTL in seconds (from settings).
-    pub device_token_ttl_secs: i64,
 
     /// ME2: Circuit breaker for the auto-moderation webhook.
     ///
@@ -562,6 +559,28 @@ impl AppState {
     /// connection loops, whose disconnect cleanup leaves voice as usual.
     pub async fn close_sessions_of(&self, pubkey: &str) {
         self.ws_key_senders.write().await.remove(pubkey);
+    }
+
+    /// Close the sockets of the identity a revoked device belongs to. Tokens
+    /// are refused from here on, but an open socket was authenticated once,
+    /// at its handshake. Sockets are keyed by identity, not device, so the
+    /// owner's other devices drop too and reconnect on their own.
+    pub async fn close_sessions_of_revoked(&self, master: &str, subkey: &str) {
+        match sqlx::query_scalar::<_, String>(
+            "SELECT public_key FROM users WHERE master_pubkey = $1 OR public_key = $2",
+        )
+        .bind(master)
+        .bind(subkey)
+        .fetch_all(&self.db)
+        .await
+        {
+            Ok(owners) => {
+                for pk in owners {
+                    self.close_sessions_of(&pk).await;
+                }
+            }
+            Err(e) => tracing::warn!("closing sockets of a revoked device failed: {e}"),
+        }
     }
 
     /// Deliver a targeted WS message to **every** session a pubkey has open,

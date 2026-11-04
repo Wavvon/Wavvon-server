@@ -10,7 +10,6 @@ use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
 use crate::auth::handlers::unix_timestamp;
 use crate::auth::middleware::AuthUser;
-use crate::routes::webhooks::sha256_hex;
 use crate::state::{AppState, AuthChallenge, RegChallenge};
 
 fn gen_token() -> String {
@@ -296,108 +295,6 @@ pub async fn assert_finish(
 }
 
 // ---------------------------------------------------------------------------
-// Device tokens
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct DeviceTokenCreateRequest {
-    pub device_name: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct DeviceTokenCreateResponse {
-    pub id: String,
-    pub token: String,
-    pub expires_at: i64,
-}
-
-/// POST /auth/device-token/create — mint a long-lived device token (authenticated).
-pub async fn device_token_create(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Json(body): Json<DeviceTokenCreateRequest>,
-) -> Result<Json<DeviceTokenCreateResponse>, (StatusCode, String)> {
-    let id = Uuid::new_v4().to_string();
-    let raw_token = gen_token();
-    let token_hash = sha256_hex(&raw_token);
-    let now = unix_timestamp();
-    let expires_at = now + state.device_token_ttl_secs;
-
-    sqlx::query(
-        "INSERT INTO device_tokens (id, token_hash, user_pubkey, device_name, created_at, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6)",
-    )
-    .bind(&id)
-    .bind(&token_hash)
-    .bind(&user.public_key)
-    .bind(&body.device_name)
-    .bind(now)
-    .bind(expires_at)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    Ok(Json(DeviceTokenCreateResponse {
-        id,
-        token: raw_token,
-        expires_at,
-    }))
-}
-
-#[derive(Deserialize)]
-pub struct DeviceTokenRedeemRequest {
-    pub token: String,
-}
-
-/// POST /auth/device-token/redeem — exchange device token for session token.
-/// Rotates the device token on each use so the original token is invalidated.
-pub async fn device_token_redeem(
-    State(state): State<Arc<AppState>>,
-    Json(body): Json<DeviceTokenRedeemRequest>,
-) -> Result<Json<SessionTokenResponse>, (StatusCode, String)> {
-    let token_hash = sha256_hex(&body.token);
-    let now = unix_timestamp();
-
-    let row = sqlx::query_as::<_, (String, String, i64, bool)>(
-        "SELECT id, user_pubkey, expires_at, revoked FROM device_tokens WHERE token_hash = $1",
-    )
-    .bind(&token_hash)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-    .ok_or((StatusCode::UNAUTHORIZED, "Invalid device token".to_string()))?;
-
-    let (id, user_pubkey, expires_at, revoked) = row;
-    if revoked || now > expires_at {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            "Device token expired or revoked".to_string(),
-        ));
-    }
-
-    // Rotate: issue new token, invalidate old.
-    let new_raw = gen_token();
-    let new_hash = sha256_hex(&new_raw);
-    let new_expires = now + state.device_token_ttl_secs;
-
-    sqlx::query(
-        "UPDATE device_tokens \
-         SET token_hash = $1, expires_at = $2, last_used_at = $3 \
-         WHERE id = $4",
-    )
-    .bind(&new_hash)
-    .bind(new_expires)
-    .bind(now)
-    .bind(&id)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let session_token = issue_session_token(&state, &user_pubkey).await?;
-    Ok(Json(SessionTokenResponse { session_token }))
-}
-
-// ---------------------------------------------------------------------------
 // Credential management (/me/credentials)
 // ---------------------------------------------------------------------------
 
@@ -488,75 +385,6 @@ pub async fn delete_credential(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-// ---------------------------------------------------------------------------
-// Device management (/me/devices)
-// ---------------------------------------------------------------------------
-
-#[derive(Serialize)]
-pub struct DeviceInfo {
-    pub id: String,
-    pub device_name: Option<String>,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub last_used_at: Option<i64>,
-}
-
-/// GET /me/devices — list trusted devices.
-pub async fn list_devices(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Result<Json<Vec<DeviceInfo>>, (StatusCode, String)> {
-    let now = unix_timestamp();
-    let rows = sqlx::query_as::<_, (String, Option<String>, i64, i64, Option<i64>)>(
-        "SELECT id, device_name, created_at, expires_at, last_used_at
-         FROM device_tokens
-         WHERE user_pubkey = $1 AND revoked = FALSE AND expires_at > $2
-         ORDER BY created_at DESC",
-    )
-    .bind(&user.public_key)
-    .bind(now)
-    .fetch_all(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let out = rows
-        .into_iter()
-        .map(
-            |(id, device_name, created_at, expires_at, last_used_at)| DeviceInfo {
-                id,
-                device_name,
-                created_at,
-                expires_at,
-                last_used_at,
-            },
-        )
-        .collect();
-
-    Ok(Json(out))
-}
-
-/// DELETE /me/devices/:id — revoke a trusted device token.
-pub async fn revoke_device(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Path(id): Path<String>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    let affected =
-        sqlx::query("UPDATE device_tokens SET revoked = TRUE WHERE id = $1 AND user_pubkey = $2")
-            .bind(&id)
-            .bind(&user.public_key)
-            .execute(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
-            .rows_affected();
-
-    if affected == 0 {
-        Err((StatusCode::NOT_FOUND, "Device token not found".to_string()))
-    } else {
-        Ok(StatusCode::NO_CONTENT)
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -154,6 +154,8 @@ async fn post_poll_card(
         reply_count: 0,
         embeds: None,
         game: None,
+        masquerade: None,
+        sticker: None,
         components: None,
     };
 

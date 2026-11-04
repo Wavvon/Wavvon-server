@@ -8,7 +8,7 @@ mod common;
 
 async fn admin_set_challenge_mode(server: &TestServer, token: &str, mode: &str) {
     server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(token)
         .json(&json!({ "challenge_mode": mode, "challenge_difficulty": "easy" }))
         .await
@@ -159,7 +159,7 @@ async fn admin_can_update_challenge_settings() {
     let owner_token = common::authenticate(&server, &owner).await;
 
     let resp = server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(&owner_token)
         .json(&json!({ "challenge_mode": "puzzle", "challenge_difficulty": "medium" }))
         .await;
@@ -181,7 +181,7 @@ async fn non_admin_cannot_update_challenge_settings() {
     let user_token = common::authenticate(&server, &user).await;
 
     let resp = server
-        .put("/hub/settings/challenge")
+        .patch("/admin/settings/challenge")
         .authorization_bearer(&user_token)
         .json(&json!({ "challenge_mode": "click", "challenge_difficulty": "easy" }))
         .await;
@@ -213,7 +213,10 @@ async fn auth_verify_requires_challenge_token_when_mode_is_not_off() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = new_user.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = new_user.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
 
     let resp = server
         .post("/auth/verify")
@@ -260,7 +263,10 @@ async fn auth_verify_succeeds_with_valid_challenge_token() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = new_user.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = new_user.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
 
     let resp = server
         .post("/auth/verify")
@@ -301,7 +307,10 @@ async fn a_federating_peer_hub_is_not_asked_for_the_admission_challenge() {
         .json(&json!({ "public_key": pub_key }))
         .await
         .json();
-    let signature = hub.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = hub.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     server
         .post("/auth/verify")
         .json(&json!({
@@ -332,7 +341,12 @@ async fn a_failed_challenge_admits_nobody() {
             .json(&json!({ "public_key": pub_key }))
             .await
             .json();
-        let signature = stranger.sign(&hex::decode(&challenge.challenge).unwrap());
+        let signature = stranger.sign(
+            &wavvon_identity::auth_challenge_signing_bytes(
+                &hex::decode(&challenge.challenge).unwrap(),
+            )
+            .unwrap(),
+        );
         server
             .post("/auth/verify")
             .json(&json!({

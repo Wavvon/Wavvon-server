@@ -47,7 +47,23 @@ POSTGRESQL_VERSION="=17.6.0" cargo build -p wavvon-hub --target-dir target-pg17
 | `alliancepeople` | Three hubs: browsing an ally's people through your own hub shows only members who opted in, needs both switches, and is refused to a hub outside the alliance. |
 | `alliancedelegate` | Who may act on *one* alliance: the per-alliance grant list, the channel permission sharing also needs, and the widening a delegate must not manage. |
 | `alliancestress`, `alliancechurn`, `alliancedrift` | Alliances under load, membership churn, and state drift between hubs. |
+| `stickers` | Two hubs: a stranger on B sends a sticker from A's pack, so B fetches it from A over the real network; 502 for a missing hash or a dead origin, 403 with export off. |
+| `attachments` | One hub: served headers (only a re-encoded image inline, everything sandboxed, `as_file` and executables download-only, a lying extension refused), the budget at its floor expiring the oldest, the migration step on a database a previous release left, and backup/restore carrying the blob files. |
 | `farm`, `crossfarm` | A farm hosting its own hubs, and an alliance across two farms. |
+
+## The API contract
+
+`node e2e/contract.mjs` boots one hub and calls every documented GET without
+path parameters as its owner, checking the status and the JSON body against
+Wavvon-docs' `openapi.yaml` at the commit in `openapi.ref` (`OPENAPI_SPEC=<file>`
+uses a local spec instead). A required query is filled from its documented
+`example`; an operation without one is skipped and listed. A field the hub sends
+and the spec lacks is a failure, as is a wrong status or type. Known drift goes
+in `contract-allowlist.json`, which may only shrink: an allowlisted mismatch
+that stops happening fails too. CI runs it after the test suite.
+
+A change to a response and the spec change that documents it land together:
+merge the spec on Wavvon-docs `main`, then move `openapi.ref` in the PR.
 
 ## What is *not* here
 

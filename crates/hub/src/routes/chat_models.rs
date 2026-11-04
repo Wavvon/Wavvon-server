@@ -118,6 +118,9 @@ pub struct UpdateChannelRequest {
     /// a plain `NOT NULL BOOLEAN`, so absent = unchanged, `Some(bool)` = set.
     #[serde(default)]
     pub nsfw: Option<bool>,
+    /// Switch a channel between `text` and `voice`; both keep their chat.
+    #[serde(default)]
+    pub channel_type: Option<String>,
 }
 
 /// Lets us distinguish "field missing" from "field explicitly null" in JSON.
@@ -129,9 +132,9 @@ where
     serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
-/// One inline attachment carried with a message. We embed bytes directly
-/// (base64) rather than introducing a separate storage subsystem; the per-
-/// message size cap below keeps this from getting out of hand.
+/// One inline attachment of a DM. Channel messages, posts and replies carry
+/// uploaded files instead (`crate::attachments`); a DM keeps this shape until
+/// its files move to disk too.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Attachment {
     pub name: String,
@@ -148,8 +151,13 @@ pub struct Attachment {
 #[derive(Serialize, Deserialize)]
 pub struct SendMessageRequest {
     pub content: String,
+    /// Ids from `POST /channels/{id}/upload`, shown in this order.
     #[serde(default)]
-    pub attachments: Vec<Attachment>,
+    pub attachment_ids: Vec<String>,
+    /// The retired inline form. Present only so a client still sending it is
+    /// refused with a sentence instead of losing its files silently.
+    #[serde(default, skip_serializing)]
+    pub attachments: Vec<serde_json::Value>,
     /// Optional parent message id to thread under.
     #[serde(default)]
     pub reply_to: Option<String>,
@@ -157,6 +165,57 @@ pub struct SendMessageRequest {
     /// only -- `routes/messages.rs` rejects it for any other sender.
     #[serde(default)]
     pub game: Option<crate::routes::app_models::GameLaunchCard>,
+    /// Another name and avatar to show on this message; needs
+    /// `messages.masquerade`.
+    #[serde(default)]
+    pub masquerade: Option<Masquerade>,
+    /// A sticker this hub holds (`POST /channels/{id}/stickers` makes it hold
+    /// one). The message may carry text as well.
+    #[serde(default)]
+    pub sticker_id: Option<String>,
+}
+
+/// The name and avatar a bridge or webhook shows on one message instead of
+/// its own. `sender` stays the real author, and clients show both.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Masquerade {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+impl Masquerade {
+    /// A name of 1 to 32 characters and, if any, an http(s) avatar URL of at
+    /// most 512 characters; anything else is refused rather than trimmed.
+    pub fn validated(self) -> Result<Self, (axum::http::StatusCode, String)> {
+        let bad = |m: &str| Err((axum::http::StatusCode::BAD_REQUEST, m.to_string()));
+        let name = self.name.trim().to_string();
+        if name.is_empty() || name.chars().count() > 32 {
+            return bad("masquerade.name must be 1 to 32 characters");
+        }
+        if let Some(url) = &self.avatar_url {
+            let http = url.starts_with("https://") || url.starts_with("http://");
+            if !http || url.len() > 512 {
+                return bad(
+                    "masquerade.avatar_url must be an http(s) URL of at most 512 characters",
+                );
+            }
+        }
+        Ok(Self {
+            name,
+            avatar_url: self.avatar_url,
+        })
+    }
+
+    /// Replaces the avatar URL with the hub's own copy (`/uploads/...`), so a
+    /// reader's client never contacts the third-party host. An avatar the hub
+    /// cannot fetch is dropped, and the name stays.
+    pub async fn with_hosted_avatar(mut self) -> Self {
+        if let Some(url) = self.avatar_url.take() {
+            self.avatar_url = crate::routes::preview::store_remote_image(&url).await;
+        }
+        self
+    }
 }
 
 /// Minimal preview of a parent message. We embed it in replies so the
@@ -191,7 +250,7 @@ pub struct MessageResponse {
     #[serde(default)]
     pub edited_at: Option<i64>,
     #[serde(default)]
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<crate::attachments::AttachmentRef>,
     #[serde(default)]
     pub reactions: Vec<ReactionSummary>,
     #[serde(default)]
@@ -219,6 +278,13 @@ pub struct MessageResponse {
     /// `messages.components`; a click comes back as `component_interaction`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<Vec<crate::routes::app_models::ComponentRow>>,
+    /// Shown instead of the sender's own name and avatar; persisted on
+    /// `messages.masquerade`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masquerade: Option<Masquerade>,
+    /// The sticker sent with this message, persisted as `messages.sticker_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sticker: Option<crate::routes::stickers::StickerRef>,
 }
 
 #[derive(Deserialize)]
@@ -282,13 +348,6 @@ pub enum ChatEvent {
         channel_id: String,
         stream_id: String,
         sharer_pubkey: String,
-    },
-    /// v2 signaling envelope (offer/answer/ICE/viewer-joined/viewer-left).
-    /// `to_pubkey` is the sole intended recipient; the WS dispatcher
-    /// skips every connection that isn't that pubkey.
-    ScreenShareSignal {
-        channel_id: String,
-        to_pubkey: String,
     },
     /// Notify a specific cross-channel subscriber that their subscribed stream ended.
     /// `to_pubkey` is the subscriber; this is delivered only to their connection.
@@ -374,7 +433,6 @@ impl ChatEvent {
             | ChatEvent::Typing { channel_id, .. }
             | ChatEvent::ScreenShareStarted { channel_id, .. }
             | ChatEvent::ScreenShareStopped { channel_id, .. }
-            | ChatEvent::ScreenShareSignal { channel_id, .. }
             | ChatEvent::Forum { channel_id }
             | ChatEvent::VoiceZone { channel_id }
             | ChatEvent::Video { channel_id }
@@ -408,9 +466,7 @@ impl ChatEvent {
 #[derive(Deserialize)]
 pub struct PaginationParams {
     /// The hub's list dialect: the id of the last message of the previous
-    /// page. Older clients send it as `before`, and a client talks to hubs
-    /// of every age, so that spelling stays accepted.
-    #[serde(alias = "before")]
+    /// page.
     pub cursor: Option<String>,
     pub limit: Option<i64>,
     /// Optional full-text search within the channel; returns one page of
@@ -424,6 +480,11 @@ pub struct PaginationParams {
 #[derive(Deserialize)]
 pub struct WsParams {
     pub token: String,
+    /// `on_request`: this connection receives a stream's bytes only after
+    /// opening it with `stream_subscribe`, in its own channels too (#276).
+    /// A query parameter rather than a message because the hub replays
+    /// in-progress shares before it reads anything from the socket.
+    pub streams: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -473,13 +534,16 @@ pub enum WsClientMessage {
         kind: String,
         mime: String,
         has_audio: bool,
-        /// v2: "chunks" (default, v1 relay) or "webrtc". Absent = "chunks" for
-        /// old clients. Additive — old hubs and clients ignore this field.
+        /// What the sharer intends to send, checked against the hub's
+        /// `stream_limits` (#278). Optional: older clients declare nothing.
         #[serde(default)]
-        transport: Option<String>,
-        /// v2: track metadata for webcam + screen multiplexing. Additive.
+        width: Option<u32>,
         #[serde(default)]
-        tracks: Option<Vec<TrackMeta>>,
+        height: Option<u32>,
+        #[serde(default)]
+        fps: Option<u32>,
+        #[serde(default)]
+        kbps: Option<u32>,
     },
     #[serde(rename = "screen_share_chunk")]
     ScreenShareChunk {
@@ -490,45 +554,6 @@ pub enum WsClientMessage {
     },
     #[serde(rename = "screen_share_stop")]
     ScreenShareStop {
-        channel_id: String,
-        stream_id: String,
-    },
-    // ---- Screen share v2: WebRTC signaling envelopes (client → hub) ----
-    /// Sharer sends an SDP offer to a specific viewer.
-    #[serde(rename = "screen_share_offer")]
-    ScreenShareOffer {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        /// Opaque SDP text — hub does not parse this.
-        sdp: String,
-    },
-    /// Viewer sends an SDP answer to the sharer.
-    #[serde(rename = "screen_share_answer")]
-    ScreenShareAnswer {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        sdp: String,
-    },
-    /// Either peer trickles an ICE candidate to the other.
-    #[serde(rename = "screen_share_ice")]
-    ScreenShareIce {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        /// JSON string: `{ candidate, sdpMid, sdpMLineIndex }` — opaque to hub.
-        candidate: String,
-    },
-    /// Viewer signals to the sharer that it wants a peer connection.
-    #[serde(rename = "screen_share_viewer_join")]
-    ScreenShareViewerJoin {
-        channel_id: String,
-        stream_id: String,
-    },
-    /// Viewer tears down its peer connection.
-    #[serde(rename = "screen_share_viewer_leave")]
-    ScreenShareViewerLeave {
         channel_id: String,
         stream_id: String,
     },
@@ -673,8 +698,7 @@ pub enum WsClientMessage {
     /// Generic mini-app <-> bot relay (mini-apps.md "the mini-app
     /// connects to the hub's existing /ws endpoint ... and exchanges
     /// messages with the bot ... through the normal WS relay"). `payload` is
-    /// an opaque JSON-encoded string -- the hub never inspects it, same
-    /// convention as `screen_share_ice`'s `candidate` field.
+    /// an opaque JSON-encoded string -- the hub never inspects it.
     ///
     /// From a mini-app session (non-bot connection): hub forwards to every
     /// active WS session for `app_id`, tagged with the sender's pubkey.
@@ -784,6 +808,20 @@ pub enum WsServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         outbound_loss_pct: Option<f32>,
     },
+    /// Who has a hand raised in this voice channel, oldest first, sent to
+    /// everyone in it whenever a hand goes up, comes down or is answered.
+    #[serde(rename = "voice_hands")]
+    VoiceHands {
+        channel_id: String,
+        public_keys: Vec<String>,
+    },
+    /// A moderator gave this member the floor: `may_speak` is now true for
+    /// them until they leave.
+    #[serde(rename = "voice_talk_granted")]
+    VoiceTalkGranted {
+        channel_id: String,
+        public_key: String,
+    },
     #[serde(rename = "voice_roster_update")]
     VoiceRosterUpdate {
         channel_id: String,
@@ -837,49 +875,6 @@ pub enum WsServerMessage {
         channel_id: String,
         stream_id: String,
         sharer_pubkey: String,
-    },
-
-    // ---- Screen share v2: hub→client forwarded signaling envelopes ----
-    /// SDP offer forwarded to the target viewer (from_pubkey = sharer).
-    #[serde(rename = "screen_share_offer_in")]
-    ScreenShareOfferIn {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        sdp: String,
-        from_pubkey: String,
-    },
-    /// SDP answer forwarded to the sharer (from_pubkey = viewer).
-    #[serde(rename = "screen_share_answer_in")]
-    ScreenShareAnswerIn {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        sdp: String,
-        from_pubkey: String,
-    },
-    /// ICE candidate forwarded to the target peer.
-    #[serde(rename = "screen_share_ice_in")]
-    ScreenShareIceIn {
-        channel_id: String,
-        to_pubkey: String,
-        stream_id: String,
-        candidate: String,
-        from_pubkey: String,
-    },
-    /// Hub notifies the sharer that a viewer wants to negotiate.
-    #[serde(rename = "screen_share_viewer_joined")]
-    ScreenShareViewerJoined {
-        channel_id: String,
-        stream_id: String,
-        from_pubkey: String,
-    },
-    /// Hub notifies the sharer that a viewer left.
-    #[serde(rename = "screen_share_viewer_left")]
-    ScreenShareViewerLeft {
-        channel_id: String,
-        stream_id: String,
-        from_pubkey: String,
     },
 
     // ---- Video signaling: hub → client ----
@@ -1042,6 +1037,11 @@ pub enum WsServerMessage {
     #[serde(rename = "hub_updated")]
     HubUpdated,
 
+    /// To a recovery contact: a rotation request naming them as a contact
+    /// just opened. Clients refetch `GET /recovery/requests/to-attest`.
+    #[serde(rename = "recovery_attestation_requested")]
+    RecoveryAttestationRequested { request_id: String },
+
     /// Soundboard clip-played attribution (soundboard.md §1). Purely
     /// informational -- the server does not verify the clip was actually
     /// mixed into the sender's stream; clients render a transient
@@ -1162,16 +1162,6 @@ pub enum WsServerMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         last_error: Option<String>,
     },
-}
-
-/// Track metadata carried in `ScreenShareStart.tracks` (v2, additive).
-/// Old clients that don't know this field ignore it.
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TrackMeta {
-    /// RTP `m=` mid value (a string matching `RTCRtpTransceiver.mid`).
-    pub mid: String,
-    /// "screen" or "webcam".
-    pub kind: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

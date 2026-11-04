@@ -51,7 +51,8 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))
@@ -779,6 +780,20 @@ async fn two_hubs_alliance_descendant_message_via_federation() {
     assert_eq!(descendant_entry.channel_type, "text");
     assert!(!descendant_entry.is_category);
 
+    // Files uploaded to Hub B cannot ride the text-only hop to Hub A: refused,
+    // not posted without them.
+    let resp = client
+        .post(format!(
+            "{hub_b_url}/alliances/{}/channels/{}/messages",
+            alliance.id, descendant.id
+        ))
+        .bearer_auth(&token_b)
+        .json(&json!({ "content": "with a file", "attachment_ids": ["some-upload"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
     // Hub B: post a message on the descendant channel via the alliance
     // proxy. Hub B doesn't own it, so this federates to Hub A.
     let resp = client
@@ -821,6 +836,96 @@ async fn two_hubs_alliance_descendant_message_via_federation() {
         .unwrap();
     assert_eq!(messages.len(), 1);
     assert!(messages[0].content.contains("wiped at 45%"));
+}
+
+/// An alliance channel pages like a local one, both on the owning hub and
+/// through the federation read-through: `limit` caps the page, newest first,
+/// and `cursor` (the last id of the previous page) continues from there.
+#[tokio::test]
+async fn alliance_channel_messages_page_locally_and_through_federation() {
+    let (hub_a_url, _hub_a_state, _hub_a_guard) = start_hub("hub-a-paging").await;
+    let (hub_b_url, _hub_b_state, _hub_b_guard) = start_hub("hub-b-paging").await;
+    let client = reqwest::Client::new();
+
+    let user_a = Identity::generate();
+    let token_a = authenticate_user(&hub_a_url, &user_a).await;
+    let user_b = Identity::generate();
+    let token_b = authenticate_user(&hub_b_url, &user_b).await;
+
+    let alliance = create_alliance_named(&client, &hub_a_url, &token_a, "Paging Pact").await;
+    let channel = create_channel(&client, &hub_a_url, &token_a, json!({ "name": "log" })).await;
+    let resp = client
+        .post(format!("{hub_a_url}/alliances/{}/channels", alliance.id))
+        .bearer_auth(&token_a)
+        .json(&json!({ "channel_id": channel.id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let invite: AllianceInviteResponse = client
+        .post(format!("{hub_a_url}/alliances/{}/invite", alliance.id))
+        .bearer_auth(&token_a)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("{hub_b_url}/alliances/join"))
+        .bearer_auth(&token_b)
+        .json(&json!({
+            "inviter_hub_url": hub_a_url,
+            "alliance_id": alliance.id,
+            "invite_token": invite.token,
+            "own_hub_url": hub_b_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    for content in ["one", "two", "three"] {
+        let resp = client
+            .post(format!("{hub_a_url}/channels/{}/messages", channel.id))
+            .bearer_auth(&token_a)
+            .json(&json!({ "content": content }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201);
+    }
+
+    for (hub_url, token) in [(&hub_a_url, &token_a), (&hub_b_url, &token_b)] {
+        let page = |query: String| {
+            let client = client.clone();
+            let url = format!(
+                "{hub_url}/alliances/{}/channels/{}/messages?{query}",
+                alliance.id, channel.id
+            );
+            let token = token.clone();
+            async move {
+                client
+                    .get(url)
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .unwrap()
+                    .json::<Vec<MessageResponse>>()
+                    .await
+                    .unwrap()
+            }
+        };
+
+        let first = page("limit=2".to_string()).await;
+        let contents: Vec<&str> = first.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["three", "two"], "newest page from {hub_url}");
+
+        let rest = page(format!("limit=2&cursor={}", first[1].id)).await;
+        let contents: Vec<&str> = rest.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(contents, ["one"], "next page from {hub_url}");
+    }
 }
 
 #[tokio::test]
@@ -928,12 +1033,11 @@ async fn alliance_with_shared_voice_channel(
         .await
         .unwrap();
 
-    // A plain text channel: the hub has no separate voice type — every leaf
-    // text channel hosts a voice call alongside its text pane.
+    // A voice channel: the only kind an alliance voice grant admits to.
     let channel: ChannelResponse = client
         .post(format!("{hub_a_url}/channels"))
         .bearer_auth(&token_a)
-        .json(&json!({ "name": "war-room" }))
+        .json(&json!({ "name": "war-room", "channel_type": "voice" }))
         .send()
         .await
         .unwrap()
@@ -996,7 +1100,10 @@ async fn redeem_grant(
         .json()
         .await
         .unwrap();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     client
         .post(format!("{hub_url}/auth/verify"))
         .json(&json!({
@@ -1932,6 +2039,61 @@ async fn an_alliance_manager_cannot_grant_the_list() {
         resp.status(),
         403,
         "a delegate handing the alliance to another role is exactly what roles.manage gates"
+    );
+}
+
+/// Whoever may edit the grant list may read it, without managing the
+/// alliance; a member holding neither may not.
+#[tokio::test]
+async fn roles_manage_reads_the_grant_list_it_edits() {
+    let (hub_url, _state, _guard) = start_hub("hub-managers-read").await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = authenticate_user(&hub_url, &owner).await;
+
+    let editor = Identity::generate();
+    let editor_token = authenticate_user(&hub_url, &editor).await;
+    let bystander = Identity::generate();
+    let bystander_token = authenticate_user(&hub_url, &bystander).await;
+
+    let alliance = create_alliance_named(&client, &hub_url, &owner_token, "Pact").await;
+    let editors = create_role_with(
+        &client,
+        &hub_url,
+        &owner_token,
+        "Editors",
+        &["roles.manage"],
+    )
+    .await;
+    assign_role_to(
+        &client,
+        &hub_url,
+        &owner_token,
+        &editor.public_key_hex(),
+        &editors,
+    )
+    .await;
+
+    let list = |token: String| {
+        let client = client.clone();
+        let url = format!("{hub_url}/alliances/{}/managers", alliance.id);
+        async move {
+            client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+
+    assert_eq!(list(editor_token).await, 200, "roles.manage reads the list");
+    assert_eq!(
+        list(bystander_token).await,
+        403,
+        "neither managing the alliance nor holding roles.manage"
     );
 }
 

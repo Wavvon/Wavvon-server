@@ -242,6 +242,22 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .await;
     }
 
+    // Voice lives in voice channels (decisions.md, "Voice lives in voice
+    // channels"); a spawner has already been swapped for the voice room it
+    // made, so `channel_id` names a voice channel or the join stops here.
+    if target_channel_type.as_deref() != Some("spawner")
+        && target_channel_type.as_deref() != Some("voice")
+    {
+        let err = WsServerMessage::Error {
+            context: "voice_join".to_string(),
+            message: "This channel has no voice. Join a voice channel instead.".to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
     // Talk-power check.
     let min_talk_power: i64 =
         sqlx::query_scalar("SELECT COALESCE(min_talk_power, 0) FROM channels WHERE id = $1")
@@ -821,9 +837,9 @@ pub(in crate::routes::ws) async fn handle_voice_move(
         }
     }
 
-    // Destination must be a real, non-category channel.
+    // Destination must be a voice channel.
     let target_channel_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND is_category = false")
+        sqlx::query_scalar("SELECT name FROM channels WHERE id = $1 AND channel_type = 'voice'")
             .bind(&target_channel_id)
             .fetch_optional(&state.db)
             .await
@@ -832,7 +848,7 @@ pub(in crate::routes::ws) async fn handle_voice_move(
     let target_channel_name = match target_channel_name {
         Some(name) => name,
         None => {
-            return send_voice_move_error(ws_tx, "Target channel does not exist.").await;
+            return send_voice_move_error(ws_tx, "Target is not a voice channel.").await;
         }
     };
 
@@ -1001,23 +1017,6 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
         _ => return DispatchResult::Continue,
     };
 
-    let can_create = {
-        let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
-        perms
-            .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
-            .unwrap_or(false)
-    };
-    if !can_create {
-        let err = WsServerMessage::Error {
-            context: "voice_zone_create".to_string(),
-            message: "Requires manage_voice permission.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
-    }
-
     let ch_id = match cs.voice_channel.clone() {
         Some(ch) => ch,
         None => {
@@ -1031,6 +1030,37 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
             return DispatchResult::Continue;
         }
     };
+
+    // Checked on the room, not the hub: a channel-level grant or deny of
+    // channels.manage is what an admin set for this room.
+    let can_create = crate::permissions::channel_permissions(&state.db, &cs.public_key, &ch_id)
+        .await
+        .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
+        .unwrap_or(false);
+    if !can_create {
+        let err = WsServerMessage::Error {
+            context: "voice_zone_create".to_string(),
+            message: "Requires the channels.manage permission.".to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
+    // `session_roster` was accepted here and then refused every position
+    // update, so a zone created with it could never be used. Refuse it up
+    // front until a session roster exists to check against.
+    if !matches!(auth_mode.as_str(), "creator_only" | "any_channel_member") {
+        let err = WsServerMessage::Error {
+            context: "voice_zone_create".to_string(),
+            message: format!("Unsupported zone auth_mode \"{auth_mode}\"."),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
 
     let zone = crate::state::VoiceZone {
         zone_id: zone_id.clone(),
@@ -1097,12 +1127,11 @@ pub(in crate::routes::ws) async fn handle_voice_zone_destroy(
             .map(|z| z.creator_pubkey == cs.public_key)
             .unwrap_or(false)
     };
-    let can_destroy = can_destroy || {
-        let perms = crate::permissions::user_permissions(&state.db, &cs.public_key).await;
-        perms
+    let can_destroy = can_destroy
+        || crate::permissions::channel_permissions(&state.db, &cs.public_key, &ch_id)
+            .await
             .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
-            .unwrap_or(false)
-    };
+            .unwrap_or(false);
     if !can_destroy {
         return DispatchResult::Continue;
     }
@@ -1126,8 +1155,12 @@ pub(in crate::routes::ws) async fn handle_voice_zone_destroy(
     DispatchResult::Continue
 }
 
+/// A client moving smoothly sends at most ~30 updates a second; anything
+/// faster is dropped rather than queued.
+const MIN_POSITION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(30);
+
 pub(in crate::routes::ws) async fn handle_voice_position_update(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
 ) -> DispatchResult {
@@ -1145,12 +1178,20 @@ pub(in crate::routes::ws) async fn handle_voice_position_update(
         return DispatchResult::Continue;
     }
 
+    let now = std::time::Instant::now();
+    if cs
+        .last_position_update
+        .is_some_and(|last| now.duration_since(last) < MIN_POSITION_INTERVAL)
+    {
+        return DispatchResult::Continue;
+    }
+    cs.last_position_update = Some(now);
+
     let allowed = {
         let zones = state.voice_zones.read().await;
         if let Some(z) = zones.get(&(ch_id.clone(), zone_id.clone())) {
             match z.auth_mode.as_str() {
                 "creator_only" => z.creator_pubkey == cs.public_key,
-                "session_roster" => false,
                 _ => true,
             }
         } else {
@@ -1207,6 +1248,24 @@ pub(in crate::routes::ws) async fn handle_video_enable(
         let err = WsServerMessage::Error {
             context: "video_enable".to_string(),
             message: "Must be in voice to enable video.".to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
+    // Being in the call is not enough: the camera is its own grant (#277).
+    let may_camera =
+        match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await
+        {
+            Ok(perms) => perms.has(crate::permissions::VOICE_CAMERA),
+            Err(_) => false,
+        };
+    if !may_camera {
+        let err = WsServerMessage::Error {
+            context: "video_enable".to_string(),
+            message: "You cannot turn a camera on in this channel.".to_string(),
         };
         let _ = ws_tx
             .send(Message::Text(serde_json::to_string(&err).unwrap().into()))

@@ -60,6 +60,36 @@ impl WebClientConfig {
     }
 }
 
+/// Policy for every response that belongs to the web client (HTML, JS, CSS,
+/// workers: a worker's policy comes from its own response, not its parent's).
+///
+/// - `script-src` pins the one inline script `inject_hub_config` adds by hash
+///   (a unit test keeps the two in step). `wasm-unsafe-eval` is for the opus
+///   encoder and the background-blur model; it does not allow `eval`.
+/// - `style-src-attr 'unsafe-inline'`: React sets `style=` attributes all over.
+///   Style *elements* stay locked to same-origin files.
+/// - `connect-src https: wss:` and `img-src/media-src https:`: the client is
+///   multi-hub, so other hubs' APIs, sockets, WebTransport relays, uploads and
+///   stickers live on origins nobody can list in advance. Banner and hub-icon
+///   URLs are likewise operator-chosen. Plain `http:`/`ws:` are allowed too:
+///   a hub on a LAN or a dev box has no TLS, and since `https:` already admits
+///   any host, dropping them would protect nothing (an https page still
+///   upgrades or blocks them as mixed content).
+/// - `frame-src https:`: mini-apps are served from their own origin (the
+///   iframe is sandboxed by the client).
+/// - `blob:`/`data:`: object-URL previews of pending attachments, inlined
+///   small assets.
+pub const HTML_CSP: &str = "default-src 'none'; script-src 'self' 'sha256-J2mFV7BCOcjSxOBL55Scfp1mmsMYgEpU5I1c/ap5vPA=' 'wasm-unsafe-eval'; style-src 'self'; style-src-attr 'unsafe-inline'; img-src 'self' blob: data: https: http:; media-src 'self' blob: https: http:; font-src 'self' data:; connect-src 'self' https: wss: http: ws:; worker-src 'self' blob:; frame-src 'self' https:; manifest-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// Add [`HTML_CSP`] to a web-client response.
+pub fn with_html_csp(mut resp: Response) -> Response {
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(HTML_CSP),
+    );
+    resp
+}
+
 /// Insert the hub-origin config script immediately before `</head>`.
 ///
 /// The injected script sets `window.__WAVVON_HOME_HUB__` to
@@ -106,7 +136,7 @@ pub fn build_fallback(cfg: Arc<WebClientConfig>) -> axum::routing::Router {
     axum::Router::new().fallback(move |req: Request| {
         let cfg = cfg.clone();
         let dir = dir.clone();
-        async move { serve_request(cfg, dir, req).await }
+        async move { with_html_csp(serve_request(cfg, dir, req).await) }
     })
 }
 
@@ -155,6 +185,15 @@ fn index_response(bytes: Arc<[u8]>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csp_hash_matches_the_injected_script() {
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+        let body = "window.__WAVVON_HOME_HUB__=window.location.origin;";
+        let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(body));
+        assert!(HTML_CSP.contains(&format!("'sha256-{hash}'")));
+    }
 
     #[test]
     fn injects_script_before_head_close() {

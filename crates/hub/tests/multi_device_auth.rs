@@ -52,7 +52,8 @@ async fn auth_with_cert(
         .await;
     let challenge: ChallengeResponse = resp.json();
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = subkey.sign(&challenge_bytes);
+    let signature =
+        subkey.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let mut body = serde_json::json!({
         "public_key": pub_key,
@@ -79,7 +80,10 @@ async fn auth_legacy(server: &TestServer, identity: &Identity) -> String {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -307,6 +311,75 @@ async fn revoked_key_is_rejected_by_middleware() {
     let resp = server.get("/me").authorization_bearer(&token).await;
     resp.assert_status_unauthorized();
     assert!(resp.text().contains("revoked"));
+}
+
+/// A paired device's session is stored under the master, while the revocation
+/// names the device: the check has to find the device behind the token, and
+/// the device must not be able to sign in again. Its sibling stays signed in.
+#[tokio::test]
+async fn revoked_paired_device_loses_its_session_and_cannot_sign_in() {
+    let (server, db) = setup().await;
+    let master = Identity::generate().master().unwrap();
+    let phone = DeviceSubkey::generate("phone".into());
+    let laptop = DeviceSubkey::generate("laptop".into());
+    let phone_cert = make_cert(&master, &phone.public_key_hex(), "phone");
+    let laptop_cert = make_cert(&master, &laptop.public_key_hex(), "laptop");
+
+    let phone_token = auth_with_cert(&server, &phone, Some(&phone_cert))
+        .await
+        .unwrap();
+    let laptop_token = auth_with_cert(&server, &laptop, Some(&laptop_cert))
+        .await
+        .unwrap();
+
+    insert_revocation(&db, &phone.public_key_hex()).await;
+
+    let resp = server.get("/me").authorization_bearer(&phone_token).await;
+    resp.assert_status_unauthorized();
+    assert!(resp.text().contains("revoked"));
+
+    assert_eq!(
+        auth_with_cert(&server, &phone, Some(&phone_cert)).await,
+        Err("status: 401 Unauthorized".to_string())
+    );
+
+    server
+        .get("/me")
+        .authorization_bearer(&laptop_token)
+        .await
+        .assert_status_ok();
+}
+
+#[tokio::test]
+async fn expired_cert_is_rejected() {
+    let (server, _db) = setup().await;
+    let master = Identity::generate().master().unwrap();
+    let phone = DeviceSubkey::generate("phone".into());
+    let master_pubkey = master.public_key_hex();
+    let subkey_pubkey = phone.public_key_hex();
+    let (issued_at, not_after) = (1_700_000_000, Some(1_700_000_001));
+    let bytes = SubkeyCert::signing_bytes(
+        &master_pubkey,
+        &subkey_pubkey,
+        "phone",
+        issued_at,
+        not_after,
+        &[],
+    );
+    let cert = SubkeyCert {
+        signature: hex::encode(master.sign(&bytes).to_bytes()),
+        master_pubkey,
+        subkey_pubkey,
+        device_label: "phone".to_string(),
+        issued_at,
+        not_after,
+        fallback_hubs: vec![],
+    };
+
+    assert_eq!(
+        auth_with_cert(&server, &phone, Some(&cert)).await,
+        Err("status: 401 Unauthorized".to_string())
+    );
 }
 
 #[tokio::test]

@@ -125,7 +125,7 @@ pub async fn admin_grant_badge(
     Ok((StatusCode::CREATED, Json(cert)))
 }
 
-/// POST /admin/certs/:pubkey/revoke
+/// DELETE /admin/certs/:pubkey
 pub async fn admin_revoke(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -138,10 +138,11 @@ pub async fn admin_revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// GET /admin/certs
+/// GET /admin/certs, newest first; `cursor` is the previous page's last `id`.
 pub async fn admin_list(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<crate::routes::paging::PageQuery>,
 ) -> Result<Json<Vec<IssuanceRow>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(CERTS_REVOKE)?;
@@ -149,8 +150,14 @@ pub async fn admin_list(
     let rows = sqlx::query_as::<_, IssuanceDbRow>(
         "SELECT id, subject_pubkey, pow_level, member_since, issued_at, expires_at,
                 revoked_at, standing, payload_json, signature
-         FROM cert_issuances ORDER BY issued_at DESC",
+         FROM cert_issuances
+         WHERE ($1::text IS NULL OR (issued_at, id) <
+                ((SELECT issued_at FROM cert_issuances WHERE id = $1), $1))
+         ORDER BY issued_at DESC, id DESC
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -291,6 +298,7 @@ pub async fn get_revocations(
 pub struct CertSettingsResponse {
     pub cert_mode: String,
     pub cert_auto_issue: bool,
+    // Wire name kept for clients; the stored setting is `cert_standing_days`.
     pub cert_min_age_days: i64,
     pub cert_validity_days: i64,
     pub cert_trusted_issuers: Vec<String>,
@@ -368,10 +376,7 @@ fn setting_text(v: &serde_json::Value) -> String {
 #[derive(Deserialize)]
 pub struct CertSettingsPatch {
     pub cert_auto_issue: Option<serde_json::Value>,
-    pub cert_standing_days: Option<serde_json::Value>,
-    /// What `GET` calls the same setting, and therefore what the admin screen
-    /// sends back. Without this the "member for N days" field silently never
-    /// saved.
+    /// Stored as `cert_standing_days`; the API spells it as `GET` does.
     pub cert_min_age_days: Option<serde_json::Value>,
     pub cert_validity_days: Option<serde_json::Value>,
     pub cert_mode: Option<String>,
@@ -406,12 +411,7 @@ pub async fn patch_cert_settings(
     if let Some(v) = body.cert_auto_issue {
         kvs.push(("cert_auto_issue", setting_text(&v)));
     }
-    // `cert_min_age_days` is the same setting under the name `GET` uses; an
-    // explicit `cert_standing_days` wins if a caller sends both.
     if let Some(v) = body.cert_min_age_days {
-        kvs.push(("cert_standing_days", setting_text(&v)));
-    }
-    if let Some(v) = body.cert_standing_days {
         kvs.push(("cert_standing_days", setting_text(&v)));
     }
     if let Some(v) = body.cert_validity_days {

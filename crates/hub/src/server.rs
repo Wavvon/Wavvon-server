@@ -18,9 +18,35 @@ async fn attach_request_id(req: Request, next: Next) -> Response {
     let id = uuid::Uuid::new_v4().to_string();
     tracing::trace!(request_id = %id, method = %req.method(), uri = %req.uri(), "request");
     let mut resp = next.run(req).await;
+    if resp.status() == axum::http::StatusCode::INTERNAL_SERVER_ERROR {
+        resp = scrub_internal_error(resp, &id).await;
+    }
     if let Ok(v) = id.parse::<axum::http::HeaderValue>() {
         resp.headers_mut().insert("x-request-id", v);
     }
+    resp
+}
+
+/// Handlers answer a failed query with the database's own error text, which
+/// names tables, columns and constraints. That detail goes to the log under
+/// the request id; the caller gets the id alone, which is enough to find it.
+async fn scrub_internal_error(resp: Response, id: &str) -> Response {
+    let (parts, body) = resp.into_parts();
+    let detail = axum::body::to_bytes(body, 64 * 1024)
+        .await
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    tracing::error!(request_id = %id, %detail, "internal error");
+    let mut resp = Response::from_parts(
+        parts,
+        axum::body::Body::from(format!("Internal server error (request {id})")),
+    );
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    resp.headers_mut()
+        .remove(axum::http::header::CONTENT_LENGTH);
     resp
 }
 
@@ -119,14 +145,6 @@ pub fn create_router_full(
             "/auth/webauthn/assert/finish",
             post(routes::webauthn::assert_finish),
         )
-        .route(
-            "/auth/device-token/create",
-            post(routes::webauthn::device_token_create),
-        )
-        .route(
-            "/auth/device-token/redeem",
-            post(routes::webauthn::device_token_redeem),
-        )
         .layer(from_fn(move |req, next| {
             let l = auth_limiter.clone();
             async move { rate_limit::enforce(l, req, next).await }
@@ -151,17 +169,28 @@ pub fn create_router_full(
             async move { rate_limit::enforce(l, req, next).await }
         }));
 
+    let sticker_limiter = RateLimiter::new(Config::STICKER_FEDERATION, trusted_proxy);
+    let sticker_federation_routes = Router::new()
+        .route(
+            "/federation/stickers/{sha256}",
+            get(routes::stickers::federation_sticker),
+        )
+        .layer(from_fn(move |req, next| {
+            let l = sticker_limiter.clone();
+            async move { rate_limit::enforce(l, req, next).await }
+        }));
+
     let api_router = Router::new()
         .route("/health", get(routes::health::get_health))
         .route("/info", get(routes::health::info))
-        .route("/key-rotation", get(routes::key_rotation::get_key_rotation))
         .route("/metrics", get(routes::metrics::metrics))
         .route("/hub", axum::routing::patch(routes::hub::update_hub))
         .route("/hub/members", get(routes::hub::list_members))
         .route("/hub/settings", get(routes::hub::get_hub_settings))
+        .route("/hub/landing-image", get(routes::hub::landing_image))
         .route("/hub/pending", get(routes::hub::list_pending))
         .route(
-            "/hub/pending/{target_key}/approve",
+            "/hub/pending/{pubkey}/approve",
             post(routes::hub::approve_user),
         )
         .route(
@@ -227,6 +256,7 @@ pub fn create_router_full(
         )
         .merge(auth_routes)
         .merge(write_routes)
+        .merge(sticker_federation_routes)
         .route(
             "/me",
             get(routes::me::me)
@@ -238,8 +268,6 @@ pub fn create_router_full(
             "/me/credentials/{id}",
             patch(routes::webauthn::rename_credential).delete(routes::webauthn::delete_credential),
         )
-        .route("/me/devices", get(routes::webauthn::list_devices))
-        .route("/me/devices/{id}", delete(routes::webauthn::revoke_device))
         .route("/channels", get(routes::channels::list_channels))
         .route(
             "/channels/{channel_id}",
@@ -360,14 +388,6 @@ pub fn create_router_full(
             get(routes::users::get_user_profile),
         )
         .route(
-            "/voice/populations",
-            get(routes::channels::voice_populations),
-        )
-        .route(
-            "/voice/active-users",
-            get(routes::channels::voice_active_users),
-        )
-        .route(
             "/voice/participants",
             get(routes::channels::voice_channel_participants),
         )
@@ -420,11 +440,11 @@ pub fn create_router_full(
             get(routes::friends::list_pending_requests),
         )
         .route(
-            "/friends/{public_key}/accept",
+            "/friends/{pubkey}/accept",
             post(routes::friends::accept_friend_request),
         )
         .route(
-            "/friends/{public_key}",
+            "/friends/{pubkey}",
             axum::routing::delete(routes::friends::remove_friend),
         )
         .route(
@@ -436,7 +456,7 @@ pub fn create_router_full(
             get(routes::permission_catalogue::get_catalogue),
         )
         .route(
-            "/users/{public_key}/permissions/why",
+            "/users/{pubkey}/permissions/why",
             get(routes::permission_catalogue::why),
         )
         .route(
@@ -457,12 +477,9 @@ pub fn create_router_full(
             "/roles/{role_id}/members",
             get(routes::roles::list_role_members),
         )
+        .route("/users/{pubkey}/roles", get(routes::roles::get_user_roles))
         .route(
-            "/users/{public_key}/roles",
-            get(routes::roles::get_user_roles),
-        )
-        .route(
-            "/users/{public_key}/roles/{role_id}",
+            "/users/{pubkey}/roles/{role_id}",
             put(routes::roles::assign_role).delete(routes::roles::remove_role),
         )
         .route(
@@ -500,7 +517,7 @@ pub fn create_router_full(
             get(routes::moderation::list_bans).post(routes::moderation::ban_user),
         )
         .route(
-            "/moderation/bans/{target_key}",
+            "/moderation/bans/{pubkey}",
             axum::routing::delete(routes::moderation::unban_user),
         )
         .route(
@@ -508,7 +525,7 @@ pub fn create_router_full(
             get(routes::moderation::list_mutes).post(routes::moderation::mute_user),
         )
         .route(
-            "/moderation/mutes/{target_key}",
+            "/moderation/mutes/{pubkey}",
             axum::routing::delete(routes::moderation::unmute_user),
         )
         .route(
@@ -521,7 +538,7 @@ pub fn create_router_full(
             get(routes::moderation::list_voice_mutes).post(routes::moderation::voice_mute),
         )
         .route(
-            "/moderation/voice-mutes/{target_key}",
+            "/moderation/voice-mutes/{pubkey}",
             axum::routing::delete(routes::moderation::voice_unmute),
         )
         .route(
@@ -688,19 +705,19 @@ pub fn create_router_full(
                 .delete(routes::alliances::receive_alliance_member_left),
         )
         .route(
-            "/identity/{master}/designation",
+            "/identity/{pubkey}/designation",
             get(routes::identity::get_designation).post(routes::identity::put_designation),
         )
         .route(
-            "/identity/{master}/devices",
+            "/identity/{pubkey}/devices",
             get(routes::identity::list_devices).post(routes::identity::post_device),
         )
         .route(
-            "/identity/{master}/revocations",
+            "/identity/{pubkey}/revocations",
             get(routes::identity::list_revocations).post(routes::identity::post_revocation),
         )
         .route(
-            "/identity/{master}/prefs",
+            "/identity/{pubkey}/prefs",
             get(routes::identity::get_prefs).put(routes::identity::put_prefs),
         )
         .route(
@@ -719,14 +736,13 @@ pub fn create_router_full(
         )
         // ---- Certification routes (Task #20 / #21) ----
         .route("/admin/certs", get(routes::certs::admin_list))
-        .route("/admin/certs/{pubkey}", post(routes::certs::admin_issue))
+        .route(
+            "/admin/certs/{pubkey}",
+            post(routes::certs::admin_issue).delete(routes::certs::admin_revoke),
+        )
         .route(
             "/admin/certs/{pubkey}/badge",
             post(routes::certs::admin_grant_badge),
-        )
-        .route(
-            "/admin/certs/{pubkey}/revoke",
-            post(routes::certs::admin_revoke),
         )
         .route(
             "/admin/settings/certs",
@@ -749,21 +765,21 @@ pub fn create_router_full(
         )
         .route("/badges", get(routes::badges::list_badges))
         .route("/badges/{id}", delete(routes::badges::delete_badge))
-        .route("/admin/badges/issue", post(routes::badges::issue_badge))
-        .route("/admin/badges/issued", get(routes::badges::list_issued))
         .route(
-            "/admin/badges/issued/{id}/revoke",
-            axum::routing::delete(routes::badges::revoke_issued_badge),
+            "/admin/badges/issued",
+            get(routes::badges::list_issued).post(routes::badges::issue_badge),
         )
-        .route("/federation/peers", get(federation::handlers::list_peers))
-        .route("/federation/peers", post(federation::handlers::add_peer))
+        .route(
+            "/admin/badges/issued/{id}",
+            delete(routes::badges::revoke_issued_badge),
+        )
         // ---- Lobby ----
         .route("/lobby/status", get(routes::lobby::get_status))
         .route("/lobby/submit-pow", post(routes::lobby::submit_pow))
         .route("/lobby/welcome", get(routes::lobby::get_welcome))
         .route(
-            "/hub/settings/lobby",
-            put(routes::lobby::update_lobby_settings),
+            "/admin/settings/lobby",
+            patch(routes::lobby::update_lobby_settings),
         )
         // ---- Bot Challenge ----
         .route("/challenge/new", get(routes::challenge::new_challenge))
@@ -772,11 +788,28 @@ pub fn create_router_full(
             post(routes::challenge::verify_challenge),
         )
         .route(
-            "/hub/settings/challenge",
-            put(routes::challenge::update_challenge_settings),
+            "/admin/settings/challenge",
+            patch(routes::challenge::update_challenge_settings),
         )
         // ---- Survey ----
         .route("/survey/current", get(routes::survey::get_current))
+        .route(
+            "/application",
+            get(routes::application::get_application).post(routes::application::submit),
+        )
+        .route("/application/status", get(routes::application::get_status))
+        .route(
+            "/admin/application",
+            get(routes::application::admin_get).put(routes::application::admin_put),
+        )
+        .route(
+            "/admin/application/responses/{pubkey}",
+            get(routes::application::admin_get_response),
+        )
+        .route(
+            "/hub/pending/{pubkey}/reject",
+            post(routes::application::reject),
+        )
         .route("/survey/submit", post(routes::survey::submit_survey))
         .route(
             "/admin/survey",
@@ -867,6 +900,10 @@ pub fn create_router_full(
         )
         .route("/recovery/requests", get(routes::recovery::get_my_requests))
         .route(
+            "/recovery/requests/to-attest",
+            get(routes::recovery::get_requests_to_attest),
+        )
+        .route(
             "/recovery/rotation-request/{id}",
             get(routes::recovery::get_rotation_request),
         )
@@ -941,7 +978,14 @@ pub fn create_router_full(
             post(routes::uploads::upload_file)
                 .layer(DefaultBodyLimit::max(routes::uploads::UPLOAD_BODY_LIMIT)),
         )
-        .route("/uploads/{filename}", get(routes::uploads::serve_upload))
+        .route(
+            "/uploads/{id}",
+            get(routes::uploads::serve_upload).delete(routes::uploads::delete_upload),
+        )
+        .route(
+            "/alliances/{alliance_id}/uploads/{id}",
+            get(routes::alliances::get_alliance_upload),
+        )
         // ---- Soundboard (soundboard.md §1) ----
         .route(
             "/soundboard",
@@ -958,6 +1002,47 @@ pub fn create_router_full(
         .route(
             "/soundboard/{id}/played",
             post(routes::soundboard::mark_played),
+        )
+        // ---- Stickers (stickers.md) ----
+        .route(
+            "/stickers/packs",
+            get(routes::stickers::list_packs).post(routes::stickers::create_pack),
+        )
+        .route(
+            "/stickers/packs/{pack_id}",
+            axum::routing::patch(routes::stickers::rename_pack)
+                .delete(routes::stickers::delete_pack),
+        )
+        .route(
+            "/stickers/packs/{pack_id}/stickers",
+            post(routes::stickers::add_pack_sticker)
+                .layer(DefaultBodyLimit::max(routes::stickers::BODY_LIMIT)),
+        )
+        .route(
+            "/stickers/packs/{pack_id}/stickers/{sticker_id}",
+            delete(routes::stickers::remove_pack_sticker),
+        )
+        .route("/stickers/{sha256}", get(routes::stickers::serve_sticker))
+        .route(
+            "/channels/{channel_id}/stickers",
+            post(routes::stickers::ensure_sticker),
+        )
+        .route(
+            "/admin/stickers",
+            get(routes::stickers_admin::list_stickers),
+        )
+        .route("/admin/stickers/usage", get(routes::stickers_admin::usage))
+        .route(
+            "/admin/stickers/blocklist",
+            get(routes::stickers_admin::list_blocklist),
+        )
+        .route(
+            "/admin/stickers/blocklist/{sha256}",
+            delete(routes::stickers_admin::unblock),
+        )
+        .route(
+            "/admin/stickers/{id}",
+            delete(routes::stickers_admin::delete_sticker),
         )
         // ---- Message pinning ----
         .route(
@@ -977,19 +1062,51 @@ pub fn create_router_full(
         .route("/polls/{poll_id}/vote", post(routes::polls::vote_poll))
         // ---- Link preview ----
         .route("/preview", get(routes::preview::get_preview))
+        .route(
+            "/preview/image/{id}",
+            get(routes::preview::get_preview_image),
+        )
         .layer(build_cors_layer(cors_origins))
         .layer(TraceLayer::new_for_http())
         .layer(from_fn(attach_request_id))
+        .layer(from_fn(move |req, next| {
+            crate::rate_limit::tag_client_ip(trusted_proxy, req, next)
+        }))
         .with_state(state);
 
     // Attach the SPA fallback when a web client directory is configured.
     // All named API routes above take priority; only truly unmatched paths
     // reach the fallback.  The fallback itself is NOT a `.route()` call so
     // it does not appear in the OpenAPI coverage check.
-    if let Some(cfg) = web_client {
+    // The nosniff and default-CSP layers go on last so it also covers the fallback service.
+    let app = if let Some(cfg) = web_client {
         let fallback = crate::web_client::build_fallback(cfg);
         api_router.fallback_service(fallback)
     } else {
         api_router
-    }
+    };
+    app.layer(from_fn(add_default_csp))
+        .layer(from_fn(add_nosniff))
+}
+
+/// Anything that did not set its own policy is API output or user bytes, and
+/// neither is ever a document that should run script or load anything.
+async fn add_default_csp(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut()
+        .entry(axum::http::header::CONTENT_SECURITY_POLICY)
+        .or_insert(axum::http::HeaderValue::from_static(
+            "default-src 'none'; sandbox",
+        ));
+    resp
+}
+
+/// Stops browsers from second-guessing a response's declared content type.
+async fn add_nosniff(req: Request, next: Next) -> Response {
+    let mut resp = next.run(req).await;
+    resp.headers_mut().insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp
 }

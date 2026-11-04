@@ -63,6 +63,10 @@ permission_catalogue! {
     MESSAGES_READ => "messages.read", HubAndChannel,
     MESSAGES_SEND => "messages.send", HubAndChannel,
     MESSAGES_MANAGE => "messages.manage", HubAndChannel,
+    /// Post a message under another name and avatar (a bridge relaying
+    /// someone from another network). The real sender stays on the message
+    /// and clients show it, so this cannot pass for a member.
+    MESSAGES_MASQUERADE => "messages.masquerade", HubAndChannel,
 
     // ── Forum ───────────────────────────────────────────────────────────
     FORUM_POSTS_CREATE => "forum.posts.create", HubAndChannel,
@@ -76,15 +80,30 @@ permission_catalogue! {
     CHANNELS_PERMISSIONS => "channels.permissions", HubAndChannel,
 
     // ── Voice ───────────────────────────────────────────────────────────
-    /// Entering voice on a channel, and screen share. Independent of
-    /// `messages.read` in both directions: a channel everyone reads where only
-    /// one role may join, and a lobby anyone may talk in with no readable
-    /// text. Neither was expressible before it.
+    /// Entering voice on a channel. Independent of `messages.read` in both
+    /// directions: a channel everyone reads where only one role may join, and
+    /// a lobby anyone may talk in with no readable text. Neither was
+    /// expressible before it.
     VOICE_JOIN => "voice.join", HubAndChannel,
+    /// Starting a screen share, on top of `voice.join`. Its own permission so
+    /// a hub can let everyone talk while only some may stream: a raid of
+    /// accounts all sharing a fake screen otherwise meets no gate.
+    VOICE_SCREEN_SHARE => "voice.screen_share", HubAndChannel,
+    /// Turning a camera on in voice, on top of `voice.join`.
+    VOICE_CAMERA => "voice.camera", HubAndChannel,
     VOICE_SOUNDBOARD_USE => "voice.soundboard.use", HubAndChannel,
     VOICE_SOUNDBOARD_MANAGE => "voice.soundboard.manage", Hub,
     /// Resolved against the **destination** channel, not the source.
     VOICE_MOVE_MEMBERS => "voice.move_members", HubAndChannel,
+
+    // ── Stickers ────────────────────────────────────────────────────────
+    /// Packs and their stickers, including "add to a pack" from chat.
+    STICKERS_PACKS_MANAGE => "stickers.packs.manage", Hub,
+    /// Make this hub fetch a sticker from another hub, and send one that is in
+    /// no pack. Revoked from everyone it means "our own packs only".
+    STICKERS_EXTERNAL => "stickers.external", HubAndChannel,
+    /// The stored-sticker admin page: delete, block, unblock.
+    STICKERS_MODERATE => "stickers.moderate", Hub,
 
     // ── Moderation ──────────────────────────────────────────────────────
     MODERATION_KICK => "moderation.kick", Hub,
@@ -117,7 +136,7 @@ permission_catalogue! {
     HUB_SETTINGS => "hub.settings", Hub,
     HUB_APPEARANCE => "hub.appearance", Hub,
     HUB_ADMISSION => "hub.admission", Hub,
-    /// Nothing about an invite is a channel; it asked for `manage_channels`
+    /// Nothing about an invite is a channel; it used to ask for `channels.manage`
     /// only by accident (permissions.md §3, Hub).
     INVITES_MANAGE => "invites.manage", Hub,
 
@@ -138,7 +157,6 @@ permission_catalogue! {
     /// and the per-share policies live on the `alliance_managers` grant list,
     /// because they belong to one relationship rather than to the hub.
     ALLIANCES_MANAGE => "alliances.manage", Hub,
-    ALLIANCES_PEERS => "alliances.peers", Hub,
     /// Makes the hub publicly discoverable, and nothing un-indexes it.
     DIRECTORY_PUBLISH => "directory.publish", Hub,
 
@@ -283,11 +301,8 @@ impl UserPermissions {
     /// the channel-overwrite path says "on this channel" and the hub-wide path
     /// does not.
     ///
-    /// `has()` short-circuits on `admin`, so an admin or owner clears every
-    /// entry for free. That is the exemption §1.6 describes as `is_owner`,
-    /// arriving for free while `admin` still exists — when the wildcard is
-    /// deleted this must start consulting owner-as-property instead, or the
-    /// owner will be unable to grant anything they were not separately given.
+    /// `has()` short-circuits on `is_owner`, so the owner clears every entry
+    /// for free: the exemption §1.6 describes.
     pub fn first_not_held<'a>(
         &self,
         requested: impl IntoIterator<Item = &'a str>,
@@ -298,7 +313,7 @@ impl UserPermissions {
     /// [`first_not_held`](Self::first_not_held) as a 403, for the hub-wide
     /// callers that all want the same message.
     ///
-    /// Without this, `manage_roles` is a wildcard. Every guard on these paths
+    /// Without this, `roles.manage` is a wildcard. Every guard on these paths
     /// bounds *rank*, and the escalation does not need rank: a role beneath
     /// your own priority can carry permissions above it, and handing it to
     /// yourself is one more call.
@@ -390,7 +405,7 @@ async fn fetch_permissions(
 // on a channel = hub-wide baseline, then fold in the ancestor chain
 // root -> target, applying each level's rows for the roles the user holds.
 // Within one level, allow wins over deny; deeper levels win over shallower
-// ones; `admin` is never removed by a deny. See docs/docs/nested-channels-ux.md §3.
+// ones; the owner is never affected by a deny (`has()` checks `is_owner` first). See docs/docs/nested-channels-ux.md §3.
 
 #[derive(sqlx::FromRow, Clone)]
 pub struct OverwriteRow {
@@ -482,7 +497,7 @@ pub async fn fetch_overwrites(
 /// - within one channel level, allow wins over deny for the same permission
 ///   (across whichever roles hold a row at that level);
 /// - a deeper (later-in-`chain`) level's decision overrides a shallower one;
-/// - `admin` is never removed by a deny.
+/// - the owner is unaffected by a deny: ownership is read in `has()`, not folded here.
 pub fn fold_overwrites(
     baseline: &HashSet<String>,
     chain: &[String],
@@ -719,6 +734,8 @@ mod tests {
             "messages.read",
             "messages.send",
             "voice.join",
+            "voice.screen_share",
+            "voice.camera",
             "channels.manage",
             "events.create",
             "moderation.mute",

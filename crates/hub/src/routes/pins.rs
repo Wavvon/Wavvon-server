@@ -35,7 +35,7 @@ pub async fn pin_message(
     user: AuthUser,
     Path((channel_id, message_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    // Require manage_messages or admin, scoped to this channel (§3.5) so a
+    // Require `messages.manage`, scoped to this channel (§3.5) so a
     // channel-level deny overwrite is respected the same way it is for
     // reads.
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;

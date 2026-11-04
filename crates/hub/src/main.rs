@@ -74,7 +74,6 @@ fn print_help() {
 
 /// Run --doctor pre-flight checks. Returns true if all checks pass.
 async fn run_doctor() -> bool {
-    use std::net::TcpListener;
     use tokio::net::UdpSocket;
 
     let settings = match wavvon_hub::settings::load() {
@@ -89,8 +88,14 @@ async fn run_doctor() -> bool {
     let mut all_pass = true;
 
     // Check TCP port
-    match TcpListener::bind(format!("0.0.0.0:{}", settings.http_port)) {
-        Ok(_) => println!("PASS  HTTP port {}: bindable", settings.http_port),
+    match wavvon_hub::listen::http_listener(settings.bind_addr, settings.http_port) {
+        Ok(l) => println!(
+            "PASS  HTTP port {}: bindable on {}",
+            settings.http_port,
+            l.local_addr()
+                .map(|a| a.ip().to_string())
+                .unwrap_or_default()
+        ),
         Err(e) => {
             println!("FAIL  HTTP port {}: {e}", settings.http_port);
             all_pass = false;
@@ -577,10 +582,7 @@ async fn main() -> Result<()> {
     }
 
     if subcommand.as_deref() == Some("rotate-key") {
-        let new_key_path = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "hub_identity_new.json".to_string());
-        rotate_hub_key(Path::new("hub_identity.json"), Path::new(&new_key_path))?;
+        rotate_hub_key(Path::new("hub_identity.json"))?;
         println!("Key rotation complete. hub_identity.json now contains the new key.");
         println!("hub_rotation.json contains the signed rotation payload.");
         println!("Restart the hub for the change to take effect.");
@@ -669,6 +671,7 @@ async fn main() -> Result<()> {
                         .bind(now)
                         .execute(&db)
                         .await?;
+                        wavvon_hub::ban_evasion::flag_banned(&db, &pubkey, None, now).await?;
                         println!("Banned {pubkey}");
                     }
                     "unban" => {
@@ -679,6 +682,7 @@ async fn main() -> Result<()> {
                             .bind(&pubkey)
                             .execute(&db)
                             .await?;
+                        wavvon_hub::ban_evasion::unflag(&db, &pubkey).await?;
                         println!("Unbanned {pubkey}");
                     }
                     "set-owner" => {
@@ -1074,11 +1078,21 @@ async fn main() -> Result<()> {
     }
 
     if settings.owner_pubkey.is_none() {
-        tracing::warn!(
-            "No WAVVON_OWNER_PUBKEY configured. \
-             The hub has no owner; set WAVVON_OWNER_PUBKEY and restart, \
-             or assign the builtin-owner role manually via the API."
-        );
+        // An owner seated through the first-boot invite holds the role with no
+        // env var behind it, which is the default path, so ask the database.
+        let has_owner: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM user_roles WHERE role_id = 'builtin-owner')",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(false);
+        if !has_owner {
+            tracing::warn!(
+                "No WAVVON_OWNER_PUBKEY configured and nobody holds the owner role. \
+                 Redeem the owner invite below, set WAVVON_OWNER_PUBKEY and restart, \
+                 or run `wavvon-hub admin users set-owner <pubkey>`."
+            );
+        }
 
         // Fresh hubs default to invite_only=true (task #31), which would
         // otherwise leave no invite-free path for anyone to become owner.
@@ -1240,8 +1254,6 @@ async fn main() -> Result<()> {
             }),
     );
 
-    let device_token_ttl_secs = (settings.device_token_ttl_days as i64) * 86400;
-
     if rp_id != "localhost" && settings.tls_cert.is_none() {
         tracing::warn!(
             "WebAuthn requires HTTPS for non-localhost rp_id '{rp_id}'; \
@@ -1298,11 +1310,11 @@ async fn main() -> Result<()> {
         owner_pubkey: settings.owner_pubkey.clone(),
         apps_allow_camera: settings.apps_allow_camera,
         allow_private_webhooks: settings.allow_private_webhooks,
+        metrics_enabled: settings.metrics,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,
         webauthn_reg_challenges: RwLock::new(HashMap::new()),
         webauthn_auth_challenges: RwLock::new(HashMap::new()),
-        device_token_ttl_secs,
         webhook_circuit: Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
@@ -1374,6 +1386,7 @@ async fn main() -> Result<()> {
 
     // Sweep messages and forum posts past their channel retention deadline.
     wavvon_hub::retention_worker::spawn(state.clone());
+    wavvon_hub::routes::stickers::spawn_gc(state.clone());
 
     // Auto-move idle voice participants into the configured AFK channel.
     wavvon_hub::afk_worker::spawn(state.clone());
@@ -1422,7 +1435,9 @@ async fn main() -> Result<()> {
             loop {
                 interval.tick().await;
                 let online = hb_state.online_users.read().await.len() as u64;
-                let db_size = 0u64; // PostgreSQL: size reported separately by the DB server
+                // Not measured yet: the farm shows 0 for every hub. The database lives in
+                // PostgreSQL, so the figure would need a size query, not a file stat.
+                let db_size = 0u64;
                 let uptime = hb_state.started_at.elapsed().as_secs();
                 let payload = serde_json::json!({
                     "hub_id": hb_farm_hub_id,
@@ -1505,7 +1520,9 @@ async fn main() -> Result<()> {
         settings.trusted_proxy,
         web_client_cfg,
     );
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
+    let std_listener = wavvon_hub::listen::http_listener(settings.bind_addr, http_port)
+        .with_context(|| format!("Failed to bind {}:{http_port}", settings.bind_addr))?;
+    let bound = std_listener.local_addr()?;
 
     let serve = async {
         if let (Some(cert), Some(key)) =
@@ -1519,15 +1536,15 @@ async fn main() -> Result<()> {
                     .with_context(|| {
                         format!("Failed to load TLS cert/key from {cert:?} / {key:?}")
                     })?;
-            tracing::info!("Hub server listening on https://0.0.0.0:{http_port} (TLS enabled)");
-            axum_server::bind_rustls(addr, rustls_config)
+            tracing::info!("Hub server listening on https://{bound} (TLS enabled)");
+            axum_server::from_tcp_rustls(std_listener, rustls_config)
                 .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         } else {
             tracing::info!(
-                "Hub server listening on http://0.0.0.0:{http_port} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
+                "Hub server listening on http://{bound} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
             );
-            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let listener = tokio::net::TcpListener::from_std(std_listener)?;
             axum::serve(
                 listener,
                 app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -1821,7 +1838,8 @@ async fn backup(out_path: &str, db_url: &str) -> anyhow::Result<()> {
     println!("Dumping the database…");
     db::dump::dump(db_url, &dump_path, &schema)?;
 
-    let file = std::fs::File::create(out_path)?;
+    // The archive carries the hub's secret key and the whole database.
+    let file = wavvon_identity::create_secret(out_path)?;
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
 
@@ -1995,7 +2013,7 @@ fn copy_dir_all(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result
 /// Generate a new hub keypair, sign a rotation payload with the old key,
 /// write it to `hub_rotation.json`, and replace `hub_identity.json` with
 /// the new key. The operator must restart the hub afterwards.
-fn rotate_hub_key(current_path: &Path, _new_path: &Path) -> anyhow::Result<()> {
+fn rotate_hub_key(current_path: &Path) -> anyhow::Result<()> {
     let old_identity =
         Identity::load(current_path).context("Failed to load current hub identity")?;
 

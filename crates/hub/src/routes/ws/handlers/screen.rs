@@ -7,7 +7,6 @@ use crate::routes::chat_models::{HubStreamInfo, WsClientMessage, WsServerMessage
 use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
-use crate::routes::ws::screen_share::send_v2_signal;
 
 type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
 
@@ -68,6 +67,9 @@ pub(in crate::routes::ws) async fn handle_subscribe(
             }
             cs.notified_streams
                 .insert((channel_id.clone(), stream_id.clone()));
+            if cs.streams_on_request {
+                continue;
+            }
             if let Some(init_bytes) = &meta.init_chunk {
                 let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
                     channel_id: channel_id.clone(),
@@ -155,17 +157,34 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
     ws_tx: &mut WsTx,
     msg: WsClientMessage,
 ) -> DispatchResult {
-    let (channel_id, stream_id, kind, mime, has_audio) = match msg {
+    let (channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps) = match msg {
         WsClientMessage::ScreenShareStart {
             channel_id,
             stream_id,
             kind,
             mime,
             has_audio,
-            ..
-        } => (channel_id, stream_id, kind, mime, has_audio),
+            width,
+            height,
+            fps,
+            kbps,
+        } => (
+            channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps,
+        ),
         _ => return DispatchResult::Continue,
     };
+
+    let limits = crate::routes::hub::read_stream_limits(&state.db).await;
+    if let Some(what) = limits.exceeded_by(width, height, fps, kbps) {
+        let err = WsServerMessage::Error {
+            context: "screen_share_start".to_string(),
+            message: format!("This hub caps a stream's {what}; choose a lower setting."),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
 
     // Channel-scoped VOICE_JOIN: a screen share is something you do once
     // present in the call, so it follows admission to the call and not
@@ -173,8 +192,12 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
     // inside an `if cs.is_bot` branch and so applied to nobody else — the
     // one check on this path was reachable only by the callers the hub had
     // labelled. There is no label now, and the rule was never about one.
+    // On top of that, `voice.screen_share` (#277): talking and streaming are
+    // separate grants, so a hub can let everyone in and only some share.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
-        Ok(perms) if perms.has(crate::permissions::VOICE_JOIN) => {}
+        Ok(perms)
+            if perms.has(crate::permissions::VOICE_JOIN)
+                && perms.has(crate::permissions::VOICE_SCREEN_SHARE) => {}
         _ => {
             let err = WsServerMessage::Error {
                 context: "screen_share_start".to_string(),
@@ -193,7 +216,6 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
             .entry((channel_id.clone(), cs.public_key.clone()))
             .or_insert_with(|| ActiveShare {
                 streams: std::collections::HashMap::new(),
-                viewers: std::collections::HashSet::new(),
                 cross_channel_subscribers: std::collections::HashSet::new(),
             });
         active.streams.insert(
@@ -293,220 +315,6 @@ pub(in crate::routes::ws) async fn handle_screen_share_stop(
     DispatchResult::Continue
 }
 
-pub(in crate::routes::ws) async fn handle_screen_share_viewer_join(
-    cs: &ConnState,
-    state: &Arc<AppState>,
-    ws_tx: &mut WsTx,
-    msg: WsClientMessage,
-) -> DispatchResult {
-    let (channel_id, stream_id) = match msg {
-        WsClientMessage::ScreenShareViewerJoin {
-            channel_id,
-            stream_id,
-        } => (channel_id, stream_id),
-        _ => return DispatchResult::Continue,
-    };
-
-    let share_exists = {
-        let shares = state.screen_shares.read().await;
-        shares
-            .iter()
-            .any(|((ch, _), active)| ch == &channel_id && active.streams.contains_key(&stream_id))
-    };
-    if !share_exists {
-        let err = WsServerMessage::Error {
-            context: "screen_share_viewer_join".to_string(),
-            message: "No active share with that stream_id in this channel.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
-    }
-
-    let sharer_pubkey: Option<String> = {
-        let mut shares = state.screen_shares.write().await;
-        shares
-            .iter_mut()
-            .find(|((ch, _), active)| ch == &channel_id && active.streams.contains_key(&stream_id))
-            .map(|((_, sharer), active)| {
-                active.viewers.insert(cs.public_key.clone());
-                sharer.clone()
-            })
-    };
-    if let Some(sharer) = sharer_pubkey {
-        let reply = WsServerMessage::ScreenShareViewerJoined {
-            channel_id: channel_id.clone(),
-            stream_id: stream_id.clone(),
-            from_pubkey: cs.public_key.clone(),
-        };
-        send_v2_signal(state, channel_id, sharer, reply);
-    }
-    DispatchResult::Continue
-}
-
-pub(in crate::routes::ws) async fn handle_screen_share_viewer_leave(
-    cs: &ConnState,
-    state: &Arc<AppState>,
-    msg: WsClientMessage,
-) -> DispatchResult {
-    let (channel_id, stream_id) = match msg {
-        WsClientMessage::ScreenShareViewerLeave {
-            channel_id,
-            stream_id,
-        } => (channel_id, stream_id),
-        _ => return DispatchResult::Continue,
-    };
-
-    let sharer_pubkey: Option<String> = {
-        let mut shares = state.screen_shares.write().await;
-        shares
-            .iter_mut()
-            .find(|((ch, _), active)| ch == &channel_id && active.streams.contains_key(&stream_id))
-            .map(|((_, sharer), active)| {
-                active.viewers.remove(&cs.public_key);
-                sharer.clone()
-            })
-    };
-    if let Some(sharer) = sharer_pubkey {
-        send_v2_signal(
-            state,
-            channel_id.clone(),
-            sharer,
-            WsServerMessage::ScreenShareViewerLeft {
-                channel_id,
-                stream_id,
-                from_pubkey: cs.public_key.clone(),
-            },
-        );
-    }
-    DispatchResult::Continue
-}
-
-pub(in crate::routes::ws) async fn handle_screen_share_offer(
-    cs: &ConnState,
-    state: &Arc<AppState>,
-    msg: WsClientMessage,
-) -> DispatchResult {
-    let (channel_id, to_pubkey, stream_id, sdp) = match msg {
-        WsClientMessage::ScreenShareOffer {
-            channel_id,
-            to_pubkey,
-            stream_id,
-            sdp,
-        } => (channel_id, to_pubkey, stream_id, sdp),
-        _ => return DispatchResult::Continue,
-    };
-
-    let share_exists = {
-        let shares = state.screen_shares.read().await;
-        shares
-            .get(&(channel_id.clone(), cs.public_key.clone()))
-            .map(|a| a.streams.contains_key(&stream_id))
-            .unwrap_or(false)
-    };
-    if !share_exists {
-        return DispatchResult::Continue;
-    }
-    send_v2_signal(
-        state,
-        channel_id.clone(),
-        to_pubkey.clone(),
-        WsServerMessage::ScreenShareOfferIn {
-            channel_id,
-            to_pubkey: to_pubkey.clone(),
-            stream_id,
-            sdp,
-            from_pubkey: cs.public_key.clone(),
-        },
-    );
-    DispatchResult::Continue
-}
-
-pub(in crate::routes::ws) async fn handle_screen_share_answer(
-    cs: &ConnState,
-    state: &Arc<AppState>,
-    msg: WsClientMessage,
-) -> DispatchResult {
-    let (channel_id, to_pubkey, stream_id, sdp) = match msg {
-        WsClientMessage::ScreenShareAnswer {
-            channel_id,
-            to_pubkey,
-            stream_id,
-            sdp,
-        } => (channel_id, to_pubkey, stream_id, sdp),
-        _ => return DispatchResult::Continue,
-    };
-
-    let share_exists = {
-        let shares = state.screen_shares.read().await;
-        shares
-            .get(&(channel_id.clone(), to_pubkey.clone()))
-            .map(|a| a.streams.contains_key(&stream_id))
-            .unwrap_or(false)
-    };
-    if !share_exists {
-        return DispatchResult::Continue;
-    }
-    send_v2_signal(
-        state,
-        channel_id.clone(),
-        to_pubkey.clone(),
-        WsServerMessage::ScreenShareAnswerIn {
-            channel_id,
-            to_pubkey: to_pubkey.clone(),
-            stream_id,
-            sdp,
-            from_pubkey: cs.public_key.clone(),
-        },
-    );
-    DispatchResult::Continue
-}
-
-pub(in crate::routes::ws) async fn handle_screen_share_ice(
-    cs: &ConnState,
-    state: &Arc<AppState>,
-    msg: WsClientMessage,
-) -> DispatchResult {
-    let (channel_id, to_pubkey, stream_id, candidate) = match msg {
-        WsClientMessage::ScreenShareIce {
-            channel_id,
-            to_pubkey,
-            stream_id,
-            candidate,
-        } => (channel_id, to_pubkey, stream_id, candidate),
-        _ => return DispatchResult::Continue,
-    };
-
-    let share_exists = {
-        let shares = state.screen_shares.read().await;
-        shares
-            .get(&(channel_id.clone(), cs.public_key.clone()))
-            .map(|a| a.streams.contains_key(&stream_id))
-            .unwrap_or(false)
-            || shares
-                .get(&(channel_id.clone(), to_pubkey.clone()))
-                .map(|a| a.streams.contains_key(&stream_id))
-                .unwrap_or(false)
-    };
-    if !share_exists {
-        return DispatchResult::Continue;
-    }
-    send_v2_signal(
-        state,
-        channel_id.clone(),
-        to_pubkey.clone(),
-        WsServerMessage::ScreenShareIceIn {
-            channel_id,
-            to_pubkey: to_pubkey.clone(),
-            stream_id,
-            candidate,
-            from_pubkey: cs.public_key.clone(),
-        },
-    );
-    DispatchResult::Continue
-}
-
 pub(in crate::routes::ws) async fn handle_stream_list(
     cs: &ConnState,
     state: &Arc<AppState>,
@@ -539,7 +347,7 @@ pub(in crate::routes::ws) async fn handle_stream_list(
 }
 
 pub(in crate::routes::ws) async fn handle_stream_subscribe(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     ws_tx: &mut WsTx,
     msg: WsClientMessage,
@@ -552,15 +360,16 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
         _ => return DispatchResult::Continue,
     };
 
+    // Watching needs the access the source channel gives to the room itself:
+    // reading it or joining its voice (#282). An unknown channel answers the
+    // same as a forbidden one.
     let can_view: bool = cs.subscribed.contains(&source_channel_id)
-        || sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM channels WHERE id = $1")
-            .bind(&source_channel_id)
-            .fetch_optional(&state.db)
+        || crate::permissions::channel_permissions(&state.db, &cs.public_key, &source_channel_id)
             .await
-            .ok()
-            .flatten()
-            .unwrap_or(0)
-            > 0;
+            .map(|p| {
+                p.has(crate::permissions::MESSAGES_READ) || p.has(crate::permissions::VOICE_JOIN)
+            })
+            .unwrap_or(false);
 
     if !can_view {
         let err = WsServerMessage::Error {
@@ -579,9 +388,14 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
             ch == &source_channel_id && active.streams.contains_key(&stream_id)
         });
         entry.and_then(|((_, sharer), active)| {
-            active
-                .cross_channel_subscribers
-                .insert(cs.public_key.clone());
+            if cs.streams_on_request {
+                cs.opened_streams
+                    .insert((source_channel_id.clone(), stream_id.clone()));
+            } else {
+                active
+                    .cross_channel_subscribers
+                    .insert(cs.public_key.clone());
+            }
             let meta = active.streams.get(&stream_id)?;
             Some((
                 sharer.clone(),
@@ -641,7 +455,7 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
 }
 
 pub(in crate::routes::ws) async fn handle_stream_unsubscribe(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
 ) -> DispatchResult {
@@ -653,6 +467,10 @@ pub(in crate::routes::ws) async fn handle_stream_unsubscribe(
         _ => return DispatchResult::Continue,
     };
 
+    if cs.streams_on_request {
+        cs.opened_streams.remove(&(source_channel_id, stream_id));
+        return DispatchResult::Continue;
+    }
     let mut shares = state.screen_shares.write().await;
     if let Some((_, active)) = shares.iter_mut().find(|((ch, _), active)| {
         ch == &source_channel_id && active.streams.contains_key(&stream_id)

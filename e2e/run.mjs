@@ -15,20 +15,21 @@
 //
 // Usage:  node e2e/run.mjs [stage...]
 //         stages: hubs alliance voice certs permissions pgupgrade challenge alliancesplit
-//                 alliancedelegate alliancepeople alliancestress alliancechurn alliancedrift farm crossfarm
+//                 alliancedelegate alliancepeople alliancestress alliancechurn alliancedrift stickers attachments farm crossfarm
 //                 (default: all)
 //         E2E_VERBOSE=1 to stream every process's output.
 
 import {
   ROOT, authenticate, check, checkEq, dbName, farm, farmToken, freshDb, hub,
-  hubBinary, identity, identityFromSeed, json, port, report, run, scenario,
+  hubBinary, identity, identityFromSeed, json, port, psql, report, run, scenario,
   start, teardown, tempDir, waitForHttp,
 } from "./lib.mjs";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 
 const want = new Set(process.argv.slice(2).length ? process.argv.slice(2)
-  : ["hubs","alliance","voice","certs","permissions","pgupgrade","challenge","alliancesplit","alliancepeople","alliancestress","alliancechurn","alliancedrift","farm","crossfarm"]);
+  : ["hubs","alliance","voice","certs","permissions","pgupgrade","challenge","alliancesplit","alliancepeople","alliancestress","alliancechurn","alliancedrift","stickers","attachments","farm","crossfarm"]);
 
 if (!existsSync(hubBinary())) {
   console.error(`No hub binary at ${hubBinary()}\n  cargo build -p wavvon-hub`);
@@ -51,6 +52,50 @@ if (want.has("pgupgrade") && !existsSync(OLD_HUB_BINARY)) {
 }
 
 const state = {};
+
+const crcTable = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+const crc32 = (buf) => {
+  let c = 0xffffffff;
+  for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+};
+const pngChunk = (type, data) => {
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(data.length);
+  const body = Buffer.concat([Buffer.from(type), data]);
+  const crc = Buffer.alloc(4);
+  crc.writeUInt32BE(crc32(body));
+  return Buffer.concat([len, body, crc]);
+};
+// A w x h RGB PNG with a gradient, so two seeds are two images.
+const png = (w, h, seed) => {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0);
+  ihdr.writeUInt32BE(h, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const stride = 1 + w * 3;
+  const raw = Buffer.alloc(stride * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const o = y * stride + 1 + x * 3;
+      raw[o] = seed;
+      raw[o + 1] = (x * 4) & 255;
+      raw[o + 2] = (y * 4) & 255;
+    }
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(raw)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+};
+
 
 try {
   // ── hubs ────────────────────────────────────────────────────────────────
@@ -445,15 +490,6 @@ try {
       };
     }
 
-    await scenario("the hub advertises voice.permissions", async () => {
-      const info = await json(`${h.url}/info`);
-      checkEq(info.status, 200, "/info");
-      check(
-        info.body.capabilities.includes("voice.permissions"),
-        `a client cannot offer the voice.join row without it, got ${info.body.capabilities}`,
-      );
-    });
-
     await scenario("an unknown permission string is refused, and nothing is written", async () => {
       const bad = await post("/roles", ownerToken, {
         name: "Typo", priority: 50, permissions: ["channels.manage", "roles.manege"],
@@ -555,9 +591,9 @@ try {
     checkEq(mv.status, 200, `member auth: ${JSON.stringify(mv.body)}`);
     const memberToken = mv.body.token;
 
-    const lobby = await post("/channels", ownerToken, { name: "lobby" });
+    const lobby = await post("/channels", ownerToken, { name: "lobby", channel_type: "voice" });
     checkEq(lobby.status, 201, `lobby: ${JSON.stringify(lobby.body)}`);
-    const raid = await post("/channels", ownerToken, { name: "raid" });
+    const raid = await post("/channels", ownerToken, { name: "raid", channel_type: "voice" });
     checkEq(raid.status, 201, `raid: ${JSON.stringify(raid.body)}`);
     const vault = await post("/channels", ownerToken, { name: "vault" });
     checkEq(vault.status, 201, `vault: ${JSON.stringify(vault.body)}`);
@@ -1054,8 +1090,8 @@ try {
     const tokenB = (await authenticate(hubB.url, ownerB)).body.token;
 
     await scenario("a hub with the admission challenge on still lets its owner back in", async () => {
-      const set = await json(`${hubA.url}/hub/settings/challenge`, {
-        method: "PUT",
+      const set = await json(`${hubA.url}/admin/settings/challenge`, {
+        method: "PATCH",
         headers: { Authorization: `Bearer ${tokenA}` },
         body: JSON.stringify({ challenge_mode: "puzzle", challenge_difficulty: "easy" }),
       });
@@ -2649,6 +2685,268 @@ try {
       // list that reads as "nobody is there".
       const other = await people(hub3.url, world.erin.token, world.key2);
       checkEq(other.status, 409, `hub 2 shares nothing: ${JSON.stringify(other.body)}`);
+    });
+  }
+
+  if (want.has("stickers")) {
+    // Two hubs, as any federated pair: A publishes a pack, B's member sends
+    // one of its stickers. B's fetch from A is hub to hub, over a real socket
+    // and a real resolver. Both hubs run default config, so B's member is a
+    // stranger who joined by invite and holds only what @everyone holds: the
+    // owner would bypass the permission this stage is about.
+    const ownerA = identity();
+    const ownerB = identity();
+    const hubA = await hub("hub-stk-a", ownerA);
+    // Both hubs sit on localhost, which the fetcher refuses unless the
+    // operator opts in, exactly as for webhooks.
+    const hubB = await hub("hub-stk-b", ownerB, { WAVVON_ALLOW_PRIVATE_WEBHOOKS: "true" });
+    const tokenA = (await authenticate(hubA.url, ownerA)).body.token;
+    const tokenB = (await authenticate(hubB.url, ownerB)).body.token;
+    const auth = (t) => ({ Authorization: `Bearer ${t}` });
+
+    const renamed = await json(`${hubA.url}/hub`, {
+      method: "PATCH", headers: auth(tokenA), body: JSON.stringify({ name: "Origin Hub" }),
+    });
+    checkEq(renamed.status, 200, `name hub A: ${JSON.stringify(renamed.body)}`);
+    const pack = await json(`${hubA.url}/stickers/packs`, {
+      method: "POST", headers: auth(tokenA), body: JSON.stringify({ name: "Test pack" }),
+    });
+    checkEq(pack.status, 201, `create pack: ${JSON.stringify(pack.body)}`);
+    const upload = async (seed) => {
+      const form = new FormData();
+      form.append("name", `s${seed}`);
+      form.append("file", new Blob([png(48, 48, seed)], { type: "image/png" }), `s${seed}.png`);
+      const res = await fetch(`${hubA.url}/stickers/packs/${pack.body.id}/stickers`, {
+        method: "POST", headers: auth(tokenA), body: form,
+      });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+
+    const invite = await json(`${hubB.url}/invites`, {
+      method: "POST", headers: auth(tokenB), body: JSON.stringify({}),
+    });
+    const stranger = identity();
+    const joined = await authenticate(hubB.url, stranger, { invite_code: invite.body.code });
+    checkEq(joined.status, 200, `stranger joins hub B: ${JSON.stringify(joined.body)}`);
+    const tokenS = joined.body.token;
+    const channel = await json(`${hubB.url}/channels`, {
+      method: "POST", headers: auth(tokenB), body: JSON.stringify({ name: "chat" }),
+    });
+    checkEq(channel.status, 201, `channel on B: ${JSON.stringify(channel.body)}`);
+
+    const ask = (sha, origin = hubA.url) => json(`${hubB.url}/channels/${channel.body.id}/stickers`, {
+      method: "POST", headers: auth(tokenS),
+      body: JSON.stringify({ sha256: sha, origin_hub_url: origin }),
+    });
+    const say = (stickerId) => json(`${hubB.url}/channels/${channel.body.id}/messages`, {
+      method: "POST", headers: auth(tokenS),
+      body: JSON.stringify({ content: "", sticker_id: stickerId }),
+    });
+    const bytes = async (url) => Buffer.from(await (await fetch(url)).arrayBuffer());
+    const held = {};
+
+    await scenario("a stranger on hub B sends a sticker from hub A's pack", async () => {
+      const s = await upload(10);
+      checkEq(s.status, 201, `upload to A's pack: ${JSON.stringify(s.body)}`);
+      held.sticker = s.body;
+      const r = await ask(s.body.sha256);
+      checkEq(r.status, 201, `B fetches it from A: ${JSON.stringify(r.body)}`);
+      checkEq(r.body.origin_hub_url, hubA.url, "B records where it came from");
+      checkEq(r.body.origin_hub_name, "Origin Hub", "and A's own name from its /info");
+      const sent = await say(r.body.id);
+      checkEq(sent.status, 201, `the message goes through: ${JSON.stringify(sent.body)}`);
+      checkEq(sent.body.sticker.sha256, s.body.sha256, "the message carries the sticker");
+      check(
+        (await bytes(`${hubA.url}${s.body.url}`)).equals(await bytes(`${hubB.url}${r.body.url}`)),
+        "B serves exactly the bytes A published",
+      );
+      const again = await ask(s.body.sha256);
+      checkEq(again.status, 200, "the second send finds it already here");
+      checkEq(again.body.id, r.body.id, "as the same row");
+    });
+
+    await scenario("a hash the origin lacks, or an origin that is gone, is a 502", async () => {
+      const missing = await ask("f".repeat(64));
+      checkEq(missing.status, 502, `unknown hash: ${JSON.stringify(missing.body)}`);
+      const dead = await ask("e".repeat(64), "http://localhost:9");
+      checkEq(dead.status, 502, `dead origin: ${JSON.stringify(dead.body)}`);
+    });
+
+    await scenario("export off on the origin: a hub that does not hold it cannot get it", async () => {
+      const s = await upload(20);
+      checkEq(s.status, 201, "second sticker published");
+      const off = await json(`${hubA.url}/hub`, {
+        method: "PATCH", headers: auth(tokenA), body: JSON.stringify({ stickers_export: false }),
+      });
+      checkEq(off.status, 200, `export off: ${JSON.stringify(off.body)}`);
+      const direct = await fetch(`${hubA.url}/federation/stickers/${s.body.sha256}`);
+      checkEq(direct.status, 403, "the federation route answers 403");
+      const r = await ask(s.body.sha256);
+      checkEq(r.status, 502, `B cannot fetch it: ${JSON.stringify(r.body)}`);
+      const kept = await ask(held.sticker.sha256);
+      checkEq(kept.status, 200, "copies B already holds are B's content");
+    });
+  }
+  if (want.has("attachments")) {
+    // One hub, real binary, real sockets: what the in-process suite cannot see
+    // is the migration against a database a previous release left, the
+    // headers a browser would act on, the budget at its floor, and a backup
+    // that has to carry files as well as rows.
+    const owner = identity();
+    const uploads = tempDir("wavvon-e2e-att-uploads-");
+    const hubAtt = await hub("hub-att", owner, { WAVVON_UPLOADS_DIR: uploads });
+    const token = (await authenticate(hubAtt.url, owner)).body.token;
+    const auth = { Authorization: `Bearer ${token}` };
+    const ch = (await json(`${hubAtt.url}/channels`, {
+      method: "POST", headers: auth, body: JSON.stringify({ name: "files" }),
+    })).body.id;
+    const put = async (name, bytes, { asFile = false, channel = ch } = {}) => {
+      const form = new FormData();
+      form.append("file", new Blob([bytes]), name);
+      if (asFile) form.append("as_file", "true");
+      const res = await fetch(`${hubAtt.url}/channels/${channel}/upload`, {
+        method: "POST", headers: auth, body: form,
+      });
+      return { status: res.status, body: await res.json().catch(() => null) };
+    };
+    const get = async (url) => {
+      const res = await fetch(`${hubAtt.url}${url}`);
+      return { status: res.status, headers: res.headers, bytes: Buffer.from(await res.arrayBuffer()) };
+    };
+    const say = (ids) => json(`${hubAtt.url}/channels/${ch}/messages`, {
+      method: "POST", headers: auth, body: JSON.stringify({ content: "files", attachment_ids: ids }),
+    });
+    const unique = (n) => {
+      const b = Buffer.alloc(n);
+      b.write(`blob-${Date.now()}-${Math.random()}`, 1);
+      return b;
+    };
+
+    await scenario("served headers: only a re-encoded image is inline, everything is sandboxed", async () => {
+      const img = await put("shot.png", png(64, 48, 11));
+      checkEq(img.status, 201, `upload: ${JSON.stringify(img.body)}`);
+      checkEq(img.body.mime, "image/webp", "a PNG is re-encoded");
+      const got = await get(img.body.url);
+      checkEq(got.headers.get("content-disposition"), "inline", "the image shows inline");
+      checkEq(got.headers.get("content-type"), "image/webp", "as WebP");
+      checkEq(got.headers.get("x-content-type-options"), "nosniff", "nosniff");
+      checkEq(got.headers.get("content-security-policy"), "default-src 'none'; sandbox", "sandboxed");
+      check(got.bytes.subarray(0, 4).toString() === "RIFF", "the bytes are a WebP");
+
+      const original = png(32, 32, 12);
+      const file = await put("orig.png", original, { asFile: true });
+      checkEq(file.status, 201, "send as file");
+      const dl = await get(file.body.url);
+      check(
+        dl.headers.get("content-disposition").startsWith("attachment; filename*=UTF-8''orig.png"),
+        `download only, got ${dl.headers.get("content-disposition")}`,
+      );
+      check(dl.bytes.equals(original), "the original, byte for byte");
+
+      const exe = await put("setup.exe", Buffer.concat([Buffer.from("MZ\x90\x00"), unique(64)]));
+      checkEq(exe.status, 201, "an executable is accepted");
+      const exeGot = await get(exe.body.url);
+      check(exeGot.headers.get("content-disposition").startsWith("attachment"), "and only downloaded");
+
+      const lie = await put("holiday.png", Buffer.concat([Buffer.from("MZ\x90\x00"), unique(64)]));
+      checkEq(lie.status, 415, "an extension that contradicts the bytes is refused");
+      checkEq((await get("/uploads/no-such-id")).status, 404, "unknown id");
+    });
+
+    await scenario("the budget at its floor expires the oldest and never refuses", async () => {
+      const set = await json(`${hubAtt.url}/hub`, {
+        method: "PATCH", headers: auth, body: JSON.stringify({ attachments_cap_bytes: 64 * 1024 * 1024 }),
+      });
+      checkEq(set.status, 200, `cap to the floor: ${JSON.stringify(set.body)}`);
+      const size = 24 * 1024 * 1024;
+      const a = await put("a.bin", unique(size));
+      const b = await put("b.bin", unique(size));
+      checkEq((await say([a.body.id])).status, 201, "first linked");
+      await new Promise((r) => setTimeout(r, 1100));
+      checkEq((await say([b.body.id])).status, 201, "second linked");
+      const c = await put("c.bin", unique(size));
+      checkEq(c.status, 201, "the third upload succeeds although the cap is crossed");
+      checkEq((await get(a.body.url)).status, 410, "the oldest expired");
+      checkEq((await get(b.body.url)).status, 200, "the next one is still there");
+      const history = await json(`${hubAtt.url}/channels/${ch}/messages`, { headers: auth });
+      const expired = history.body.flatMap((m) => m.attachments).find((x) => x.id === a.body.id);
+      checkEq(expired.state, "expired", "the message says so, with the name kept");
+      const settings = await json(`${hubAtt.url}/hub/settings`, { headers: auth });
+      check(settings.body.attachments_usage.evictions >= 1, "the eviction is counted");
+    });
+
+    await scenario("the step on a database a previous release left: old attachments are expired rows", async () => {
+      await hubAtt.stop();
+      const db = dbName("hub-att");
+      for (const sql of [
+        "DROP TABLE attachments",
+        "DROP TABLE attachment_blobs",
+        "ALTER TABLE messages ADD COLUMN attachments TEXT",
+        "ALTER TABLE posts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE post_replies ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+        "CREATE TABLE upload_files (id TEXT PRIMARY KEY, filename TEXT NOT NULL, original_name TEXT NOT NULL, mime_type TEXT NOT NULL, size_bytes BIGINT NOT NULL, uploader_pubkey TEXT NOT NULL, channel_id TEXT NOT NULL, created_at BIGINT NOT NULL)",
+        "UPDATE schema_version SET version = 8",
+        `INSERT INTO messages (id, channel_id, sender, content, created_at, attachments) VALUES ('old-msg', '${ch}', '${owner.pubkey}', 'from the old days', 1000, jsonb_build_array(jsonb_build_object('name', 'photo.jpg', 'mime', 'image/jpeg', 'data_b64', 'AAAA'))::text)`,
+        `UPDATE channels SET banner_file_id = 'gone' WHERE id = '${ch}'`,
+      ]) psql(sql, db);
+      await hubAtt.start();
+      const history = await json(`${hubAtt.url}/channels/${ch}/messages?limit=100`, {
+        headers: { Authorization: `Bearer ${(await authenticate(hubAtt.url, owner)).body.token}` },
+      });
+      checkEq(history.status, 200, `history reads: ${JSON.stringify(history.body)}`);
+      const old = history.body.find((m) => m.id === "old-msg");
+      check(old, "the old message is still there");
+      checkEq(old.attachments.length, 1, "with its attachment");
+      checkEq(old.attachments[0].state, "expired", "as an expired row");
+      checkEq(old.attachments[0].name, "photo.jpg", "whose name is kept");
+      checkEq((await get(old.attachments[0].url)).status, 410, "and answers 410");
+      const list = await json(`${hubAtt.url}/channels`, { headers: { Authorization: `Bearer ${(await authenticate(hubAtt.url, owner)).body.token}` } });
+      check(list.body.every((c) => !c.banner_file_id), "banner references are cleared");
+    });
+
+    await scenario("backup and restore carry the blobs, not only the rows", async () => {
+      const root = tempDir("wavvon-e2e-att-backup-");
+      const httpPort = port();
+      const voicePort = port();
+      const url = `http://localhost:${httpPort}`;
+      const env = {
+        WAVVON_HTTP_PORT: String(httpPort),
+        WAVVON_VOICE_UDP_PORT: String(voicePort),
+        WAVVON_PUBLIC_URL: url,
+        WAVVON_OWNER_PUBKEY: owner.pubkey,
+        WAVVON_WEB_CLIENT_DIR: "",
+      };
+      const boot = async (name) => {
+        const e = start(name, hubBinary(), [], { cwd: root, env });
+        await waitForHttp(e, `${url}/info`, 240_000);
+        return e;
+      };
+      const first = await boot("hub-att-bundled");
+      const t = (await authenticate(url, owner)).body.token;
+      const h = { Authorization: `Bearer ${t}` };
+      const c = (await json(`${url}/channels`, { method: "POST", headers: h, body: JSON.stringify({ name: "keep" }) })).body.id;
+      const bytes = unique(5000);
+      const form = new FormData();
+      form.append("file", new Blob([bytes]), "keep.bin");
+      const up = await (await fetch(`${url}/channels/${c}/upload`, { method: "POST", headers: h, body: form })).json();
+      const sent = await json(`${url}/channels/${c}/messages`, {
+        method: "POST", headers: h, body: JSON.stringify({ content: "keep", attachment_ids: [up.id] }),
+      });
+      checkEq(sent.status, 201, `message with the file: ${JSON.stringify(sent.body)}`);
+      first.child.kill("SIGKILL");
+      await new Promise((r) => setTimeout(r, 1500));
+
+      const archive = join(root, "att.tar.gz");
+      const backup = await run("att-backup", hubBinary(), ["backup", archive], { cwd: root, env });
+      checkEq(backup.code, 0, `backup:\n${backup.log}`);
+      rmSync(join(root, "uploads"), { recursive: true, force: true });
+      const restored = await run("att-restore", hubBinary(), ["restore", archive, "--force"], { cwd: root, env });
+      checkEq(restored.code, 0, `restore:\n${restored.log}`);
+
+      await boot("hub-att-restored");
+      const got = await fetch(`${url}${up.url}`);
+      checkEq(got.status, 200, "the file is served after the restore");
+      check(Buffer.from(await got.arrayBuffer()).equals(bytes), "with its own bytes");
     });
   }
 } catch (e) {

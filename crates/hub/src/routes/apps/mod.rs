@@ -11,4 +11,4 @@ pub use registration::{
     get_my_app, list_apps, put_my_app_commands, put_my_app_profile, put_my_app_subscriptions,
 };
 // Re-export the audit log types that tests or other modules may reference.
-pub use models::{AuditLogEntry, AuditLogQuery, AuditLogResponse};
+pub use models::{AuditLogEntry, AuditLogQuery};

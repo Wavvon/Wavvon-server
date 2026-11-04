@@ -13,7 +13,7 @@ use crate::routes::role_models::RoleResponse;
 use crate::state::AppState;
 
 /// Update the hub's branding: name, description, icon (all optional).
-/// Requires the caller to have the admin permission.
+/// Requires `hub.settings`.
 pub async fn update_hub(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -126,7 +126,7 @@ pub async fn update_hub(
             upsert_setting(&state.db, "afk_channel_id", "").await?;
         } else {
             let exists: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1 AND is_category = false)",
+                "SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1 AND channel_type = 'voice')",
             )
             .bind(channel_id)
             .fetch_one(&state.db)
@@ -135,7 +135,7 @@ pub async fn update_hub(
             if !exists {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    "afk_channel_id does not reference an existing channel".to_string(),
+                    "afk_channel_id must reference a voice channel".to_string(),
                 ));
             }
             upsert_setting(&state.db, "afk_channel_id", channel_id).await?;
@@ -150,6 +150,31 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "afk_timeout_secs", &secs.to_string()).await?;
     }
+    if let Some(image) = req.landing_image.as_deref() {
+        set_landing_image(&state.db, image).await?;
+    }
+    if let Some(colors) = req.landing_colors {
+        let valid = |c: &String| {
+            c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|d| d.is_ascii_hexdigit())
+        };
+        if !(colors.is_empty() || colors.len() == 2 && colors.iter().all(valid)) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "landing_colors must be two #rrggbb colours, or empty to clear".to_string(),
+            ));
+        }
+        upsert_setting(&state.db, "landing_colors", &colors.join(",")).await?;
+    }
+    if let Some(limits) = req.stream_limits {
+        for (key, value) in limits.keyed() {
+            upsert_setting(
+                &state.db,
+                key,
+                &value.map(|v| v.to_string()).unwrap_or_default(),
+            )
+            .await?;
+        }
+    }
     if let Some(bytes) = req.max_attachment_bytes {
         if !(MIN_MAX_ATTACHMENT_BYTES..=MAX_MAX_ATTACHMENT_BYTES).contains(&bytes) {
             return Err((
@@ -161,6 +186,18 @@ pub async fn update_hub(
             ));
         }
         upsert_setting(&state.db, "max_attachment_bytes", &bytes.to_string()).await?;
+    }
+    if let Some(bytes) = req.max_preview_image_bytes {
+        if !(MIN_MAX_PREVIEW_IMAGE_BYTES..=MAX_MAX_PREVIEW_IMAGE_BYTES).contains(&bytes) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "max_preview_image_bytes must be between {} and {} bytes",
+                    MIN_MAX_PREVIEW_IMAGE_BYTES, MAX_MAX_PREVIEW_IMAGE_BYTES
+                ),
+            ));
+        }
+        upsert_setting(&state.db, "max_preview_image_bytes", &bytes.to_string()).await?;
     }
     if let Some(bytes) = req.max_upload_bytes {
         if !(MIN_MAX_UPLOAD_BYTES..=MAX_MAX_UPLOAD_BYTES).contains(&bytes) {
@@ -186,6 +223,9 @@ pub async fn update_hub(
         }
         upsert_setting(&state.db, "name_color_mode", mode).await?;
     }
+
+    req.stickers.apply(&state.db).await?;
+    req.attachments.apply(&state.db).await?;
 
     let json: std::sync::Arc<str> = std::sync::Arc::from(
         serde_json::to_string(&crate::routes::chat_models::WsServerMessage::HubUpdated)
@@ -257,11 +297,20 @@ pub async fn list_pending(
     // Oldest first — the queue is worked from the front, so the cursor moves
     // forward rather than back like the newest-first lists.
     let rows = sqlx::query_as::<_, PendingUserRow>(
-        "SELECT public_key, display_name, first_seen_at
-         FROM users WHERE approval_status = 'pending'
-           AND ($1::text IS NULL OR (first_seen_at, public_key) >
+        "SELECT u.public_key, u.display_name, u.first_seen_at, f.matched_pubkey,
+                a.id IS NOT NULL AS has_application
+         FROM users u LEFT JOIN admission_flags f ON f.public_key = u.public_key
+         LEFT JOIN LATERAL (
+             SELECT sr.id, sr.rejected FROM survey_responses sr
+             JOIN surveys s ON s.id = sr.survey_id AND s.purpose = 'application'
+             WHERE sr.pubkey = u.public_key
+             ORDER BY sr.submitted_at DESC LIMIT 1
+         ) a ON TRUE
+         WHERE u.approval_status = 'pending'
+           AND a.rejected IS NOT TRUE
+           AND ($1::text IS NULL OR (u.first_seen_at, u.public_key) >
                 ((SELECT first_seen_at FROM users WHERE public_key = $1), $1))
-         ORDER BY first_seen_at, public_key
+         ORDER BY u.first_seen_at, u.public_key
          LIMIT $2",
     )
     .bind(page.cursor())
@@ -276,6 +325,8 @@ pub async fn list_pending(
                 public_key: r.public_key,
                 display_name: r.display_name,
                 first_seen_at: r.first_seen_at,
+                ban_evasion_match: r.matched_pubkey,
+                has_application: r.has_application,
             })
             .collect(),
     ))
@@ -291,6 +342,19 @@ pub async fn approve_user(
     perms.require(HUB_ADMISSION)?;
 
     sqlx::query("UPDATE users SET approval_status = 'approved' WHERE public_key = $1")
+        .bind(&target_key)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::routes::application::mark_approved(
+        &state.db,
+        &target_key,
+        crate::auth::handlers::unix_timestamp(),
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // The moderator has seen the flag and decided; it has done its job.
+    sqlx::query("DELETE FROM admission_flags WHERE public_key = $1")
         .bind(&target_key)
         .execute(&state.db)
         .await
@@ -389,6 +453,7 @@ pub async fn get_hub_settings(
 
     let max_attachment_bytes = read_attachment_cap(&state.db).await;
     let max_upload_bytes = read_upload_cap(&state.db).await;
+    let max_preview_image_bytes = read_preview_image_cap(&state.db).await;
 
     let name_color_mode = crate::routes::users::name_color_mode(&state.db).await;
 
@@ -405,6 +470,12 @@ pub async fn get_hub_settings(
         name_color_mode,
         max_attachment_bytes,
         max_upload_bytes,
+        max_preview_image_bytes,
+        stream_limits: read_stream_limits(&state.db).await,
+        landing: read_landing(&state.db).await,
+        stickers: crate::routes::stickers::read_settings(&state.db).await,
+        attachments: crate::attachments::read_settings(&state.db).await,
+        attachments_usage: crate::attachments::usage(&state.db).await,
     }))
 }
 
@@ -424,6 +495,20 @@ pub async fn read_upload_cap(db: &sqlx::PgPool) -> u64 {
         .and_then(|v| v.parse().ok())
         .filter(|b| *b >= MIN_MAX_UPLOAD_BYTES && *b <= MAX_MAX_UPLOAD_BYTES)
         .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES)
+}
+
+/// Largest image a link preview will fetch and re-serve (an `og:image` or a
+/// direct image link); the default is above the old 1 MB so ordinary GIFs fit.
+pub const DEFAULT_MAX_PREVIEW_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
+pub const MIN_MAX_PREVIEW_IMAGE_BYTES: u64 = 256 * 1024;
+pub const MAX_MAX_PREVIEW_IMAGE_BYTES: u64 = 16 * 1024 * 1024;
+
+pub async fn read_preview_image_cap(db: &sqlx::PgPool) -> u64 {
+    read_setting(db, "max_preview_image_bytes")
+        .await
+        .and_then(|v| v.parse().ok())
+        .filter(|b| *b >= MIN_MAX_PREVIEW_IMAGE_BYTES && *b <= MAX_MAX_PREVIEW_IMAGE_BYTES)
+        .unwrap_or(DEFAULT_MAX_PREVIEW_IMAGE_BYTES)
 }
 
 /// Default attachment cap: the value that used to be the compile-time
@@ -458,6 +543,162 @@ pub async fn read_attachment_cap(db: &sqlx::PgPool) -> u64 {
         .and_then(|v| v.parse().ok())
         .filter(|b| *b >= MIN_MAX_ATTACHMENT_BYTES && *b <= MAX_MAX_ATTACHMENT_BYTES)
         .unwrap_or(DEFAULT_MAX_ATTACHMENT_BYTES)
+}
+
+/// The most a screen share or camera may declare (#278). Each limit is unset
+/// by default, meaning no cap; a hub on a small machine sets them so a few
+/// 4K/120 fps shares cannot saturate it, since it relays every stream to
+/// every viewer who opened it.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, Debug, PartialEq)]
+pub struct StreamLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_fps: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_kbps: Option<u32>,
+}
+
+impl StreamLimits {
+    fn keyed(self) -> [(&'static str, Option<u32>); 4] {
+        [
+            ("stream_max_width", self.max_width),
+            ("stream_max_height", self.max_height),
+            ("stream_max_fps", self.max_fps),
+            ("stream_max_kbps", self.max_kbps),
+        ]
+    }
+
+    /// The first limit a declared stream exceeds, by name. A value the
+    /// client did not declare is not checked: older clients declare none.
+    pub fn exceeded_by(
+        &self,
+        width: Option<u32>,
+        height: Option<u32>,
+        fps: Option<u32>,
+        kbps: Option<u32>,
+    ) -> Option<&'static str> {
+        let over =
+            |v: Option<u32>, max: Option<u32>| matches!((v, max), (Some(v), Some(m)) if v > m);
+        [
+            ("width", over(width, self.max_width)),
+            ("height", over(height, self.max_height)),
+            ("frame rate", over(fps, self.max_fps)),
+            ("bitrate", over(kbps, self.max_kbps)),
+        ]
+        .into_iter()
+        .find_map(|(name, over)| over.then_some(name))
+    }
+}
+
+/// Read per share, like the other caps, so changing one needs no restart.
+/// Largest landing image accepted, before re-encoding. Its base64 has to fit
+/// the JSON body limit of `PATCH /hub`.
+pub const LANDING_MAX_BYTES: usize = 1024 * 1024;
+pub const LANDING_IMAGE_PATH: &str = "/hub/landing-image";
+
+/// How the invite landing looks: readable without membership.
+#[derive(Serialize, Deserialize, Default)]
+pub struct Landing {
+    /// Path of the image on this hub, when one is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colors: Option<[String; 2]>,
+}
+
+pub async fn read_landing(db: &sqlx::PgPool) -> Landing {
+    let image = read_setting(db, "landing_image_mime")
+        .await
+        .filter(|m| !m.is_empty())
+        .map(|_| LANDING_IMAGE_PATH.to_string());
+    let colors = read_setting(db, "landing_colors").await.and_then(|v| {
+        let (a, b) = v.split_once(',')?;
+        Some([a.to_string(), b.to_string()])
+    });
+    Landing { image, colors }
+}
+
+async fn set_landing_image(db: &sqlx::PgPool, data_url: &str) -> Result<(), (StatusCode, String)> {
+    use base64::Engine;
+    if data_url.is_empty() {
+        upsert_setting(db, "landing_image_mime", "").await?;
+        return upsert_setting(db, "landing_image", "").await;
+    }
+    let bad = || {
+        (
+            StatusCode::BAD_REQUEST,
+            "landing_image must be a base64 data: URL".to_string(),
+        )
+    };
+    let (head, body) = data_url.split_once(',').ok_or_else(bad)?;
+    if !(head.starts_with("data:") && head.ends_with(";base64")) {
+        return Err(bad());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .map_err(|_| bad())?;
+    let image = crate::sticker_image::canonicalize_with(
+        bytes,
+        LANDING_MAX_BYTES,
+        crate::sticker_image::LANDING,
+    )
+    .await
+    .map_err(|e| match e {
+        crate::sticker_image::IngestError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m),
+        crate::sticker_image::IngestError::NotAnImage(m) => (StatusCode::BAD_REQUEST, m),
+    })?;
+    upsert_setting(
+        db,
+        "landing_image",
+        &base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+    )
+    .await?;
+    upsert_setting(db, "landing_image_mime", image.mime).await
+}
+
+/// GET /hub/landing-image. Public: the invite landing shows it before joining.
+pub async fn landing_image(
+    State(state): State<Arc<AppState>>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    use axum::http::header;
+    use base64::Engine;
+    let not_found = || (StatusCode::NOT_FOUND, "No landing image".to_string());
+    let mime = read_setting(&state.db, "landing_image_mime")
+        .await
+        .filter(|m| !m.is_empty())
+        .ok_or_else(not_found)?;
+    let bytes = read_setting(&state.db, "landing_image")
+        .await
+        .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok())
+        .ok_or_else(not_found)?;
+    axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "default-src 'none'; sandbox",
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "public, max-age=300")
+        .body(axum::body::Body::from(bytes))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+pub async fn read_stream_limits(db: &sqlx::PgPool) -> StreamLimits {
+    let read = |key: &'static str| async move {
+        read_setting(db, key)
+            .await
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|v| *v > 0)
+    };
+    StreamLimits {
+        max_width: read("stream_max_width").await,
+        max_height: read("stream_max_height").await,
+        max_fps: read("stream_max_fps").await,
+        max_kbps: read("stream_max_kbps").await,
+    }
 }
 
 /// Default idle threshold for the AFK sweep when a channel is configured but
@@ -502,6 +743,27 @@ pub struct HubSettings {
     /// Largest file `POST /channels/{id}/upload` accepts, in bytes.
     #[serde(default = "default_upload_cap")]
     pub max_upload_bytes: u64,
+    /// Largest image a link preview will fetch and re-serve, in bytes.
+    #[serde(default = "default_preview_image_cap")]
+    pub max_preview_image_bytes: u64,
+    /// Sticker packs, copies and their disk budgets (sticker-storage.md §4).
+    #[serde(flatten)]
+    pub stickers: crate::routes::stickers::StickerSettings,
+    /// Attachment limits and retention (attachments.md §5).
+    #[serde(flatten)]
+    pub attachments: crate::attachments::AttachmentSettings,
+    /// Caps on a stream's declared quality; an absent field is no cap.
+    #[serde(default)]
+    pub stream_limits: StreamLimits,
+    #[serde(default)]
+    pub landing: Landing,
+    /// Disk used against the cap, and the warning the admin page shows.
+    #[serde(default)]
+    pub attachments_usage: crate::attachments::Usage,
+}
+
+fn default_preview_image_cap() -> u64 {
+    DEFAULT_MAX_PREVIEW_IMAGE_BYTES
 }
 
 fn default_upload_cap() -> u64 {
@@ -529,6 +791,12 @@ pub struct PendingUser {
     pub public_key: String,
     pub display_name: Option<String>,
     pub first_seen_at: i64,
+    /// The banned identity whose last address this joiner arrived from, when
+    /// that is why they are waiting (ban_evasion.rs). A hint, not a verdict.
+    pub ban_evasion_match: Option<String>,
+    /// Whether they filled the hub's join application; its answers are at
+    /// `GET /admin/application/responses/{pubkey}`.
+    pub has_application: bool,
 }
 
 #[derive(sqlx::FromRow)]
@@ -536,6 +804,8 @@ struct PendingUserRow {
     public_key: String,
     display_name: Option<String>,
     first_seen_at: i64,
+    matched_pubkey: Option<String>,
+    has_application: bool,
 }
 
 pub async fn upsert_setting(
@@ -585,7 +855,7 @@ pub struct UpdateHubRequest {
     /// Hub-level invite role policy default (invite role policies). Role to
     /// grant a new user who joins via an invite that doesn't itself carry an
     /// explicit `grant_role_id`. Must reference an existing role that does
-    /// not carry the `admin` permission. Empty string clears the setting.
+    /// not be a takeover role (owner, or one carrying `roles.manage`). Empty string clears the setting.
     #[serde(default)]
     pub default_invite_role_id: Option<String>,
     /// IANA timezone name (e.g. "Europe/Rome") used for hub-local birthday
@@ -611,16 +881,39 @@ pub struct UpdateHubRequest {
     /// constants for why there is a ceiling at all.
     #[serde(default)]
     pub max_attachment_bytes: Option<u64>,
+    /// Replaces all four stream limits; a field left out, or 0, clears that
+    /// limit.
+    #[serde(default)]
+    pub stream_limits: Option<StreamLimits>,
+    /// Invite landing image as a `data:` URL; re-encoded and capped at
+    /// `LANDING_MAX_BYTES`. Empty string clears it.
+    #[serde(default)]
+    pub landing_image: Option<String>,
+    /// Two `#rrggbb` colours for the invite landing; empty clears them.
+    #[serde(default)]
+    pub landing_colors: Option<Vec<String>>,
     /// Largest file upload, in bytes. Clamped to [`MIN_MAX_UPLOAD_BYTES`,
     /// `MAX_MAX_UPLOAD_BYTES`].
     #[serde(default)]
     pub max_upload_bytes: Option<u64>,
+    /// Largest link-preview image, in bytes. Must be within
+    /// [`MIN_MAX_PREVIEW_IMAGE_BYTES`, `MAX_MAX_PREVIEW_IMAGE_BYTES`].
+    #[serde(default)]
+    pub max_preview_image_bytes: Option<u64>,
     /// Priority order for resolving a member's displayed name color (member
     /// name colors feature). Must be one of `NAME_COLOR_MODES`
     /// ("user_over_role", "role_over_user", "role_only", "user_only",
     /// "none").
     #[serde(default)]
     pub name_color_mode: Option<String>,
+    /// The `stickers_*` limits and `stickers_export`; see
+    /// [`crate::routes::stickers::StickerSettingsPatch`].
+    #[serde(flatten)]
+    pub stickers: crate::routes::stickers::StickerSettingsPatch,
+    /// `max_attachments_per_message` and the `attachments_*` budget; see
+    /// [`crate::attachments::AttachmentSettingsPatch`].
+    #[serde(flatten)]
+    pub attachments: crate::attachments::AttachmentSettingsPatch,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -748,17 +1041,25 @@ pub(crate) async fn load_hub_url(state: &AppState) -> String {
 }
 
 /// Admin-facing member listing with joined / last-seen / online + role summaries.
+/// Paged like every list: `cursor` is the previous page's last `public_key`.
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
+    Query(page): Query<crate::routes::paging::PageQuery>,
 ) -> Result<Json<Vec<MemberAdminInfo>>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(MEMBERS_READ)?;
 
     let users = sqlx::query_as::<_, UserAdminRow>(
         "SELECT public_key, display_name, first_seen_at, last_seen_at, birthday
-         FROM users ORDER BY first_seen_at LIMIT 1000",
+         FROM users
+         WHERE ($1::text IS NULL OR (first_seen_at, public_key) >
+                ((SELECT first_seen_at FROM users WHERE public_key = $1), $1))
+         ORDER BY first_seen_at, public_key
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

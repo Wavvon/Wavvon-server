@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -14,6 +14,22 @@ use crate::state::AppState;
 const MAX_BODY_BYTES: usize = 64 * 1024; // 64 KB
 const CACHE_TTL_SECS: u64 = 30 * 60; // 30 minutes
 const FETCH_TIMEOUT_SECS: u64 = 5;
+const MAX_AVATAR_BYTES: usize = 1024 * 1024; // 1 MB
+const MAX_CACHED_IMAGE_BYTES: usize = 128 * 1024 * 1024;
+/// SVG is left out on purpose: it is a document that can carry script.
+const IMAGE_TYPES: [&str; 5] = [
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+];
+
+/// Preview images by id: (content type, bytes, fetched at). Bounded by total
+/// bytes (`MAX_CACHED_IMAGE_BYTES`), oldest evicted first.
+type ImageCache = Mutex<HashMap<String, (String, Vec<u8>, Instant)>>;
+static PREVIEW_IMAGES: std::sync::LazyLock<ImageCache> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LinkPreview {
@@ -30,60 +46,64 @@ pub struct PreviewQuery {
     pub url: String,
 }
 
-/// Returns true if the IP address falls within a private/loopback/link-local range.
-/// Covers IPv4 private ranges, IPv6 unique-local (fc00::/7), IPv6 link-local
-/// (fe80::/10), and IPv4-mapped IPv6 (::ffff:x.x.x.x treated as their embedded v4).
+/// Returns true unless the address is a global unicast one: deny by default,
+/// so loopback, private, link-local, CGNAT, benchmarking, reserved, multicast,
+/// broadcast, unspecified, NAT64 and the like are all refused. IPv4-mapped and
+/// NAT64-embedded IPv6 forms are judged by their embedded v4 address.
 ///
-/// `pub(crate)` so other outbound-URL validators (e.g.
-/// `outgoing_webhooks::routes`) can reuse the same private-range rule instead
-/// of duplicating it.
+/// `pub(crate)` so other outbound-URL validators (e.g. `webhook_url`) share
+/// the same rule instead of duplicating it.
 pub(crate) fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => is_private_v4(v4),
+        IpAddr::V4(v4) => !is_global_v4(v4),
         IpAddr::V6(v6) => {
-            // ::1 loopback
-            if v6.is_loopback() {
-                return true;
-            }
-            // IPv4-mapped: ::ffff:x.x.x.x — validate the embedded v4 address
             if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_v4(v4);
+                return !is_global_v4(v4);
             }
-            let segs = v6.segments();
-            // fc00::/7 — unique local (fc00:: through fdff::)
-            if segs[0] & 0xfe00 == 0xfc00 {
+            let s = v6.segments();
+            // 64:ff9b::/96 NAT64 well-known prefix: judge the embedded v4.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                let [a, b] = [s[6].to_be_bytes(), s[7].to_be_bytes()];
+                return !is_global_v4(Ipv4Addr::new(a[0], a[1], b[0], b[1]));
+            }
+            // Only 2000::/3 is global unicast today; everything else (::, ::1,
+            // fc00::/7, fe80::/10, ff00::/8, 64:ff9b:1::/48, ...) is refused.
+            if s[0] & 0xe000 != 0x2000 {
                 return true;
             }
-            // fe80::/10 — link local
-            if segs[0] & 0xffc0 == 0xfe80 {
-                return true;
-            }
-            false
+            // Documentation (2001:db8::/32) and 6to4 (2002::/16, embeds v4).
+            (s[0] == 0x2001 && s[1] == 0x0db8) || s[0] == 0x2002
         }
     }
 }
 
-fn is_private_v4(v4: Ipv4Addr) -> bool {
-    let octets = v4.octets();
-    // 127.0.0.0/8 loopback
-    octets[0] == 127
-    // 10.0.0.0/8
-    || octets[0] == 10
-    // 172.16.0.0/12
-    || (octets[0] == 172 && (octets[1] & 0xf0) == 16)
-    // 192.168.0.0/16
-    || (octets[0] == 192 && octets[1] == 168)
-    // 169.254.0.0/16 (link-local)
-    || (octets[0] == 169 && octets[1] == 254)
+fn is_global_v4(v4: Ipv4Addr) -> bool {
+    let o = v4.octets();
+    !(o[0] == 0 // 0.0.0.0/8
+        || o[0] == 10
+        || (o[0] == 100 && (o[1] & 0xc0) == 64) // 100.64.0.0/10 CGNAT
+        || o[0] == 127
+        || (o[0] == 169 && o[1] == 254)
+        || (o[0] == 172 && (o[1] & 0xf0) == 16)
+        || (o[0] == 192 && o[1] == 0 && o[2] == 0) // 192.0.0.0/24
+        || (o[0] == 192 && o[1] == 0 && o[2] == 2) // TEST-NET-1
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 198 && (o[1] & 0xfe) == 18) // 198.18.0.0/15
+        || (o[0] == 198 && o[1] == 51 && o[2] == 100) // TEST-NET-2
+        || (o[0] == 203 && o[1] == 0 && o[2] == 113) // TEST-NET-3
+        || o[0] >= 224) // multicast, 240.0.0.0/4 reserved, broadcast
 }
 
-/// Perform SSRF-safe DNS resolution. Returns the list of validated SocketAddrs
-/// (all checked to be non-private) so the caller can connect to a specific one,
-/// preventing DNS-rebinding between the check and the connection.
-fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>, &'static str> {
-    let addr_str = format!("{host}:{port}");
-    let addrs: Vec<SocketAddr> = addr_str
-        .to_socket_addrs()
+/// Perform SSRF-safe DNS resolution without blocking the runtime. Returns the
+/// validated SocketAddrs (all checked to be global) so the caller can pin the
+/// connection to them, preventing DNS-rebinding between check and connect.
+async fn resolve_and_check_ssrf(
+    host: &str,
+    port: u16,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, &'static str> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
         .map_err(|_| "dns_failed")?
         .collect();
 
@@ -91,10 +111,8 @@ fn resolve_and_check_ssrf(host: &str, port: u16) -> Result<Vec<SocketAddr>, &'st
         return Err("dns_failed");
     }
 
-    for addr in &addrs {
-        if is_private_ip(addr.ip()) {
-            return Err("ssrf_blocked");
-        }
+    if !allow_private && addrs.iter().any(|a| is_private_ip(a.ip())) {
+        return Err("ssrf_blocked");
     }
 
     Ok(addrs)
@@ -222,14 +240,113 @@ fn html_decode(s: &str) -> String {
 const PREVIEW_RATE_LIMIT: u32 = 10;
 const PREVIEW_RATE_WINDOW_SECS: u64 = 60;
 
-pub async fn get_preview(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-    Query(params): Query<PreviewQuery>,
-) -> Result<Json<LinkPreview>, (StatusCode, String)> {
-    // Per-user rate limit: 10 preview fetches per 60 seconds.
-    // Cache hits are counted too — they're cheap, but the outer window
-    // keeps one user from monopolising the endpoint.
+/// Fetches `url_str` under the SSRF rules (http(s) only, no non-global
+/// address, the connection pinned to the addresses that were checked) and
+/// returns at most `max` bytes of the body with its content type. Redirects are
+/// followed by hand (max 3) so every hop is re-resolved, re-checked and pinned.
+async fn fetch_capped(
+    url_str: &str,
+    max: usize,
+) -> Result<(Vec<u8>, Option<String>), (StatusCode, String)> {
+    fetch_capped_opts(url_str, max, false).await
+}
+
+/// [`fetch_capped`] with the operator opt-in for private and loopback
+/// addresses (`WAVVON_ALLOW_PRIVATE_WEBHOOKS`: LAN hubs, test harnesses). The
+/// connection is still pinned to the resolved addresses and redirects are
+/// still followed by hand; only the "must be global" verdict is waived.
+pub(crate) async fn fetch_capped_opts(
+    url_str: &str,
+    max: usize,
+    allow_private: bool,
+) -> Result<(Vec<u8>, Option<String>), (StatusCode, String)> {
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
+    let mut url = reqwest::Url::parse(url_str).map_err(|_| bad("invalid_url"))?;
+    let mut hops = 0;
+    let resp = loop {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err(bad("invalid_scheme"));
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| bad("missing_host"))?
+            .to_string();
+        if !allow_private && host.eq_ignore_ascii_case("localhost") {
+            return Err(bad("ssrf_blocked"));
+        }
+        let port = url.port_or_known_default().unwrap_or(80);
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let validated = resolve_and_check_ssrf(bare, port, allow_private)
+            .await
+            .map_err(bad)?;
+
+        // no_proxy(): a system proxy must not forward to addresses that passed
+        // the check. Redirects are off: this loop is the redirect policy.
+        let client = reqwest::Client::builder()
+            .resolve_to_addrs(&host, &validated)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .build()
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("client_build_error: {e}"),
+                )
+            })?;
+        let resp = client
+            .get(url.clone())
+            .header("User-Agent", "Mozilla/5.0 Wavvon-Hub LinkPreview/1.0")
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch_error: {e}")))?;
+
+        if !resp.status().is_redirection() {
+            break resp;
+        }
+        let next = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|l| url.join(l).ok());
+        hops += 1;
+        match next {
+            Some(n) if hops <= 3 => url = n,
+            // Too many hops or no usable Location: stop and read this response.
+            _ => break resp,
+        }
+    };
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // Read up to `max` bytes
+    let bytes = {
+        use futures_util::StreamExt;
+        let mut body = resp.bytes_stream();
+        let mut buf = Vec::with_capacity(max);
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|e| (StatusCode::BAD_GATEWAY, format!("read_error: {e}")))?;
+            let remaining = max - buf.len();
+            if chunk.len() >= remaining {
+                buf.extend_from_slice(&chunk[..remaining]);
+                break;
+            } else {
+                buf.extend_from_slice(&chunk);
+            }
+        }
+        buf
+    };
+    Ok((bytes, content_type))
+}
+
+/// Per-user budget for anything that makes this hub fetch a URL on a member's
+/// behalf: link previews and sticker copies share it. It bounds outbound
+/// traffic; it is not a storage quota.
+pub(crate) fn check_fetch_rate(state: &AppState, key: &str) -> Result<(), (StatusCode, String)> {
     {
         let mut map = state
             .rate_limiters
@@ -245,7 +362,7 @@ pub async fn get_preview(
             map.retain(|_, (_, ts)| now.duration_since(*ts) <= window);
         }
 
-        let entry = map.entry(user.public_key.clone()).or_insert((0, now));
+        let entry = map.entry(key.to_string()).or_insert((0, now));
         if now.duration_since(entry.1) > window {
             *entry = (0, now);
         }
@@ -257,68 +374,17 @@ pub async fn get_preview(
         }
         entry.0 += 1;
     }
+    Ok(())
+}
+
+pub async fn get_preview(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Query(params): Query<PreviewQuery>,
+) -> Result<Json<LinkPreview>, (StatusCode, String)> {
+    check_fetch_rate(&state, &user.public_key)?;
 
     let url_str = params.url.trim().to_string();
-
-    // Validate scheme
-    let is_https = if url_str.starts_with("https://") {
-        true
-    } else if url_str.starts_with("http://") {
-        false
-    } else {
-        return Err((StatusCode::BAD_REQUEST, "invalid_scheme".to_string()));
-    };
-
-    // Extract host and optional port from the URL string.
-    // Strip scheme, then take the authority part (up to first '/', '?', '#').
-    let after_scheme = if is_https {
-        &url_str["https://".len()..]
-    } else {
-        &url_str["http://".len()..]
-    };
-
-    let authority_end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    let authority = &after_scheme[..authority_end];
-
-    if authority.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "missing_host".to_string()));
-    }
-
-    // Split host:port — account for IPv6 like [::1]:8080
-    let (host, port) = if authority.starts_with('[') {
-        // IPv6 literal
-        let bracket_end = authority.find(']').unwrap_or(authority.len());
-        let host_part = &authority[1..bracket_end];
-        let port_part = authority
-            .get(bracket_end + 2..)
-            .and_then(|p| p.parse::<u16>().ok());
-        let default_port = if is_https { 443u16 } else { 80u16 };
-        (host_part.to_string(), port_part.unwrap_or(default_port))
-    } else if let Some(colon) = authority.rfind(':') {
-        let port_str = &authority[colon + 1..];
-        if let Ok(p) = port_str.parse::<u16>() {
-            (authority[..colon].to_string(), p)
-        } else {
-            let default_port = if is_https { 443u16 } else { 80u16 };
-            (authority.to_string(), default_port)
-        }
-    } else {
-        let default_port = if is_https { 443u16 } else { 80u16 };
-        (authority.to_string(), default_port)
-    };
-
-    // Reject "localhost" hostname directly
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err((StatusCode::BAD_REQUEST, "ssrf_blocked".to_string()));
-    }
-
-    // SSRF check — DNS resolve once, validate all IPs, keep the result.
-    // We then pin reqwest to one of the validated addresses so a second DNS
-    // lookup at connection time cannot return a different (private) IP.
-    let validated_addrs = resolve_and_check_ssrf(&host, port)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
 
     // Check cache
     {
@@ -333,76 +399,21 @@ pub async fn get_preview(
         }
     }
 
-    // Build a one-shot client that is pinned to the first validated address.
-    // This prevents DNS-rebinding: the hostname in the URL resolves to the
-    // address we already validated, not whatever the DNS says at connect time.
-    //
-    // no_proxy(): disable HTTP_PROXY / HTTPS_PROXY env vars so a system proxy
-    // cannot forward requests to private IPs that passed the DNS check.
-    //
-    // Custom redirect policy: cap at 3 hops and block redirects to private IP
-    // literals (covers 301 → http://127.0.0.1/ attacks). Hostname-based
-    // redirects are allowed — a follow-on DNS resolution would require async
-    // code that is unavailable in the policy callback; the small hop cap limits
-    // exposure. IPv6 bracket notation is handled by stripping [ ].
-    let pinned_addr = validated_addrs[0];
-    let pinned_client = reqwest::Client::builder()
-        .resolve(&host, pinned_addr)
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 3 {
-                return attempt.stop();
-            }
-            if let Some(h) = attempt.url().host_str() {
-                let bare = h.trim_start_matches('[').trim_end_matches(']');
-                if bare.eq_ignore_ascii_case("localhost") {
-                    return attempt.stop();
-                }
-                if let Ok(ip) = bare.parse::<IpAddr>() {
-                    if is_private_ip(ip) {
-                        return attempt.stop();
-                    }
-                }
-            }
-            attempt.follow()
-        }))
-        .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .build()
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("client_build_error: {e}"),
-            )
-        })?;
+    let (bytes, content_type) = fetch_capped(&url_str, MAX_BODY_BYTES).await?;
 
-    // Fetch with timeout
-    let resp = pinned_client
-        .get(&url_str)
-        .header("User-Agent", "Mozilla/5.0 Wavvon-Hub LinkPreview/1.0")
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("fetch_error: {e}")))?;
-
-    // Read up to MAX_BODY_BYTES
-    let bytes = {
-        use futures_util::StreamExt;
-        let mut body = resp.bytes_stream();
-        let mut buf = Vec::with_capacity(MAX_BODY_BYTES);
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| (StatusCode::BAD_GATEWAY, format!("read_error: {e}")))?;
-            let remaining = MAX_BODY_BYTES - buf.len();
-            if chunk.len() >= remaining {
-                buf.extend_from_slice(&chunk[..remaining]);
-                break;
-            } else {
-                buf.extend_from_slice(&chunk);
-            }
-        }
-        buf
+    let (title, description, image_url) = if is_image_type(content_type.as_deref()) {
+        // Fetched a second time under the image cap: the first read stopped at
+        // MAX_BODY_BYTES, and a GIF is usually larger than that.
+        (None, None, proxy_image(&state, &url_str, &url_str).await)
+    } else {
+        let html = String::from_utf8_lossy(&bytes);
+        let (title, description, og_image) = parse_og_tags(&html);
+        let image_url = match og_image {
+            Some(image) => proxy_image(&state, &url_str, &image).await,
+            None => None,
+        };
+        (title, description, image_url)
     };
-
-    let html = String::from_utf8_lossy(&bytes);
-    let (title, description, image_url) = parse_og_tags(&html);
 
     let preview = LinkPreview {
         url: url_str.clone(),
@@ -421,4 +432,249 @@ pub async fn get_preview(
     }
 
     Ok(Json(preview))
+}
+
+fn is_image_type(content_type: Option<&str>) -> bool {
+    content_type
+        .and_then(|c| c.split(';').next())
+        .is_some_and(|c| IMAGE_TYPES.contains(&c.trim().to_ascii_lowercase().as_str()))
+}
+
+/// The normalised content type when the response is an allowed raster type
+/// that fits `cap`; `None` otherwise.
+fn accepted_image_type(content_type: Option<&str>, len: usize, cap: usize) -> Option<String> {
+    let ct = content_type?.split(';').next()?.trim().to_ascii_lowercase();
+    (len <= cap && IMAGE_TYPES.contains(&ct.as_str())).then_some(ct)
+}
+
+type CachedImage = (String, Vec<u8>, Instant);
+
+/// Adds an image, dropping expired entries and then the oldest until the total
+/// stays within `max_total`.
+fn insert_image(
+    images: &mut HashMap<String, CachedImage>,
+    id: String,
+    entry: CachedImage,
+    max_total: usize,
+) {
+    images.retain(|_, (_, _, at)| at.elapsed().as_secs() < CACHE_TTL_SECS);
+    images.remove(&id);
+    let mut total: usize = images.values().map(|(_, b, _)| b.len()).sum();
+    while total + entry.1.len() > max_total {
+        let Some(oldest) = images
+            .iter()
+            .min_by_key(|(_, (_, _, at))| *at)
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        if let Some((_, b, _)) = images.remove(&oldest) {
+            total -= b.len();
+        }
+    }
+    images.insert(id, entry);
+}
+
+/// Fetches a preview's image on the hub and returns the hub's own URL for it,
+/// so a reader's client never contacts the third-party host. `None` (no image
+/// on the card) when the hub has no public URL to offer, or the image is not
+/// a raster type within the `max_preview_image_bytes` setting.
+async fn proxy_image(state: &AppState, page_url: &str, image: &str) -> Option<String> {
+    let base = state.canonical_url.read().await.clone()?;
+    let absolute = reqwest::Url::parse(page_url).ok()?.join(image).ok()?;
+    let cap = crate::routes::hub::read_preview_image_cap(&state.db).await as usize;
+    let (bytes, content_type) = fetch_capped(absolute.as_str(), cap + 1).await.ok()?;
+    let content_type = accepted_image_type(content_type.as_deref(), bytes.len(), cap)?;
+    use sha2::{Digest, Sha256};
+    let id = hex::encode(&Sha256::digest(absolute.as_str().as_bytes())[..16]);
+    {
+        let mut images = PREVIEW_IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = (content_type, bytes, Instant::now());
+        insert_image(&mut images, id.clone(), entry, MAX_CACHED_IMAGE_BYTES);
+    }
+    Some(format!("{}/preview/image/{id}", base.trim_end_matches('/')))
+}
+
+/// Fetches an image on the hub, under the same rules as preview images, and
+/// keeps it in the uploads directory under a name derived from its source URL
+/// (so the same avatar is stored once). Returns its hub-relative URL,
+/// `/uploads/<name>`, or `None` when it cannot be fetched or is not a raster
+/// image within `MAX_AVATAR_BYTES`.
+pub(crate) async fn store_remote_image(url: &str) -> Option<String> {
+    let (bytes, content_type) = fetch_capped(url, MAX_AVATAR_BYTES + 1).await.ok()?;
+    let content_type = content_type?.split(';').next()?.trim().to_ascii_lowercase();
+    if bytes.len() > MAX_AVATAR_BYTES || !IMAGE_TYPES.contains(&content_type.as_str()) {
+        return None;
+    }
+    let ext = content_type
+        .trim_start_matches("image/")
+        .replace("jpeg", "jpg");
+    use sha2::{Digest, Sha256};
+    let name = format!(
+        "remote-{}.{ext}",
+        hex::encode(&Sha256::digest(url.as_bytes())[..16])
+    );
+    let dir = crate::routes::uploads::uploads_dir();
+    tokio::fs::create_dir_all(&dir).await.ok()?;
+    let path = format!("{}/{name}", dir.trim_end_matches('/'));
+    if tokio::fs::metadata(&path).await.is_err() {
+        tokio::fs::write(&path, &bytes).await.ok()?;
+    }
+    Some(format!("/uploads/{name}"))
+}
+
+/// `GET /preview/image/{id}`: an image the hub fetched for a link preview.
+/// No auth: an `<img>` cannot send a bearer token, and only images a member's
+/// authenticated `/preview` already fetched are ever served, so this is not
+/// an open proxy.
+pub async fn get_preview_image(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    use axum::http::header;
+    use axum::response::IntoResponse;
+    let images = PREVIEW_IMAGES.lock().unwrap_or_else(|e| e.into_inner());
+    match images.get(&id) {
+        Some((content_type, bytes, at)) if at.elapsed().as_secs() < CACHE_TTL_SECS => (
+            [
+                (header::CONTENT_TYPE, content_type.clone()),
+                (
+                    header::CACHE_CONTROL,
+                    format!("public, max-age={CACHE_TTL_SECS}"),
+                ),
+                (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+            ],
+            bytes.clone(),
+        )
+            .into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blocked(s: &str) -> bool {
+        is_private_ip(s.parse().unwrap())
+    }
+
+    #[test]
+    fn non_global_addresses_are_blocked() {
+        for ip in [
+            "0.0.0.0",
+            "0.1.2.3",
+            "10.0.0.1",
+            "100.64.0.1",
+            "100.127.255.255",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.0.0.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "198.19.255.255",
+            "224.0.0.1",
+            "239.255.255.255",
+            "240.0.0.1",
+            "255.255.255.255",
+            "::",
+            "::1",
+            "fc00::1",
+            "fd12::1",
+            "fe80::1",
+            "ff02::1",
+            "::ffff:10.0.0.1",
+            "::ffff:100.64.0.1",
+            "::ffff:127.0.0.1",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a00:1",
+            "64:ff9b::c0a8:1",
+            "2001:db8::1",
+            "64:ff9b:1::1",
+        ] {
+            assert!(blocked(ip), "{ip} should be blocked");
+        }
+    }
+
+    #[test]
+    fn public_addresses_are_allowed() {
+        for ip in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "198.17.0.1",
+            "198.20.0.1",
+            "223.255.255.255",
+            "2606:4700:4700::1111",
+            "::ffff:8.8.8.8",
+            "64:ff9b::808:808",
+        ] {
+            assert!(!blocked(ip), "{ip} should be allowed");
+        }
+    }
+
+    #[tokio::test]
+    async fn private_targets_are_refused_before_any_connection() {
+        assert_eq!(
+            resolve_and_check_ssrf("localhost", 80, false).await,
+            Err("ssrf_blocked")
+        );
+        for u in [
+            "http://user@127.0.0.1/",
+            "http://0.0.0.0/",
+            "http://[::]/",
+            "http://100.64.0.1/",
+        ] {
+            assert_eq!(fetch_capped(u, 10).await.unwrap_err().1, "ssrf_blocked");
+        }
+    }
+
+    #[test]
+    fn image_types_are_recognised_with_parameters() {
+        assert!(is_image_type(Some("image/gif")));
+        assert!(is_image_type(Some("Image/GIF; charset=x")));
+        assert!(!is_image_type(Some("image/svg+xml")));
+        assert!(!is_image_type(Some("text/html")));
+        assert!(!is_image_type(None));
+    }
+
+    #[test]
+    fn an_image_over_the_cap_or_of_a_wrong_type_is_refused() {
+        assert_eq!(
+            accepted_image_type(Some("image/gif"), 100, 100).as_deref(),
+            Some("image/gif")
+        );
+        assert!(accepted_image_type(Some("image/gif"), 101, 100).is_none());
+        assert!(accepted_image_type(Some("text/html"), 10, 100).is_none());
+        assert!(accepted_image_type(None, 10, 100).is_none());
+    }
+
+    #[test]
+    fn image_cache_stays_under_its_byte_bound_and_evicts_oldest() {
+        let mut m = HashMap::new();
+        for i in 0..10 {
+            let e = ("image/gif".to_string(), vec![0u8; 400], Instant::now());
+            insert_image(&mut m, format!("k{i}"), e, 1000);
+            assert!(m.values().map(|(_, b, _)| b.len()).sum::<usize>() <= 1000);
+        }
+        assert_eq!(m.len(), 2);
+        assert!(m.contains_key("k9") && m.contains_key("k8"));
+    }
+
+    #[tokio::test]
+    async fn a_fetched_image_is_served_with_its_type_and_an_unknown_one_is_not() {
+        PREVIEW_IMAGES.lock().unwrap().insert(
+            "abc".to_string(),
+            ("image/png".to_string(), vec![1, 2, 3], Instant::now()),
+        );
+        let resp = get_preview_image(axum::extract::Path("abc".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers()["content-type"], "image/png");
+        assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+
+        let resp = get_preview_image(axum::extract::Path("nope".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
 }

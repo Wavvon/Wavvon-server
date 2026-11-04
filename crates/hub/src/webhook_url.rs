@@ -4,12 +4,15 @@
 //! `WAVVON_ALLOW_PRIVATE_WEBHOOKS`. `routes::preview` owns the canonical
 //! private-IP-range check; it is reused here rather than duplicated.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::IpAddr;
 
 use axum::http::StatusCode;
 use url::Url;
 
-pub fn validate_webhook_url(raw: &str, allow_private: bool) -> Result<(), (StatusCode, String)> {
+pub async fn validate_webhook_url(
+    raw: &str,
+    allow_private: bool,
+) -> Result<(), (StatusCode, String)> {
     let parsed =
         Url::parse(raw).map_err(|_| (StatusCode::BAD_REQUEST, "Invalid URL".to_string()))?;
 
@@ -51,7 +54,7 @@ pub fn validate_webhook_url(raw: &str, allow_private: bool) -> Result<(), (Statu
     // private/loopback. Best-effort: DNS failure here is a validation error,
     // not a delivery-time concern.
     let port = parsed.port_or_known_default().unwrap_or(443);
-    let addrs = (host, port).to_socket_addrs().map_err(|_| {
+    let addrs = tokio::net::lookup_host((host, port)).await.map_err(|_| {
         (
             StatusCode::BAD_REQUEST,
             "Could not resolve host".to_string(),
@@ -82,8 +85,8 @@ pub fn validate_webhook_url(raw: &str, allow_private: bool) -> Result<(), (Statu
 mod tests {
     use super::validate_webhook_url as v;
 
-    #[test]
-    fn strict_rejects_http_and_private_opt_in_allows() {
+    #[tokio::test]
+    async fn strict_rejects_http_and_private_opt_in_allows() {
         for u in [
             "http://example.com/h",
             "https://localhost/h",
@@ -91,10 +94,10 @@ mod tests {
             "https://10.0.0.5/h",
             "https://169.254.169.254/h",
         ] {
-            assert!(v(u, false).is_err(), "{u}");
-            assert!(v(u, true).is_ok(), "{u}");
+            assert!(v(u, false).await.is_err(), "{u}");
+            assert!(v(u, true).await.is_ok(), "{u}");
         }
-        assert!(v("https://1.1.1.1/h", false).is_ok());
-        assert!(v("not a url", true).is_err());
+        assert!(v("https://1.1.1.1/h", false).await.is_ok());
+        assert!(v("not a url", true).await.is_err());
     }
 }

@@ -685,3 +685,55 @@ async fn approve_transfers_non_owner_roles_and_never_owner() {
     .unwrap();
     assert_eq!(old_roles, vec!["builtin-owner".to_string()]);
 }
+
+/// A contact finds the request that names them without being sent its id
+/// (Wavvon-server#190), and it leaves their list once they have attested.
+/// Someone who is not a contact never sees it.
+#[tokio::test]
+async fn contact_lists_requests_to_attest_until_attested() {
+    let server = common::setup().await;
+    let (hub_pubkey, request_id, owner, contact, new_key, _) =
+        open_request_with_one_contact(&server).await;
+    let contact_token = common::authenticate(&server, &contact).await;
+    let stranger_token = common::authenticate(&server, &Identity::generate()).await;
+
+    let list = |token: String| {
+        let server = &server;
+        async move {
+            let resp = server
+                .get("/recovery/requests/to-attest")
+                .authorization_bearer(&token)
+                .await;
+            resp.assert_status_ok();
+            resp.json::<Vec<serde_json::Value>>()
+        }
+    };
+
+    let pending = list(contact_token.clone()).await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0]["id"], request_id);
+    assert_eq!(pending[0]["old_pubkey"], owner.public_key_hex());
+    assert_eq!(pending[0]["threshold"], 1);
+    assert!(list(stranger_token).await.is_empty());
+
+    let bundle = server
+        .get(&format!("/recovery/rotation-request/{request_id}"))
+        .await
+        .json::<serde_json::Value>();
+    server
+        .post(&format!("/recovery/rotation-request/{request_id}/attest"))
+        .json(&json!({
+            "attester": contact.public_key_hex(),
+            "signature": attestation_signature(
+                &hub_pubkey,
+                &owner.public_key_hex(),
+                &new_key.public_key_hex(),
+                bundle["nonce"].as_str().unwrap(),
+                &contact,
+            ),
+        }))
+        .await
+        .assert_status_ok();
+
+    assert!(list(contact_token).await.is_empty());
+}

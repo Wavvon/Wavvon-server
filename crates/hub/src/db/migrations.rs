@@ -1,48 +1,445 @@
-// Schema baseline reset 2026-08-20 (pre-1.0), following the same reset of
-// 2026-07-05.
+// Schema history: a baseline, then numbered steps.
 //
-// Every ALTER TABLE ... ADD COLUMN accumulated since the July baseline has
-// been folded into its owning CREATE TABLE, and the two forum-tag tables
-// have moved up into the forum section they belong to. Columns were
-// **appended in the order the ALTERs ran**, so the physical column order is
-// unchanged and the resulting schema is byte-identical to the pre-fold one —
-// verified by diffing `pg_dump --schema-only` before and after, not by
-// reading. No table, column, type, default or REFERENCES clause changed
-use crate::permissions::{
-    ALL_PERMISSIONS, EVENTS_CREATE, FORUM_POSTS_CREATE, MESSAGES_READ, MESSAGES_SEND, VOICE_JOIN,
-};
-// meaning.
+// `baseline` is the schema as of 2026-08-20 plus everything appended to it
+// until 2026-10-27, when the version marker landed. It is idempotent and runs
+// on every start, exactly as the whole file used to. **It is frozen**: a
+// schema or data change from now on is a new numbered step in `step`, never
+// an edit to the baseline, and `SCHEMA_VERSION` moves with it. The one edit
+// it takes is a deletion: dropping a table the baseline creates means
+// removing its CREATE here, or the next start recreates it, and dropping it
+// in a step.
 //
-// Exactly one ALTER survives, and it has to: `invites.grant_role_id`
-// REFERENCES `roles`, which this file creates *after* `invites`.
+// Each step runs once, in its own transaction, and records the version it
+// reached. That is what a one-shot data migration needs: run on every boot,
+// the voice-channel conversion (step 1) turned a room an admin had switched
+// back to text into a voice room again at each restart. And a database newer
+// than the binary is refused before anything touches it, so an older hub
+// started on an upgraded database stops with a sentence instead of running
+// its own baseline, DROPs included, against a schema it does not know.
 //
-// This is safe to do only because nothing in production runs this schema
-// yet. Folding an ADD COLUMN deletes the statement that would upgrade an
-// existing database, and `CREATE TABLE IF NOT EXISTS` then skips the table
-// silently — a database created before a folded column would simply lack it,
-// with no error until a query touches it. Once there are hub databases in
-// the field, a fold needs a schema-version marker and a refuse-to-start
-// check first (same shape as `db/version.rs`).
-//
-// Going forward from this baseline, and **for as long as this is beta**,
-// destructive changes are allowed: DROP, ALTER ... TYPE, renames, reshaping a
-// table. No database in the field has a promised upgrade path yet, so the
-// better schema wins over the additive one.
-//
-// **The additive-only rule starts at 1.0.0**, and from there it is absolute:
-// new columns via `ALTER TABLE ... ADD COLUMN` wrapped in `let _ = ...` so
-// "already exists" is ignored, new tables via `CREATE TABLE IF NOT EXISTS`,
-// and nothing destructive ever. The paragraph above is why: a fold deletes the
-// statement that would upgrade an existing database, and
-// `CREATE TABLE IF NOT EXISTS` then skips it silently, so a database created
-// before the fold simply lacks the column with no error until a query touches
-// it. Before 1.0 that costs a `DROP DATABASE`; after it, it costs somebody
-// their hub.
+// **Until 1.0 a step may be destructive**: DROP, ALTER ... TYPE, renames.
+// **From 1.0.0 steps are additive only** (new tables, new nullable or
+// defaulted columns), and that rule is absolute: a hub in the field cannot be
+// asked to `DROP DATABASE`. Removals wait for a major.
 
-use anyhow::Result;
-use sqlx::PgPool;
+use crate::permissions::{
+    ALL_PERMISSIONS, EVENTS_CREATE, FORUM_POSTS_CREATE, MESSAGES_READ, MESSAGES_SEND, VOICE_CAMERA,
+    VOICE_JOIN, VOICE_SCREEN_SHARE,
+};
+use anyhow::{bail, Result};
+use sqlx::{PgConnection, PgPool};
+
+/// The schema version this binary migrates to: the number of the last step.
+pub const SCHEMA_VERSION: i32 = 10;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
+    // Single-row table; the CHECK keeps it that way.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS schema_version (
+            id      BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+            version INTEGER NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    let found: i32 = sqlx::query_scalar("SELECT version FROM schema_version")
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(0);
+    check_not_newer(found)?;
+
+    baseline(pool).await?;
+    if found == 0 {
+        seed_everyone_defaults(pool).await?;
+    }
+
+    for version in found + 1..=SCHEMA_VERSION {
+        let mut tx = pool.begin().await?;
+        step(version, &mut tx).await?;
+        sqlx::query(
+            "INSERT INTO schema_version (id, version) VALUES (TRUE, $1)
+             ON CONFLICT (id) DO UPDATE SET version = EXCLUDED.version",
+        )
+        .bind(version)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        tracing::info!(version, "Applied schema step");
+    }
+
+    tracing::info!("Database migrations complete");
+    Ok(())
+}
+
+fn check_not_newer(found: i32) -> Result<()> {
+    if found > SCHEMA_VERSION {
+        bail!(
+            "this database is at schema version {found}, newer than the {SCHEMA_VERSION} \
+             wavvon-hub {} knows. It was upgraded by a newer hub; run that version, \
+             or restore a backup taken before the upgrade.",
+            env!("CARGO_PKG_VERSION"),
+        );
+    }
+    Ok(())
+}
+
+async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
+    match version {
+        // Voice lives in voice channels (decisions.md). The rooms that can only
+        // ever have been voice rooms convert themselves: temporary rooms
+        // (spawned and squad rooms) and the AFK channel. Every other channel
+        // stays text until an admin switches it, keeping its chat.
+        1 => {
+            sqlx::query(
+                "UPDATE channels SET channel_type = 'voice'
+                 WHERE channel_type = 'text' AND is_category = FALSE
+                   AND (is_temporary = TRUE
+                        OR id = (SELECT value FROM hub_settings WHERE key = 'afk_channel_id'))",
+            )
+            .execute(conn)
+            .await?;
+        }
+        // "Trust this device" tokens: no client ever minted one, and a client
+        // already signs in silently with the key it holds. `alliances.peers`
+        // gated the retired manual peering route; a role still holding it
+        // would fail validation on every later edit.
+        2 => {
+            sqlx::query("DROP TABLE IF EXISTS device_tokens")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query("DELETE FROM role_permissions WHERE permission = 'alliances.peers'")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "DELETE FROM channel_permission_overwrites WHERE permission = 'alliances.peers'",
+            )
+            .execute(conn)
+            .await?;
+        }
+        // Ban-evasion flag (decisions.md, "A ban stays on the identity; an IP is a
+        // signal, never a wall"). Every table holds a keyed hash, never an
+        // address. `ip_sightings` is the last hash each identity was seen from,
+        // swept after a week; a ban copies it into `ban_ip_flags` for the hub's
+        // window; a new identity arriving from a flagged hash is seated pending
+        // with an `admission_flags` row naming the banned identity it matched.
+        3 => {
+            for ddl in [
+                "CREATE TABLE IF NOT EXISTS ip_sightings (
+                    public_key TEXT PRIMARY KEY,
+                    ip_hash    TEXT NOT NULL,
+                    seen_at    BIGINT NOT NULL
+                )",
+                "CREATE TABLE IF NOT EXISTS ban_ip_flags (
+                    ip_hash       TEXT NOT NULL,
+                    banned_pubkey TEXT NOT NULL,
+                    expires_at    BIGINT NOT NULL,
+                    PRIMARY KEY (ip_hash, banned_pubkey)
+                )",
+                "CREATE TABLE IF NOT EXISTS admission_flags (
+                    public_key     TEXT PRIMARY KEY REFERENCES users(public_key) ON DELETE CASCADE,
+                    matched_pubkey TEXT NOT NULL,
+                    flagged_at     BIGINT NOT NULL
+                )",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+        }
+        // Join forms (join-forms.md): the survey tables carry two forms told
+        // apart by `purpose`, the onboarding survey and the pre-join
+        // application. Questions gain help text and the limits the new kinds
+        // need; a multi-select answer keeps its choices in a table of its own,
+        // since `survey_answers` holds one choice per question. An application
+        // response records its decision, which starts its deletion clock.
+        4 => {
+            for ddl in [
+                "ALTER TABLE surveys ADD COLUMN IF NOT EXISTS purpose TEXT NOT NULL DEFAULT 'onboarding'",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS help TEXT",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS multiline BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS max_len INTEGER",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS min_choices INTEGER",
+                "ALTER TABLE survey_questions ADD COLUMN IF NOT EXISTS max_choices INTEGER",
+                "ALTER TABLE survey_responses ADD COLUMN IF NOT EXISTS decided_at BIGINT",
+                "ALTER TABLE survey_responses ADD COLUMN IF NOT EXISTS rejection_reason TEXT",
+                "ALTER TABLE survey_responses ADD COLUMN IF NOT EXISTS rejected BOOLEAN NOT NULL DEFAULT FALSE",
+                "CREATE TABLE IF NOT EXISTS survey_answer_choices (
+                    response_id TEXT NOT NULL REFERENCES survey_responses(id) ON DELETE CASCADE,
+                    question_id TEXT NOT NULL,
+                    choice_id   TEXT NOT NULL,
+                    PRIMARY KEY (response_id, question_id, choice_id)
+                )",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+        }
+        // A session remembers the device key that signed in, since its
+        // `public_key` is the canonical identity (the master, for a paired
+        // device) and a revocation names the device. Sessions issued before
+        // this have no device on record, so those of anyone who has ever
+        // revoked a device are dropped; their clients sign in again.
+        5 => {
+            sqlx::query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS device_pubkey TEXT")
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "DELETE FROM sessions WHERE public_key IN (
+                    SELECT u.public_key FROM users u
+                    JOIN subkey_revocations r ON r.master_pubkey = u.master_pubkey)",
+            )
+            .execute(conn)
+            .await?;
+        }
+        // Masquerade: the name and avatar a bridge or webhook shows on one
+        // message, as JSON {name, avatar_url}.
+        6 => {
+            sqlx::query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS masquerade TEXT")
+                .execute(conn)
+                .await?;
+        }
+        // Attachments stored in clear beside an encrypted DM envelope, from
+        // clients that sent them outside the ciphertext. Clients no longer
+        // show them; they were never meant to be readable here.
+        7 => {
+            sqlx::query(
+                "UPDATE dm_messages SET attachments = NULL
+                 WHERE (is_encrypted OR is_group_encrypted) AND attachments IS NOT NULL",
+            )
+            .execute(conn)
+            .await?;
+        }
+        // Stickers (stickers.md, sticker-storage.md). `sha256` is the hash of
+        // the normalized WebP, so one image is one row however often it is
+        // sent. `pack_id` decides pack sticker or cached copy. The grant is a
+        // one-time seed, not baseline: the baseline would hand it back to
+        // @everyone on every start after an admin revoked it (#246).
+        8 => {
+            for ddl in [
+                "CREATE TABLE IF NOT EXISTS sticker_packs (
+                    id         TEXT PRIMARY KEY,
+                    name       TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at BIGINT NOT NULL
+                )",
+                "CREATE TABLE IF NOT EXISTS stickers (
+                    id              TEXT PRIMARY KEY,
+                    sha256          TEXT NOT NULL UNIQUE,
+                    name            TEXT NOT NULL,
+                    mime            TEXT NOT NULL,
+                    size_bytes      BIGINT NOT NULL,
+                    width           INTEGER NOT NULL,
+                    height          INTEGER NOT NULL,
+                    pack_id         TEXT REFERENCES sticker_packs(id) ON DELETE SET NULL,
+                    origin_hub_url  TEXT,
+                    origin_hub_name TEXT,
+                    uploader        TEXT NOT NULL,
+                    created_at      BIGINT NOT NULL,
+                    last_used_at    BIGINT NOT NULL,
+                    removed_at      BIGINT,
+                    evicted_at      BIGINT
+                )",
+                "CREATE INDEX IF NOT EXISTS idx_stickers_pack ON stickers(pack_id)",
+                "CREATE TABLE IF NOT EXISTS sticker_blocklist (
+                    sha256     TEXT PRIMARY KEY,
+                    blocked_by TEXT NOT NULL,
+                    reason     TEXT,
+                    created_at BIGINT NOT NULL
+                )",
+                "ALTER TABLE messages ADD COLUMN IF NOT EXISTS sticker_id TEXT REFERENCES stickers(id)",
+                "CREATE INDEX IF NOT EXISTS idx_messages_sticker ON messages(sticker_id)
+                 WHERE sticker_id IS NOT NULL",
+                "INSERT INTO role_permissions (role_id, permission)
+                 SELECT 'builtin-everyone', 'stickers.external'
+                 WHERE EXISTS (SELECT 1 FROM roles WHERE id = 'builtin-everyone')
+                 ON CONFLICT (role_id, permission) DO NOTHING",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+        }
+        // Attachments on disk (attachments.md). Existing inline and forum
+        // attachments become expired rows, name kept and no blob: nothing is
+        // converted (alpha, no backward compatibility). The old columns and
+        // `upload_files` go, and banners must be uploaded again. Irreversible.
+        9 => {
+            for ddl in [
+                "CREATE TABLE IF NOT EXISTS attachment_blobs (
+                    sha256         TEXT PRIMARY KEY,
+                    kind           TEXT NOT NULL,
+                    mime           TEXT NOT NULL,
+                    size_bytes     BIGINT NOT NULL,
+                    width          INTEGER,
+                    height         INTEGER,
+                    created_at     BIGINT NOT NULL,
+                    last_linked_at BIGINT NOT NULL
+                )",
+                "CREATE INDEX IF NOT EXISTS idx_attachment_blobs_linked
+                    ON attachment_blobs(last_linked_at)",
+                "CREATE TABLE IF NOT EXISTS attachments (
+                    id         TEXT PRIMARY KEY,
+                    sha256     TEXT REFERENCES attachment_blobs(sha256) ON DELETE SET NULL,
+                    name       TEXT NOT NULL,
+                    uploader   TEXT NOT NULL,
+                    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+                    message_id TEXT REFERENCES messages(id) ON DELETE CASCADE,
+                    post_id    TEXT REFERENCES posts(id) ON DELETE CASCADE,
+                    reply_id   TEXT REFERENCES post_replies(id) ON DELETE CASCADE,
+                    as_file    BOOLEAN NOT NULL DEFAULT FALSE,
+                    position   INTEGER NOT NULL DEFAULT 0,
+                    created_at BIGINT NOT NULL,
+                    removed_at BIGINT,
+                    expired_at BIGINT
+                )",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_message ON attachments(message_id)
+                    WHERE message_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_post ON attachments(post_id)
+                    WHERE post_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_reply ON attachments(reply_id)
+                    WHERE reply_id IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_sha ON attachments(sha256)
+                    WHERE sha256 IS NOT NULL",
+                "CREATE INDEX IF NOT EXISTS idx_attachments_orphans ON attachments(created_at)
+                    WHERE message_id IS NULL AND post_id IS NULL AND reply_id IS NULL",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+            expire_inline(&mut *conn, "messages", "message_id", 1000).await?;
+            expire_inline(&mut *conn, "posts", "post_id", 1).await?;
+            expire_inline(&mut *conn, "post_replies", "reply_id", 1).await?;
+            for ddl in [
+                "ALTER TABLE messages DROP COLUMN IF EXISTS attachments",
+                "ALTER TABLE posts DROP COLUMN IF EXISTS attachments",
+                "ALTER TABLE post_replies DROP COLUMN IF EXISTS attachments",
+                "UPDATE channels SET banner_file_id = NULL WHERE banner_file_id IS NOT NULL",
+                "DROP TABLE IF EXISTS upload_files",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
+        }
+        // Screen share and camera split out of `voice.join` (#277). Granted to
+        // @everyone once, so an existing hub behaves as before until an admin
+        // restricts them; a one-time step, not the seed, for the reason in #246.
+        10 => {
+            for perm in [VOICE_SCREEN_SHARE, VOICE_CAMERA] {
+                sqlx::query(
+                    "INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', $1)
+                     ON CONFLICT (role_id, permission) DO NOTHING",
+                )
+                .bind(perm)
+                .execute(&mut *conn)
+                .await?;
+            }
+        }
+        _ => unreachable!("no schema step {version}"),
+    }
+    Ok(())
+}
+
+/// One expired row per inline or forum attachment of `table`, name kept. Read
+/// one row at a time: an inline attachment is base64 and a table of them does
+/// not fit in memory. A column that does not parse is skipped, not fatal: the
+/// hub wrote it, and a start that stops on one old row helps nobody.
+/// `ts_divisor` turns the owner's timestamp into seconds.
+async fn expire_inline(
+    conn: &mut PgConnection,
+    table: &str,
+    owner_col: &str,
+    ts_divisor: i64,
+) -> Result<()> {
+    let has_column: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = current_schema()
+                         AND table_name = $1 AND column_name = 'attachments')",
+    )
+    .bind(table)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !has_column {
+        return Ok(());
+    }
+    let channel_expr = if table == "post_replies" {
+        "(SELECT p.channel_id FROM posts p WHERE p.id = t.post_id)"
+    } else {
+        "t.channel_id"
+    };
+    let author = match table {
+        "messages" => "t.sender",
+        _ => "t.author_pubkey",
+    };
+    let ids: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT t.id FROM {table} t
+         WHERE t.attachments IS NOT NULL AND t.attachments NOT IN ('', '[]')"
+    ))
+    .fetch_all(&mut *conn)
+    .await?;
+    let now = crate::auth::handlers::unix_timestamp();
+    for id in ids {
+        let (json, channel_id, uploader, created_at): (String, Option<String>, String, i64) =
+            sqlx::query_as(&format!(
+                "SELECT t.attachments, {channel_expr}, {author}, t.created_at
+                 FROM {table} t WHERE t.id = $1"
+            ))
+            .bind(&id)
+            .fetch_one(&mut *conn)
+            .await?;
+        let Some(channel_id) = channel_id else {
+            continue;
+        };
+        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else {
+            continue;
+        };
+        for (pos, item) in items.iter().enumerate() {
+            let name = item
+                .get("name")
+                .and_then(|n| n.as_str())
+                .filter(|n| !n.is_empty())
+                .unwrap_or("file");
+            sqlx::query(&format!(
+                "INSERT INTO attachments
+                    (id, name, uploader, channel_id, {owner_col}, position, created_at, expired_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+            ))
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(name)
+            .bind(&uploader)
+            .bind(&channel_id)
+            .bind(&id)
+            .bind(pos as i32)
+            .bind(created_at / ts_divisor)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// The permissions every member starts with, granted once when the database is
+/// created. Run on every start (as the baseline once did), it handed back any
+/// of these an admin had revoked from @everyone at each restart.
+///
+/// `voice.join` here is the whole "nothing changes until someone denies it"
+/// property of an independent voice gate.
+async fn seed_everyone_defaults(pool: &PgPool) -> Result<()> {
+    for perm in [
+        MESSAGES_SEND,
+        MESSAGES_READ,
+        FORUM_POSTS_CREATE,
+        EVENTS_CREATE,
+        VOICE_JOIN,
+        VOICE_SCREEN_SHARE,
+        VOICE_CAMERA,
+    ] {
+        sqlx::query(
+            "INSERT INTO role_permissions (role_id, permission) VALUES ('builtin-everyone', $1)
+             ON CONFLICT (role_id, permission) DO NOTHING",
+        )
+        .bind(perm)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn baseline(pool: &PgPool) -> Result<()> {
     // =======================================================================
     // Identity & sessions
     // =======================================================================
@@ -107,22 +504,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             aaguid         TEXT,
             created_at     BIGINT NOT NULL,
             last_used_at   BIGINT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // Device tokens ("Trust this device").
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS device_tokens (
-            id            TEXT PRIMARY KEY,
-            token_hash    TEXT NOT NULL UNIQUE,
-            user_pubkey   TEXT NOT NULL,
-            device_name   TEXT,
-            created_at    BIGINT NOT NULL,
-            expires_at    BIGINT NOT NULL,
-            last_used_at  BIGINT,
-            revoked       BOOLEAN NOT NULL DEFAULT FALSE
         )",
     )
     .execute(pool)
@@ -335,22 +716,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    // File uploads.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS upload_files (
-            id              TEXT PRIMARY KEY,
-            filename        TEXT NOT NULL,
-            original_name   TEXT NOT NULL,
-            mime_type       TEXT NOT NULL,
-            size_bytes      BIGINT NOT NULL,
-            uploader_pubkey TEXT NOT NULL,
-            channel_id      TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-            created_at      BIGINT NOT NULL
-        )",
-    )
-    .execute(pool)
-    .await?;
-
     // =======================================================================
     // Roles & permissions
     // =======================================================================
@@ -463,32 +828,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-
-    // Seed built-in permissions, in the rebuilt catalogue's ids.
-    //
-    // `builtin-owner` loses its `admin` row and gains nothing in its place
-    // (permissions.md §6): its power comes from `is_owner`, which is
-    // membership of the role itself. The rows it used to carry beside `admin`
-    // were redundant with the wildcard and are gone with it.
-    //
-    // `builtin-everyone` keeps the baseline every member needs, including
-    // `voice.join` — that one row is the whole "nothing changes until someone
-    // denies it" property of an independent voice gate.
-    for (role, perm) in [
-        ("builtin-everyone", MESSAGES_SEND),
-        ("builtin-everyone", MESSAGES_READ),
-        ("builtin-everyone", FORUM_POSTS_CREATE),
-        ("builtin-everyone", EVENTS_CREATE),
-        ("builtin-everyone", VOICE_JOIN),
-    ] {
-        sqlx::query(
-            "INSERT INTO role_permissions (role_id, permission) VALUES ($1, $2) ON CONFLICT (role_id, permission) DO NOTHING",
-        )
-        .bind(role)
-        .bind(perm)
-        .execute(pool)
-        .await?;
-    }
 
     // Role-based channel permission overwrites (Nested Channels §3). One row
     // per (channel, role, permission). Absence of a row = inherit. Depends on
@@ -2069,8 +2408,6 @@ pub async fn run(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
-
-    tracing::info!("Database migrations complete");
 
     Ok(())
 }

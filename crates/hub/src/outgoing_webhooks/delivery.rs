@@ -52,17 +52,6 @@ pub async fn attempt_delivery(
         }
     };
 
-    let signature = match sign_body(&webhook.signing_key, body_json.as_bytes()) {
-        Ok(s) => s,
-        Err(e) => {
-            return DeliveryResult {
-                success: false,
-                status_code: None,
-                error_msg: Some(e),
-            }
-        }
-    };
-
     let timestamp = crate::auth::handlers::unix_timestamp();
     let signature_v1 = match sign_body(
         &webhook.signing_key,
@@ -82,7 +71,6 @@ pub async fn attempt_delivery(
         .post(&webhook.url)
         .header("Content-Type", "application/json")
         .header(wavvon_identity::HEADER_HUB_PUBKEY, hub_pubkey_hex)
-        .header(wavvon_identity::HEADER_SIGNATURE_LEGACY, &signature)
         .header(wavvon_identity::HEADER_SIGNATURE_V1, &signature_v1)
         .header(wavvon_identity::HEADER_TIMESTAMP, timestamp.to_string())
         .header(wavvon_identity::HEADER_WEBHOOK_ID, &webhook.id)

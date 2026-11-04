@@ -5,7 +5,7 @@ use crate::routes::alliance_models::{AllianceDetailResponse, SharedChannelRespon
 use crate::routes::chat_models::MessageResponse;
 use crate::routes::dm_models::FederatedDmRequest;
 use crate::routes::health::InfoResponse;
-use crate::routes::post_models::{PostDetail, PostListResponse, ReplyView};
+use crate::routes::post_models::{PostDetail, PostSummary, ReplyView};
 use wavvon_identity::Identity;
 
 pub struct FederationClient {
@@ -59,22 +59,16 @@ impl FederationClient {
         // could pick the bytes of an invite token and get it signed. A
         // Wavvon hub issues exactly AUTH_CHALLENGE_LEN random bytes, and
         // every structured object the hub signs is longer (each carries at
-        // least a hex key or a UUID), so that length is all we sign.
+        // least a hex key or a UUID), so that length is all we sign;
+        // `auth_challenge_signing_bytes` refuses any other.
         anyhow::ensure!(
-            challenge_bytes.len() == crate::auth::handlers::AUTH_CHALLENGE_LEN,
-            "Peer sent a {}-byte auth challenge; refusing to sign it",
-            challenge_bytes.len()
+            challenge.scheme.as_deref() == Some(wavvon_identity::AUTH_CHALLENGE_SCHEME),
+            "Peer named auth challenge scheme {:?}; refusing to sign",
+            challenge.scheme
         );
-        // Tagged when the peer says it takes that; the raw form stays for an
-        // older peer, guarded by the length check above.
-        let signature =
-            if challenge.scheme.as_deref() == Some(wavvon_identity::AUTH_CHALLENGE_SCHEME) {
-                identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-                    &challenge_bytes,
-                ))
-            } else {
-                identity.sign(&challenge_bytes)
-            };
+        let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+            &challenge_bytes,
+        )?);
 
         let verify: VerifyResponse = self
             .http
@@ -120,17 +114,34 @@ impl FederationClient {
             .context("Invalid message response")
     }
 
+    /// An attachment from the hub that holds it, for the alliance read path.
+    /// Public on the holder's side, so no token.
+    pub async fn get_upload(&self, base_url: &str, id: &str) -> Result<reqwest::Response> {
+        self.http
+            .get(format!("{base_url}/uploads/{id}"))
+            .send()
+            .await
+            .context("Failed to fetch upload from peer")
+    }
+
     pub async fn get_messages(
         &self,
         base_url: &str,
         token: &str,
         alliance_id: &str,
         channel_id: &str,
+        limit: i64,
+        cursor: Option<&str>,
     ) -> Result<Vec<MessageResponse>> {
+        let mut query = vec![("limit", limit.to_string())];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor.to_string()));
+        }
         self.http
             .get(format!(
                 "{base_url}/alliances/{alliance_id}/channels/{channel_id}/messages"
             ))
+            .query(&query)
             .bearer_auth(token)
             .send()
             .await
@@ -154,7 +165,7 @@ impl FederationClient {
         cursor: Option<&str>,
         limit: Option<i64>,
         tag: Option<&str>,
-    ) -> Result<PostListResponse> {
+    ) -> Result<Vec<PostSummary>> {
         let mut query: Vec<(&str, String)> = Vec::new();
         if let Some(c) = cursor {
             query.push(("cursor", c.to_string()));

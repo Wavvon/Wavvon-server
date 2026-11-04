@@ -13,41 +13,6 @@ use crate::routes::chat_models::{
 };
 use crate::state::AppState;
 
-/// Returns a per-channel voice population snapshot. Channels with zero
-/// participants are omitted -- callers can treat "missing key" as zero.
-/// Invisible members are not counted (except the requester's own entry) --
-/// a count that includes a hidden user would leak their presence
-/// (decisions.md 2026-07-12, same gate as the participant list below).
-pub async fn voice_populations(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Json<HashMap<String, usize>> {
-    let snapshot: Vec<(String, Vec<String>)> = {
-        let voice = state.voice_channels.read().await;
-        voice
-            .iter()
-            .map(|(ch, members)| (ch.clone(), members.keys().cloned().collect()))
-            .collect()
-    };
-    let all_keys: Vec<String> = snapshot
-        .iter()
-        .flat_map(|(_, ks)| ks.iter().cloned())
-        .collect();
-    let invisible = crate::routes::users::invisible_subset(&state.db, &all_keys).await;
-
-    let mut out: HashMap<String, usize> = HashMap::with_capacity(snapshot.len());
-    for (channel_id, members) in snapshot {
-        let count = members
-            .iter()
-            .filter(|pk| **pk == user.public_key || !invisible.contains(*pk))
-            .count();
-        if count > 0 {
-            out.insert(channel_id, count);
-        }
-    }
-    Json(out)
-}
-
 /// Returns voice participants grouped by channel, enriched with each
 /// member's display_name from the local users table. Lets the sidebar
 /// show participant names nested under each voice-active channel rather
@@ -128,30 +93,6 @@ pub struct VoiceParticipantInfo {
     pub visiting_from: Option<String>,
 }
 
-/// Returns the set of public keys currently in any voice channel on this
-/// hub. Used by the client to show a 🎙️ next to in-voice users in the
-/// member list.
-pub async fn voice_active_users(
-    State(state): State<Arc<AppState>>,
-    user: AuthUser,
-) -> Json<Vec<String>> {
-    let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
-    {
-        let voice = state.voice_channels.read().await;
-        for members in voice.values() {
-            for pk in members.keys() {
-                out.insert(pk.clone());
-            }
-        }
-    }
-    // Same invisible gate as the participant list: don't put a 🎙️ badge on
-    // a user everyone is being told is offline (self excepted).
-    let key_vec: Vec<String> = out.iter().cloned().collect();
-    let invisible = crate::routes::users::invisible_subset(&state.db, &key_vec).await;
-    out.retain(|pk| *pk == user.public_key || !invisible.contains(pk));
-    Json(out.into_iter().collect())
-}
-
 pub async fn create_channel(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -211,12 +152,14 @@ pub async fn create_channel(
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
 
-    // Validate channel_type: "text", "forum", "banner", or "spawner" on leaf channels.
+    // Validate channel_type: "text", "voice", "forum", "banner", or "spawner" on
+    // leaf channels. Only a voice channel can be joined for voice.
     let channel_type = if req.is_category {
         "text".to_string()
     } else {
         match req.channel_type.as_deref() {
             None | Some("text") => "text".to_string(),
+            Some("voice") => "voice".to_string(),
             Some("forum") => "forum".to_string(),
             Some("banner") => "banner".to_string(),
             Some("spawner") => "spawner".to_string(),
@@ -385,6 +328,19 @@ pub async fn update_channel(
     let changing_talk_power = req.min_talk_power.is_some();
     let changing_retention = req.retention_days.is_some();
     let changing_forum_require_tag = req.forum_require_tag.is_some();
+    // Text and voice both carry a chat, so a channel can switch between them
+    // keeping its history: the step an admin takes after an upgrade to turn
+    // the rooms people talked in into voice channels.
+    if let Some(ct) = req.channel_type.as_deref() {
+        let switchable = |t: &str| t == "text" || t == "voice";
+        if !switchable(ct) || !switchable(&existing_type) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "channel_type can only switch between text and voice".to_string(),
+            ));
+        }
+        perms.require(permissions::CHANNELS_MANAGE)?;
+    }
 
     // Owner powers, v1: rename only (temp-voice-channels.md §3). A temp
     // channel's owner may change its name without CHANNELS_MANAGE, but any
@@ -491,7 +447,9 @@ pub async fn update_channel(
         }
         if let Some(ref fid) = req.banner_file_id {
             let valid: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM upload_files WHERE id = $1 AND channel_id = $2 AND mime_type IN ('image/png','image/jpeg','image/gif','image/webp')",
+                "SELECT a.id FROM attachments a JOIN attachment_blobs b ON b.sha256 = a.sha256
+                 WHERE a.id = $1 AND a.channel_id = $2 AND b.kind = 'image'
+                   AND a.removed_at IS NULL AND a.expired_at IS NULL",
             )
             .bind(fid)
             .bind(&channel_id)
@@ -523,7 +481,8 @@ pub async fn update_channel(
         || req.banner_url.is_some()
         || req.banner_file_id.is_some()
         || req.forum_require_tag.is_some()
-        || req.nsfw.is_some();
+        || req.nsfw.is_some()
+        || req.channel_type.is_some();
 
     if needs_update {
         let mut qb = sqlx::QueryBuilder::new("UPDATE channels SET ");
@@ -577,6 +536,10 @@ pub async fn update_channel(
         if let Some(nsfw) = req.nsfw {
             sep.push("nsfw = ");
             sep.push_bind_unseparated(nsfw);
+        }
+        if let Some(ct) = req.channel_type.as_deref() {
+            sep.push("channel_type = ");
+            sep.push_bind_unseparated(ct);
         }
         qb.push(" WHERE id = ");
         qb.push_bind(&channel_id);
@@ -1007,7 +970,7 @@ pub async fn spawn_temp_channel(
         let result = sqlx::query(
             "INSERT INTO channels
                 (id, name, created_by, parent_id, is_category, display_order, channel_type, created_at, is_temporary, owner_pubkey)
-             VALUES ($1, $2, $3, $4, FALSE, $5, 'text', $6, TRUE, $7)",
+             VALUES ($1, $2, $3, $4, FALSE, $5, 'voice', $6, TRUE, $7)",
         )
         .bind(&id)
         .bind(&name)

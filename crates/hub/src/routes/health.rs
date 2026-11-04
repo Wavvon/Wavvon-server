@@ -145,6 +145,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
 
     let birthdays_enabled = crate::routes::hub::birthdays_enabled(&state.db).await;
     let max_attachment_bytes = crate::routes::hub::read_attachment_cap(&state.db).await;
+    let stream_limits = crate::routes::hub::read_stream_limits(&state.db).await;
 
     Json(InfoResponse {
         name: branding.name,
@@ -165,7 +166,6 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         nsfw,
         badges,
         cert_requirement,
-        screen_share_v2: true,
         sfu_url: std::env::var("WAVVON_SFU_URL").ok(),
         emoji_count,
         rotation,
@@ -180,6 +180,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         timezone,
         birthdays_enabled,
         max_attachment_bytes,
+        stream_limits,
         canonical_url: state.canonical_url.read().await.clone(),
     })
 }
@@ -223,9 +224,6 @@ pub struct InfoResponse {
     /// Clients read this pre-auth to know which certs to present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cert_requirement: Option<CertRequirement>,
-    /// Signals to clients that this hub supports WebRTC screen-share v2
-    /// signaling (SDP/ICE relay). Always true on this build.
-    pub screen_share_v2: bool,
     /// Optional URL of an SFU (Selective Forwarding Unit) for this hub.
     /// When set, clients capable of SFU-based video should connect there
     /// instead of doing full mesh WebRTC. Read from `WAVVON_SFU_URL` env var.
@@ -293,6 +291,11 @@ pub struct InfoResponse {
     /// uploading it — a client with its own hardcoded copy silently ignores
     /// an operator who raised or lowered the limit.
     pub max_attachment_bytes: u64,
+    /// The most a screen share or camera may declare (#278), public so the
+    /// share dialog can disable choices above it before anyone tries one.
+    /// An absent field is no cap.
+    #[serde(default)]
+    pub stream_limits: crate::routes::hub::StreamLimits,
     /// The address this hub says clients should use for it.
     ///
     /// Behind a farm this is the hub's canonical slug URL and it **changes**

@@ -53,11 +53,13 @@ export function freshDb(name) {
   return `${PG}/${db}`;
 }
 
-export function psql(sql) {
-  execSync(
-    `docker exec wavvon-pg psql -U postgres -c ${JSON.stringify(sql)}`,
-    { stdio: "pipe" },
-  );
+/** `E2E_PSQL_DIRECT=1` uses a `psql` on PATH against `PG`, as CI does, where
+ *  PostgreSQL is a service container rather than the dev box's `wavvon-pg`. */
+export function psql(sql, db) {
+  const client = process.env.E2E_PSQL_DIRECT
+    ? `psql ${PG}/${db ?? "postgres"}`
+    : `docker exec wavvon-pg psql -U postgres${db ? ` -d ${db}` : ""}`;
+  execSync(`${client} -c ${JSON.stringify(sql)}`, { stdio: "pipe" });
 }
 
 /** Start a long-running process and keep it for teardown. */
@@ -212,6 +214,11 @@ export function identityFromSeed(seedHex) {
   };
 }
 
+/** The only auth-challenge answer a hub or farm accepts (scheme `tagged-v1`). */
+function tagged(challengeHex) {
+  return Buffer.concat([Buffer.from("wavvon/auth-challenge/v1\0"), Buffer.from(challengeHex, "hex")]);
+}
+
 export function identity() {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   // SPKI DER for Ed25519 is a 12-byte header then the raw 32-byte key.
@@ -229,7 +236,7 @@ export async function authenticate(hubUrl, id, extra = {}) {
     body: JSON.stringify({ public_key: id.pubkey }),
   });
   check(ch.status === 200, `challenge failed: ${ch.status} ${JSON.stringify(ch.body)}`);
-  const signature = id.sign(Buffer.from(ch.body.challenge, "hex"));
+  const signature = id.sign(tagged(ch.body.challenge));
   const v = await json(`${hubUrl}/auth/verify`, {
     method: "POST",
     body: JSON.stringify({
@@ -244,8 +251,9 @@ export async function authenticate(hubUrl, id, extra = {}) {
 
 // ── booting the things under test ───────────────────────────────────────
 
-/** Boot a hub with its own database, port pair, work dir and owner. */
-export async function hub(name, owner) {
+/** Boot a hub with its own database, port pair, work dir and owner.
+ *  `extraEnv` is for a stage that needs a setting the others must not have. */
+export async function hub(name, owner, extraEnv = {}) {
   const httpPort = port();
   const voicePort = port();
   // `localhost`, not `127.0.0.1`: identical for the HTTP assertions here, but
@@ -268,6 +276,7 @@ export async function hub(name, owner) {
     // API-only: nothing here drives a browser, and a hub that insists on a
     // web-client directory it has not got refuses to start.
     WAVVON_WEB_CLIENT_DIR: "",
+    ...extraEnv,
   };
   const boot = async () => {
     const entry = start(name, hubBinary(), [], { cwd, env });
@@ -326,7 +335,7 @@ export async function farmToken(farmUrl, id) {
     body: JSON.stringify({ public_key: id.pubkey }),
   });
   check(ch.status === 200, `farm challenge: ${ch.status} ${JSON.stringify(ch.body)}`);
-  const signature = id.sign(Buffer.from(ch.body.challenge, "hex"));
+  const signature = id.sign(tagged(ch.body.challenge));
   const v = await json(`${farmUrl}/auth/verify`, {
     method: "POST",
     body: JSON.stringify({

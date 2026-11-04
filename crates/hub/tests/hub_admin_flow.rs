@@ -30,7 +30,8 @@ async fn authenticate(server: &TestServer, identity: &Identity) -> String {
     let challenge: ChallengeResponse = resp.json();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let resp = server
         .post("/auth/verify")
@@ -298,53 +299,6 @@ async fn attachment_cap_rejects_values_outside_the_bounds() {
     assert_eq!(settings["max_attachment_bytes"], 3 * 1024 * 1024);
 }
 
-#[tokio::test]
-async fn a_message_over_the_configured_cap_is_refused() {
-    let server = common::setup().await;
-    let owner = Identity::generate();
-    let token = common::authenticate(&server, &owner).await;
-
-    let chan: serde_json::Value = server
-        .post("/channels")
-        .authorization_bearer(&token)
-        .json(&json!({ "name": "uploads" }))
-        .await
-        .json();
-    let channel_id = chan["id"].as_str().unwrap().to_string();
-
-    // Tighten the cap, then send just over it. Proves the send path reads the
-    // setting rather than the old constant — with the constant still in force
-    // this 200 KB payload would sail through.
-    server
-        .patch("/hub")
-        .authorization_bearer(&token)
-        .json(&json!({ "max_attachment_bytes": 128 * 1024 }))
-        .await
-        .assert_status_ok();
-
-    let payload = "A".repeat(200 * 1024);
-    let resp = server
-        .post(&format!("/channels/{channel_id}/messages"))
-        .authorization_bearer(&token)
-        .json(&json!({
-            "content": "too big",
-            "attachments": [{ "name": "big.bin", "mime": "application/octet-stream", "data_b64": payload }],
-        }))
-        .await;
-    resp.assert_status(axum::http::StatusCode::PAYLOAD_TOO_LARGE);
-
-    // And a small one still goes through under the same tightened cap.
-    server
-        .post(&format!("/channels/{channel_id}/messages"))
-        .authorization_bearer(&token)
-        .json(&json!({
-            "content": "small enough",
-            "attachments": [{ "name": "ok.bin", "mime": "application/octet-stream", "data_b64": "A".repeat(1024) }],
-        }))
-        .await
-        .assert_status_success();
-}
-
 // ---------------------------------------------------------------------------
 // Farewell label — shown by a client when someone removes this hub from their
 // device (decisions.md, "Leave hub does not leave").
@@ -417,4 +371,110 @@ async fn farewell_label_is_length_capped() {
         .json(&json!({ "farewell_label": "é".repeat(281) }))
         .await
         .assert_status_bad_request();
+}
+
+/// The audit log reads newest first and pages backwards: a log viewer opens on
+/// what just happened, and "Load older" walks into the past
+/// (Wavvon-server#189). It used to page forwards from seq 0, so a hub with any
+/// history opened on its very first actions.
+#[tokio::test]
+async fn audit_log_reads_newest_first_and_pages_backwards() {
+    let (server, token) = common::setup_with_owner().await;
+
+    let page = |cursor: Option<i64>, actor: Option<String>, limit: i64| {
+        let server = &server;
+        let token = token.clone();
+        async move {
+            let mut req = server
+                .get("/admin/audit-log")
+                .authorization_bearer(&token)
+                .add_query_param("event_type", "channel.created")
+                .add_query_param("limit", limit);
+            if let Some(c) = cursor {
+                req = req.add_query_param("cursor", c);
+            }
+            if let Some(a) = actor {
+                req = req.add_query_param("actor", a);
+            }
+            let resp = req.await;
+            resp.assert_status_ok();
+            resp.json::<Vec<serde_json::Value>>()
+        }
+    };
+
+    // Channel events are published from a spawned task, so each one is
+    // awaited before the next channel is made: otherwise their seqs could
+    // land in either order.
+    let mut ids = Vec::new();
+    for name in ["audit-a", "audit-b", "audit-c"] {
+        let resp = server
+            .post("/channels")
+            .authorization_bearer(&token)
+            .json(&json!({ "name": name }))
+            .await;
+        resp.assert_status(axum::http::StatusCode::CREATED);
+        ids.push(
+            resp.json::<serde_json::Value>()["id"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+        );
+        for _ in 0..50 {
+            if page(None, None, 200).await.len() == ids.len() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
+
+    let channel_of = |e: &serde_json::Value| e["channel_id"].as_str().unwrap().to_string();
+    let first = page(None, None, 2).await;
+    assert_eq!(
+        first.iter().map(channel_of).collect::<Vec<_>>(),
+        vec![ids[2].clone(), ids[1].clone()]
+    );
+
+    let older = page(first[1]["seq"].as_i64(), None, 2).await;
+    assert_eq!(
+        older.iter().map(channel_of).collect::<Vec<_>>(),
+        vec![ids[0].clone()]
+    );
+
+    let actor = first[0]["actor_pubkey"].as_str().unwrap().to_string();
+    assert_eq!(page(None, Some(actor), 200).await.len(), 3);
+    assert!(page(None, Some("0".repeat(64)), 200).await.is_empty());
+}
+
+#[tokio::test]
+async fn preview_image_cap_defaults_and_rejects_values_outside_the_bounds() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+    let get = || async {
+        let s: serde_json::Value = server
+            .get("/hub/settings")
+            .authorization_bearer(&token)
+            .await
+            .json();
+        s["max_preview_image_bytes"].clone()
+    };
+    assert_eq!(get().await, 4 * 1024 * 1024);
+
+    for bad in [1024u64, 17 * 1024 * 1024] {
+        server
+            .patch("/hub")
+            .authorization_bearer(&token)
+            .json(&json!({ "max_preview_image_bytes": bad }))
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(get().await, 4 * 1024 * 1024);
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&token)
+        .json(&json!({ "max_preview_image_bytes": 16 * 1024 * 1024 }))
+        .await
+        .assert_status_ok();
+    assert_eq!(get().await, 16 * 1024 * 1024);
 }

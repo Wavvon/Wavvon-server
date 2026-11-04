@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use rand::RngCore;
 use sqlx::PgPool;
-use wavvon_identity::SubkeyCert;
+use wavvon_identity::{SubkeyCert, AUTH_CHALLENGE_LEN};
 
 use crate::auth::models::{ChallengeRequest, ChallengeResponse, VerifyRequest, VerifyResponse};
 use crate::state::{AppState, PendingChallenge};
@@ -30,6 +30,13 @@ pub async fn resolve_canonical_identity(
     auth_pubkey: &str,
     cert: Option<&SubkeyCert>,
 ) -> Result<(String, Option<String>), (StatusCode, String)> {
+    // Checked here, against the key that signed the challenge: the session is
+    // written under the canonical key, which for a paired device is the
+    // master, so a revocation (which names the device) can't be found from it.
+    if is_revoked(db, auth_pubkey).await? {
+        return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
+    }
+
     let cert = match cert {
         None => return Ok((auth_pubkey.to_string(), None)),
         Some(c) => c,
@@ -42,6 +49,12 @@ pub async fn resolve_canonical_identity(
             StatusCode::UNAUTHORIZED,
             "Cert subkey_pubkey doesn't match auth pubkey".to_string(),
         ));
+    }
+    if cert
+        .not_after
+        .is_some_and(|exp| unix_timestamp() as u64 >= exp)
+    {
+        return Err((StatusCode::UNAUTHORIZED, "Cert expired".to_string()));
     }
     let master = cert.master_pubkey.clone();
 
@@ -72,9 +85,35 @@ pub async fn resolve_canonical_identity(
     Ok((master.clone(), Some(master)))
 }
 
-/// Length of an auth challenge. The federation client signs a peer's
-/// challenge only at exactly this length (see `FederationClient::authenticate`).
-pub const AUTH_CHALLENGE_LEN: usize = 32;
+/// Whether `key` is a revoked device key. Fails closed: a lookup error refuses
+/// the request instead of reading as "not revoked".
+pub async fn is_revoked(db: &PgPool, key: &str) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM subkey_revocations WHERE subkey_pubkey = $1)")
+        .bind(key)
+        .fetch_one(db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+}
+
+/// Whether a token's holder has been revoked since it was issued: either the
+/// device that signed in (`sessions.device_pubkey`) or the key the token
+/// speaks for. Fails closed like [`is_revoked`].
+pub async fn session_is_revoked(
+    db: &PgPool,
+    token: &str,
+    pubkey: &str,
+) -> Result<bool, (StatusCode, String)> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM subkey_revocations
+         WHERE subkey_pubkey = $2
+            OR subkey_pubkey = (SELECT device_pubkey FROM sessions WHERE token = $1))",
+    )
+    .bind(token)
+    .bind(pubkey)
+    .fetch_one(db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
+}
 
 pub async fn challenge(
     State(state): State<Arc<AppState>>,
@@ -108,6 +147,7 @@ pub async fn challenge(
 
 pub async fn verify(
     State(state): State<Arc<AppState>>,
+    client_ip: Option<axum::Extension<crate::rate_limit::ClientIp>>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, (StatusCode, String)> {
     let pending = state
@@ -414,7 +454,40 @@ pub async fn verify(
 
     // `existing_users` was already computed above (before the
     // security-level gate) for the owner-exemption check; reused here.
-    let initial_status = if require_approval && existing_users > 0 && req.is_hub != Some(true) {
+    // A new identity arriving from the address a banned one last used is
+    // seated pending, for a moderator to decide (ban_evasion.rs). Only at
+    // first seat: a member who shares an address with someone later banned
+    // keeps their standing.
+    let ip_hash = client_ip.and_then(|axum::Extension(crate::rate_limit::ClientIp(ip))| {
+        crate::ban_evasion::ip_hash(&state, ip)
+    });
+    let ban_match = match &ip_hash {
+        Some(hash) if existing_users > 0 && req.is_hub != Some(true) => {
+            let seated: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1)")
+                    .bind(&canonical_pubkey)
+                    .fetch_one(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            if seated {
+                None
+            } else {
+                crate::ban_evasion::matching_ban(&state.db, hash, &canonical_pubkey, now)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+            }
+        }
+        _ => None,
+    };
+
+    // An enabled join application is an approval gate of its own: the
+    // application is the request a moderator reads (join-forms.md).
+    let application = crate::routes::application::is_enabled(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let initial_status = if ban_match.is_some()
+        || ((require_approval || application) && existing_users > 0 && req.is_hub != Some(true))
+    {
         "pending"
     } else {
         "approved"
@@ -454,6 +527,22 @@ pub async fn verify(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    if let Some(matched) = &ban_match {
+        sqlx::query(
+            "INSERT INTO admission_flags (public_key, matched_pubkey, flagged_at)
+             VALUES ($1, $2, $3) ON CONFLICT (public_key) DO NOTHING",
+        )
+        .bind(&canonical_pubkey)
+        .bind(matched)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    if let Some(hash) = &ip_hash {
+        crate::ban_evasion::record_sighting(&state.db, &canonical_pubkey, hash, now).await;
+    }
 
     // Compute session scope (lobby-survey.md Feature 1): a session is
     // "lobby"-scoped when the lobby is enabled and the user's persisted PoW
@@ -625,13 +714,14 @@ pub async fn verify(
     });
 
     sqlx::query(
-        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO sessions (token, public_key, created_at, expires_at, scope, device_pubkey) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&token)
     .bind(&canonical_pubkey)
     .bind(now)
     .bind(Option::<i64>::None)
     .bind(&scope)
+    .bind(&req.public_key)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -693,7 +783,17 @@ pub async fn verify(
 
     if !is_member && !peer {
         admit_member(&state.db, &canonical_pubkey).await?;
-        if existing_users == 0 {
+        // Once the first-boot owner invite exists, ownership comes from that
+        // invite (its role grant, below) and nowhere else. Without this, an
+        // operator who switched `invite_only` off before claiming the hub
+        // handed it to whoever authenticated first.
+        let owner_invite_minted: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM hub_settings WHERE key = 'first_boot_owner_invite_code' AND value <> '')",
+        )
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if existing_users == 0 && !owner_invite_minted {
             sqlx::query(
                 "INSERT INTO user_roles (user_public_key, role_id, assigned_at)
                  VALUES ($1, 'builtin-owner', $2)
@@ -895,14 +995,7 @@ pub async fn validate_ws_token(
             }
         };
 
-    // Subkey revocation check.
-    let revoked_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = $1")
-            .bind(&pk)
-            .fetch_one(db)
-            .await
-            .unwrap_or(0);
-    if revoked_count > 0 {
+    if session_is_revoked(db, token, &pk).await? {
         return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
     }
 

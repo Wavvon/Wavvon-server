@@ -1,7 +1,6 @@
 mod conn_state;
 mod connection;
 mod handlers;
-mod screen_share;
 mod voice;
 
 use std::sync::Arc;
@@ -25,6 +24,7 @@ pub use voice::voice_identity;
 pub async fn ws_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WsParams>,
+    client_ip: Option<axum::Extension<crate::rate_limit::ClientIp>>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Delegate to the shared session-validity helper so the WS admission
@@ -32,6 +32,7 @@ pub async fn ws_handler(
     // (session expiry, revocation, approval_status, bans).
     let auth = crate::auth::handlers::validate_ws_token(&state, &params.token).await?;
     let public_key = auth.public_key;
+    let streams_on_request = params.streams.as_deref() == Some("on_request");
 
     // An alliance-voice visitor is confined to the one channel their grant
     // admitted them to. Resolved here, once, rather than per message: an
@@ -42,6 +43,15 @@ pub async fn ws_handler(
     } else {
         None
     };
+
+    // A token outlives many connections, so the sign-in alone would leave the
+    // last-seen address weeks stale; every socket refreshes it.
+    if let Some(hash) = client_ip.and_then(|axum::Extension(crate::rate_limit::ClientIp(ip))| {
+        crate::ban_evasion::ip_hash(&state, ip)
+    }) {
+        let now = crate::auth::handlers::unix_timestamp();
+        crate::ban_evasion::record_sighting(&state.db, &public_key, &hash, now).await;
+    }
 
     tracing::info!(
         "WebSocket connected: {}",
@@ -55,6 +65,7 @@ pub async fn ws_handler(
             public_key,
             auth.mini_app_channel_id,
             alliance_voice_channel,
+            streams_on_request,
         )
     }))
 }

@@ -242,3 +242,258 @@ async fn peers_admitted_as_members_are_demoted_once_and_people_are_spared() {
             .unwrap();
     assert!(again);
 }
+
+#[tokio::test]
+async fn schema_version_is_recorded() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    let version: i32 = sqlx::query_scalar("SELECT version FROM schema_version")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(version, db::migrations::SCHEMA_VERSION);
+}
+
+/// A step runs once. Run on every boot, the voice-channel conversion turned a
+/// room an admin had switched back to text into a voice room at each restart.
+#[tokio::test]
+async fn a_step_does_not_rerun_on_restart() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    for sql in [
+        "INSERT INTO users (public_key, first_seen_at) VALUES ('owner', 1)",
+        "INSERT INTO channels (id, name, created_by, created_at, is_temporary, channel_type) \
+         VALUES ('squad', 'Squad', 'owner', 1, TRUE, 'text')",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    let channel_type: String =
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = 'squad'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(channel_type, "text", "step 1 already ran at creation");
+}
+
+/// A database that predates the marker runs every step once.
+#[tokio::test]
+async fn a_database_without_the_marker_runs_every_step() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    for sql in [
+        "DROP TABLE schema_version",
+        "INSERT INTO users (public_key, first_seen_at) VALUES ('owner', 1)",
+        "INSERT INTO channels (id, name, created_by, created_at, is_temporary, channel_type) \
+         VALUES ('squad', 'Squad', 'owner', 1, TRUE, 'text')",
+    ] {
+        sqlx::query(sql).execute(&pool).await.unwrap();
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    let channel_type: String =
+        sqlx::query_scalar("SELECT channel_type FROM channels WHERE id = 'squad'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(channel_type, "voice");
+}
+
+/// An older binary must not run its baseline against a newer schema.
+#[tokio::test]
+async fn a_newer_database_is_refused_before_anything_runs() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    sqlx::query("UPDATE schema_version SET version = $1")
+        .bind(db::migrations::SCHEMA_VERSION + 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE friends")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let err = db::migrations::run(&pool).await.unwrap_err().to_string();
+    assert!(err.contains("newer"), "{err}");
+
+    let friends: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'friends'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(friends, 0, "the baseline must not have run");
+}
+
+#[tokio::test]
+async fn revoked_everyone_default_stays_revoked_after_restart() {
+    let (pool, _guard) = common::create_test_db().await;
+
+    sqlx::query(
+        "DELETE FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = 'messages.send'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // A restart runs the migrations again.
+    db::migrations::run(&pool).await.unwrap();
+
+    let granted: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = 'messages.send'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(granted, 0, "an admin's revocation must survive a restart");
+}
+
+#[tokio::test]
+async fn fresh_db_grants_everyone_defaults() {
+    let (pool, _guard) = common::create_test_db().await;
+    let perms: Vec<String> = sqlx::query_scalar(
+        "SELECT permission FROM role_permissions WHERE role_id = 'builtin-everyone'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(perms.contains(&"messages.send".to_string()));
+    assert!(perms.contains(&"voice.join".to_string()));
+}
+
+#[tokio::test]
+async fn step_7_drops_cleartext_attachments_of_encrypted_dms() {
+    let (pool, _guard) = common::create_test_db().await;
+    for (id, enc, group) in [
+        ("enc", true, false),
+        ("grp", false, true),
+        ("plain", false, false),
+    ] {
+        sqlx::query(
+            "INSERT INTO dm_messages (id, conversation_id, sender, created_at, attachments, is_encrypted, is_group_encrypted)
+             VALUES ($1, 'c', 's', 0, '[{}]', $2, $3)",
+        )
+        .bind(id)
+        .bind(enc)
+        .bind(group)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("UPDATE schema_version SET version = 6")
+        .execute(&pool)
+        .await
+        .unwrap();
+    db::migrations::run(&pool).await.unwrap();
+
+    let kept: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM dm_messages WHERE attachments IS NOT NULL")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kept, vec!["plain".to_string()]);
+}
+
+#[tokio::test]
+async fn step_9_turns_inline_and_forum_attachments_into_expired_rows() {
+    let (pool, _guard) = common::create_test_db().await;
+    // Put the database back where a hub of the previous release leaves it.
+    for ddl in [
+        "DROP TABLE attachments",
+        "DROP TABLE attachment_blobs",
+        "ALTER TABLE messages ADD COLUMN attachments TEXT",
+        "ALTER TABLE posts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE post_replies ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+        "CREATE TABLE upload_files (id TEXT PRIMARY KEY, filename TEXT NOT NULL, original_name TEXT NOT NULL,
+            mime_type TEXT NOT NULL, size_bytes BIGINT NOT NULL, uploader_pubkey TEXT NOT NULL,
+            channel_id TEXT NOT NULL, created_at BIGINT NOT NULL)",
+        "UPDATE schema_version SET version = 8",
+        "INSERT INTO users (public_key, first_seen_at) VALUES ('u', 1)",
+        "INSERT INTO channels (id, name, created_by, created_at, banner_file_id) VALUES ('ch', 'c', 'u', 1, 'old-file')",
+        "INSERT INTO messages (id, channel_id, sender, content, created_at, attachments)
+         VALUES ('m1', 'ch', 'u', 'hi', 5000, '[{\"name\":\"photo.jpg\",\"mime\":\"image/jpeg\",\"data_b64\":\"AAAA\"},{\"name\":\"b.txt\",\"mime\":\"text/plain\",\"data_b64\":\"AA\"}]'),
+                ('m2', 'ch', 'u', 'broken', 6000, 'not json')",
+        "INSERT INTO posts (id, channel_id, author_pubkey, title, body, created_at, last_activity_at, attachments)
+         VALUES ('p1', 'ch', 'u', 't', 'b', 7, 7, '[{\"url\":\"https://x.example/f.pdf\",\"name\":\"f.pdf\",\"mime\":\"application/pdf\",\"size\":1}]')",
+        "INSERT INTO post_replies (id, post_id, author_pubkey, body, created_at, attachments)
+         VALUES ('r1', 'p1', 'u', 'b', 8, '[{\"url\":\"https://x.example/g.png\",\"name\":\"g.png\",\"mime\":\"image/png\",\"size\":1}]')",
+    ] {
+        sqlx::query(ddl).execute(&pool).await.unwrap_or_else(|e| panic!("{ddl}: {e}"));
+    }
+
+    db::migrations::run(&pool).await.unwrap();
+
+    #[derive(sqlx::FromRow)]
+    struct Row(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i32,
+        bool,
+        bool,
+        i64,
+    );
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT name, message_id, post_id, reply_id, position, expired_at IS NOT NULL,
+                    sha256 IS NULL, created_at
+             FROM attachments ORDER BY name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let names: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert_eq!(names, ["b.txt", "f.pdf", "g.png", "photo.jpg"]);
+    assert!(rows.iter().all(|r| r.5 && r.6), "expired, and no blob");
+    let photo = rows.iter().find(|r| r.0 == "photo.jpg").unwrap();
+    assert_eq!((photo.1.as_deref(), photo.4, photo.7), (Some("m1"), 0, 5));
+    assert_eq!(
+        rows.iter().find(|r| r.0 == "f.pdf").unwrap().2.as_deref(),
+        Some("p1")
+    );
+    assert_eq!(
+        rows.iter().find(|r| r.0 == "g.png").unwrap().3.as_deref(),
+        Some("r1")
+    );
+
+    for (table, col) in [
+        ("messages", "attachments"),
+        ("posts", "attachments"),
+        ("post_replies", "attachments"),
+    ] {
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2",
+        )
+        .bind(table)
+        .bind(col)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n, 0, "{table}.{col} is gone");
+    }
+    let upload_files: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('upload_files')::text")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(upload_files.is_none());
+    let banner: Option<String> =
+        sqlx::query_scalar("SELECT banner_file_id FROM channels WHERE id = 'ch'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(banner.is_none(), "banners must be uploaded again");
+
+    // A restart must neither bring upload_files back nor repeat the step.
+    db::migrations::run(&pool).await.unwrap();
+    let again: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(again, 4);
+}

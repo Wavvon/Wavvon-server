@@ -280,11 +280,18 @@ async fn patch_banner_source_switch_clears_other() {
         .unwrap()
         .to_string();
 
-    // Synthetic uploaded image row — the PATCH validation only checks
-    // id + channel + image mime, so this stands in for the upload step.
+    // Synthetic uploaded image rows — the PATCH validation only checks id,
+    // channel and an image blob, so this stands in for the upload step.
     sqlx::query(
-        "INSERT INTO upload_files (id, filename, original_name, mime_type, size_bytes, uploader_pubkey, channel_id, created_at)
-         VALUES ('banner-file-1', 'f.png', 'f.png', 'image/png', 10, $1, $2, 0)",
+        "INSERT INTO attachment_blobs (sha256, kind, mime, size_bytes, width, height, created_at, last_linked_at)
+         VALUES ('banner-blob-1', 'image', 'image/webp', 10, 1, 1, 0, 0)",
+    )
+    .execute(&server.state().db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO attachments (id, sha256, name, uploader, channel_id, created_at)
+         VALUES ('banner-file-1', 'banner-blob-1', 'f.png', $1, $2, 0)",
     )
     .bind(owner.public_key_hex())
     .bind(&id)

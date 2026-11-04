@@ -76,13 +76,20 @@ pub async fn require_alliance_manager(
 }
 
 /// GET /alliances/:id/managers
+///
+/// Readable by whoever manages the alliance and by whoever may edit the list,
+/// which is `roles.manage`: an editor who cannot read what they edit is left
+/// granting blind.
 pub async fn list_alliance_managers(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(alliance_id): Path<String>,
 ) -> Result<Json<Vec<AllianceManagerResponse>>, (StatusCode, String)> {
     super::models::require_alliance_visibility(&state, &user.public_key, &alliance_id).await?;
-    require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    if !perms.has(ROLES_MANAGE) {
+        require_alliance_manager(&state, &user.public_key, &alliance_id).await?;
+    }
 
     let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
         "SELECT am.role_id, r.name, am.granted_by, am.granted_at

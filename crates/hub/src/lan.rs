@@ -115,6 +115,7 @@ pub fn load_or_create_self_signed(
     if cert_path.exists() && key_path.exists() {
         let cert_pem = std::fs::read_to_string(cert_path)
             .with_context(|| format!("Failed to read LAN cert {cert_path:?}"))?;
+        wavvon_identity::restrict_secret(key_path);
         let key_pem = std::fs::read_to_string(key_path)
             .with_context(|| format!("Failed to read LAN key {key_path:?}"))?;
         let fingerprint_hex = fingerprint_from_pem(&cert_pem)?;
@@ -146,7 +147,7 @@ pub fn load_or_create_self_signed(
 
     std::fs::write(cert_path, &cert_pem)
         .with_context(|| format!("Failed to write LAN cert {cert_path:?}"))?;
-    std::fs::write(key_path, &key_pem)
+    wavvon_identity::write_secret(key_path, &key_pem)
         .with_context(|| format!("Failed to write LAN key {key_path:?}"))?;
 
     Ok(LanCert {

@@ -364,7 +364,7 @@ pub fn generate_files(cfg: &SetupConfig) -> Result<GeneratedFiles, String> {
     let env_path = cfg.out_dir.join(".env");
     let compose_path = cfg.out_dir.join("docker-compose.yml");
 
-    std::fs::write(&env_path, render_env(cfg, &db_password))
+    wavvon_identity::write_secret(&env_path, render_env(cfg, &db_password))
         .map_err(|e| format!("Could not write {}: {e}", env_path.display()))?;
     std::fs::write(&compose_path, render_compose(cfg))
         .map_err(|e| format!("Could not write {}: {e}", compose_path.display()))?;

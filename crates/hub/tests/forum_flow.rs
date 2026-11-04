@@ -1,6 +1,6 @@
 use axum_test::TestServer;
 use serde_json::{json, Value};
-use wavvon_hub::routes::post_models::{PostDetail, PostListResponse, PostSearchResponse};
+use wavvon_hub::routes::post_models::{PostDetail, PostSearchHit, PostSummary};
 use wavvon_identity::Identity;
 
 #[path = "common.rs"]
@@ -57,9 +57,10 @@ async fn forum_create_list_get_post() {
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
     assert_eq!(resp.status_code(), 200);
-    let list: PostListResponse = resp.json();
-    assert_eq!(list.posts.len(), 1);
-    assert_eq!(list.posts[0].id, post_id);
+    let list: Vec<PostSummary> = resp.json();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, post_id);
+    assert_eq!(list[0].excerpt.as_deref(), Some("First post body"));
 
     // Get post detail.
     let resp = server
@@ -126,8 +127,8 @@ async fn forum_delete_post_soft() {
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
     assert_eq!(resp.status_code(), 200);
-    let list: PostListResponse = resp.json();
-    assert!(list.posts.is_empty());
+    let list: Vec<PostSummary> = resp.json();
+    assert!(list.is_empty());
 }
 
 #[tokio::test]
@@ -276,8 +277,8 @@ async fn forum_search_returns_hits() {
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
     assert_eq!(resp.status_code(), 200, "{}", resp.text());
-    let sr: PostSearchResponse = resp.json();
-    assert!(!sr.results.is_empty(), "expected search hits for 'Rust'");
+    let hits: Vec<PostSearchHit> = resp.json();
+    assert!(!hits.is_empty(), "expected search hits for 'Rust'");
 }
 
 // ── Rejection tests ──────────────────────────────────────────────────────────
@@ -553,8 +554,66 @@ async fn forum_post_reaction_invalid_emoji_rejected() {
 
 // ── Attachments ───────────────────────────────────────────────────────────────
 
+async fn upload_file(
+    server: &axum_test::TestServer,
+    token: &str,
+    channel_id: &str,
+    name: &str,
+    bytes: Vec<u8>,
+) -> String {
+    let form = axum_test::multipart::MultipartForm::new().add_part(
+        "file",
+        axum_test::multipart::Part::bytes(bytes).file_name(name),
+    );
+    let resp = server
+        .post(&format!("/channels/{channel_id}/upload"))
+        .authorization_bearer(token)
+        .multipart(form)
+        .await;
+    assert_eq!(resp.status_code(), 201, "{}", resp.text());
+    resp.json::<Value>()["id"].as_str().unwrap().to_string()
+}
+
 #[tokio::test]
 async fn forum_post_with_attachments() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+    let att = upload_file(
+        &server,
+        &token,
+        &channel_id,
+        "file.pdf",
+        b"%PDF-1.4 x".to_vec(),
+    )
+    .await;
+
+    let resp = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "With files", "body": "see attachment", "attachment_ids": [att] }))
+        .await;
+    assert_eq!(resp.status_code(), 201, "{}", resp.text());
+    let v: Value = resp.json();
+    let attachments = v["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1);
+    assert_eq!(attachments[0]["url"], format!("/uploads/{att}"));
+    assert_eq!(attachments[0]["name"].as_str(), Some("file.pdf"));
+    assert_eq!(attachments[0]["state"].as_str(), Some("ok"));
+
+    // Round-trip via GET.
+    let post_id = v["id"].as_str().unwrap().to_string();
+    let resp = server
+        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+    let v2: Value = resp.json();
+    assert_eq!(v2["attachments"].as_array().map(|a| a.len()), Some(1));
+}
+
+#[tokio::test]
+async fn forum_post_refuses_outside_urls() {
     let server = common::setup().await;
     let identity = Identity::generate();
     let token = common::authenticate(&server, &identity).await;
@@ -564,31 +623,12 @@ async fn forum_post_with_attachments() {
         .post(&format!("/channels/{channel_id}/posts"))
         .add_header("Authorization", format!("Bearer {token}"))
         .json(&json!({
-            "title": "With files",
-            "body": "see attachment",
-            "attachments": [
-                { "url": "https://example.com/file.pdf", "name": "file.pdf", "mime": "application/pdf", "size": 12345 }
-            ]
+            "title": "T",
+            "body": "b",
+            "attachments": [{ "url": "https://example.com/f.pdf", "name": "f.pdf", "mime": "application/pdf", "size": 1 }]
         }))
         .await;
-    assert_eq!(resp.status_code(), 201, "{}", resp.text());
-    let v: Value = resp.json();
-    let attachments = v["attachments"].as_array().unwrap();
-    assert_eq!(attachments.len(), 1);
-    assert_eq!(
-        attachments[0]["url"].as_str(),
-        Some("https://example.com/file.pdf")
-    );
-    assert_eq!(attachments[0]["name"].as_str(), Some("file.pdf"));
-
-    // Verify round-trip via GET.
-    let post_id = v["id"].as_str().unwrap().to_string();
-    let resp = server
-        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
-        .add_header("Authorization", format!("Bearer {token}"))
-        .await;
-    let v2: Value = resp.json();
-    assert_eq!(v2["attachments"].as_array().map(|a| a.len()), Some(1));
+    assert_eq!(resp.status_code(), 400, "{}", resp.text());
 }
 
 #[tokio::test]
@@ -605,22 +645,19 @@ async fn forum_reply_with_attachments() {
         .await;
     let v: Value = resp.json();
     let post_id = v["id"].as_str().unwrap().to_string();
+    let att = upload_file(&server, &token, &channel_id, "note.txt", b"hello".to_vec()).await;
 
     let resp = server
         .post(&format!("/channels/{channel_id}/posts/{post_id}/replies"))
         .add_header("Authorization", format!("Bearer {token}"))
-        .json(&json!({
-            "body": "reply with file",
-            "attachments": [
-                { "url": "https://example.com/img.png", "name": "img.png", "mime": "image/png", "size": 9000 }
-            ]
-        }))
+        .json(&json!({ "body": "reply with file", "attachment_ids": [att] }))
         .await;
     assert_eq!(resp.status_code(), 201, "{}", resp.text());
     let reply: Value = resp.json();
     let attachments = reply["attachments"].as_array().unwrap();
     assert_eq!(attachments.len(), 1);
-    assert_eq!(attachments[0]["mime"].as_str(), Some("image/png"));
+    assert_eq!(attachments[0]["mime"].as_str(), Some("text/plain"));
+    assert_eq!(attachments[0]["kind"].as_str(), Some("file"));
 }
 
 #[tokio::test]
@@ -692,7 +729,8 @@ async fn authenticate_user(hub_url: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&challenge.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let verify: VerifyResponse = client
         .post(format!("{hub_url}/auth/verify"))
@@ -821,7 +859,7 @@ async fn alliance_forum_read_through_proxies_to_owning_hub() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "{}", resp.text().await.unwrap());
-    let list: PostListResponse = client
+    let list: Vec<PostSummary> = client
         .get(format!(
             "{hub_a_url}/alliances/{}/channels/{}/posts",
             alliance.id, channel.id
@@ -833,9 +871,9 @@ async fn alliance_forum_read_through_proxies_to_owning_hub() {
         .json()
         .await
         .unwrap();
-    assert_eq!(list.posts.len(), 1);
-    assert_eq!(list.posts[0].id, post.summary.id);
-    assert_eq!(list.posts[0].title.as_deref(), Some("v1.2 notes"));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, post.summary.id);
+    assert_eq!(list[0].title.as_deref(), Some("v1.2 notes"));
 
     // Hub A: get post detail (with the reply) via the proxy.
     let detail: PostDetail = client
@@ -1538,4 +1576,91 @@ async fn a_muted_member_cannot_write_through_the_alliance_proxy() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403);
+}
+
+/// The list pages by the previous page's last post id, and the key covers the
+/// pin: a pinned post with the oldest activity sorts first and must still
+/// appear exactly once across pages.
+#[tokio::test]
+async fn forum_list_pages_by_post_id_across_a_pin() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let mut ids = Vec::new();
+    for title in ["one", "two", "three"] {
+        let detail: PostDetail = server
+            .post(&format!("/channels/{channel_id}/posts"))
+            .add_header("Authorization", format!("Bearer {token}"))
+            .json(&json!({ "title": title, "body": "body" }))
+            .await
+            .json();
+        ids.push(detail.summary.id);
+    }
+    server
+        .post(&format!("/channels/{channel_id}/posts/{}/pin", ids[0]))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await;
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    // Bounded, so an ignored cursor fails the assertion below instead of
+    // looping forever on the same page.
+    for _ in 0..10 {
+        let url = match &cursor {
+            Some(c) => format!("/channels/{channel_id}/posts?limit=1&cursor={c}"),
+            None => format!("/channels/{channel_id}/posts?limit=1"),
+        };
+        let page: Vec<PostSummary> = server
+            .get(&url)
+            .add_header("Authorization", format!("Bearer {token}"))
+            .await
+            .json();
+        let Some(last) = page.last() else { break };
+        cursor = Some(last.id.clone());
+        seen.extend(page.into_iter().map(|p| p.id));
+    }
+    assert_eq!(seen.first(), Some(&ids[0]), "the pinned post comes first");
+    let mut sorted = seen.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(seen.len(), 3, "every post exactly once: {seen:?}");
+    assert_eq!(sorted.len(), 3, "no post twice: {seen:?}");
+}
+
+/// A list or grid view shows the start of a post without opening it: one line
+/// of collapsed whitespace, cut on a character boundary, marked as cut.
+#[tokio::test]
+async fn forum_list_carries_a_bounded_excerpt() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let body = format!(
+        "Line one
+
+  line two {}",
+        "è".repeat(400)
+    );
+    server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "Long", "body": body }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let list: Vec<PostSummary> = server
+        .get(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await
+        .json();
+    let excerpt = list[0].excerpt.as_deref().expect("excerpt");
+    assert!(excerpt.starts_with("Line one line two èèè"));
+    assert!(excerpt.ends_with('…'));
+    assert_eq!(
+        excerpt.chars().count(),
+        wavvon_hub::routes::post_models::EXCERPT_CHARS + 1
+    );
 }

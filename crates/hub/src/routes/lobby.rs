@@ -47,7 +47,8 @@ pub struct SubmitPowRequest {
 
 #[derive(Deserialize)]
 pub struct UpdateLobbySettingsRequest {
-    pub lobby_enabled: bool,
+    #[serde(default)]
+    pub lobby_enabled: Option<bool>,
     #[serde(default)]
     pub welcome_md: Option<String>,
 }
@@ -215,7 +216,7 @@ pub async fn get_welcome(
     }))
 }
 
-/// PUT /hub/settings/lobby
+/// PATCH /admin/settings/lobby
 pub async fn update_lobby_settings(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -224,12 +225,9 @@ pub async fn update_lobby_settings(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(HUB_SETTINGS)?;
 
-    upsert_setting(
-        &state.db,
-        "lobby_enabled",
-        if req.lobby_enabled { "1" } else { "0" },
-    )
-    .await?;
+    if let Some(enabled) = req.lobby_enabled {
+        upsert_setting(&state.db, "lobby_enabled", if enabled { "1" } else { "0" }).await?;
+    }
 
     if let Some(md) = req.welcome_md.as_deref() {
         upsert_setting(&state.db, "lobby_welcome_md", md).await?;

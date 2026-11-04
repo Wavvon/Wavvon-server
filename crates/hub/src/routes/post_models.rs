@@ -16,7 +16,6 @@ pub struct PostRow {
     pub reply_count: i64,
     pub last_activity_at: i64,
     pub deleted_at: Option<i64>,
-    pub attachments: String,
     /// Origin hub public key hex when authored via the alliance forum
     /// write-proxy (forum.md §9); `None` for locally-authored posts.
     pub author_hub: Option<String>,
@@ -32,7 +31,6 @@ pub struct ReplyRow {
     pub edited_at: Option<i64>,
     pub reply_to_id: Option<String>,
     pub deleted_at: Option<i64>,
-    pub attachments: String,
     /// Origin hub public key hex when authored via the alliance forum
     /// write-proxy (forum.md §9); `None` for locally-authored replies.
     pub author_hub: Option<String>,
@@ -49,14 +47,7 @@ pub struct ReactionCount {
     pub me: bool,
 }
 
-/// File attachment metadata stored as JSON in the DB.
-#[derive(Serialize, Deserialize, Clone, Debug, sqlx::FromRow)]
-pub struct Attachment {
-    pub url: String,
-    pub name: String,
-    pub mime: String,
-    pub size: i64,
-}
+pub use crate::attachments::AttachmentRef;
 
 // ── Post tags (forum.md §10) ────────────────────────────────────────────────
 
@@ -120,6 +111,10 @@ pub struct PostSummary {
     pub channel_id: String,
     pub author_pubkey: Option<String>,
     pub title: Option<String>,
+    /// The start of the body, for list and grid views; absent on a deleted
+    /// post and on older hubs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited_at: Option<i64>,
@@ -133,7 +128,7 @@ pub struct PostSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unread_reply_count: Option<i64>,
     pub reactions: Vec<ReactionCount>,
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<AttachmentRef>,
     /// Origin hub public key hex when this post came in through the alliance
     /// forum write-proxy (forum.md §9 "Proxied writes"); `None` for
     /// locally-authored posts. Hub-asserted, not cryptographically proven --
@@ -173,19 +168,11 @@ pub struct ReplyView {
     pub reply_to_id: Option<String>,
     pub is_deleted: bool,
     pub reactions: Vec<ReactionCount>,
-    pub attachments: Vec<Attachment>,
+    pub attachments: Vec<AttachmentRef>,
     /// Origin hub public key hex when this reply came in through the
     /// alliance forum write-proxy; see `PostSummary::author_hub`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_hub: Option<String>,
-}
-
-/// Paged list of posts.
-#[derive(Serialize, Deserialize)]
-pub struct PostListResponse {
-    pub posts: Vec<PostSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
 }
 
 /// Create a new post.
@@ -193,8 +180,12 @@ pub struct PostListResponse {
 pub struct CreatePostRequest {
     pub title: String,
     pub body: String,
+    /// Ids from `POST /channels/{id}/upload`. Outside URLs are no longer taken.
     #[serde(default)]
-    pub attachments: Option<Vec<Attachment>>,
+    pub attachment_ids: Vec<String>,
+    /// The retired form; see `SendMessageRequest::attachments`.
+    #[serde(default)]
+    pub attachments: Option<Vec<serde_json::Value>>,
     /// Tag ids to assign at creation (forum.md §10.2). Every id must belong
     /// to this channel's tag set; capped at 5; enforced against
     /// `forum_require_tag` on the channel.
@@ -222,21 +213,16 @@ pub struct CreateReplyRequest {
     #[serde(default)]
     pub reply_to_id: Option<String>,
     #[serde(default)]
-    pub attachments: Option<Vec<Attachment>>,
+    pub attachment_ids: Vec<String>,
+    /// The retired form; see `SendMessageRequest::attachments`.
+    #[serde(default)]
+    pub attachments: Option<Vec<serde_json::Value>>,
 }
 
 /// Edit a reply body.
 #[derive(Deserialize)]
 pub struct EditReplyRequest {
     pub body: String,
-}
-
-/// FTS search results for a forum channel.
-#[derive(Serialize, Deserialize)]
-pub struct PostSearchResponse {
-    pub results: Vec<PostSearchHit>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<String>,
 }
 
 /// A single FTS hit (may be from a post body/title or a reply body).
@@ -253,7 +239,7 @@ pub struct PostSearchHit {
 /// Cursor parameters for post list pagination.
 #[derive(Deserialize, Default)]
 pub struct PostListParams {
-    /// Opaque cursor: "last_activity_at:id" of the last seen post.
+    /// The id of the last post of the previous page.
     #[serde(default)]
     pub cursor: Option<String>,
     #[serde(default)]
@@ -273,10 +259,14 @@ pub struct ReplyListParams {
     pub limit: Option<i64>,
 }
 
-/// Search query parameter.
+/// Search query, paged like every list: `cursor` is the last hit's `post_id`.
 #[derive(Deserialize)]
 pub struct SearchParams {
     pub q: Option<String>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
 }
 
 // ── Federation: proxied writes (forum.md §9 phase 2) ────────────────────────
@@ -330,11 +320,15 @@ pub struct FederatedRetractRequest {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn parse_attachments(json: &str) -> Vec<Attachment> {
-    if json.is_empty() || json == "[]" {
-        return Vec::new();
+/// Longest excerpt, in characters: two lines of a grid card, with room to spare.
+pub const EXCERPT_CHARS: usize = 240;
+
+fn excerpt(body: &str) -> String {
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}…", flat[..cut].trim_end()),
+        None => flat,
     }
-    serde_json::from_str(json).unwrap_or_default()
 }
 
 /// Convert a PostRow to a PostSummary. `viewer_can_moderate` controls whether
@@ -345,6 +339,7 @@ pub fn post_to_summary(
     viewer_can_moderate: bool,
     reactions: Vec<ReactionCount>,
     tags: Vec<TagRef>,
+    attachments: Vec<AttachmentRef>,
 ) -> PostSummary {
     let is_deleted = row.deleted_at.is_some();
     PostSummary {
@@ -360,6 +355,7 @@ pub fn post_to_summary(
         } else {
             Some(row.title.clone())
         },
+        excerpt: (!is_deleted).then(|| excerpt(&row.body)),
         created_at: row.created_at,
         edited_at: row.edited_at,
         is_pinned: row.is_pinned,
@@ -369,7 +365,7 @@ pub fn post_to_summary(
         is_deleted,
         unread_reply_count: None,
         reactions,
-        attachments: parse_attachments(&row.attachments),
+        attachments,
         author_hub: if is_deleted && !viewer_can_moderate {
             None
         } else {
@@ -384,6 +380,7 @@ pub fn reply_to_view(
     row: &ReplyRow,
     viewer_can_moderate: bool,
     reactions: Vec<ReactionCount>,
+    attachments: Vec<AttachmentRef>,
 ) -> ReplyView {
     let is_deleted = row.deleted_at.is_some();
     ReplyView {
@@ -404,7 +401,7 @@ pub fn reply_to_view(
         reply_to_id: row.reply_to_id.clone(),
         is_deleted,
         reactions,
-        attachments: parse_attachments(&row.attachments),
+        attachments,
         author_hub: if is_deleted && !viewer_can_moderate {
             None
         } else {

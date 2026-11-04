@@ -297,7 +297,7 @@ pub struct IssuedBadgeResponse {
     pub expires_at: Option<i64>,
 }
 
-/// POST /admin/badges/issue
+/// POST /admin/badges/issued
 ///
 /// Fetches the recipient hub's /info, builds the badge payload, signs it
 /// with our hub keypair, POSTs it to the recipient's /federation/badge-offer,

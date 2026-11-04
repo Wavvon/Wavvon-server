@@ -56,7 +56,8 @@ async fn authenticate_http(base: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&resp.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))
@@ -254,7 +255,7 @@ async fn joining_spawner_voice_creates_temp_sibling() {
         Some(member.public_key_hex().as_str())
     );
     assert_eq!(temp.name, "Alice's room");
-    assert_eq!(temp.channel_type, "text");
+    assert_eq!(temp.channel_type, "voice");
 
     let _ = tx.send(TsMessage::Close(None)).await;
 }

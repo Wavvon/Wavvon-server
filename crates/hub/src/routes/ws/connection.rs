@@ -26,6 +26,7 @@ pub(super) async fn handle_socket(
     public_key: String,
     mini_app_channel_id: Option<String>,
     alliance_voice_channel: Option<String>,
+    streams_on_request: bool,
 ) {
     // ── Connection setup ─────────────────────────────────────────────────────
 
@@ -195,6 +196,7 @@ pub(super) async fn handle_socket(
         subscribed,
         my_conversations,
     );
+    cs.streams_on_request = streams_on_request;
 
     // Push in-progress screen shares to this client.
     {
@@ -219,6 +221,9 @@ pub(super) async fn handle_socket(
                 let _ = ws_tx.send(Message::Text(json.into())).await;
                 cs.notified_streams
                     .insert((ch_id.clone(), stream_id.clone()));
+                if cs.streams_on_request {
+                    continue;
+                }
                 if let Some(init_bytes) = &meta.init_chunk {
                     let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
                         channel_id: ch_id.clone(),
@@ -302,12 +307,6 @@ pub(super) async fn handle_socket(
                                 if let Some(ref vtp) = m.visible_to_pubkey {
                                     if vtp != &cs.public_key { continue; }
                                 }
-                            }
-                            // v2 signaling: targeted to to_pubkey only.
-                            if let crate::routes::chat_models::ChatEvent::ScreenShareSignal {
-                                to_pubkey, ..
-                            } = &event {
-                                if to_pubkey != &cs.public_key { continue; }
                             }
                             // StreamSubscriptionEnded: targeted.
                             if let crate::routes::chat_models::ChatEvent::StreamSubscriptionEnded {
@@ -480,8 +479,9 @@ pub(super) async fn handle_socket(
                         WsServerMessage::VoiceParticipantJoined { .. }
                             | WsServerMessage::VoiceParticipantLeft { .. }
                     );
-                    let in_same_channel =
-                        cs.voice_channel.as_deref() == Some(channel_id.as_str());
+                    let in_same_channel = cs.voice_channel.as_deref()
+                        == Some(channel_id.as_str())
+                        || cs.watched_voice_channel.as_deref() == Some(channel_id.as_str());
                     if is_roster_event || (in_same_channel && !is_self) {
                         let json = serde_json::to_string(&msg).unwrap();
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {
@@ -560,7 +560,15 @@ pub(super) async fn handle_socket(
                                 .map(|m| (m.sharer_pubkey.clone(), m.kind.clone(), m.mime.clone(), m.has_audio));
                             (cross, meta)
                         };
-                        if in_channel || is_cross_subscriber {
+                        // On request, only what this connection opened; otherwise
+                        // every stream of its channels, as before (#276).
+                        let deliver = if cs.streams_on_request {
+                            ev.sharer_pubkey != cs.public_key
+                                && cs.opened_streams.contains(&(ev.channel_id.clone(), ev.stream_id.clone()))
+                        } else {
+                            in_channel || is_cross_subscriber
+                        };
+                        if deliver {
                             // Guarantee screen_share_started arrives before the
                             // first chunk for this stream, regardless of the order
                             // the hub processes the sharer's messages.
@@ -700,10 +708,9 @@ pub(super) async fn handle_socket(
             }
         });
 
-        // Remove the disconnecting user as a viewer/subscriber from all
+        // Remove the disconnecting user as a cross-channel subscriber from all
         // remaining shares (they may have been watching someone else's share).
         for active in shares.values_mut() {
-            active.viewers.remove(&public_key);
             active.cross_channel_subscribers.remove(&public_key);
         }
 
@@ -878,7 +885,7 @@ async fn dispatch_client_msg(
                     })
                     .unwrap_or(false);
             if visible {
-                cs.voice_channel = Some(channel_id);
+                cs.watched_voice_channel = Some(channel_id);
             }
             DispatchResult::Continue
         }
@@ -898,7 +905,7 @@ async fn dispatch_client_msg(
             DispatchResult::Continue
         }
         WsClientMessage::VoiceUnwatch => {
-            cs.voice_channel = None;
+            cs.watched_voice_channel = None;
             DispatchResult::Continue
         }
         WsClientMessage::VoiceLeave { .. } => voice::handle_voice_leave(cs, state, msg).await,
@@ -941,21 +948,6 @@ async fn dispatch_client_msg(
         }
         WsClientMessage::ScreenShareStop { .. } => {
             screen::handle_screen_share_stop(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareViewerJoin { .. } => {
-            screen::handle_screen_share_viewer_join(cs, state, ws_tx, msg).await
-        }
-        WsClientMessage::ScreenShareViewerLeave { .. } => {
-            screen::handle_screen_share_viewer_leave(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareOffer { .. } => {
-            screen::handle_screen_share_offer(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareAnswer { .. } => {
-            screen::handle_screen_share_answer(cs, state, msg).await
-        }
-        WsClientMessage::ScreenShareIce { .. } => {
-            screen::handle_screen_share_ice(cs, state, msg).await
         }
         WsClientMessage::StreamList => screen::handle_stream_list(cs, state, ws_tx).await,
         WsClientMessage::StreamSubscribe { .. } => {

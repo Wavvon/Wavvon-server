@@ -208,7 +208,7 @@ async fn dm_history_is_limited_and_pages_backwards() {
         .collect();
     assert!(stamps.windows(2).all(|w| w[0] <= w[1]), "ascending by time");
 
-    // Walking `before` backwards must cover the history exactly once. The
+    // Walking `cursor` backwards must cover the history exactly once. The
     // keyset tiebreaks on the message id (a uuid), so messages sharing a
     // one-second `created_at` have an arbitrary but *stable* relative order —
     // enough for gap-free paging, which is what is asserted here.
@@ -217,12 +217,14 @@ async fn dm_history_is_limited_and_pages_backwards() {
         .map(|m| m["content"].as_str().unwrap().to_string())
         .collect();
     let mut cursor = page[0]["id"].as_str().unwrap().to_string();
-    loop {
+    // Bounded, so an ignored cursor fails the assertion below instead of
+    // looping forever on the same page.
+    for _ in 0..10 {
         let older = server
             .get(&format!("/conversations/{conv_id}/messages"))
             .authorization_bearer(&token)
             .add_query_param("limit", "10")
-            .add_query_param("before", cursor.as_str())
+            .add_query_param("cursor", cursor.as_str())
             .await
             .json::<Vec<serde_json::Value>>();
         if older.is_empty() {
@@ -255,9 +257,9 @@ async fn dm_history_non_member_is_still_rejected() {
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
 
-/// Channel history pages with the dialect's `cursor`, and `before` keeps
-/// working for clients that predate it (Wavvon-server#172). A thread pages
-/// forward with the same parameter instead of stopping at one page.
+/// Channel history pages with the dialect's `cursor` (Wavvon-server#172). A
+/// thread pages forward with the same parameter instead of stopping at one
+/// page.
 #[tokio::test]
 async fn channel_history_and_threads_page_with_cursor() {
     let (server, token) = common::setup_with_owner().await;
@@ -322,12 +324,6 @@ async fn channel_history_and_threads_page_with_cursor() {
     let mut expected: Vec<String> = posted.iter().chain(&replies).cloned().collect();
     expected.reverse();
     assert_eq!(walked, expected, "newest first, no gaps or repeats");
-
-    assert_eq!(
-        page(format!("limit=3&before={}", expected[2])).await,
-        page(format!("limit=3&cursor={}", expected[2])).await,
-        "before is the same cursor"
-    );
 
     let first = page(format!("thread_root={root}&limit=2")).await;
     assert_eq!(first, replies[..2]);

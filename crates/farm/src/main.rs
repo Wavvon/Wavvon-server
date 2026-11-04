@@ -20,6 +20,7 @@ struct SavedFarmIdentity {
 
 fn load_or_create_keypair(path: &Path) -> Result<(SigningKey, bool)> {
     if path.exists() {
+        wavvon_identity::restrict_secret(path);
         let json = std::fs::read_to_string(path).context("Failed to read farm_identity.json")?;
         let saved: SavedFarmIdentity =
             serde_json::from_str(&json).context("Failed to parse farm_identity.json")?;
@@ -36,7 +37,7 @@ fn load_or_create_keypair(path: &Path) -> Result<(SigningKey, bool)> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("Failed to create identity directory")?;
         }
-        std::fs::write(path, serde_json::to_string_pretty(&saved)?)
+        wavvon_identity::write_secret(path, serde_json::to_string_pretty(&saved)?)
             .context("Failed to write farm_identity.json")?;
         Ok((keypair, true))
     }
@@ -248,11 +249,11 @@ async fn main() -> Result<()> {
     wavvon_farm::monitor::spawn(state.clone());
 
     let app = server::create_router_with_cors(state, &cfg.cors_origins);
-    let addr: std::net::SocketAddr = format!("0.0.0.0:{http_port}").parse()?;
+    let listener = tokio::net::TcpListener::from_std(dual_stack_listener(http_port)?)?;
     tracing::info!(
-        "Farm server listening on http://0.0.0.0:{http_port} (set WAVVON_FARM_URL for the external URL)"
+        "Farm server listening on http://{} (set WAVVON_FARM_URL for the external URL)",
+        listener.local_addr()?
     );
-    let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app.into_make_service()).await?;
 
     if let Some(provider) = otlp_provider {
@@ -260,4 +261,32 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// IPv6 and IPv4 on one socket, as the hub does (Wavvon-server#280): binding
+/// `0.0.0.0` alone leaves IPv6 clients unanswered. Falls back to IPv4 only on
+/// a host without IPv6.
+fn dual_stack_listener(port: u16) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    let bind = |ip: IpAddr| -> std::io::Result<std::net::TcpListener> {
+        let addr = SocketAddr::new(ip, port);
+        let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+        if ip.is_ipv6() {
+            socket.set_only_v6(false)?;
+        }
+        #[cfg(unix)]
+        socket.set_reuse_address(true)?;
+        socket.bind(&addr.into())?;
+        socket.listen(1024)?;
+        socket.set_nonblocking(true)?;
+        Ok(socket.into())
+    };
+    match bind(IpAddr::V6(Ipv6Addr::UNSPECIFIED)) {
+        Err(e) if e.kind() != std::io::ErrorKind::AddrInUse => {
+            tracing::warn!("IPv6 unavailable ({e}); listening on IPv4 only");
+            bind(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+        }
+        r => r,
+    }
 }

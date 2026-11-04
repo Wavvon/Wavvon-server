@@ -85,8 +85,9 @@ impl FromRequestParts<Arc<AppState>> for PeerHub {
 }
 
 /// Paths that pending (not-yet-approved) users are allowed to hit.
-/// They can see their own status at /me and nothing else.
-const PENDING_ALLOWED_PATHS: &[&str] = &["/me"];
+/// They can see their own status at /me, and fill or follow the hub's join
+/// application (join-forms.md), and nothing else.
+const PENDING_ALLOWED_PATHS: &[&str] = &["/me", "/application", "/application/status"];
 
 /// Paths a `scope: "lobby"` session may reach (lobby-survey.md Feature
 /// 1). Everything else 403s — "anything not explicitly allowed for lobby
@@ -444,16 +445,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                 ));
             };
 
-            // Reject revoked keys.
-            let revoked_count: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM subkey_revocations WHERE subkey_pubkey = $1",
-            )
-            .bind(&pk)
-            .fetch_one(&state.db)
-            .await
-            .unwrap_or(0);
-
-            if revoked_count > 0 {
+            if crate::auth::handlers::session_is_revoked(&state.db, token, &pk).await? {
                 return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
             }
 

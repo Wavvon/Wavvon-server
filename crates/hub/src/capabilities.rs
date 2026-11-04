@@ -17,6 +17,8 @@
 //! than silently. The list only ever grows — a removed string means every
 //! older client stops offering the feature, which is a breaking change and
 //! waits for a major (decisions.md, "Wire changes are additive").
+//! The one exception was the pre-1.0 prune (Wavvon-server#198): strings
+//! every hub a 1.0 client can meet advertises, and no client tested, went.
 //!
 //! Keep it sorted; the test below enforces that so two features added in
 //! parallel conflict in the merge instead of landing twice.
@@ -26,6 +28,16 @@
 /// Seeded with the cases where a newer client would otherwise call an
 /// endpoint an older hub does not have, or silently get a worse answer.
 pub const CAPABILITIES: &[&str] = &[
+    // The join application (join-forms.md): `GET /application` serves the
+    // form to anyone, a pending joiner submits it and follows its decision,
+    // and moderators read it and reject with a reason. Gated so a client
+    // offers the form only where the hub will take it.
+    "admission.application",
+    // A new identity arriving from the address a banned one last used is
+    // seated pending, and `GET /hub/pending` names the banned identity in
+    // `ban_evasion_match`. Gated so a client shows the hint only where the
+    // field can be present; on an older hub its absence means nothing.
+    "admission.banevasion",
     // `GET /alliances/{id}/people` lists the members of one allied hub who
     // opted in (`PATCH /me` `findable_by_allies`) under an alliance whose
     // manager allowed it (`PUT /alliances/{id}/people-visibility`). Gated so a
@@ -49,12 +61,17 @@ pub const CAPABILITIES: &[&str] = &[
     // here, in beta, because the alternative is an admin panel that looks
     // alive and cannot work.
     "apps.register",
-    // Every channel in `GET /channels` carries `can_move_members`: the
-    // caller's own `voice.move_members` there, resolved channel-scoped. A
-    // client that does not see this string has no way to know which
-    // destinations it may offer, so its move picker keeps listing them all and
-    // the refusal arrives when the move is issued.
-    "channels.move.targets",
+    // Attachments are uploaded first (`POST /channels/{id}/upload`), stored on
+    // disk and sent as `attachment_ids`; messages, posts and replies carry
+    // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
+    // it takes inline `attachments` only, so a client hides the attach button.
+    "attachments.stored",
+    // Voice works only in `voice` channels (decisions.md, "Voice lives in
+    // voice channels"): the hub refuses a voice join, a voice move, an AFK
+    // channel or an alliance voice grant anywhere else, and a text channel
+    // can be switched to voice and back. A client that does not see this
+    // string keeps offering voice in every channel, as such a hub allows.
+    "channels.voice",
     // Adding a member to a group DM, or leaving one, takes the actor's
     // signature (`signed`), and the hub carries the change to the other
     // members' hubs. Gated so a client signs only where the change will be
@@ -64,6 +81,10 @@ pub const CAPABILITIES: &[&str] = &[
     // sign it with its subkey. Gated because an older hub verifies the
     // signature against the canonical key alone and refuses the send.
     "dms.plaintext.signercert",
+    // `PATCH /hub` takes `landing_image` and `landing_colors`, and the
+    // invite preview carries them with `description` and `online_count`.
+    // An admin page must not offer fields an older hub would silently drop.
+    "hub.landing",
     // `DELETE /me` — a member can remove themselves from the hub: profile and
     // roles cleared, the pubkey kept as the anchor moderation and message
     // history point at. Gated because a client must not offer "leave this
@@ -77,23 +98,17 @@ pub const CAPABILITIES: &[&str] = &[
     // the admin believed they had named someone, which is the one failure
     // this feature exists to prevent.
     "invites.bound",
-    // `GET /invites` hides the invites that can no longer admit anyone and
-    // carries `status` (`live`, `expired`, `used_up`) on the ones it shows;
-    // `?include_inactive=true` asks for the history. A client that cannot see
-    // this string is talking to a hub that returns every row ever minted and
-    // no status, so it must keep working the answer out from `uses`,
-    // `max_uses` and `expires_at` itself.
-    "invites.status",
-    // `/info` carries `max_attachment_bytes` and hub admin can change it. A
-    // client that does not see this string is talking to a hub whose cap is a
-    // compile-time 3 MB, so it must keep using its own constant rather than
-    // trusting a field that will not be there.
-    "limits.attachments",
     // `GET /users`, `GET /conversations/{id}/messages` and `GET
     // /admin/reports` honour `limit` + a keyset `cursor`. Without this the
     // hub ignores both and returns one truncated page — a client that pages
     // to exhaustion against an older hub sees a short list, not an error.
     "list.cursor",
+    // `limit` + keyset `cursor` on the admin lists that grow with the hub:
+    // `GET /hub/members` and `/admin/banlist/entries` (both used to stop at
+    // 1000 rows without saying so), `/admin/certs` and
+    // `/admin/survey/responses`. A client walking pages against a hub that
+    // does not advertise this would get the same first page forever.
+    "list.cursor.admin",
     // The same `limit` + keyset `cursor` dialect on the rest of the lists that
     // grow with use: `GET /moderation/bans`, `/moderation/mutes`, `/invites`,
     // `/hub/pending`, `/conversations`, `/channels/{id}/pins` and
@@ -102,9 +117,9 @@ pub const CAPABILITIES: &[&str] = &[
     // advertising only `list.cursor` would page an endpoint that ignores the
     // cursor and hand back the first page over and over.
     "list.cursor.lists",
-    // Device pairing: subkey certs presented at `/auth/verify`, and the
-    // ECIES-wrapped canonical DH material a paired device needs for DMs.
-    "pairing.subkey",
+    // A message may carry `masquerade { name, avatar_url }`, shown instead
+    // of the sender's own, with the real sender beside it (bridges, webhooks).
+    "messages.masquerade",
     // The permission catalogue is served by the hub and no longer copied into
     // each client: GET /permissions lists every id with its scope, and
     // GET /users/{pubkey}/permissions/why explains one answer. A client that
@@ -113,34 +128,43 @@ pub const CAPABILITIES: &[&str] = &[
     // the two spellings share no ids, and there is no dual-reading period
     // (permissions.md §6).
     "permissions.catalogue",
-    // Recovery contacts: signed `wavvon/recovery-request/v1` and
-    // `wavvon/recovery-attestation/v1` envelopes and the endpoints behind
-    // them.
-    "recovery.attestation",
-    // WebRTC screen-share v2 signalling (SDP/ICE relay). Mirrors the older
-    // `screen_share_v2` boolean, which stays for clients that read it.
-    "screenshare.v2",
+    // `GET /recovery/requests/to-attest` lists the open rotation requests
+    // that name the caller as a recovery contact, and a
+    // `recovery_attestation_requested` WebSocket event says when one opens.
+    // A client that does not see this string has only the request id the
+    // person recovering sends by other means, so it must keep that field.
+    "recovery.attest.requests",
+    // `/info` and `GET /hub/settings` carry `stream_limits` (max width, height,
+    // fps, kbps; each absent when uncapped), `PATCH /hub` sets them, and a
+    // `screen_share_start` declaring more is refused (#278). An older hub has
+    // no caps to show and ignores the declared values.
+    "screenshare.limits",
+    // A WebSocket opened with `?streams=on_request` receives a stream's bytes
+    // only after opening it with `stream_subscribe`, in its own voice channel
+    // too, and `stream_unsubscribe` closes it again (#276). Gated so a client
+    // asks for it only to a hub that will honour it; an older hub pushes every
+    // stream of the channel to everyone in it.
+    "screenshare.onrequest",
+    // Sticker packs, copies fetched from the hub that published them, and
+    // `sticker_id` on a message (stickers.md). Gated so a client offers the
+    // picker only where `POST /channels/{id}/stickers` exists.
+    "stickers",
     // A member of an allied hub can join voice in a channel this hub shares
     // with that alliance: the mint route on their hub, the grant field on
     // `/auth/verify` here, and the visitor scope behind it (alliances.md).
     // Gated because a client that cannot see this string must not offer a
     // voice affordance on an alliance channel it would then fail to join.
     "voice.alliance",
-    // `pong` carries `outbound_loss_pct`: the relay counts gaps in the
-    // sender's own cleartext `ctr` sequence, which is the only place outbound
-    // loss can be measured at all. Gated because a client that cannot tell
-    // "this hub does not report it" from "loss is zero" would show a
-    // reassuring 0.0% against every older hub.
-    "voice.loss",
-    // Voice admission is its own permission, `voice.join`, independent of
-    // `read_messages` in both directions (permissions.md §3, Voice). Two
-    // things a client may only do once it sees this string: offer `voice.join`
-    // as a channel overwrite — an older hub's validator rejects the id as
-    // unknown — and stop treating a read deny as though it also closed voice,
-    // because on this hub it does not. Named for the shape the alliance work
-    // uses (`alliance.permissions`), not for the permission id, which is a
-    // different namespace that happens to read the same.
-    "voice.permissions",
+    // `voice_hands` (who has a hand up, to everyone in the room) and
+    // `voice_talk_granted` over the WebSocket. Without them a moderator only
+    // learns of a raised hand by polling, and the member granted the floor
+    // never learns it, so a client offers the raise-hand flow only here.
+    "voice.hands",
+    // `voice.screen_share` and `voice.camera` are separate grants from
+    // `voice.join` (#277). A client may hide the share and camera buttons where
+    // the member lacks them only on a hub that says so; an older hub gates
+    // both on `voice.join` alone.
+    "voice.media.permissions",
     // `min_talk_power` gates transmitting, not joining, and the floor is
     // granted by a moderator rather than taken with `raise-hand`. Two things
     // a client may only do once it sees this string: read `may_speak` on
@@ -149,19 +173,11 @@ pub const CAPABILITIES: &[&str] = &[
     // this — and offer the grant route, which an older hub answers 404. On an
     // older hub a raised hand is still how the threshold is cleared.
     "voice.talk",
-    // Voice over WebTransport/QUIC with E2E sender keys (voice-transport-v2).
-    // The raw-UDP and `/voice/ws` relays it replaced are gone, so a client
-    // that does not see this string has no voice path to this hub at all.
-    "voice.wt",
     // Webhook deliveries (app dispatch, outgoing webhooks) carry
     // `X-Wavvon-Signature-V1` over the timestamp and the body. Advertised so a
     // program can tell a hub that never sends it from a replayed request
     // stripped of it, and refuse the second.
     "webhooks.signedtimestamp",
-    // The WS answers `ping` with `pong`, echoing the nonce. Without this a
-    // client measuring latency would wait for a reply that never comes and
-    // show a dead "—" forever, so the readout has to be gated on it.
-    "ws.ping",
 ];
 
 #[cfg(test)]

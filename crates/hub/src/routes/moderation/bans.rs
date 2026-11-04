@@ -96,6 +96,10 @@ pub async fn ban_user(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    crate::ban_evasion::flag_banned(&state.db, &req.target_public_key, expires_at, now)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
     // Delete their sessions so they're immediately logged out
     sqlx::query("DELETE FROM sessions WHERE public_key = $1")
         .bind(&req.target_public_key)
@@ -154,6 +158,9 @@ pub async fn unban_user(
     sqlx::query("DELETE FROM bans WHERE target_public_key = $1")
         .bind(&target_key)
         .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::ban_evasion::unflag(&state.db, &target_key)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 

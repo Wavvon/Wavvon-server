@@ -48,7 +48,8 @@ async fn authenticate_http(base: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&resp.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))
@@ -431,4 +432,367 @@ async fn multiple_concurrent_sharers_allowed() {
     let chunk_env = next_text(&mut viewer_rx).await;
     assert_eq!(chunk_env["type"], "screen_share_chunk");
     assert_ne!(chunk_env["type"], "error", "No error from Bob's share");
+}
+
+/// Wait for a text frame of the given `type`, skipping everything else.
+async fn wait_for_type(
+    rx: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    ty: &str,
+) -> Value {
+    loop {
+        let v = next_text(rx).await;
+        if v["type"] == ty {
+            return v;
+        }
+    }
+}
+
+async fn revoke_from_everyone(state: &AppState, perm: &str) {
+    sqlx::query(
+        "DELETE FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = $1",
+    )
+    .bind(perm)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
+/// `voice.screen_share` is its own grant (#277): revoked from @everyone, a
+/// member who may still join voice is refused a share, and nobody sees it.
+#[tokio::test]
+async fn screen_share_needs_its_own_permission() {
+    let (base, state, _guard) = start_hub().await;
+    // The owner bypasses every check, so the act is a second member's.
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &owner_token, "general").await;
+    let sharer_token = authenticate_http(&base, &Identity::generate()).await;
+    revoke_from_everyone(&state, "voice.screen_share").await;
+
+    let (mut tx, mut rx) = connect_ws(&base, &sharer_token).await;
+    send_text(&mut tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    send_text(
+        &mut tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-denied",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+
+    let err = wait_for_type(&mut rx, "error").await;
+    assert_eq!(err["context"], "screen_share_start");
+    assert!(state.screen_shares.read().await.is_empty());
+}
+
+/// `voice.camera` likewise (#277): in the call, but refused a camera.
+#[tokio::test]
+async fn camera_needs_its_own_permission() {
+    let (base, state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let room: ChannelResponse = reqwest::Client::new()
+        .post(format!("{base}/channels"))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "name": "room", "channel_type": "voice" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = authenticate_http(&base, &Identity::generate()).await;
+    revoke_from_everyone(&state, "voice.camera").await;
+
+    let (mut tx, mut rx) = connect_ws(&base, &token).await;
+    send_text(
+        &mut tx,
+        json!({ "type": "voice_join", "channel_id": room.id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for_type(&mut rx, "voice_joined").await;
+    send_text(
+        &mut tx,
+        json!({ "type": "video_enable", "channel_id": room.id }),
+    )
+    .await;
+
+    let err = wait_for_type(&mut rx, "error").await;
+    assert_eq!(err["context"], "video_enable");
+    assert!(state
+        .video_channels
+        .read()
+        .await
+        .get(&room.id)
+        .is_none_or(|set| set.is_empty()));
+}
+
+/// Ping and return the first text frame, so a test can tell whether anything
+/// was queued for this connection before the pong.
+async fn first_after_ping(
+    tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TsMessage,
+    >,
+    rx: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+) -> Value {
+    send_text(tx, json!({ "type": "ping", "nonce": 7 })).await;
+    next_text(rx).await
+}
+
+async fn send_chunk(
+    tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TsMessage,
+    >,
+    channel_id: &str,
+    seq: u64,
+    bytes: &[u8],
+) {
+    send_text(
+        tx,
+        json!({
+            "type": "screen_share_chunk",
+            "channel_id": channel_id,
+            "stream_id": "s-req",
+            "seq": seq,
+            "is_init": seq == 0,
+        }),
+    )
+    .await;
+    tx.send(TsMessage::Binary(bytes.to_vec())).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
+
+/// #276: a connection that was opened with `?streams=on_request` hears that a stream
+/// started, but gets its bytes only between `stream_subscribe` and
+/// `stream_unsubscribe` -- in its own channel too.
+#[tokio::test]
+async fn streams_on_request_flow_only_once_opened() {
+    let (base, _state, _guard) = start_hub().await;
+    let sharer_token = authenticate_http(&base, &Identity::generate()).await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &sharer_token, "general").await;
+
+    let (mut viewer_tx, mut viewer_rx) =
+        connect_ws(&base, &format!("{viewer_token}&streams=on_request")).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+
+    let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-req",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    let started = next_text(&mut viewer_rx).await;
+    assert_eq!(started["type"], "screen_share_started");
+
+    send_chunk(&mut sharer_tx, &ch.id, 0, b"INIT").await;
+    send_chunk(&mut sharer_tx, &ch.id, 1, b"ONE").await;
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong",
+        "nothing flows before the stream is opened"
+    );
+
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "stream_subscribe", "source_channel_id": ch.id, "stream_id": "s-req" }),
+    )
+    .await;
+    assert_eq!(next_text(&mut viewer_rx).await["type"], "stream_subscribed");
+    assert_eq!(next_text(&mut viewer_rx).await["is_init"], true);
+    assert!(matches!(next_raw(&mut viewer_rx).await, TsMessage::Binary(b) if &b[..] == b"INIT"));
+
+    send_chunk(&mut sharer_tx, &ch.id, 2, b"TWO").await;
+    assert_eq!(next_text(&mut viewer_rx).await["seq"], 2);
+    assert!(matches!(next_raw(&mut viewer_rx).await, TsMessage::Binary(b) if &b[..] == b"TWO"));
+
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "stream_unsubscribe", "source_channel_id": ch.id, "stream_id": "s-req" }),
+    )
+    .await;
+    send_chunk(&mut sharer_tx, &ch.id, 3, b"THREE").await;
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong",
+        "nothing flows after the stream is closed"
+    );
+}
+
+/// #276: a late joiner on request is told about the stream but is not handed
+/// its init segment until it opens it.
+#[tokio::test]
+async fn streams_on_request_late_joiner_gets_no_init() {
+    let (base, _state, _guard) = start_hub().await;
+    let sharer_token = authenticate_http(&base, &Identity::generate()).await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &sharer_token, "general").await;
+
+    let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-req",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    send_chunk(&mut sharer_tx, &ch.id, 0, b"INIT").await;
+
+    let (mut viewer_tx, mut viewer_rx) =
+        connect_ws(&base, &format!("{viewer_token}&streams=on_request")).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut viewer_rx).await["type"],
+        "screen_share_started"
+    );
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong"
+    );
+}
+
+/// #282: knowing a channel id and a stream id is not access. A member who can
+/// neither read the source channel nor join its voice is refused the stream.
+#[tokio::test]
+async fn stream_subscribe_needs_access_to_the_source_channel() {
+    let (base, state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &owner_token, "private").await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    revoke_from_everyone(&state, "messages.read").await;
+    revoke_from_everyone(&state, "voice.join").await;
+
+    let (mut owner_tx, _owner_rx) = connect_ws(&base, &owner_token).await;
+    send_text(
+        &mut owner_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-private",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!state.screen_shares.read().await.is_empty());
+
+    let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "stream_subscribe", "source_channel_id": ch.id, "stream_id": "s-private" }),
+    )
+    .await;
+    let reply = next_text(&mut viewer_rx).await;
+    assert_eq!(reply["type"], "error");
+    assert_eq!(reply["context"], "stream_subscribe");
+}
+
+/// #278: a hub caps the quality a share may declare. The cap is public on
+/// `/info`, a share above it is refused, one within it or declaring nothing
+/// (an older client) goes ahead.
+#[tokio::test]
+async fn stream_limits_are_public_and_enforced() {
+    let (base, state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &owner_token, "general").await;
+    let http = reqwest::Client::new();
+
+    let res = http
+        .patch(format!("{base}/hub"))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "stream_limits": { "max_height": 1080, "max_fps": 60 } }))
+        .send()
+        .await
+        .unwrap();
+    assert!(res.status().is_success(), "{}", res.status());
+    let info: Value = http
+        .get(format!("{base}/info"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        info["stream_limits"],
+        json!({ "max_height": 1080, "max_fps": 60 })
+    );
+
+    let token = authenticate_http(&base, &Identity::generate()).await;
+    let (mut tx, mut rx) = connect_ws(&base, &token).await;
+    let start = |id: &str, extra: Value| {
+        let mut m = json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": id,
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        });
+        m.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        m
+    };
+
+    send_text(&mut tx, start("s-4k", json!({ "height": 2160, "fps": 60 }))).await;
+    let err = wait_for_type(&mut rx, "error").await;
+    assert_eq!(err["context"], "screen_share_start");
+    assert!(state.screen_shares.read().await.is_empty());
+
+    send_text(&mut tx, start("s-ok", json!({ "height": 1080, "fps": 60 }))).await;
+    send_text(&mut tx, start("s-old", json!({}))).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let shares = state.screen_shares.read().await;
+    let streams: Vec<&String> = shares.values().flat_map(|a| a.streams.keys()).collect();
+    assert!(streams.iter().any(|s| *s == "s-ok"), "{streams:?}");
+    assert!(streams.iter().any(|s| *s == "s-old"), "{streams:?}");
 }

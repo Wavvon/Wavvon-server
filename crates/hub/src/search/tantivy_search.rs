@@ -233,7 +233,8 @@ impl MessageSearch for TantivySearch {
                     ]))
                 };
 
-                let top_docs = searcher.search(&final_query, &TopDocs::with_limit(limit))?;
+                let top_docs =
+                    searcher.search(&final_query, &TopDocs::with_limit(limit).order_by_score())?;
 
                 let hits: Vec<SearchHit> = top_docs
                     .iter()

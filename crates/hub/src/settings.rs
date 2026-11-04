@@ -32,6 +32,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "HTTP / WebSocket port the hub listens on",
     ),
     (
+        "WAVVON_BIND_ADDR",
+        "::",
+        "Address the HTTP listener binds. `::` listens on IPv6 and IPv4 at once (IPv4-only hosts fall back to 0.0.0.0); 0.0.0.0 for IPv4 only, or one interface's address",
+    ),
+    (
         wavvon_hub_env::VOICE_UDP_PORT,
         "3001",
         "UDP port for the voice relay",
@@ -105,8 +110,8 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
     ),
     (
         wavvon_hub_env::DATABASE_URL,
-        DEFAULT_DATABASE_URL,
-        "PostgreSQL connection URL (required). Example: postgres://user:pass@host/dbname",
+        "built-in PostgreSQL",
+        "PostgreSQL connection URL. Unset: the hub starts and supervises its own PostgreSQL in the working directory. Example: postgres://user:pass@host/dbname",
     ),
     (
         wavvon_hub_env::DB_MAX_CONNECTIONS,
@@ -167,6 +172,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "Set to `true` to let outgoing webhooks and app `webhook_url`s use plain http and          private/loopback hosts. Off by default: both are https-only and refuse private          ranges, because any member holding apps.register could otherwise aim the hub at          localhost or a cloud metadata address (SSRF). Enable only on a LAN-only hub.",
     ),
     (
+        "WAVVON_METRICS",
+        "false",
+        "Set to `true` to serve the Prometheus `GET /metrics` endpoint. Off by default:          the counters are aggregate, but they tell anyone who asks how many members are          online, in voice and posting. When on, keep the route behind a firewall or a          reverse proxy that only your scraper reaches.",
+    ),
+    (
         "WAVVON_BOTS_ALLOW_VIDEO",
         "false",
         "Set to `true` to allow bots granted `can_inject_video` to push frames into the \
@@ -194,11 +204,6 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "WebAuthn Relying Party ID override (e.g. example.com). \
          Defaults to the hostname extracted from WAVVON_PUBLIC_URL, \
          or `localhost` when neither is set",
-    ),
-    (
-        "WAVVON_DEVICE_TOKEN_TTL_DAYS",
-        "30",
-        "Lifetime of 'Trust this device' tokens in days. Default: 30",
     ),
     (
         "WAVVON_LAN_MODE",
@@ -233,6 +238,8 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
 pub struct Settings {
     /// HTTP port the hub listens on. Env: WAVVON_HTTP_PORT
     pub http_port: u16,
+    /// Address the HTTP listener binds. Env: WAVVON_BIND_ADDR
+    pub bind_addr: std::net::IpAddr,
     /// UDP port for voice traffic. Env: WAVVON_VOICE_UDP_PORT
     pub voice_udp_port: u16,
     /// Path to TLS certificate PEM. Both cert and key must be set to enable HTTPS.
@@ -280,8 +287,10 @@ pub struct Settings {
     /// Set to "none" to disable search entirely (NullSearch).
     /// Env: WAVVON_SEARCH_BACKEND
     pub search_backend: Option<String>,
-    /// PostgreSQL connection URL. Falls back to [`DEFAULT_DATABASE_URL`]
-    /// when unset — with a warning, and only until embedded PostgreSQL lands.
+    /// PostgreSQL connection URL. Unset means the hub's own embedded
+    /// PostgreSQL, for the server and the CLI subcommands alike; only
+    /// `doctor`, which starts nothing, falls back to [`DEFAULT_DATABASE_URL`]
+    /// when that server is not running.
     /// Env: WAVVON_DATABASE_URL
     pub database_url: Option<String>,
     /// PostgreSQL connection-pool size. Env: WAVVON_DB_MAX_CONNECTIONS
@@ -315,6 +324,10 @@ pub struct Settings {
     ///
     /// Env: WAVVON_ALLOW_PRIVATE_WEBHOOKS
     pub allow_private_webhooks: bool,
+    /// Serve `GET /metrics`. Opt-in (decisions.md, "Observability").
+    ///
+    /// Env: WAVVON_METRICS
+    pub metrics: bool,
     /// Operator kill-switch for `can_inject_video` bot video streams.
     /// Max concurrent video streams started over HTTP, hub-wide.
     /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
@@ -325,9 +338,6 @@ pub struct Settings {
     /// WebAuthn Relying Party ID override. Falls back to public_url hostname.
     /// Env: WAVVON_WEBAUTHN_RP_ID
     pub webauthn_rp_id: Option<String>,
-    /// Device token TTL in days. Default: 30.
-    /// Env: WAVVON_DEVICE_TOKEN_TTL_DAYS
-    pub device_token_ttl_days: u64,
     /// Explicit opt-in for LAN/offline mode. See `crate::lan` and lan-mode.md.
     /// Env: WAVVON_LAN_MODE
     pub lan_mode: bool,
@@ -379,14 +389,15 @@ pub fn effective_public_url(
 pub fn load() -> Result<Settings> {
     let settings = config::Config::builder()
         .set_default("http_port", 3000)?
+        .set_default("bind_addr", "::")?
         .set_default("voice_udp_port", 3001)?
         .set_default("cors_origins", "*")?
         .set_default("log_format", "text")?
         .set_default("trusted_proxy", false)?
         .set_default("apps_allow_camera", false)?
         .set_default("allow_private_webhooks", false)?
+        .set_default("metrics", false)?
         .set_default("http_video_stream_budget", 2u32)?
-        .set_default("device_token_ttl_days", 30u64)?
         .set_default("db_max_connections", 5u32)?
         .set_default("lan_mode", false)?
         .set_default("lan_tls_mode", "self")?

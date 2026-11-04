@@ -1,0 +1,13 @@
+# Every test gets a deadline. A test that waits on something that never comes
+# (a cursor the hub ignores, a socket nobody writes to) otherwise hangs the
+# whole run with no output: list_pagination_flow once spun for 90 minutes.
+[profile.default]
+# More threads exhaust Postgres max_connections and fail with PoolTimedOut.
+test-threads = 4
+slow-timeout = { period = "30s", terminate-after = 4 }
+fail-fast = false
+
+# CI greps the log for WAVVON-TEST-SKIPPED:, which a passing test only prints
+# if its output is shown.
+[profile.ci]
+success-output = "immediate"

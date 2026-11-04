@@ -74,7 +74,8 @@ async fn authenticate_http(base: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&resp.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))
@@ -97,7 +98,7 @@ async fn create_channel(base: &str, token: &str, name: &str) -> ChannelResponse 
     reqwest::Client::new()
         .post(format!("{base}/channels"))
         .bearer_auth(token)
-        .json(&json!({ "name": name }))
+        .json(&json!({ "name": name, "channel_type": "voice" }))
         .send()
         .await
         .unwrap()
@@ -345,6 +346,9 @@ async fn below_the_threshold_is_heard_only_after_a_grant() {
         .send()
         .await
         .unwrap();
+    // The moderator in the room hears about it without polling.
+    let hands = next_msg_of_type(&mut rx_o, "voice_hands").await;
+    assert_eq!(hands["public_keys"], json!([member.public_key_hex()]));
     conn_m.send_datagram(payload).expect("the client may send");
     let still_silent = tokio::time::timeout(
         std::time::Duration::from_millis(700),
@@ -368,6 +372,11 @@ async fn below_the_threshold_is_heard_only_after_a_grant() {
         .await
         .unwrap();
     assert_eq!(granted.status(), 204);
+    // The member learns they have the floor, and the hand comes down.
+    let floor = next_msg_of_type(&mut rx_m, "voice_talk_granted").await;
+    assert_eq!(floor["public_key"], member.public_key_hex());
+    let hands = next_msg_of_type(&mut rx_o, "voice_hands").await;
+    assert_eq!(hands["public_keys"], json!([]));
 
     conn_m.send_datagram(payload).expect("the client may send");
     let received =

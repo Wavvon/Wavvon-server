@@ -89,7 +89,7 @@ pub struct DirectorySignResponse {
 /// Ed25519 private key, and returns the payload + pubkey + signature so
 /// the Tauri client can forward them to the directory API.
 ///
-/// Requires admin or owner role.
+/// Requires `directory.publish`.
 pub async fn sign_for_directory(
     State(state): State<Arc<AppState>>,
     user: AuthUser,

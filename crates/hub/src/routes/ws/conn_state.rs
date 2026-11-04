@@ -27,6 +27,13 @@ pub(super) struct ConnState {
     pub session_id: String,
     /// Voice channel the client is currently in, if any.
     pub voice_channel: Option<String>,
+    /// Voice room whose speaking events this connection receives without
+    /// being in it (`voice_watch`). Never grants anything `voice_channel`
+    /// does: zones, positions and whispers all read the latter.
+    pub watched_voice_channel: Option<String>,
+    /// When this connection last had a `voice_position_update` accepted;
+    /// each one takes the zone write lock and fans out to the zone.
+    pub last_position_update: Option<Instant>,
     /// Pending screen-share chunk header waiting for the binary frame.
     /// Fields: (channel_id, stream_id, seq, is_init).
     pub pending_chunk: Option<(String, String, u32, bool)>,
@@ -36,6 +43,14 @@ pub(super) struct ConnState {
     /// client.  Keyed by (channel_id, stream_id).  Ensures the chunk relay arm
     /// never delivers a chunk before the client knows the stream exists.
     pub notified_streams: HashSet<(String, String)>,
+    /// Set by `?streams=on_request` on the socket URL: this client opens each
+    /// stream it wants with `stream_subscribe`, and stream bytes reach it only
+    /// for those, its own channel included. Without it, every stream of the
+    /// channels it is subscribed to is pushed (#276).
+    pub streams_on_request: bool,
+    /// The streams this connection opened, by (channel_id, stream_id). Read
+    /// only when `streams_on_request` is set.
+    pub opened_streams: HashSet<(String, String)>,
     /// Rate-limit map for component interactions.
     /// Key: (user_pubkey, custom_id).  Value: last interaction instant.
     pub component_rate_limit: HashMap<(String, String), Instant>,
@@ -64,9 +79,13 @@ impl ConnState {
             alliance_voice_channel,
             session_id,
             voice_channel: None,
+            watched_voice_channel: None,
+            last_position_update: None,
             pending_chunk: None,
             subscribed,
             notified_streams: HashSet::new(),
+            streams_on_request: false,
+            opened_streams: HashSet::new(),
             component_rate_limit: HashMap::new(),
             my_conversations,
             replay_buffer: Vec::new(),

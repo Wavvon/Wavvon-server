@@ -202,6 +202,10 @@ pub async fn update_source(
 #[derive(Debug, Deserialize)]
 pub struct EntryFilter {
     pub source: Option<String>,
+    pub limit: Option<i64>,
+    /// `<source_hub_pubkey>:<target_master_pubkey>` of the previous page's
+    /// last row: an entry is keyed by the pair.
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -232,7 +236,7 @@ struct FederatedBanRow {
     synced_at: i64,
 }
 
-/// GET /admin/banlist/entries?source=<hub_pubkey>
+/// GET /admin/banlist/entries?source=<hub_pubkey>, newest sync first.
 pub async fn list_entries(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -241,29 +245,36 @@ pub async fn list_entries(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(BANLIST_READ)?;
 
-    let rows = if let Some(src) = filter.source.as_deref() {
-        sqlx::query_as::<_, FederatedBanRow>(
-            "SELECT fb.source_hub_pubkey, COALESCE(fbs.policy, 'unknown') AS policy, fb.target_master_pubkey, fb.reason,
-                    fb.added_at, fb.synced_at
-             FROM federated_bans fb
-             LEFT JOIN federated_ban_sources fbs ON fbs.issuer_pubkey = fb.source_hub_pubkey
-             WHERE fb.source_hub_pubkey = $1
-             ORDER BY fb.synced_at DESC LIMIT 1000",
-        )
-        .bind(src)
-        .fetch_all(&state.db)
-        .await
-    } else {
-        sqlx::query_as::<_, FederatedBanRow>(
-            "SELECT fb.source_hub_pubkey, COALESCE(fbs.policy, 'unknown') AS policy, fb.target_master_pubkey, fb.reason,
-                    fb.added_at, fb.synced_at
-             FROM federated_bans fb
-             LEFT JOIN federated_ban_sources fbs ON fbs.issuer_pubkey = fb.source_hub_pubkey
-             ORDER BY fb.synced_at DESC LIMIT 1000",
-        )
-        .fetch_all(&state.db)
-        .await
-    }
+    let limit = filter
+        .limit
+        .unwrap_or(crate::routes::paging::DEFAULT_LIMIT)
+        .clamp(1, crate::routes::paging::MAX_LIMIT);
+    let (cursor_source, cursor_target) = match filter.cursor.as_deref() {
+        Some(c) => match c.split_once(':') {
+            Some((s, t)) => (Some(s), Some(t)),
+            None => return Err((StatusCode::BAD_REQUEST, "invalid_cursor".to_string())),
+        },
+        None => (None, None),
+    };
+
+    let rows = sqlx::query_as::<_, FederatedBanRow>(
+        "SELECT fb.source_hub_pubkey, COALESCE(fbs.policy, 'unknown') AS policy, fb.target_master_pubkey, fb.reason,
+                fb.added_at, fb.synced_at
+         FROM federated_bans fb
+         LEFT JOIN federated_ban_sources fbs ON fbs.issuer_pubkey = fb.source_hub_pubkey
+         WHERE ($1::text IS NULL OR fb.source_hub_pubkey = $1)
+           AND ($2::text IS NULL OR (fb.synced_at, fb.source_hub_pubkey, fb.target_master_pubkey) <
+                ((SELECT synced_at FROM federated_bans
+                  WHERE source_hub_pubkey = $2 AND target_master_pubkey = $3), $2, $3))
+         ORDER BY fb.synced_at DESC, fb.source_hub_pubkey DESC, fb.target_master_pubkey DESC
+         LIMIT $4",
+    )
+    .bind(filter.source.as_deref())
+    .bind(cursor_source)
+    .bind(cursor_target)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     Ok(Json(

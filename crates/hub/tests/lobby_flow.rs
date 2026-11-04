@@ -16,7 +16,10 @@ async fn auth_verify_raw(server: &TestServer, identity: &Identity) -> Value {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = identity.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = identity.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -78,7 +81,7 @@ async fn admin_can_update_lobby_settings() {
 
     // Update welcome_md
     let resp = server
-        .put("/hub/settings/lobby")
+        .patch("/admin/settings/lobby")
         .authorization_bearer(&token)
         .json(&json!({ "lobby_enabled": true, "welcome_md": "# Welcome!" }))
         .await;
@@ -106,7 +109,7 @@ async fn non_admin_cannot_update_lobby_settings() {
     let user_token = common::authenticate(&server, &user).await;
 
     let resp = server
-        .put("/hub/settings/lobby")
+        .patch("/admin/settings/lobby")
         .authorization_bearer(&user_token)
         .json(&json!({ "lobby_enabled": false }))
         .await;
@@ -138,7 +141,10 @@ async fn verify_response_includes_scope_field() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = user.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = user.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
 
     let resp = server
         .post("/auth/verify")
@@ -366,7 +372,10 @@ async fn hub_peer_join_is_never_lobby_confined_even_below_level() {
         .json(&json!({ "public_key": peer_pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = peer_hub.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = peer_hub.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({
@@ -409,7 +418,7 @@ async fn min_security_level_still_hard_rejects_when_lobby_disabled() {
 
     // Disable the lobby soft-landing explicitly.
     server
-        .put("/hub/settings/lobby")
+        .patch("/admin/settings/lobby")
         .authorization_bearer(&owner_token)
         .json(&json!({ "lobby_enabled": false }))
         .await
@@ -422,7 +431,10 @@ async fn min_security_level_still_hard_rejects_when_lobby_disabled() {
         .json(&json!({ "public_key": pub_key }))
         .await;
     let challenge: ChallengeResponse = resp.json();
-    let signature = newcomer.sign(&hex::decode(&challenge.challenge).unwrap());
+    let signature = newcomer.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge.challenge).unwrap())
+            .unwrap(),
+    );
     let resp = server
         .post("/auth/verify")
         .json(&json!({

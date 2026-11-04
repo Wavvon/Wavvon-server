@@ -41,7 +41,8 @@ async fn do_auth(server: &TestServer, identity: &Identity) -> String {
     resp.assert_status_ok();
     let ch: ChallengeResponse = resp.json();
     let challenge_bytes = hex::decode(&ch.challenge).unwrap();
-    let sig = identity.sign(&challenge_bytes);
+    let sig =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
     let sig_hex = hex::encode(sig.to_bytes());
     let resp = server
         .post("/auth/verify")
@@ -129,7 +130,7 @@ async fn admin_revoke_cert() {
         .assert_status(axum::http::StatusCode::CREATED);
 
     server
-        .post(&format!("/admin/certs/{member_pk}/revoke"))
+        .delete(&format!("/admin/certs/{member_pk}"))
         .authorization_bearer(&owner_token)
         .await
         .assert_status(axum::http::StatusCode::NO_CONTENT);
@@ -249,7 +250,8 @@ async fn cert_mode_any_rejects_no_cert() {
     ch_resp.assert_status_ok();
     let ch: ChallengeResponse = ch_resp.json();
     let challenge_bytes = hex::decode(&ch.challenge).unwrap();
-    let sig = newcomer.sign(&challenge_bytes);
+    let sig =
+        newcomer.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
     let sig_hex = hex::encode(sig.to_bytes());
 
     let resp = server
@@ -315,7 +317,8 @@ async fn cert_mode_any_accepts_valid_cert() {
     ch_resp.assert_status_ok();
     let ch: ChallengeResponse = ch_resp.json();
     let challenge_bytes = hex::decode(&ch.challenge).unwrap();
-    let sig = newcomer.sign(&challenge_bytes);
+    let sig =
+        newcomer.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
     let sig_hex = hex::encode(sig.to_bytes());
 
     let resp = server
@@ -491,7 +494,10 @@ async fn a_trusted_issuer_is_pulled_when_the_client_presents_nothing() {
         .await;
     ch_resp.assert_status_ok();
     let ch: ChallengeResponse = ch_resp.json();
-    let sig = newcomer.sign(&hex::decode(&ch.challenge).unwrap());
+    let sig = newcomer.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&ch.challenge).unwrap())
+            .unwrap(),
+    );
 
     let resp = server
         .post("/auth/verify")
@@ -528,7 +534,10 @@ async fn an_issuer_with_no_url_is_not_pulled() {
         .await;
     ch_resp.assert_status_ok();
     let ch: ChallengeResponse = ch_resp.json();
-    let sig = newcomer.sign(&hex::decode(&ch.challenge).unwrap());
+    let sig = newcomer.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&ch.challenge).unwrap())
+            .unwrap(),
+    );
 
     let resp = server
         .post("/auth/verify")
@@ -580,7 +589,10 @@ async fn a_pulled_cert_signed_by_someone_untrusted_is_refused() {
         .await;
     ch_resp.assert_status_ok();
     let ch: ChallengeResponse = ch_resp.json();
-    let sig = newcomer.sign(&hex::decode(&ch.challenge).unwrap());
+    let sig = newcomer.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&ch.challenge).unwrap())
+            .unwrap(),
+    );
 
     let resp = server
         .post("/auth/verify")

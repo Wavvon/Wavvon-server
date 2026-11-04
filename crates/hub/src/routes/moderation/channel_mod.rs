@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, CHANNELS_MANAGE, MODERATION_BAN_PERMANENT, MODERATION_MUTE};
+use crate::routes::chat_models::WsServerMessage;
 use crate::routes::moderation_models::*;
 use crate::state::AppState;
 
@@ -321,6 +322,25 @@ pub async fn list_channel_voice_mutes(
 
 // --- Raise-hand ---
 
+/// Tell the room who is asking for the floor. A snapshot rather than a diff,
+/// so a client that missed one event is right again at the next.
+async fn broadcast_hands(state: &AppState, channel_id: &str) {
+    let public_keys: Vec<String> = sqlx::query_scalar(
+        "SELECT pubkey FROM raise_hand_requests WHERE channel_id = $1 ORDER BY requested_at ASC",
+    )
+    .bind(channel_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let _ = state.voice_event_tx.send((
+        channel_id.to_string(),
+        WsServerMessage::VoiceHands {
+            channel_id: channel_id.to_string(),
+            public_keys,
+        },
+    ));
+}
+
 /// POST /channels/{channel_id}/raise-hand
 ///
 /// A **request** for the floor, and only that. It used to clear the channel's
@@ -346,6 +366,8 @@ pub async fn raise_hand(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    broadcast_hands(&state, &channel_id).await;
 
     Ok((
         StatusCode::CREATED,
@@ -400,6 +422,14 @@ pub async fn grant_talk(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    broadcast_hands(&state, &channel_id).await;
+    let _ = state.voice_event_tx.send((
+        channel_id.clone(),
+        WsServerMessage::VoiceTalkGranted {
+            channel_id: channel_id.clone(),
+            public_key: pubkey,
+        },
+    ));
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -421,6 +451,7 @@ pub async fn lower_hand(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    broadcast_hands(&state, &channel_id).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

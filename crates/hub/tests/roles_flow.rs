@@ -159,6 +159,39 @@ async fn cannot_modify_builtin_roles() {
 }
 
 #[tokio::test]
+async fn everyone_role_permissions_are_editable_but_nothing_else() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = common::authenticate(&server, &member).await;
+
+    let resp = server
+        .patch("/roles/builtin-everyone")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "Renamed" }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    let resp = server
+        .patch("/roles/builtin-everyone")
+        .authorization_bearer(&member_token)
+        .json(&json!({ "permissions": ["channels.manage"] }))
+        .await;
+    resp.assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    let resp = server
+        .patch("/roles/builtin-everyone")
+        .authorization_bearer(&token)
+        .json(&json!({ "permissions": ["messages.send"] }))
+        .await;
+    resp.assert_status_ok();
+    let role: RoleResponse = resp.json();
+    assert_eq!(role.name, "everyone");
+    assert_eq!(role.permissions, vec!["messages.send".to_string()]);
+}
+
+#[tokio::test]
 async fn permission_gating_on_channels() {
     let server = common::setup().await;
     let owner = Identity::generate();
@@ -390,4 +423,42 @@ async fn delegate_cannot_assign_a_role_carrying_a_permission_they_lack() {
         .authorization_bearer(&owner_token)
         .await
         .assert_status_ok();
+}
+
+/// The member list orders its role sections by priority, so the roster says
+/// which priority each member's hoisted role has.
+#[tokio::test]
+async fn member_list_carries_the_hoisted_role_priority() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let role: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Mods", "permissions": [], "priority": 40, "display_separately": true }))
+        .await
+        .json();
+
+    let member = Identity::generate();
+    common::authenticate(&server, &member).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            member.public_key_hex(),
+            role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    let users: Vec<serde_json::Value> = server
+        .get("/users")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    let row = users
+        .iter()
+        .find(|u| u["public_key"] == member.public_key_hex())
+        .unwrap();
+    assert_eq!(row["group_role"], "Mods");
+    assert_eq!(row["group_role_priority"], 40);
 }

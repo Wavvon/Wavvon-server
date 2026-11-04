@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::permissions;
 use crate::routes::chat_models::{
-    Attachment, ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
+    ChatEvent, EditMessageRequest, MessageResponse, PaginationParams, ReactionRequest,
     ReactionSummary, ReplyContext, SendMessageRequest,
 };
 use crate::state::AppState;
@@ -109,34 +109,17 @@ pub async fn send_message_with(
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
-    // Cap attachments size. The base64 payload is what counts toward the
-    // limit since that's what travels over WS and lands in the DB.
-    // Operator-configurable since 2026-08-21 (hub_settings
-    // `max_attachment_bytes`); the old constant is now only the default.
-    let cap = crate::routes::hub::read_attachment_cap(&state.db).await;
-    let attach_total: u64 = req
-        .attachments
-        .iter()
-        .map(|a| a.data_b64.len() as u64)
-        .sum();
-    if attach_total > cap {
-        return Err((
-            StatusCode::PAYLOAD_TOO_LARGE,
-            format!("Attachments exceed {}MB cap", cap / 1024 / 1024),
-        ));
-    }
+    crate::attachments::reject_legacy(!req.attachments.is_empty())?;
+    crate::attachments::check_ids(
+        &state.db,
+        &req.attachment_ids,
+        &user.public_key,
+        &channel_id,
+    )
+    .await?;
 
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp_ms();
-
-    let attachments_json = if req.attachments.is_empty() {
-        None
-    } else {
-        Some(
-            serde_json::to_string(&req.attachments)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?,
-        )
-    };
 
     // Game-modal launch card (apps.md §2): bot authors only,
     // same rule as embeds/components elsewhere in the bot wire surface
@@ -156,6 +139,19 @@ pub async fn send_message_with(
     } else {
         None
     };
+
+    let masquerade = match req.masquerade.clone() {
+        Some(m) => {
+            perms.require(permissions::MESSAGES_MASQUERADE)?;
+            Some(m.validated()?.with_hosted_avatar().await)
+        }
+        None => None,
+    };
+    let masquerade_json = masquerade
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Encode: {e}")))?;
 
     // If a reply_to is provided, sanity-check the parent exists in this
     // same channel. Cross-channel replies would surprise everyone.
@@ -182,6 +178,14 @@ pub async fn send_message_with(
             _ => {}
         }
     }
+
+    // A sticker must be one this hub holds, live, and a copy of another hub's
+    // needs `stickers.external` on this channel. `perms` is the channel's own
+    // verdict, so a per-channel revoke applies here too.
+    let sticker = match &req.sticker_id {
+        Some(sid) => Some(crate::routes::stickers::check_for_send(&state.db, sid, &perms).await?),
+        None => None,
+    };
 
     // Slash command dispatch (external bot system): if the message starts with
     // '/' and a registered app handles the command, the app responds via its
@@ -222,7 +226,9 @@ pub async fn send_message_with(
                     reply_count: 0,
                     embeds: None,
                     game: None,
+                    masquerade: None,
                     components: None,
+                    sticker: None,
                 };
                 return Ok((StatusCode::OK, Json(placeholder)));
             }
@@ -280,7 +286,7 @@ pub async fn send_message_with(
                     "channel_id": &channel_id,
                     "sender_pubkey": &user.public_key,
                     "content": &req.content,
-                    "attachments_count": req.attachments.len(),
+                    "attachments_count": req.attachment_ids.len(),
                     "timestamp": now,
                 });
                 let payload_str = serde_json::to_string(&payload).unwrap_or_default();
@@ -359,20 +365,38 @@ pub async fn send_message_with(
         }
     }
 
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     sqlx::query(
-        "INSERT INTO messages (id, channel_id, sender, content, attachments, reply_to, created_at, game) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        "INSERT INTO messages (id, channel_id, sender, content, reply_to, created_at, game, masquerade, sticker_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     )
     .bind(&id)
     .bind(&channel_id)
     .bind(&user.public_key)
     .bind(&req.content)
-    .bind(&attachments_json)
     .bind(&req.reply_to)
     .bind(now)
     .bind(&game_json)
-    .execute(&state.db)
+    .bind(&masquerade_json)
+    .bind(&req.sticker_id)
+    .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::link(
+        &mut tx,
+        crate::attachments::Owner::Message,
+        &id,
+        &req.attachment_ids,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let attachments =
+        crate::attachments::load_one(&state.db, crate::attachments::Owner::Message, &id).await?;
 
     {
         let indexed = crate::search::IndexedMessage {
@@ -419,7 +443,7 @@ pub async fn send_message_with(
         content: req.content,
         created_at: now,
         edited_at: None,
-        attachments: req.attachments,
+        attachments,
         reactions: Vec::new(),
         reply_to: reply_ctx,
         visible_to_pubkey: None,
@@ -429,6 +453,8 @@ pub async fn send_message_with(
         embeds: None,
         game: req.game,
         components: None,
+        masquerade,
+        sticker,
     };
 
     {
@@ -632,21 +658,14 @@ pub async fn delete_message(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn parse_attachments(json: Option<String>) -> Vec<Attachment> {
-    json.as_deref()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
-}
-
 async fn load_message(
     state: &AppState,
     message_id: &str,
 ) -> Result<MessageResponse, (StatusCode, String)> {
     let row = sqlx::query_as::<_, MessageRow>(
         "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name,
-                m.content, m.attachments, m.reply_to, m.created_at, m.edited_at,
-                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+                m.content, m.reply_to, m.created_at, m.edited_at,
+                COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
          FROM messages m LEFT JOIN users u ON m.sender = u.public_key
          WHERE m.id = $1",
     )
@@ -661,6 +680,15 @@ async fn load_message(
     } else {
         None
     };
+    let sticker = match &row.sticker_id {
+        Some(sid) => crate::routes::stickers::load_refs(&state.db, std::slice::from_ref(sid))
+            .await?
+            .remove(sid),
+        None => None,
+    };
+    let attachments =
+        crate::attachments::load_one(&state.db, crate::attachments::Owner::Message, &row.id)
+            .await?;
     Ok(MessageResponse {
         id: row.id,
         channel_id: row.channel_id,
@@ -669,7 +697,7 @@ async fn load_message(
         content: row.content,
         created_at: row.created_at,
         edited_at: row.edited_at,
-        attachments: parse_attachments(row.attachments),
+        attachments,
         reactions,
         reply_to,
         visible_to_pubkey: None,
@@ -677,6 +705,8 @@ async fn load_message(
         embeds: parse_json(row.embeds),
         game: parse_json(row.game),
         components: parse_json(row.components),
+        masquerade: parse_json(row.masquerade),
+        sticker,
     })
 }
 
@@ -702,7 +732,7 @@ pub async fn get_messages(
         // Thread mode: replies to this root, oldest first, so the cursor
         // pages forward.
         sqlx::query_as::<_, MessageRow>(
-            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+            "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
                AND ($3::text IS NULL OR (m.created_at, m.id) >
@@ -745,7 +775,7 @@ pub async fn get_messages(
                     .collect::<Vec<_>>()
                     .join(",");
                 let sql = format!(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
                      ORDER BY m.created_at DESC, m.id DESC"
@@ -758,7 +788,7 @@ pub async fn get_messages(
             }
             None => {
                 sqlx::query_as::<_, MessageRow>(
-                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.attachments, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components
+                    "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
                        AND ($2::text IS NULL OR (m.created_at, m.id) <
@@ -784,13 +814,18 @@ pub async fn get_messages(
         .collect();
 
     let mut reactions_map = batch_load_reactions(&state.db, &msg_ids, &user.public_key).await?;
+    let mut attachment_map =
+        crate::attachments::load(&state.db, crate::attachments::Owner::Message, &msg_ids).await?;
     let mut reply_map = batch_load_reply_contexts(&state.db, &reply_ids).await?;
+    let sticker_ids: Vec<String> = rows.iter().filter_map(|r| r.sticker_id.clone()).collect();
+    let sticker_map = crate::routes::stickers::load_refs(&state.db, &sticker_ids).await?;
 
     let messages: Vec<MessageResponse> = rows
         .into_iter()
         .map(|r| {
             let reactions = reactions_map.remove(&r.id).unwrap_or_default();
             let reply_to = r.reply_to.as_deref().and_then(|id| reply_map.remove(id));
+            let attachments = attachment_map.remove(&r.id).unwrap_or_default();
             MessageResponse {
                 id: r.id,
                 channel_id: r.channel_id,
@@ -799,14 +834,19 @@ pub async fn get_messages(
                 content: r.content,
                 created_at: r.created_at,
                 edited_at: r.edited_at,
-                attachments: parse_attachments(r.attachments),
+                attachments,
                 reactions,
                 reply_to,
                 visible_to_pubkey: None,
                 reply_count: r.reply_count,
                 embeds: parse_json(r.embeds),
                 game: parse_json(r.game),
+                masquerade: parse_json(r.masquerade),
                 components: parse_json(r.components),
+                sticker: r
+                    .sticker_id
+                    .as_deref()
+                    .and_then(|id| sticker_map.get(id).cloned()),
             }
         })
         .collect();
@@ -821,7 +861,6 @@ struct MessageRow {
     sender: String,
     sender_name: Option<String>,
     content: String,
-    attachments: Option<String>,
     reply_to: Option<String>,
     created_at: i64,
     edited_at: Option<i64>,
@@ -829,6 +868,8 @@ struct MessageRow {
     embeds: Option<String>,
     game: Option<String>,
     components: Option<String>,
+    masquerade: Option<String>,
+    sticker_id: Option<String>,
 }
 
 /// Read one of the optional JSON columns on `messages` (embeds, game,
@@ -1046,8 +1087,8 @@ pub async fn add_reaction(
 }
 
 /// Sign a moderation check the way an outgoing webhook is signed, so one
-/// verifier serves both: HMAC-SHA256 keyed by HKDF of the secret, body-only
-/// and timestamped (V1). The operator types this secret rather than being
+/// verifier serves both: HMAC-SHA256 keyed by HKDF of the secret, over the
+/// timestamped V1 bytes. The operator types this secret rather than being
 /// shown a generated one, so the raw secret is its UTF-8 bytes.
 fn moderation_webhook_signed(
     request: reqwest::RequestBuilder,
@@ -1066,10 +1107,6 @@ fn moderation_webhook_signed(
         .header(
             wavvon_identity::HEADER_HUB_PUBKEY,
             state.hub_identity.public_key_hex(),
-        )
-        .header(
-            wavvon_identity::HEADER_SIGNATURE_LEGACY,
-            sign(body.as_bytes()),
         )
         .header(
             wavvon_identity::HEADER_SIGNATURE_V1,

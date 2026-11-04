@@ -1,7 +1,7 @@
 use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_hub::routes::chat_models::ChannelResponse;
-use wavvon_hub::routes::post_models::{ForumTag, PostDetail, PostListResponse};
+use wavvon_hub::routes::post_models::{ForumTag, PostDetail, PostSummary};
 use wavvon_identity::Identity;
 
 #[path = "common.rs"]
@@ -192,10 +192,10 @@ async fn post_create_with_tags_appears_in_list_and_detail() {
         .get(&format!("/channels/{channel_id}/posts"))
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
-    let list: PostListResponse = resp.json();
-    assert_eq!(list.posts.len(), 1);
-    assert_eq!(list.posts[0].tags.len(), 2);
-    assert!(list.posts[0].tags.iter().any(|t| t.label == "bug"));
+    let list: Vec<PostSummary> = resp.json();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].tags.len(), 2);
+    assert!(list[0].tags.iter().any(|t| t.label == "bug"));
 
     // Detail — tags populated.
     let resp = server
@@ -365,9 +365,9 @@ async fn tag_filter_on_list_route() {
         .add_header("Authorization", format!("Bearer {token}"))
         .await;
     assert_eq!(resp.status_code(), 200, "{}", resp.text());
-    let list: PostListResponse = resp.json();
-    assert_eq!(list.posts.len(), 1);
-    assert_eq!(list.posts[0].title.as_deref(), Some("Bug post"));
+    let list: Vec<PostSummary> = resp.json();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].title.as_deref(), Some("Bug post"));
 }
 
 #[tokio::test]

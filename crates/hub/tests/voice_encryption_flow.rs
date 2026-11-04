@@ -48,7 +48,8 @@ async fn authenticate_http(base: &str, identity: &Identity) -> String {
         .unwrap();
 
     let challenge_bytes = hex::decode(&resp.challenge).unwrap();
-    let signature = identity.sign(&challenge_bytes);
+    let signature =
+        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
 
     let verify: VerifyResponse = client
         .post(format!("{base}/auth/verify"))
@@ -71,7 +72,7 @@ async fn create_channel(base: &str, token: &str, name: &str) -> ChannelResponse 
     reqwest::Client::new()
         .post(format!("{base}/channels"))
         .bearer_auth(token)
-        .json(&json!({ "name": name }))
+        .json(&json!({ "name": name, "channel_type": "voice" }))
         .send()
         .await
         .unwrap()

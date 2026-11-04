@@ -20,6 +20,27 @@ const ECIES_INFO: &[u8] = b"wavvon/ecies/v1";
 ///   eph_x25519_pub[32] || aes_gcm_nonce[12] || aes_gcm_ciphertext_and_tag[48]
 /// (total 92 bytes → 184 hex chars)
 pub fn wrap_blob_key(blob_key: &[u8; 32], recipient_ed25519_pubkey_hex: &str) -> Result<String> {
+    let mut eph_secret = [0u8; 32];
+    OsRng.fill_bytes(&mut eph_secret);
+    let mut nonce_bytes = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    wrap_blob_key_with(
+        blob_key,
+        recipient_ed25519_pubkey_hex,
+        eph_secret,
+        nonce_bytes,
+    )
+}
+
+/// [`wrap_blob_key`] with the ephemeral X25519 secret and the nonce supplied
+/// by the caller, so the wire vectors can pin its output. Anything else must
+/// use `wrap_blob_key`: reusing either value breaks the encryption.
+pub fn wrap_blob_key_with(
+    blob_key: &[u8; 32],
+    recipient_ed25519_pubkey_hex: &str,
+    eph_secret: [u8; 32],
+    nonce_bytes: [u8; 12],
+) -> Result<String> {
     // 1. Decode recipient pubkey hex → 32 bytes
     let pubkey_bytes = hex::decode(recipient_ed25519_pubkey_hex)
         .map_err(|e| anyhow!("invalid pubkey hex: {e}"))?;
@@ -36,8 +57,8 @@ pub fn wrap_blob_key(blob_key: &[u8; 32], recipient_ed25519_pubkey_hex: &str) ->
     let montgomery = point.to_montgomery();
     let x25519_pub = x25519_dalek::PublicKey::from(montgomery.to_bytes());
 
-    // 3. Generate ephemeral X25519 keypair
-    let eph_priv = x25519_dalek::StaticSecret::random_from_rng(OsRng);
+    // 3. Ephemeral X25519 keypair
+    let eph_priv = x25519_dalek::StaticSecret::from(eph_secret);
     let eph_pub = x25519_dalek::PublicKey::from(&eph_priv);
 
     // 4. ECDH
@@ -50,8 +71,6 @@ pub fn wrap_blob_key(blob_key: &[u8; 32], recipient_ed25519_pubkey_hex: &str) ->
         .map_err(|e| anyhow!("HKDF expand: {e}"))?;
 
     // 6. AES-256-GCM encrypt
-    let mut nonce_bytes = [0u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
     let cipher = Aes256Gcm::new_from_slice(&enc_key).map_err(|e| anyhow!("AES key: {e}"))?;
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&nonce_bytes), blob_key.as_ref())
