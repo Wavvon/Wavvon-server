@@ -26,6 +26,7 @@ pub(super) async fn handle_socket(
     public_key: String,
     mini_app_channel_id: Option<String>,
     alliance_voice_channel: Option<String>,
+    streams_on_request: bool,
 ) {
     // ── Connection setup ─────────────────────────────────────────────────────
 
@@ -195,6 +196,7 @@ pub(super) async fn handle_socket(
         subscribed,
         my_conversations,
     );
+    cs.streams_on_request = streams_on_request;
 
     // Push in-progress screen shares to this client.
     {
@@ -219,6 +221,9 @@ pub(super) async fn handle_socket(
                 let _ = ws_tx.send(Message::Text(json.into())).await;
                 cs.notified_streams
                     .insert((ch_id.clone(), stream_id.clone()));
+                if cs.streams_on_request {
+                    continue;
+                }
                 if let Some(init_bytes) = &meta.init_chunk {
                     let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
                         channel_id: ch_id.clone(),
@@ -555,7 +560,15 @@ pub(super) async fn handle_socket(
                                 .map(|m| (m.sharer_pubkey.clone(), m.kind.clone(), m.mime.clone(), m.has_audio));
                             (cross, meta)
                         };
-                        if in_channel || is_cross_subscriber {
+                        // On request, only what this connection opened; otherwise
+                        // every stream of its channels, as before (#276).
+                        let deliver = if cs.streams_on_request {
+                            ev.sharer_pubkey != cs.public_key
+                                && cs.opened_streams.contains(&(ev.channel_id.clone(), ev.stream_id.clone()))
+                        } else {
+                            in_channel || is_cross_subscriber
+                        };
+                        if deliver {
                             // Guarantee screen_share_started arrives before the
                             // first chunk for this stream, regardless of the order
                             // the hub processes the sharer's messages.

@@ -130,6 +130,12 @@ pub const CAPABILITIES: &[&str] = &[
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
     "recovery.attest.requests",
+    // A WebSocket opened with `?streams=on_request` receives a stream's bytes
+    // only after opening it with `stream_subscribe`, in its own voice channel
+    // too, and `stream_unsubscribe` closes it again (#276). Gated so a client
+    // asks for it only to a hub that will honour it; an older hub pushes every
+    // stream of the channel to everyone in it.
+    "screenshare.onrequest",
     // Sticker packs, copies fetched from the hub that published them, and
     // `sticker_id` on a message (stickers.md). Gated so a client offers the
     // picker only where `POST /channels/{id}/stickers` exists.
