@@ -664,7 +664,7 @@ async fn main() -> Result<()> {
     //  Dev (category)
     //    #dev-talk
     //  Voice (category)
-    //    Lounge          <- text+voice unified channel named "Lounge"
+    //    Lounge          <- the voice room
     // ------------------------------------------------------------------
     println!("Creating channels ...");
 
@@ -712,7 +712,8 @@ async fn main() -> Result<()> {
     .await?;
 
     let voice_cat = create_channel(&client, &hub_url, &admin_token, "Voice", None, true).await?;
-    let _lounge_ch = create_channel(
+    // Voice joins only voice channels, so the room people sit in is one.
+    let lounge_ch = create_channel(
         &client,
         &hub_url,
         &admin_token,
@@ -721,6 +722,16 @@ async fn main() -> Result<()> {
         false,
     )
     .await?;
+    send(
+        client
+            .patch(format!("{hub_url}/channels/{}", lounge_ch.id))
+            .bearer_auth(&admin_token)
+            .json(&json!({ "channel_type": "voice" })),
+    )
+    .await
+    .context("PATCH /channels (Lounge) failed")?
+    .error_for_status()
+    .context("making Lounge a voice channel")?;
 
     println!("Channels created: welcome, general, game-night, dev-talk, Lounge");
 
