@@ -172,8 +172,12 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
     // inside an `if cs.is_bot` branch and so applied to nobody else — the
     // one check on this path was reachable only by the callers the hub had
     // labelled. There is no label now, and the rule was never about one.
+    // On top of that, `voice.screen_share` (#277): talking and streaming are
+    // separate grants, so a hub can let everyone in and only some share.
     match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await {
-        Ok(perms) if perms.has(crate::permissions::VOICE_JOIN) => {}
+        Ok(perms)
+            if perms.has(crate::permissions::VOICE_JOIN)
+                && perms.has(crate::permissions::VOICE_SCREEN_SHARE) => {}
         _ => {
             let err = WsServerMessage::Error {
                 context: "screen_share_start".to_string(),

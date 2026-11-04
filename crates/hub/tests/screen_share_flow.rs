@@ -433,3 +433,102 @@ async fn multiple_concurrent_sharers_allowed() {
     assert_eq!(chunk_env["type"], "screen_share_chunk");
     assert_ne!(chunk_env["type"], "error", "No error from Bob's share");
 }
+
+/// Wait for a text frame of the given `type`, skipping everything else.
+async fn wait_for_type(
+    rx: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    ty: &str,
+) -> Value {
+    loop {
+        let v = next_text(rx).await;
+        if v["type"] == ty {
+            return v;
+        }
+    }
+}
+
+async fn revoke_from_everyone(state: &AppState, perm: &str) {
+    sqlx::query(
+        "DELETE FROM role_permissions WHERE role_id = 'builtin-everyone' AND permission = $1",
+    )
+    .bind(perm)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
+/// `voice.screen_share` is its own grant (#277): revoked from @everyone, a
+/// member who may still join voice is refused a share, and nobody sees it.
+#[tokio::test]
+async fn screen_share_needs_its_own_permission() {
+    let (base, state, _guard) = start_hub().await;
+    // The owner bypasses every check, so the act is a second member's.
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &owner_token, "general").await;
+    let sharer_token = authenticate_http(&base, &Identity::generate()).await;
+    revoke_from_everyone(&state, "voice.screen_share").await;
+
+    let (mut tx, mut rx) = connect_ws(&base, &sharer_token).await;
+    send_text(&mut tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    send_text(
+        &mut tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "s-denied",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+
+    let err = wait_for_type(&mut rx, "error").await;
+    assert_eq!(err["context"], "screen_share_start");
+    assert!(state.screen_shares.read().await.is_empty());
+}
+
+/// `voice.camera` likewise (#277): in the call, but refused a camera.
+#[tokio::test]
+async fn camera_needs_its_own_permission() {
+    let (base, state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let room: ChannelResponse = reqwest::Client::new()
+        .post(format!("{base}/channels"))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "name": "room", "channel_type": "voice" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = authenticate_http(&base, &Identity::generate()).await;
+    revoke_from_everyone(&state, "voice.camera").await;
+
+    let (mut tx, mut rx) = connect_ws(&base, &token).await;
+    send_text(
+        &mut tx,
+        json!({ "type": "voice_join", "channel_id": room.id, "udp_port": 0 }),
+    )
+    .await;
+    wait_for_type(&mut rx, "voice_joined").await;
+    send_text(
+        &mut tx,
+        json!({ "type": "video_enable", "channel_id": room.id }),
+    )
+    .await;
+
+    let err = wait_for_type(&mut rx, "error").await;
+    assert_eq!(err["context"], "video_enable");
+    assert!(state
+        .video_channels
+        .read()
+        .await
+        .get(&room.id)
+        .is_none_or(|set| set.is_empty()));
+}

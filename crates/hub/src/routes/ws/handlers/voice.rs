@@ -1255,6 +1255,24 @@ pub(in crate::routes::ws) async fn handle_video_enable(
         return DispatchResult::Continue;
     }
 
+    // Being in the call is not enough: the camera is its own grant (#277).
+    let may_camera =
+        match crate::permissions::channel_permissions(&state.db, &cs.public_key, &channel_id).await
+        {
+            Ok(perms) => perms.has(crate::permissions::VOICE_CAMERA),
+            Err(_) => false,
+        };
+    if !may_camera {
+        let err = WsServerMessage::Error {
+            context: "video_enable".to_string(),
+            message: "You cannot turn a camera on in this channel.".to_string(),
+        };
+        let _ = ws_tx
+            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+            .await;
+        return DispatchResult::Continue;
+    }
+
     state
         .video_channels
         .write()
