@@ -111,6 +111,10 @@ pub struct PostSummary {
     pub channel_id: String,
     pub author_pubkey: Option<String>,
     pub title: Option<String>,
+    /// The start of the body, for list and grid views; absent on a deleted
+    /// post and on older hubs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excerpt: Option<String>,
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub edited_at: Option<i64>,
@@ -316,6 +320,17 @@ pub struct FederatedRetractRequest {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/// Longest excerpt, in characters: two lines of a grid card, with room to spare.
+pub const EXCERPT_CHARS: usize = 240;
+
+fn excerpt(body: &str) -> String {
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}…", flat[..cut].trim_end()),
+        None => flat,
+    }
+}
+
 /// Convert a PostRow to a PostSummary. `viewer_can_moderate` controls whether
 /// the author field is preserved for tombstoned rows. Reactions and attachments
 /// are always passed in by the caller (fetched separately).
@@ -340,6 +355,7 @@ pub fn post_to_summary(
         } else {
             Some(row.title.clone())
         },
+        excerpt: (!is_deleted).then(|| excerpt(&row.body)),
         created_at: row.created_at,
         edited_at: row.edited_at,
         is_pinned: row.is_pinned,
