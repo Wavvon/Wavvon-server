@@ -60,6 +60,7 @@ async fn forum_create_list_get_post() {
     let list: Vec<PostSummary> = resp.json();
     assert_eq!(list.len(), 1);
     assert_eq!(list[0].id, post_id);
+    assert_eq!(list[0].excerpt.as_deref(), Some("First post body"));
 
     // Get post detail.
     let resp = server
@@ -1626,4 +1627,40 @@ async fn forum_list_pages_by_post_id_across_a_pin() {
     sorted.dedup();
     assert_eq!(seen.len(), 3, "every post exactly once: {seen:?}");
     assert_eq!(sorted.len(), 3, "no post twice: {seen:?}");
+}
+
+/// A list or grid view shows the start of a post without opening it: one line
+/// of collapsed whitespace, cut on a character boundary, marked as cut.
+#[tokio::test]
+async fn forum_list_carries_a_bounded_excerpt() {
+    let server = common::setup().await;
+    let identity = Identity::generate();
+    let token = common::authenticate(&server, &identity).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+
+    let body = format!(
+        "Line one
+
+  line two {}",
+        "è".repeat(400)
+    );
+    server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "Long", "body": body }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let list: Vec<PostSummary> = server
+        .get(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await
+        .json();
+    let excerpt = list[0].excerpt.as_deref().expect("excerpt");
+    assert!(excerpt.starts_with("Line one line two èèè"));
+    assert!(excerpt.ends_with('…'));
+    assert_eq!(
+        excerpt.chars().count(),
+        wavvon_hub::routes::post_models::EXCERPT_CHARS + 1
+    );
 }
