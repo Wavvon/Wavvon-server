@@ -367,7 +367,8 @@ async fn run_doctor() -> bool {
             }
         }
         Err(e) => {
-            println!("INFO  database ({db_url}) unreachable, skipping owner check: {e}");
+            let (shown, _) = wavvon_hub::db::dump::split_password(&db_url);
+            println!("INFO  database ({shown}) unreachable, skipping owner check: {e}");
         }
     }
 
