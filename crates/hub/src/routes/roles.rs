@@ -434,6 +434,19 @@ pub async fn remove_role(
         ));
     }
 
+    // The role's rank was checked, the member's was not: a low role could be
+    // stripped from someone who outranks the caller. Your own roles stay
+    // yours to drop.
+    if public_key != user.public_key {
+        let target = permissions::user_permissions(&state.db, &public_key).await?;
+        if target.max_priority >= perms.max_priority {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Cannot remove roles from a member ranked at or above you".to_string(),
+            ));
+        }
+    }
+
     // Prevent removing the last owner
     if role_id == "builtin-owner" {
         let owner_count: i64 =

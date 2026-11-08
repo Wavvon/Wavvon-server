@@ -334,6 +334,12 @@ pub struct AppState {
     /// Multiple concurrent sharers per channel are allowed (multi-stream overlay).
     /// In-memory only — cleared on process restart.
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
+    /// Sender pubkey to master, as proven by a remote hub's device registry
+    /// (`dms::messages::resolve_master_binding`). Kept apart from
+    /// `users.master_pubkey` on purpose: sign-in maps a master-signed cert to
+    /// the row holding that column, so a binding a federation peer could
+    /// supply must never land there.
+    pub federated_masters: RwLock<HashMap<String, String>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.
     pub screen_share_tx: broadcast::Sender<ScreenChunkEvent>,
     /// Active bot WS sessions: app_pubkey → { session_id → mpsc sender }.
