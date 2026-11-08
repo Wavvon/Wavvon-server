@@ -567,6 +567,47 @@ impl AppState {
         self.ws_key_senders.write().await.remove(pubkey);
     }
 
+    /// Who holds `role_id`: everyone for @everyone. Read before a write that
+    /// removes the role, so the holders can still be found afterwards.
+    pub async fn role_holders(&self, role_id: &str) -> Option<Vec<String>> {
+        if role_id == "builtin-everyone" {
+            return None;
+        }
+        Some(
+            sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+                .bind(role_id)
+                .fetch_all(&self.db)
+                .await
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Tell the sockets of the members a permission change reaches to check
+    /// their access again (see `WsServerMessage::AccessChanged`). A socket
+    /// computes its channels and voice rights once, at connect: a member who
+    /// lost a channel otherwise kept receiving it until they reconnected.
+    /// `None` (an @everyone change) reaches every socket. Nothing is closed:
+    /// a permission tweak must not drop the whole hub out of its calls.
+    pub async fn recheck_access_of(&self, holders: Option<Vec<String>>) {
+        let senders = self.ws_key_senders.read().await;
+        let mut send =
+            |sessions: &HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>| {
+                for tx in sessions.values() {
+                    let _ = tx.send(WsServerMessage::AccessChanged);
+                }
+            };
+        match holders {
+            Some(pks) => {
+                for pk in pks {
+                    if let Some(sessions) = senders.get(&pk) {
+                        send(sessions);
+                    }
+                }
+            }
+            None => senders.values().for_each(&mut send),
+        }
+    }
+
     /// Close the sockets of the identity a revoked device belongs to. Tokens
     /// are refused from here on, but an open socket was authenticated once,
     /// at its handshake. Sockets are keyed by identity, not device, so the
