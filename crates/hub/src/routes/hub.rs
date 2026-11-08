@@ -84,18 +84,34 @@ pub async fn update_hub(
             // by `icon` and `welcome_invite_url` above.
             upsert_setting(&state.db, "default_invite_role_id", "").await?;
         } else {
-            let exists: bool =
-                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM roles WHERE id = $1)")
-                    .bind(role_id)
-                    .fetch_one(&state.db)
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-            if !exists {
-                return Err((
+            let role_priority: i64 = sqlx::query_scalar("SELECT priority FROM roles WHERE id = $1")
+                .bind(role_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+                .ok_or((
                     StatusCode::BAD_REQUEST,
                     "default_invite_role_id does not reference an existing role".to_string(),
+                ))?;
+            // The default role is handed to everyone who joins, so choosing it
+            // is assigning it: the same escalation ceiling as assign_role and
+            // a role-granting invite. Without it, `hub.settings` alone could
+            // make a moderation role the default and join a second account
+            // into it.
+            if role_priority >= perms.max_priority {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "Cannot make a role at or above your own priority the default invite role"
+                        .to_string(),
                 ));
             }
+            let carried: Vec<String> =
+                sqlx::query_scalar("SELECT permission FROM role_permissions WHERE role_id = $1")
+                    .bind(role_id)
+                    .fetch_all(&state.db)
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            perms.require_can_grant(carried.iter().map(String::as_str))?;
             if crate::routes::invites::role_is_a_takeover_token(&state.db, role_id).await? {
                 return Err((
                     StatusCode::BAD_REQUEST,
