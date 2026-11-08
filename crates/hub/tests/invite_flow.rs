@@ -1712,6 +1712,44 @@ async fn landing_appearance_refuses_bad_input_and_non_admins() {
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
 
+/// A retired invite stops describing the hub: only a live code gets the
+/// landing preview.
+#[tokio::test]
+async fn join_preview_answers_only_for_a_live_invite() {
+    let server = common::setup_raw().await;
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    for (code, max_uses, uses, expires_at) in [
+        ("livecode", None, 0_i64, None),
+        ("usedcode", Some(1_i64), 1_i64, None),
+        ("oldcode", None, 0_i64, Some(now - 60)),
+    ] {
+        sqlx::query(
+            "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at)
+             VALUES ($1, 'system', $2, $3, $4, $5)",
+        )
+        .bind(code)
+        .bind(max_uses)
+        .bind(uses)
+        .bind(expires_at)
+        .bind(now)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+    }
+    let preview = |code: &'static str| {
+        server
+            .get(&format!("/join/{code}"))
+            .add_header("accept", "application/json")
+    };
+    preview("livecode").await.assert_status_ok();
+    preview("usedcode")
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+    preview("oldcode")
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
 /// Choosing the default invite role is assigning it to everyone who joins, so
 /// `hub.settings` alone must not reach a role at or above the caller, nor one
 /// carrying permissions the caller lacks.
