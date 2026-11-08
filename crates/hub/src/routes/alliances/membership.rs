@@ -437,9 +437,22 @@ pub async fn push_invite_handler(
     };
 
     let target_url = req.target_hub_url.trim_end_matches('/').to_string();
+    // The target shows the sender to its admins, so it takes the sender from
+    // who authenticated, not from the payload.
+    let token = state
+        .federation_client
+        .authenticate(&target_url, &state.hub_identity)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to reach target hub: {e}"),
+            )
+        })?;
     let resp = state
         .http_client
         .post(format!("{target_url}/federation/alliance-invite"))
+        .bearer_auth(&token)
         .json(&payload)
         .send()
         .await
@@ -462,13 +475,37 @@ pub async fn push_invite_handler(
     Ok(StatusCode::OK)
 }
 
+const MAX_PENDING_INVITES_PER_SENDER: i64 = 5;
+
 /// `POST /federation/alliance-invite`
 /// Hub B receives a pushed invite from Hub A (no auth required).
 pub async fn receive_federation_alliance_invite(
     State(state): State<Arc<AppState>>,
+    peer: crate::auth::middleware::PeerHub,
     Json(payload): Json<crate::routes::alliance_models::FederationAllianceInvitePayload>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if payload.from_hub_public_key != peer.public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "from_hub_public_key is not the calling hub".to_string(),
+        ));
+    }
     let now = crate::auth::handlers::unix_timestamp();
+
+    // Each invite waits in front of an admin; a sender gets a few at a time.
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pending_alliance_invites WHERE from_hub_public_key = $1",
+    )
+    .bind(&peer.public_key)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if pending >= MAX_PENDING_INVITES_PER_SENDER {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many pending invites from this hub".to_string(),
+        ));
+    }
 
     sqlx::query(
         "INSERT INTO pending_alliance_invites

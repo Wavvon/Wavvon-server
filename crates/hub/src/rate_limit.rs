@@ -136,6 +136,14 @@ impl Config {
         burst: 30,
         refill_per_sec: 10.0,
     };
+
+    /// Unsolicited inboxes whose every call lands in front of a person (an
+    /// admin's pending invites, a member's recovery contacts): 10 at once,
+    /// then one every ten seconds.
+    pub const INBOX: Config = Config {
+        burst: 10,
+        refill_per_sec: 0.1,
+    };
 }
 
 /// A positive number from the environment, or nothing. A malformed or
