@@ -880,6 +880,25 @@ pub async fn remove(db: &PgPool, id: &str) -> Result<(), ApiErr> {
     Ok(())
 }
 
+/// Tombstones every attachment of a deleted post or reply, so its files stop
+/// being served (a moderator deleting a post over an image takes the image
+/// down), and drops bytes nothing else wants.
+pub async fn remove_owned(db: &PgPool, owner: Owner, owner_id: &str) -> Result<(), ApiErr> {
+    let _guard = LOCK.lock().await;
+    let now = crate::auth::handlers::unix_timestamp();
+    sqlx::query(&format!(
+        "UPDATE attachments SET removed_at = COALESCE(removed_at, $2), sha256 = NULL WHERE {} = $1",
+        owner.column()
+    ))
+    .bind(owner_id)
+    .bind(now)
+    .execute(db)
+    .await
+    .map_err(db_err)?;
+    drop_unused(db, now).await?;
+    Ok(())
+}
+
 // ── Retention ───────────────────────────────────────────────────────────
 
 /// The retention worker's pass: age, orphans, blobs nothing wants.
