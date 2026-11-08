@@ -796,3 +796,122 @@ async fn stream_limits_are_public_and_enforced() {
     assert!(streams.iter().any(|s| *s == "s-ok"), "{streams:?}");
     assert!(streams.iter().any(|s| *s == "s-old"), "{streams:?}");
 }
+
+/// #296: video signaling is relayed only between members of the voice call,
+/// and an offer only from someone whose camera is on.
+#[tokio::test]
+async fn video_offers_need_the_call_and_a_camera() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let room: ChannelResponse = reqwest::Client::new()
+        .post(format!("{base}/channels"))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "name": "room", "channel_type": "voice" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let alice = Identity::generate();
+    let carol = Identity::generate();
+    let (mut alice_tx, mut alice_rx) =
+        connect_ws(&base, &authenticate_http(&base, &alice).await).await;
+    let (mut carol_tx, mut carol_rx) =
+        connect_ws(&base, &authenticate_http(&base, &carol).await).await;
+    let (mut bob_tx, mut bob_rx) = connect_ws(
+        &base,
+        &authenticate_http(&base, &Identity::generate()).await,
+    )
+    .await;
+    let (mut mallory_tx, _mallory_rx) = connect_ws(
+        &base,
+        &authenticate_http(&base, &Identity::generate()).await,
+    )
+    .await;
+
+    for (tx, rx, camera) in [
+        (&mut alice_tx, &mut alice_rx, true),
+        (&mut carol_tx, &mut carol_rx, true),
+        (&mut bob_tx, &mut bob_rx, false),
+    ] {
+        send_text(
+            tx,
+            json!({ "type": "voice_join", "channel_id": room.id, "udp_port": 0 }),
+        )
+        .await;
+        wait_for_type(rx, "voice_joined").await;
+        if camera {
+            send_text(tx, json!({ "type": "video_enable", "channel_id": room.id })).await;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let offer = |sdp: &str| json!({ "type": "video_offer", "channel_id": room.id, "to_pubkey": alice.public_key_hex(), "sdp": sdp });
+    send_text(&mut mallory_tx, offer("from-outside-the-call")).await;
+    send_text(&mut bob_tx, offer("camera-off")).await;
+    send_text(&mut carol_tx, offer("legit")).await;
+
+    let got = wait_for_type(&mut alice_rx, "video_offer_in").await;
+    assert_eq!(got["sdp"], "legit");
+    assert_eq!(got["from_pubkey"], carol.public_key_hex());
+}
+
+/// #297: a chunk for a stream id the sender did not start is dropped, so
+/// nobody can inject frames into someone else's share.
+#[tokio::test]
+async fn a_chunk_for_someone_elses_stream_is_dropped() {
+    let (base, _state, _guard) = start_hub().await;
+    let alice_token = authenticate_http(&base, &Identity::generate()).await;
+    let mallory_token = authenticate_http(&base, &Identity::generate()).await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &alice_token, "general").await;
+
+    let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
+    let (mut alice_tx, _alice_rx) = connect_ws(&base, &alice_token).await;
+    let (mut mallory_tx, _mallory_rx) = connect_ws(&base, &mallory_token).await;
+    for tx in [&mut viewer_tx, &mut alice_tx, &mut mallory_tx] {
+        send_text(tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    }
+    send_text(
+        &mut alice_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "alice-stream",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut viewer_rx).await["type"],
+        "screen_share_started"
+    );
+
+    for is_init in [true, false] {
+        send_text(
+            &mut mallory_tx,
+            json!({
+                "type": "screen_share_chunk",
+                "channel_id": ch.id,
+                "stream_id": "alice-stream",
+                "seq": 1,
+                "is_init": is_init,
+            }),
+        )
+        .await;
+        mallory_tx
+            .send(TsMessage::Binary(b"FORGED".to_vec()))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong",
+        "no forged chunk reaches the viewer"
+    );
+}

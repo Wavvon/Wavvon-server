@@ -135,6 +135,7 @@ pub async fn review_report(
                 .execute(&state.db)
                 .await
                 .ok();
+            crate::routes::messages::reindex_message(&state, &message_id).await;
         }
         "ban_user" => {
             let sender: Option<String> =

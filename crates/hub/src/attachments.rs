@@ -609,8 +609,12 @@ async fn drop_unused(db: &PgPool, now: i64) -> Result<i64, ApiErr> {
     Ok(gone.iter().map(|(_, n)| n).sum())
 }
 
-/// Whole blobs, least recently linked first, banners excepted, until `want`
-/// bytes are freed. Every row on an evicted blob becomes "expired".
+/// Whole blobs, banners excepted, until `want` bytes are freed: first those
+/// no posted message, post or reply uses (an upload that was never sent), then
+/// the least recently linked. Every row on an evicted blob becomes "expired".
+/// Unsent uploads go first because they are fresh by `last_linked_at`, so a
+/// member uploading without sending would otherwise expire every older posted
+/// file on the hub before any of theirs.
 async fn evict_oldest(db: &PgPool, want: i64, now: i64) -> Result<i64, ApiErr> {
     let mut freed = 0i64;
     while freed < want {
@@ -619,7 +623,12 @@ async fn evict_oldest(db: &PgPool, want: i64, now: i64) -> Result<i64, ApiErr> {
              WHERE NOT EXISTS (SELECT 1 FROM attachments a
                                JOIN channels c ON c.banner_file_id = a.id
                                WHERE a.sha256 = b.sha256)
-             ORDER BY b.last_linked_at, b.sha256 LIMIT 32",
+             ORDER BY EXISTS (SELECT 1 FROM attachments a
+                              WHERE a.sha256 = b.sha256
+                                AND (a.message_id IS NOT NULL OR a.post_id IS NOT NULL
+                                     OR a.reply_id IS NOT NULL)),
+                      b.last_linked_at, b.sha256
+             LIMIT 32",
         )
         .fetch_all(db)
         .await
@@ -665,6 +674,40 @@ async fn ensure_room(db: &PgPool, need: i64, now: i64) -> Result<(), ApiErr> {
     let over = over - drop_unused(db, now).await?;
     if over > 0 {
         evict_oldest(db, over, now).await?;
+    }
+    Ok(())
+}
+
+/// One member's uploads that are not yet in a message, post or reply may
+/// hold at most a tenth of the disk budget. The first pending upload is always
+/// allowed, so a small budget never refuses a single file, and an orphan past
+/// the delay no longer counts: the next sweep or upload drops it.
+async fn refuse_over_unsent_share(
+    db: &PgPool,
+    uploader: &str,
+    size: i64,
+    now: i64,
+) -> Result<(), ApiErr> {
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(b.size_bytes), 0)::BIGINT FROM attachment_blobs b
+         WHERE b.sha256 IN (
+             SELECT a.sha256 FROM attachments a
+             WHERE a.uploader = $1 AND a.sha256 IS NOT NULL
+               AND a.message_id IS NULL AND a.post_id IS NULL AND a.reply_id IS NULL
+               AND a.created_at >= $2
+               AND NOT EXISTS (SELECT 1 FROM channels c WHERE c.banner_file_id = a.id))",
+    )
+    .bind(uploader)
+    .bind(now - ORPHAN_AFTER_SECS)
+    .fetch_one(db)
+    .await
+    .map_err(db_err)?;
+    let share = read_settings(db).await.attachments_cap_bytes as i64 / 10;
+    if pending > 0 && pending + size > share {
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_unsent_uploads",
+        ));
     }
     Ok(())
 }
@@ -732,6 +775,7 @@ pub async fn ingest(db: &PgPool, up: Upload) -> Result<AttachmentRef, ApiErr> {
     let id = uuid::Uuid::new_v4().to_string();
 
     let _guard = LOCK.lock().await;
+    refuse_over_unsent_share(db, &up.uploader, size, now).await?;
     let held: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM attachment_blobs WHERE sha256 = $1)")
             .bind(&sha)

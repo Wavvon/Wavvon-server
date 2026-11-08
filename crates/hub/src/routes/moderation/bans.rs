@@ -54,6 +54,24 @@ async fn end_membership(state: &AppState, target: &str) -> Result<(), (StatusCod
 
 // --- Ban ---
 
+/// Whether the target already carries a sanction with no end in `table`
+/// (`bans` or `mutes`). Replacing one with a timed sanction lifts it, so it
+/// needs the permission that sets the permanent kind, not the weaker one.
+async fn is_permanent(
+    state: &AppState,
+    table: &str,
+    target: &str,
+) -> Result<bool, (StatusCode, String)> {
+    let found: Option<i64> = sqlx::query_scalar(&format!(
+        "SELECT 1::BIGINT FROM {table} WHERE target_public_key = $1 AND expires_at IS NULL"
+    ))
+    .bind(target)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    Ok(found.is_some())
+}
+
 pub async fn ban_user(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
@@ -67,6 +85,17 @@ pub async fn ban_user(
         None => MODERATION_BAN_PERMANENT,
     };
     require_can_moderate(&state, &user.public_key, &req.target_public_key, needed).await?;
+    if needed == MODERATION_BAN_TEMPORARY
+        && is_permanent(&state, "bans", &req.target_public_key).await?
+    {
+        require_can_moderate(
+            &state,
+            &user.public_key,
+            &req.target_public_key,
+            MODERATION_BAN_PERMANENT,
+        )
+        .await?;
+    }
 
     let now = crate::auth::handlers::unix_timestamp();
     let expires_at = match req.duration_seconds {
@@ -314,6 +343,15 @@ pub async fn timeout_user(
         MODERATION_TIMEOUT,
     )
     .await?;
+    if is_permanent(&state, "mutes", &req.target_public_key).await? {
+        require_can_moderate(
+            &state,
+            &user.public_key,
+            &req.target_public_key,
+            MODERATION_MUTE,
+        )
+        .await?;
+    }
 
     let now = crate::auth::handlers::unix_timestamp();
     let expires_at = now + req.duration_seconds as i64;
