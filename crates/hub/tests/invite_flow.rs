@@ -1711,3 +1711,55 @@ async fn landing_appearance_refuses_bad_input_and_non_admins() {
         .await
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
+
+/// Choosing the default invite role is assigning it to everyone who joins, so
+/// `hub.settings` alone must not reach a role at or above the caller, nor one
+/// carrying permissions the caller lacks.
+#[tokio::test]
+async fn hub_settings_holder_cannot_make_a_stronger_role_the_default() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let settings_role: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Settings", "permissions": ["hub.settings"], "priority": 500 }))
+        .await
+        .json();
+    let higher = create_role(&server, &owner_token, "Higher", 900).await;
+    let moderator: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Moderator", "permissions": ["moderation.kick"], "priority": 100 }))
+        .await
+        .json();
+    let plain = create_role(&server, &owner_token, "Plain", 100).await;
+
+    let manager = Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            settings_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    for role in [&higher, &moderator.id] {
+        server
+            .patch("/hub")
+            .authorization_bearer(&manager_token)
+            .json(&json!({ "default_invite_role_id": role }))
+            .await
+            .assert_status(axum::http::StatusCode::FORBIDDEN);
+    }
+    server
+        .patch("/hub")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "default_invite_role_id": plain }))
+        .await
+        .assert_status_success();
+}
