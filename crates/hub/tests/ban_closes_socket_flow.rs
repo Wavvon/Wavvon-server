@@ -173,3 +173,10 @@ async fn a_revocation_closes_the_devices_open_socket() {
     .await;
     assert!(closed, "the revocation left the device's socket open");
 }
+
+/// #319: a voice mute also reaches the socket, which reconnects and is
+/// refused voice; before, the member kept talking until they reconnected.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_voice_mute_closes_the_members_open_socket() {
+    moderate("/moderation/voice-mutes").await;
+}

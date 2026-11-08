@@ -561,6 +561,37 @@ impl AppState {
         self.ws_key_senders.write().await.remove(pubkey);
     }
 
+    /// Who holds `role_id`: everyone for @everyone. Read before a write that
+    /// removes the role, so the holders can still be found afterwards.
+    pub async fn role_holders(&self, role_id: &str) -> Option<Vec<String>> {
+        if role_id == "builtin-everyone" {
+            return None;
+        }
+        Some(
+            sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+                .bind(role_id)
+                .fetch_all(&self.db)
+                .await
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Close the sockets of the members a narrowed permission reaches, so each
+    /// reconnects and has its subscriptions and voice rights computed again.
+    /// A socket computes them once, at connect: a member who lost a channel
+    /// or the right to speak otherwise kept it until they happened to
+    /// reconnect. `None` (an @everyone change) closes every socket.
+    pub async fn close_sessions_of_holders(&self, holders: Option<Vec<String>>) {
+        match holders {
+            Some(pks) => {
+                for pk in pks {
+                    self.close_sessions_of(&pk).await;
+                }
+            }
+            None => self.ws_key_senders.write().await.clear(),
+        }
+    }
+
     /// Close the sockets of the identity a revoked device belongs to. Tokens
     /// are refused from here on, but an open socket was authenticated once,
     /// at its handshake. Sockets are keyed by identity, not device, so the

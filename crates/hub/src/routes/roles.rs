@@ -251,6 +251,8 @@ pub async fn update_role(
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         }
+        let holders = state.role_holders(&role_id).await;
+        state.close_sessions_of_holders(holders).await;
     }
 
     if let Some(flag) = req.display_separately {
@@ -355,6 +357,7 @@ pub async fn delete_role(
     // setting rather than a foreign key, and would otherwise go on naming a
     // role that no longer exists.
     let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let holders = state.role_holders(&role_id).await;
     let mut tx = state.db.begin().await.map_err(db_err)?;
     for sql in [
         "UPDATE invites SET grant_role_id = NULL WHERE grant_role_id = $1",
@@ -370,6 +373,7 @@ pub async fn delete_role(
             .map_err(db_err)?;
     }
     tx.commit().await.map_err(db_err)?;
+    state.close_sessions_of_holders(holders).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -469,6 +473,8 @@ pub async fn remove_role(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Access narrowed: the open socket has to compute it again.
+    state.close_sessions_of(&public_key).await;
 
     Ok(StatusCode::OK)
 }
