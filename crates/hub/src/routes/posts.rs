@@ -768,6 +768,7 @@ pub async fn delete_post(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Post, &post_id).await?;
 
     broadcast_forum_event(
         &state,
@@ -983,6 +984,8 @@ pub async fn delete_reply(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Reply, &reply_id)
+        .await?;
 
     // Decrement reply_count (don't go below 0).
     sqlx::query("UPDATE posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1")
@@ -1975,6 +1978,7 @@ pub async fn federated_delete_post(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Post, &post_id).await?;
 
     broadcast_forum_event(
         &state,
@@ -2018,6 +2022,8 @@ pub async fn federated_delete_reply(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Reply, &reply_id)
+        .await?;
 
     sqlx::query("UPDATE posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1")
         .bind(&post_id)
