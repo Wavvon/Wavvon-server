@@ -13,6 +13,8 @@ use axum::response::IntoResponse;
 use crate::routes::chat_models::WsParams;
 use crate::state::AppState;
 
+const MAX_WS_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
 pub use connection::leave_voice;
 pub use connection::leave_voice_for_test;
 pub use voice::apply_pending_voice_move_assignment;
@@ -58,6 +60,11 @@ pub async fn ws_handler(
         &public_key[..16.min(public_key.len())]
     );
 
+    // The library default is 64 MiB a message. The largest legitimate frame
+    // is a screen-share chunk, a second or so of video.
+    let ws = ws
+        .max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_MESSAGE_BYTES);
     Ok(ws.on_upgrade(move |socket| {
         connection::handle_socket(
             socket,

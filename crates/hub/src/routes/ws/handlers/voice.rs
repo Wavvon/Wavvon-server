@@ -1488,17 +1488,28 @@ pub(in crate::routes::ws) async fn handle_voice_key_offer(
         _ => return DispatchResult::Continue,
     };
 
-    // Resolve the numeric sender_id for this client in the channel.
-    let from_sender_id = state
-        .voice_sender_ids
-        .read()
-        .await
-        .get(&channel_id)
-        .and_then(|m| m.get(&cs.public_key))
-        .copied()
-        .unwrap_or(0);
+    // A key is for the people in the call, from someone in it. Without this
+    // anyone could queue bundles into any member's socket.
+    let (from_sender_id, in_call) = {
+        let ids = state.voice_sender_ids.read().await;
+        let Some(room) = ids.get(&channel_id) else {
+            return DispatchResult::Continue;
+        };
+        let Some(id) = room.get(&cs.public_key).copied() else {
+            return DispatchResult::Continue;
+        };
+        (
+            id,
+            room.keys()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
 
-    for bundle in bundles {
+    for bundle in bundles.into_iter().take(in_call.len()) {
+        if !in_call.contains(&bundle.recipient_pubkey) {
+            continue;
+        }
         let delivery = WsServerMessage::VoiceKeyReceived {
             channel_id: channel_id.clone(),
             from_sender_id,
