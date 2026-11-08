@@ -252,7 +252,7 @@ pub async fn update_role(
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         }
         let holders = state.role_holders(&role_id).await;
-        state.close_sessions_of_holders(holders).await;
+        state.recheck_access_of(holders).await;
     }
 
     if let Some(flag) = req.display_separately {
@@ -373,7 +373,7 @@ pub async fn delete_role(
             .map_err(db_err)?;
     }
     tx.commit().await.map_err(db_err)?;
-    state.close_sessions_of_holders(holders).await;
+    state.recheck_access_of(holders).await;
 
     Ok(StatusCode::NO_CONTENT)
 }

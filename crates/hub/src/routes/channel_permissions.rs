@@ -333,7 +333,7 @@ pub async fn put_channel_permissions(
 
     let view = role_view(&state.db, &channel_id, &role_id, &role_name).await?;
     let holders = state.role_holders(&role_id).await;
-    state.close_sessions_of_holders(holders).await;
+    state.recheck_access_of(holders).await;
     Ok(Json(view))
 }
 
@@ -399,6 +399,6 @@ pub async fn delete_channel_permissions(
     }
 
     let holders = state.role_holders(&role_id).await;
-    state.close_sessions_of_holders(holders).await;
+    state.recheck_access_of(holders).await;
     Ok(StatusCode::NO_CONTENT)
 }
