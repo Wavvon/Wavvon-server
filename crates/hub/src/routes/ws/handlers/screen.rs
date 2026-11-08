@@ -124,6 +124,31 @@ pub(in crate::routes::ws) fn handle_screen_share_chunk_header(
     DispatchResult::Continue
 }
 
+/// How many seconds of the cap a stream may send at once: a keyframe is far
+/// larger than the frames around it.
+const BITRATE_BURST_SECS: f64 = 4.0;
+
+/// Token bucket over relayed bytes. The cap a stream declared used to be
+/// checked only as a number at start, so a modified client could then send at
+/// any rate; past the allowance a chunk is dropped instead of relayed.
+fn within_bitrate(
+    allowance: &mut (f64, std::time::Instant),
+    kbps: u32,
+    len: usize,
+    now: std::time::Instant,
+) -> bool {
+    let bytes_per_sec = f64::from(kbps) * 125.0;
+    let (tokens, last) = allowance;
+    let elapsed = now.saturating_duration_since(*last).as_secs_f64();
+    *tokens = (*tokens + elapsed * bytes_per_sec).min(bytes_per_sec * BITRATE_BURST_SECS);
+    *last = now;
+    if *tokens < len as f64 {
+        return false;
+    }
+    *tokens -= len as f64;
+    true
+}
+
 pub(in crate::routes::ws) async fn handle_binary_chunk(
     cs: &mut ConnState,
     state: &Arc<AppState>,
@@ -143,12 +168,22 @@ pub(in crate::routes::ws) async fn handle_binary_chunk(
             };
             meta.init_chunk = Some(data.clone());
         } else {
-            let shares = state.screen_shares.read().await;
-            if !shares
-                .get(&key)
-                .is_some_and(|active| active.streams.contains_key(&st_id))
-            {
-                return DispatchResult::Continue;
+            let max_kbps = {
+                let shares = state.screen_shares.read().await;
+                match shares.get(&key).and_then(|a| a.streams.get(&st_id)) {
+                    Some(meta) => meta.max_kbps,
+                    None => return DispatchResult::Continue,
+                }
+            };
+            if let Some(kbps) = max_kbps {
+                let now = std::time::Instant::now();
+                let entry = cs
+                    .chunk_allowance
+                    .entry(st_id.clone())
+                    .or_insert((f64::from(kbps) * 125.0 * BITRATE_BURST_SECS, now));
+                if !within_bitrate(entry, kbps, data.len(), now) {
+                    return DispatchResult::Continue;
+                }
             }
         }
         let _ = state.screen_share_tx.send(ScreenChunkEvent {
@@ -241,6 +276,10 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
                 session_id: cs.session_id.clone(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),
+                max_kbps: match (kbps, limits.max_kbps) {
+                    (Some(d), Some(m)) => Some(d.min(m)),
+                    (d, m) => d.or(m),
+                },
             },
         );
     }
@@ -490,4 +529,28 @@ pub(in crate::routes::ws) async fn handle_stream_unsubscribe(
         active.cross_channel_subscribers.remove(&cs.public_key);
     }
     DispatchResult::Continue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_relay_holds_a_stream_to_its_bitrate() {
+        let start = Instant::now();
+        // 8 kbps = 1000 bytes a second, 4000 of burst.
+        let mut allowance = (4000.0, start);
+        assert!(within_bitrate(&mut allowance, 8, 4000, start));
+        assert!(!within_bitrate(&mut allowance, 8, 1, start), "burst spent");
+        let later = start + Duration::from_secs(1);
+        assert!(within_bitrate(&mut allowance, 8, 1000, later));
+        assert!(!within_bitrate(&mut allowance, 8, 1, later));
+        let much_later = start + Duration::from_secs(60);
+        assert!(within_bitrate(&mut allowance, 8, 4000, much_later));
+        assert!(
+            !within_bitrate(&mut allowance, 8, 1, much_later),
+            "refill stops at the burst"
+        );
+    }
 }

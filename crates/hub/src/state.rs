@@ -86,6 +86,9 @@ pub struct ScreenStreamMeta {
     /// "share started before I subscribed" (push needed) from
     /// "share started after I subscribed" (broadcast delivers it).
     pub started_at: Instant,
+    /// The bitrate the relay holds this stream to: what the sharer declared,
+    /// or the hub's cap when it declared nothing. None when neither exists.
+    pub max_kbps: Option<u32>,
 }
 
 /// All active streams for one (channel, sharer) pair.
