@@ -130,13 +130,25 @@ pub(in crate::routes::ws) async fn handle_binary_chunk(
     data: bytes::Bytes,
 ) -> DispatchResult {
     if let Some((ch_id, st_id, seq, is_init)) = cs.pending_chunk.take() {
+        // Viewers key chunks by stream id, so a chunk for a stream this sender
+        // did not start would play under the real sharer's name.
+        let key = (ch_id.clone(), cs.public_key.clone());
         if is_init {
             let mut shares = state.screen_shares.write().await;
-            let key = (ch_id.clone(), cs.public_key.clone());
-            if let Some(active) = shares.get_mut(&key) {
-                if let Some(meta) = active.streams.get_mut(&st_id) {
-                    meta.init_chunk = Some(data.clone());
-                }
+            let Some(meta) = shares
+                .get_mut(&key)
+                .and_then(|active| active.streams.get_mut(&st_id))
+            else {
+                return DispatchResult::Continue;
+            };
+            meta.init_chunk = Some(data.clone());
+        } else {
+            let shares = state.screen_shares.read().await;
+            if !shares
+                .get(&key)
+                .is_some_and(|active| active.streams.contains_key(&st_id))
+            {
+                return DispatchResult::Continue;
             }
         }
         let _ = state.screen_share_tx.send(ScreenChunkEvent {
