@@ -91,6 +91,52 @@ async fn search_finds_matching_message() {
     assert!(hit.content_preview.contains("wavvonsearch"));
 }
 
+/// #312: an edit replaces the indexed text; what was edited away is not findable.
+#[tokio::test]
+async fn an_edited_message_is_found_by_its_new_text_only() {
+    let (server, _tmp) = setup_with_search().await;
+    let token = authenticate(&server, &Identity::generate()).await;
+    let channel: ChannelResponse = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "general" }))
+        .await
+        .json();
+    let msg: serde_json::Value = server
+        .post(format!("/channels/{}/messages", channel.id).as_str())
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "oldsecretword here", "attachments": [] }))
+        .await
+        .json();
+    server
+        .patch(&format!(
+            "/channels/{}/messages/{}",
+            channel.id,
+            msg["id"].as_str().unwrap()
+        ))
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "newpublicword here" }))
+        .await
+        .assert_status_ok();
+
+    let hits = |q: &'static str| {
+        let server = &server;
+        let token = token.clone();
+        async move {
+            server
+                .get("/search")
+                .add_query_param("q", q)
+                .authorization_bearer(&token)
+                .await
+                .json::<Vec<SearchResult>>()
+        }
+    };
+    assert!(hits("oldsecretword").await.is_empty());
+    let found = hits("newpublicword").await;
+    assert_eq!(found.len(), 1);
+    assert!(found[0].content_preview.contains("newpublicword"));
+}
+
 /// Short query (< 2 chars) returns an empty list, not an error.
 #[tokio::test]
 async fn search_short_query_returns_empty() {

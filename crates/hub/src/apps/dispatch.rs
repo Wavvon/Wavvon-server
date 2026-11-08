@@ -585,6 +585,7 @@ async fn apply_component_response(
                 .bind(message_id)
                 .execute(&state.db)
                 .await;
+            crate::routes::messages::reindex_message(state, message_id).await;
         }
 
         if let Some(rows) = &components {
