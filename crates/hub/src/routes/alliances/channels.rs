@@ -1012,6 +1012,7 @@ pub async fn get_alliance_channel_messages(
                     m.masquerade
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1
+               AND m.visible_to_pubkey IS NULL
                AND ($2::text IS NULL OR (m.created_at, m.id) <
                     ((SELECT created_at FROM messages WHERE id = $2), $2))
              ORDER BY m.created_at DESC, m.id DESC LIMIT $3",

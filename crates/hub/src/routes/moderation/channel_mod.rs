@@ -41,6 +41,8 @@ pub async fn voice_mute(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Access narrowed: the open socket has to compute it again.
+    state.close_sessions_of(&req.target_public_key).await;
 
     Ok((
         StatusCode::CREATED,
@@ -170,6 +172,8 @@ pub async fn channel_ban(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Access narrowed: the open socket has to compute it again.
+    state.close_sessions_of(&req.pubkey).await;
 
     Ok((
         StatusCode::CREATED,
@@ -254,6 +258,8 @@ pub async fn channel_voice_mute(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Access narrowed: the open socket has to compute it again.
+    state.close_sessions_of(&req.pubkey).await;
 
     Ok((
         StatusCode::CREATED,
