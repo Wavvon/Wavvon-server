@@ -460,7 +460,13 @@ async fn a_key_offer_reaches_every_live_session_of_the_recipient() {
     .await;
     let _ = next_msg_of_type(&mut rx_a, "voice_joined").await;
 
-    let (mut tx_b, _rx_b) = connect_ws(&base, &token_b).await;
+    let (mut tx_b, mut rx_b) = connect_ws(&base, &token_b).await;
+    send_ws(
+        &mut tx_b,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    let _ = next_msg_of_type(&mut rx_b, "voice_joined").await;
     send_ws(
         &mut tx_b,
         json!({
@@ -479,4 +485,46 @@ async fn a_key_offer_reaches_every_live_session_of_the_recipient() {
         let msg = next_msg_of_type(rx, "voice_key_received").await;
         assert_eq!(msg["ciphertext_hex"].as_str().unwrap(), "0101");
     }
+}
+
+/// #318: a key offer is relayed only from someone in the call, so nobody
+/// outside it can queue bundles into a member's socket.
+#[tokio::test]
+async fn a_key_offer_from_outside_the_call_is_dropped() {
+    let (base, _state, _guard) = start_hub().await;
+    let id_a = Identity::generate();
+    let token_a = authenticate_http(&base, &id_a).await;
+    let token_b = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &token_a, "enc-gate").await;
+
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token_a).await;
+    send_ws(
+        &mut tx_a,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    let _ = next_msg_of_type(&mut rx_a, "voice_joined").await;
+
+    let (mut tx_b, mut rx_b) = connect_ws(&base, &token_b).await;
+    let offer = |hex: &str| {
+        json!({
+            "type": "voice_key_offer",
+            "channel_id": ch.id,
+            "bundles": [{ "recipient_pubkey": id_a.public_key_hex(), "ciphertext_hex": hex, "nonce_hex": "02" }]
+        })
+    };
+    send_ws(&mut tx_b, offer("aa")).await;
+    send_ws(
+        &mut tx_b,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    let _ = next_msg_of_type(&mut rx_b, "voice_joined").await;
+    send_ws(&mut tx_b, offer("bb")).await;
+
+    let msg = next_msg_of_type(&mut rx_a, "voice_key_received").await;
+    assert_eq!(
+        msg["ciphertext_hex"], "bb",
+        "the offer sent from outside never arrived"
+    );
 }

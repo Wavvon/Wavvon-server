@@ -69,7 +69,7 @@ pub(in crate::routes::ws) async fn handle_typing(
 /// client tracks its invisible state locally and does not rely on this
 /// broadcast to know it's invisible.
 pub(in crate::routes::ws) async fn handle_set_status(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
 ) -> DispatchResult {
@@ -77,6 +77,16 @@ pub(in crate::routes::ws) async fn handle_set_status(
         WsClientMessage::SetStatus { status, custom } => (status, custom),
         _ => return DispatchResult::Continue,
     };
+    // Every accepted change is broadcast hub-wide, so a socket gets a burst of
+    // five and then one a second; a flood would otherwise lag every client.
+    let now = std::time::Instant::now();
+    let (tokens, last) = cs.status_allowance.get_or_insert((5.0, now));
+    *tokens = (*tokens + now.duration_since(*last).as_secs_f64()).min(5.0);
+    *last = now;
+    if *tokens < 1.0 {
+        return DispatchResult::Continue;
+    }
+    *tokens -= 1.0;
 
     let status = match status.as_str() {
         "online" => None,
