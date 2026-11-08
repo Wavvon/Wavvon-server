@@ -75,11 +75,13 @@ async fn main() -> Result<()> {
                 .with_endpoint(endpoint)
                 .build()
                 .ok()?;
-            let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-                .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new("service.name", env!("CARGO_PKG_NAME")),
-                ]))
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_resource(
+                    opentelemetry_sdk::Resource::builder()
+                        .with_service_name(env!("CARGO_PKG_NAME"))
+                        .build(),
+                )
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
             Some(provider)
