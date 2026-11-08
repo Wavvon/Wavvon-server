@@ -119,6 +119,7 @@ pub async fn screenshare_start(
                 session_id: HTTP_SESSION_ID.to_string(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),
+                max_kbps: None,
             },
         );
     }

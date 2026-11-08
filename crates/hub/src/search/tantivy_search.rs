@@ -109,6 +109,9 @@ impl MessageSearch for TantivySearch {
                     ts_field => timestamp,
                 );
                 let mut w = writer.lock().unwrap_or_else(|e| e.into_inner());
+                // An upsert: an edited message replaces its old text, which
+                // would otherwise stay findable.
+                w.delete_term(Term::from_field_text(id_field, &id));
                 w.add_document(doc)?;
                 // Commit on every document. The reader is refreshed lazily
                 // inside query() instead of here, so this hot path does not

@@ -124,6 +124,18 @@ pub async fn dispatch_event(
 
         let Some(webhook) = webhook else { continue };
 
+        // Checked at delivery, not only at subscription: the creator may have
+        // lost the channel since, and a hub-scope subscription names none.
+        if let Some(ch) = channel_id {
+            let may_read =
+                crate::permissions::channel_permissions(&state.db, &webhook.created_by_pubkey, ch)
+                    .await
+                    .is_ok_and(|p| p.has(crate::permissions::MESSAGES_READ));
+            if !may_read {
+                continue;
+            }
+        }
+
         if !BUCKET.try_take() {
             let depth = BUCKET.in_flight.load(Ordering::Relaxed);
             if depth > QUEUE_DEPTH_WARN_THRESHOLD {

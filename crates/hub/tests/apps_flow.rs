@@ -851,3 +851,44 @@ async fn a_slash_reply_keeps_its_components_thread_and_reactions() {
         "an empty update clears them"
     );
 }
+
+/// #307: a command name belongs to one app, and a command is dispatched only
+/// in a channel its app can read.
+#[tokio::test]
+async fn a_command_is_one_apps_and_only_where_it_can_read() {
+    let server = common::setup_allowing_private_webhooks().await;
+    grant_apps_register(&server).await;
+    // The first identity becomes the owner, whom no channel denies.
+    common::authenticate(&server, &Identity::generate()).await;
+    let owner = app_with_command(&server, 0).await;
+
+    let (_squatter, squatter_token) = register_app(&server, "Squatter").await;
+    server
+        .put("/me/app/commands")
+        .authorization_bearer(&squatter_token)
+        .json(&json!({ "commands": [{ "name": "ping", "description": "mine now" }] }))
+        .await
+        .assert_status(axum::http::StatusCode::CONFLICT);
+
+    sqlx::query(
+        "INSERT INTO channels (id, name, created_by, created_at) VALUES ('secret', 'secret', $1, 0)",
+    )
+    .bind(&owner)
+    .execute(&server.state().db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO channel_permission_overwrites (channel_id, role_id, permission, allow, created_at)
+         VALUES ('secret', 'builtin-everyone', 'messages.read', FALSE, 0)",
+    )
+    .execute(&server.state().db)
+    .await
+    .unwrap();
+    let in_secret =
+        wavvon_hub::apps::dispatch::dispatch_slash(&server.state_arc(), "secret", "alice", "/ping")
+            .await;
+    assert_eq!(
+        in_secret, None,
+        "an app that cannot read the channel never hears the command"
+    );
+}

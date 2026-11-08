@@ -1295,6 +1295,7 @@ async fn main() -> Result<()> {
         dm_tx,
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
+        federated_masters: RwLock::new(HashMap::new()),
         screen_share_tx,
         app_sessions: RwLock::new(HashMap::new()),
         farm_url,
