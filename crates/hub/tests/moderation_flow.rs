@@ -1286,3 +1286,71 @@ async fn voice_is_joined_only_in_voice_channels() {
     assert_eq!(frame["type"], "voice_joined", "{frame}");
     assert!(afk(&text.id).await.unwrap().status().is_success());
 }
+
+/// #310: a temporary-ban or timeout permission cannot replace a permanent
+/// ban or mute with a timed one, which would lift it early.
+#[tokio::test]
+async fn a_weaker_permission_cannot_shorten_a_permanent_sanction() {
+    let server = common::setup().await;
+    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let moderator = Identity::generate();
+    let mod_token = common::authenticate(&server, &moderator).await;
+    let target = Identity::generate();
+    let _ = common::authenticate(&server, &target).await;
+
+    let role: serde_json::Value = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "name": "Junior",
+            "permissions": ["moderation.ban.temporary", "moderation.timeout"],
+            "priority": 500
+        }))
+        .await
+        .json();
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            moderator.public_key_hex(),
+            role["id"].as_str().unwrap()
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_success();
+
+    let target_key = target.public_key_hex();
+    server
+        .post("/moderation/bans")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "target_public_key": target_key }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+    server
+        .post("/moderation/mutes")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "target_public_key": target_key }))
+        .await
+        .assert_status_success();
+
+    server
+        .post("/moderation/bans")
+        .authorization_bearer(&mod_token)
+        .json(&json!({ "target_public_key": target_key, "duration_seconds": 60 }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+    server
+        .post("/moderation/timeout")
+        .authorization_bearer(&mod_token)
+        .json(&json!({ "target_public_key": target_key, "duration_seconds": 60 }))
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+
+    let bans: Vec<BanResponse> = server
+        .get("/moderation/bans")
+        .authorization_bearer(&owner_token)
+        .await
+        .json();
+    assert!(bans
+        .iter()
+        .any(|b| b.target_public_key == target_key && b.expires_at.is_none()));
+}

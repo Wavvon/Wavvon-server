@@ -38,6 +38,22 @@ async fn hub_url(state: &AppState) -> String {
 ///
 /// When the app responds with a reply, that reply is inserted into the DB
 /// here and broadcast via `state.chat_tx` so WS clients receive it.
+async fn app_may_serve(state: &AppState, app_pubkey: &str, channel_id: &str) -> bool {
+    let registers = crate::permissions::user_permissions(&state.db, app_pubkey)
+        .await
+        .is_ok_and(|p| p.has(crate::permissions::APPS_REGISTER));
+    if !registers
+        || crate::routes::moderation::helpers::is_banned(&state.db, app_pubkey)
+            .await
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    crate::permissions::channel_permissions(&state.db, app_pubkey, channel_id)
+        .await
+        .is_ok_and(|p| p.has(crate::permissions::MESSAGES_READ))
+}
+
 pub async fn dispatch_slash(
     state: &Arc<AppState>,
     channel_id: &str,
@@ -69,19 +85,37 @@ pub async fn dispatch_slash(
         cooldown_seconds: i64,
     }
 
-    let matched = sqlx::query_as::<_, MatchedCommand>(
+    let candidates = sqlx::query_as::<_, MatchedCommand>(
         "SELECT bc.pubkey as app_pubkey, bp.name as app_name, bp.webhook_url,
                 bc.privileged, bc.cooldown_seconds
          FROM app_commands bc
          JOIN app_profiles bp ON bp.pubkey = bc.pubkey
          WHERE bc.name = $1
-         LIMIT 1",
+         ORDER BY bc.pubkey",
     )
     .bind(&command_name)
-    .fetch_optional(&state.db)
+    .fetch_all(&state.db)
     .await
-    .ok()
-    .flatten()?; // None = no app matched, fall through to normal message storage
+    .ok()?;
+
+    // An app hears a command only where it could read the conversation
+    // itself, and only while its owner still runs apps here: the invocation
+    // carries the channel's words, and the reply is posted into it.
+    let mut eligible = Vec::new();
+    for c in candidates {
+        if app_may_serve(state, &c.app_pubkey, channel_id).await {
+            eligible.push(c);
+        }
+    }
+    if eligible.len() > 1 {
+        let names: Vec<&str> = eligible.iter().map(|c| c.app_name.as_str()).collect();
+        return Some(format!(
+            "/{command_name} is provided by more than one app here ({}). Ask an admin to remove one.",
+            names.join(", ")
+        ));
+    }
+    // None = no app matched, fall through to normal message storage.
+    let matched = eligible.pop()?;
 
     // Privileged command: check invoker's permissions.
     if matched.privileged {
@@ -585,6 +619,7 @@ async fn apply_component_response(
                 .bind(message_id)
                 .execute(&state.db)
                 .await;
+            crate::routes::messages::reindex_message(state, message_id).await;
         }
 
         if let Some(rows) = &components {

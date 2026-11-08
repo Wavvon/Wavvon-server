@@ -37,6 +37,9 @@ pub(super) struct ConnState {
     /// Pending screen-share chunk header waiting for the binary frame.
     /// Fields: (channel_id, stream_id, seq, is_init).
     pub pending_chunk: Option<(String, String, u32, bool)>,
+    /// Per stream id: bytes this connection may still relay, and when the
+    /// allowance was last topped up. See `screen::within_bitrate`.
+    pub chunk_allowance: HashMap<String, (f64, Instant)>,
     /// Channels whose events this connection currently receives.
     pub subscribed: HashSet<String>,
     /// Streams for which `screen_share_started` has already been sent to this
@@ -82,6 +85,7 @@ impl ConnState {
             watched_voice_channel: None,
             last_position_update: None,
             pending_chunk: None,
+            chunk_allowance: HashMap::new(),
             subscribed,
             notified_streams: HashSet::new(),
             streams_on_request: false,
