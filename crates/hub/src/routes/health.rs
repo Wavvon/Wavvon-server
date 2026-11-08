@@ -182,6 +182,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         max_attachment_bytes,
         stream_limits,
         canonical_url: state.canonical_url.read().await.clone(),
+        landing: Some(crate::routes::hub::read_landing(&state.db).await),
     })
 }
 
@@ -309,6 +310,11 @@ pub struct InfoResponse {
     /// what stops a changed address from silently becoming a different hub.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canonical_url: Option<String>,
+    /// The invite landing look: `image` is set only when one exists, so a
+    /// member's client can skip requesting it (it used to 404 on every load).
+    /// Absent on older hubs, which a client reads as "unknown, try the image".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<crate::routes::hub::Landing>,
 }
 
 fn default_true() -> bool {
