@@ -935,9 +935,9 @@ async fn dispatch_client_msg(
             voice::handle_video_enable(cs, state, ws_tx, msg).await
         }
         WsClientMessage::VideoDisable { .. } => voice::handle_video_disable(cs, state, msg).await,
-        WsClientMessage::VideoOffer { .. } => voice::handle_video_offer(cs, state, msg),
-        WsClientMessage::VideoAnswer { .. } => voice::handle_video_answer(cs, state, msg),
-        WsClientMessage::VideoIce { .. } => voice::handle_video_ice(cs, state, msg),
+        WsClientMessage::VideoOffer { .. } => voice::handle_video_offer(cs, state, msg).await,
+        WsClientMessage::VideoAnswer { .. } => voice::handle_video_answer(cs, state, msg).await,
+        WsClientMessage::VideoIce { .. } => voice::handle_video_ice(cs, state, msg).await,
 
         // ── Screen share ───────────────────────────────────────────────────
         WsClientMessage::ScreenShareStart { .. } => {
