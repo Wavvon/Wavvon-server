@@ -1712,6 +1712,26 @@ async fn landing_appearance_refuses_bad_input_and_non_admins() {
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
 
+/// `/info` says whether a landing image exists, so a member's client asks
+/// for it only when there is one (it used to 404 on every load).
+#[tokio::test]
+async fn info_says_whether_a_landing_image_exists() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert_eq!(info["landing"], json!({}));
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "landing_image": landing_png() }))
+        .await
+        .assert_status_success();
+    let info: serde_json::Value = server.get("/info").await.json();
+    let path = info["landing"]["image"].as_str().expect("image path");
+    server.get(path).await.assert_status_success();
+}
+
 #[tokio::test]
 async fn create_invite_rejects_non_positive_and_overflowing_bounds() {
     let server = common::setup().await;
