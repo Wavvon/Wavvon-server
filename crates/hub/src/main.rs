@@ -415,7 +415,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let settings = match wavvon_hub::settings::load() {
+    let mut settings = match wavvon_hub::settings::load() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to load configuration: {e}");
@@ -855,6 +855,13 @@ async fn main() -> Result<()> {
             }
         }
         let ip = lan_advertise_ip.expect("set immediately above");
+        match wavvon_hub::lan::lan_bind_addr(settings.bind_addr) {
+            Ok(addr) => settings.bind_addr = addr,
+            Err(e) => {
+                eprintln!("LAN mode configuration error: {e}");
+                std::process::exit(1);
+            }
+        }
 
         if has_ca_cert {
             tracing::info!(
@@ -1288,6 +1295,7 @@ async fn main() -> Result<()> {
         dm_tx,
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
+        federated_masters: RwLock::new(HashMap::new()),
         screen_share_tx,
         app_sessions: RwLock::new(HashMap::new()),
         farm_url,

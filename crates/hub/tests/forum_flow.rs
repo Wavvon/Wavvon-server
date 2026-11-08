@@ -1664,3 +1664,50 @@ async fn forum_list_carries_a_bounded_excerpt() {
         wavvon_hub::routes::post_models::EXCERPT_CHARS + 1
     );
 }
+
+/// #305: an allied hub cannot file a post or reply under one of our members.
+#[tokio::test]
+async fn alliance_forum_refuses_a_local_member_as_federated_author() {
+    let s = setup_forum_alliance(Some("posts_and_replies")).await;
+    let me: Value = s
+        .client
+        .get(format!("{}/me", s.hub_b_url))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let local_author = me["public_key"].as_str().unwrap().to_string();
+
+    let peer_token = FederationClient::new()
+        .authenticate(&s.hub_b_url, &s.hub_a_state.hub_identity)
+        .await
+        .unwrap();
+    let reply = s
+        .client
+        .post(format!(
+            "{}/federation/forum/channels/{}/posts/{}/replies",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&peer_token)
+        .json(&json!({ "author_pubkey": local_author, "body": "not really me" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), 403, "{}", reply.text().await.unwrap());
+
+    let post = s
+        .client
+        .post(format!(
+            "{}/federation/forum/channels/{}/posts",
+            s.hub_b_url, s.channel_id
+        ))
+        .bearer_auth(&peer_token)
+        .json(&json!({ "author_pubkey": local_author, "title": "t", "body": "b" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 403, "{}", post.text().await.unwrap());
+}
