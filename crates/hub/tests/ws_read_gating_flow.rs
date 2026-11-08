@@ -463,3 +463,39 @@ async fn voice_admission_is_independent_of_read_in_both_directions() {
     );
     assert_eq!(frame["context"], "voice_join");
 }
+
+/// #319: revoking read on a channel reaches a socket already subscribed to it.
+/// The socket stays open (a permission tweak must not drop everyone's calls)
+/// but stops receiving the channel.
+#[tokio::test]
+async fn revoking_read_reaches_an_open_socket() {
+    let (base, _state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let member_token = authenticate_http(&base, &Identity::generate()).await;
+    let room = create_channel(&base, &owner_token, "soon-private").await;
+
+    let (mut member_tx, mut member_rx) = connect_ws(&base, &member_token).await;
+    send_text(
+        &mut member_tx,
+        json!({ "type": "subscribe", "channel_id": room.id }),
+    )
+    .await;
+    send_message(&base, &owner_token, &room.id, "before").await;
+    let first = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(15))
+        .await
+        .expect("the channel is readable at first");
+    assert_eq!(first["type"], "message");
+
+    deny_everyone(&base, &owner_token, &room.id, "messages.read").await;
+    let notice = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(5))
+        .await
+        .expect("the socket is told its access changed");
+    assert_eq!(notice["type"], "access_changed");
+
+    send_message(&base, &owner_token, &room.id, "after").await;
+    let leaked = next_meaningful_frame(&mut member_rx, std::time::Duration::from_secs(2)).await;
+    assert!(
+        leaked.is_none(),
+        "a revoked channel kept flowing: {leaked:?}"
+    );
+}

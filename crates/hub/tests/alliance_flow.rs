@@ -2382,3 +2382,37 @@ async fn a_pushed_invite_must_come_from_the_hub_it_names() {
         .unwrap();
     assert_eq!(honest.status(), 200);
 }
+
+/// #304: an invite to an alliance this hub already belongs to is refused
+/// before the inviter is contacted, since its member list could only add
+/// the inviter to that alliance.
+#[tokio::test]
+async fn an_invite_to_an_alliance_already_joined_is_refused() {
+    let (hub_url, _state, _guard) = start_hub("hub-a").await;
+    let client = reqwest::Client::new();
+    let token = authenticate_user(&hub_url, &Identity::generate()).await;
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_url}/alliances"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "Mine" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{hub_url}/alliances/join"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "inviter_hub_url": "http://127.0.0.1:9",
+            "alliance_id": alliance.id,
+            "invite_token": "anything",
+            "own_hub_url": hub_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+}

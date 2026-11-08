@@ -112,6 +112,20 @@ pub(super) async fn do_join_alliance(
     invite_token: &str,
     own_hub_url: &str,
 ) -> Result<AllianceDetailResponse, (StatusCode, String)> {
+    // An invite to an alliance this hub is already in can only be an attempt
+    // to add the inviter to it: the detail below would list it as a member.
+    let already: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM alliances WHERE id = $1)")
+        .bind(alliance_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if already {
+        return Err((
+            StatusCode::CONFLICT,
+            "This hub is already a member of the alliance.".to_string(),
+        ));
+    }
+
     let token = state
         .federation_client
         .authenticate(inviter_url, &state.hub_identity)
@@ -178,6 +192,55 @@ pub(super) async fn do_join_alliance(
             )
         })?;
 
+    if detail.id != alliance_id {
+        tracing::warn!(
+            "Alliance join: {inviter_url} answered for alliance {} when asked for {alliance_id}",
+            detail.id
+        );
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "The inviting hub described a different alliance than the invite named.".to_string(),
+        ));
+    }
+
+    // The member list is the inviter's word. Each hub on it is kept only if
+    // the hub at its address presents that key, the inviter included, so an
+    // inviter cannot seat keys of its choosing in the alliance.
+    let inviter_key = match state.federation_client.get_info(inviter_url).await {
+        Ok(info) => info.public_key,
+        Err(e) => {
+            tracing::warn!("Alliance join: could not read {inviter_url}/info: {e}");
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "Could not reach the inviting hub. It may be offline or its URL has changed."
+                    .to_string(),
+            ));
+        }
+    };
+    let own_key = state.hub_identity.public_key_hex();
+    let mut verified = Vec::with_capacity(detail.members.len());
+    for m in &detail.members {
+        let ok = if m.hub_public_key == own_key {
+            true
+        } else if m.hub_url == "self" || m.hub_url == inviter_url {
+            m.hub_public_key == inviter_key
+        } else {
+            matches!(
+                state.federation_client.get_info(&m.hub_url).await,
+                Ok(info) if info.public_key == m.hub_public_key
+            )
+        };
+        if ok {
+            verified.push(m);
+        } else {
+            tracing::warn!(
+                "Alliance join: {inviter_url} listed {} at {} and that address does not present it; skipping",
+                m.hub_public_key,
+                m.hub_url
+            );
+        }
+    }
+
     // Mirror locally
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
@@ -192,7 +255,7 @@ pub(super) async fn do_join_alliance(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    for m in &detail.members {
+    for m in &verified {
         // `m.hub_url` is "self" whenever the inviter reported its OWN row --
         // that only means "self" from the inviter's point of view. From here
         // (the joiner), the inviter's real address is `inviter_url`. Without
