@@ -201,6 +201,24 @@ pub async fn put_my_app_commands(
 ) -> Result<StatusCode, (StatusCode, String)> {
     require_app_registrar(&state, &user).await?;
 
+    // A command name belongs to one app: a second app registering it would
+    // otherwise take over, or split, every invocation of the first.
+    let names: Vec<&str> = req.commands.iter().map(|c| c.name.as_str()).collect();
+    let taken: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM app_commands WHERE name = ANY($1) AND pubkey <> $2 LIMIT 1",
+    )
+    .bind(&names)
+    .bind(&user.public_key)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some(name) = taken {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("/{name} is already registered by another app"),
+        ));
+    }
+
     sqlx::query("DELETE FROM app_commands WHERE pubkey = $1")
         .bind(&user.public_key)
         .execute(&state.db)

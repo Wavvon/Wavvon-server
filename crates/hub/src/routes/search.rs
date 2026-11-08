@@ -39,7 +39,7 @@ pub async fn search_messages(
         return Ok(Json(vec![]));
     }
 
-    let limit = params.limit.min(100);
+    let limit = params.limit.clamp(1, 100);
 
     // Text channels the caller can read (§3.5) and is not banned from.
     let readable = crate::permissions::channels_with_permission(

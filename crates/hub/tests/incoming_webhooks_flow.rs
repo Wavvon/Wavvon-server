@@ -123,3 +123,74 @@ async fn masquerade_needs_the_permission_and_a_sane_name() {
     assert_eq!(sent["masquerade"]["name"], "Grace");
     assert!(sent["masquerade"].get("avatar_url").is_none());
 }
+
+/// #308: a webhook permission does not reach past the holder's own channel
+/// access: no incoming webhook into a channel they cannot send to, no
+/// outgoing subscription to one they cannot read.
+#[tokio::test]
+async fn webhooks_stay_within_their_creators_channels() {
+    let (server, owner_token) = common::setup_with_owner().await;
+    let manager = wavvon_identity::Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+
+    let role: serde_json::Value = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({
+            "name": "Hooks",
+            "permissions": ["webhooks.incoming.manage", "webhooks.outgoing.manage"],
+            "priority": 100
+        }))
+        .await
+        .json();
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            role["id"].as_str().unwrap()
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_success();
+
+    let private: serde_json::Value = server
+        .post("/channels")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "staff" }))
+        .await
+        .json();
+    let private_id = private["id"].as_str().unwrap();
+    server
+        .put(&format!(
+            "/channels/{private_id}/permissions/builtin-everyone"
+        ))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "allow": [], "deny": ["messages.read"] }))
+        .await
+        .assert_status_ok();
+
+    server
+        .post("/admin/webhooks")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "channel_id": private_id, "display_name": "Leak" }))
+        .await
+        .assert_status_forbidden();
+
+    let hook: serde_json::Value = server
+        .post("/admin/outgoing-webhooks")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "url": "https://example.com/hook" }))
+        .await
+        .json();
+    server
+        .put(&format!(
+            "/admin/outgoing-webhooks/{}/subscriptions",
+            hook["id"].as_str().unwrap()
+        ))
+        .authorization_bearer(&manager_token)
+        .json(&json!({
+            "subscriptions": [{ "event": "message.created", "channels": [private_id] }]
+        }))
+        .await
+        .assert_status_forbidden();
+}

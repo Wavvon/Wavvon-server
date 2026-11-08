@@ -718,6 +718,11 @@ pub enum WsClientMessage {
 #[derive(Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum WsServerMessage {
+    /// What this connection may read or join changed. The connection drops
+    /// channels it can no longer read and leaves voice it can no longer join
+    /// before forwarding this, so a client can refetch its channel list.
+    #[serde(rename = "access_changed")]
+    AccessChanged,
     #[serde(rename = "message")]
     ChatMessage {
         channel_id: String,

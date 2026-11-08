@@ -1,6 +1,6 @@
 mod bans;
 mod channel_mod;
-mod helpers;
+pub(crate) mod helpers;
 mod models;
 
 // Re-export all public items so server.rs paths remain unchanged.

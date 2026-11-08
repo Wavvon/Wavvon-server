@@ -337,6 +337,12 @@ pub struct AppState {
     /// Multiple concurrent sharers per channel are allowed (multi-stream overlay).
     /// In-memory only — cleared on process restart.
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
+    /// Sender pubkey to master, as proven by a remote hub's device registry
+    /// (`dms::messages::resolve_master_binding`). Kept apart from
+    /// `users.master_pubkey` on purpose: sign-in maps a master-signed cert to
+    /// the row holding that column, so a binding a federation peer could
+    /// supply must never land there.
+    pub federated_masters: RwLock<HashMap<String, String>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.
     pub screen_share_tx: broadcast::Sender<ScreenChunkEvent>,
     /// Active bot WS sessions: app_pubkey → { session_id → mpsc sender }.
@@ -562,6 +568,47 @@ impl AppState {
     /// connection loops, whose disconnect cleanup leaves voice as usual.
     pub async fn close_sessions_of(&self, pubkey: &str) {
         self.ws_key_senders.write().await.remove(pubkey);
+    }
+
+    /// Who holds `role_id`: everyone for @everyone. Read before a write that
+    /// removes the role, so the holders can still be found afterwards.
+    pub async fn role_holders(&self, role_id: &str) -> Option<Vec<String>> {
+        if role_id == "builtin-everyone" {
+            return None;
+        }
+        Some(
+            sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+                .bind(role_id)
+                .fetch_all(&self.db)
+                .await
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Tell the sockets of the members a permission change reaches to check
+    /// their access again (see `WsServerMessage::AccessChanged`). A socket
+    /// computes its channels and voice rights once, at connect: a member who
+    /// lost a channel otherwise kept receiving it until they reconnected.
+    /// `None` (an @everyone change) reaches every socket. Nothing is closed:
+    /// a permission tweak must not drop the whole hub out of its calls.
+    pub async fn recheck_access_of(&self, holders: Option<Vec<String>>) {
+        let senders = self.ws_key_senders.read().await;
+        let mut send =
+            |sessions: &HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>| {
+                for tx in sessions.values() {
+                    let _ = tx.send(WsServerMessage::AccessChanged);
+                }
+            };
+        match holders {
+            Some(pks) => {
+                for pk in pks {
+                    if let Some(sessions) = senders.get(&pk) {
+                        send(sessions);
+                    }
+                }
+            }
+            None => senders.values().for_each(&mut send),
+        }
     }
 
     /// Close the sockets of the identity a revoked device belongs to. Tokens
