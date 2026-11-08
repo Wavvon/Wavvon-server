@@ -169,6 +169,25 @@ pub fn create_router_full(
             async move { rate_limit::enforce(l, req, next).await }
         }));
 
+    let inbox_limiter = RateLimiter::new(Config::INBOX, trusted_proxy);
+    let inbox_routes = Router::new()
+        .route(
+            "/federation/alliance-invite",
+            post(routes::alliances::receive_federation_alliance_invite),
+        )
+        .route(
+            "/federation/badge-offer",
+            post(federation::handlers::receive_badge_offer),
+        )
+        .route(
+            "/recovery/rotate-key",
+            post(routes::recovery::post_rotate_key),
+        )
+        .layer(from_fn(move |req, next| {
+            let l = inbox_limiter.clone();
+            async move { rate_limit::enforce(l, req, next).await }
+        }));
+
     let sticker_limiter = RateLimiter::new(Config::STICKER_FEDERATION, trusted_proxy);
     let sticker_federation_routes = Router::new()
         .route(
@@ -257,6 +276,7 @@ pub fn create_router_full(
         .merge(auth_routes)
         .merge(write_routes)
         .merge(sticker_federation_routes)
+        .merge(inbox_routes)
         .route(
             "/me",
             get(routes::me::me)
@@ -417,10 +437,6 @@ pub fn create_router_full(
         .route(
             "/federation/dm-member-change",
             post(routes::dms::receive_member_change),
-        )
-        .route(
-            "/federation/badge-offer",
-            post(federation::handlers::receive_badge_offer),
         )
         .route(
             "/federation/badge-revocations",
@@ -696,10 +712,6 @@ pub fn create_router_full(
             post(routes::posts::federated_add_post_reaction),
         )
         .route(
-            "/federation/alliance-invite",
-            post(routes::alliances::receive_federation_alliance_invite),
-        )
-        .route(
             "/federation/alliance-member",
             post(routes::alliances::receive_alliance_member)
                 .delete(routes::alliances::receive_alliance_member_left),
@@ -893,10 +905,6 @@ pub fn create_router_full(
         .route(
             "/recovery/contacts/{pubkey}",
             delete(routes::recovery::delete_contact),
-        )
-        .route(
-            "/recovery/rotate-key",
-            post(routes::recovery::post_rotate_key),
         )
         .route("/recovery/requests", get(routes::recovery::get_my_requests))
         .route(

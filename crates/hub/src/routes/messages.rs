@@ -721,7 +721,7 @@ pub async fn get_messages(
     let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
     perms.require(permissions::MESSAGES_READ)?;
 
-    let limit = params.limit.unwrap_or(50).min(100);
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
     let search = params
         .q
         .as_ref()

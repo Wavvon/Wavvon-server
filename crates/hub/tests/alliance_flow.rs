@@ -2332,3 +2332,87 @@ async fn a_voice_grant_is_domain_tagged() {
         403
     );
 }
+
+/// #313: a pushed alliance invite names its sender, which admins are shown;
+/// it must come from that hub, authenticated.
+#[tokio::test]
+async fn a_pushed_invite_must_come_from_the_hub_it_names() {
+    let (hub_url, _state, _guard) = start_hub("hub-b").await;
+    let client = reqwest::Client::new();
+    let invite = |from: &str| {
+        json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "alliance_id": "a1",
+            "alliance_name": "Totally Legit",
+            "from_hub_url": "https://famous.example",
+            "from_hub_name": "Famous Hub",
+            "from_hub_public_key": from,
+            "invite_token": "t",
+        })
+    };
+
+    let anonymous = client
+        .post(format!("{hub_url}/federation/alliance-invite"))
+        .json(&invite("ab".repeat(32).as_str()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anonymous.status(), 401);
+
+    let sender = Identity::generate();
+    let token = wavvon_hub::federation::client::FederationClient::new()
+        .authenticate(&hub_url, &sender)
+        .await
+        .unwrap();
+    let forged = client
+        .post(format!("{hub_url}/federation/alliance-invite"))
+        .bearer_auth(&token)
+        .json(&invite("ab".repeat(32).as_str()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), 403);
+
+    let honest = client
+        .post(format!("{hub_url}/federation/alliance-invite"))
+        .bearer_auth(&token)
+        .json(&invite(&sender.public_key_hex()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(honest.status(), 200);
+}
+
+/// #304: an invite to an alliance this hub already belongs to is refused
+/// before the inviter is contacted, since its member list could only add
+/// the inviter to that alliance.
+#[tokio::test]
+async fn an_invite_to_an_alliance_already_joined_is_refused() {
+    let (hub_url, _state, _guard) = start_hub("hub-a").await;
+    let client = reqwest::Client::new();
+    let token = authenticate_user(&hub_url, &Identity::generate()).await;
+    let alliance: AllianceResponse = client
+        .post(format!("{hub_url}/alliances"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "Mine" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{hub_url}/alliances/join"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "inviter_hub_url": "http://127.0.0.1:9",
+            "alliance_id": alliance.id,
+            "invite_token": "anything",
+            "own_hub_url": hub_url,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+}
