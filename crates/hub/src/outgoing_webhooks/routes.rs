@@ -322,6 +322,17 @@ pub async fn replace_subscriptions(
         }
     }
 
+    // A webhook exports what its creator can read, and no more.
+    for channel_id in req
+        .subscriptions
+        .iter()
+        .flat_map(|s| s.channels.iter().flatten())
+    {
+        permissions::channel_permissions(&state.db, &user.public_key, channel_id)
+            .await?
+            .require(permissions::MESSAGES_READ)?;
+    }
+
     // Replace atomically: delete all, insert new.
     sqlx::query("DELETE FROM outgoing_webhook_subscriptions WHERE webhook_id = $1")
         .bind(&id)

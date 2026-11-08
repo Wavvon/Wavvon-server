@@ -497,3 +497,45 @@ async fn message_reaction_add_read_back_and_remove() {
         .unwrap();
     assert_eq!(msg["reactions"].as_array().map(|a| a.len()), Some(0));
 }
+
+/// #306: an app's ephemeral reply is listed only for the member it is for.
+#[tokio::test]
+async fn an_ephemeral_reply_is_listed_only_for_its_recipient() {
+    let (db, guard) = common::create_test_db().await;
+    let app =
+        wavvon_hub::server::create_router(std::sync::Arc::new(common::base_state(db.clone())));
+    let server = common::TestHarness::new(axum_test::TestServer::new(app), guard);
+
+    let alice = Identity::generate();
+    let alice_token = common::authenticate(&server, &alice).await;
+    let bob_token = common::authenticate(&server, &Identity::generate()).await;
+    let ch: ChannelResponse = server
+        .post("/channels")
+        .authorization_bearer(&alice_token)
+        .json(&json!({ "name": "general" }))
+        .await
+        .json();
+    sqlx::query(
+        "INSERT INTO messages(id, channel_id, sender, content, created_at, visible_to_pubkey)
+         VALUES ('eph-1', $1, $2, 'only for alice', 1, $2)",
+    )
+    .bind(&ch.id)
+    .bind(alice.public_key_hex())
+    .execute(&db)
+    .await
+    .unwrap();
+
+    let list = |token: String| {
+        let server = &server;
+        let path = format!("/channels/{}/messages", ch.id);
+        async move {
+            server
+                .get(&path)
+                .authorization_bearer(&token)
+                .await
+                .json::<Vec<MessageResponse>>()
+        }
+    };
+    assert!(list(alice_token).await.iter().any(|m| m.id == "eph-1"));
+    assert!(!list(bob_token).await.iter().any(|m| m.id == "eph-1"));
+}

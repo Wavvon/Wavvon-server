@@ -317,3 +317,47 @@ async fn search_skips_channels_the_caller_cannot_read() {
     assert_eq!(hits(owner_token.clone()).await, 1, "the owner reads #staff");
     assert_eq!(hits(member_token.clone()).await, 0, "the member does not");
 }
+
+/// A negative `limit` used to pass `.min(100)` and become a huge `usize`; the
+/// search library sized an allocation from it and aborted the process. Every
+/// search and list limit is clamped to 1..=100 now.
+#[tokio::test]
+async fn negative_limit_is_clamped_not_fatal() {
+    let (server, _tmp) = setup_with_search().await;
+    let identity = Identity::generate();
+    let token = authenticate(&server, &identity).await;
+    let resp = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "general" }))
+        .await;
+    let channel: ChannelResponse = resp.json();
+    server
+        .post(format!("/channels/{}/messages", channel.id).as_str())
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "clampme please", "attachments": [] }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let resp = server
+        .get("/search")
+        .add_query_param("q", "clampme")
+        .add_query_param("limit", "-1")
+        .authorization_bearer(&token)
+        .await;
+    resp.assert_status_ok();
+    let results: Vec<SearchResult> = resp.json();
+    assert_eq!(results.len(), 1);
+
+    for q in [Some("clampme"), None] {
+        let mut req = server
+            .get(format!("/channels/{}/messages", channel.id).as_str())
+            .add_query_param("limit", "-9223372036854775808")
+            .authorization_bearer(&token);
+        if let Some(q) = q {
+            req = req.add_query_param("q", q);
+        }
+        let resp = req.await;
+        resp.assert_status_ok();
+    }
+}

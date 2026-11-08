@@ -796,3 +796,61 @@ async fn stream_limits_are_public_and_enforced() {
     assert!(streams.iter().any(|s| *s == "s-ok"), "{streams:?}");
     assert!(streams.iter().any(|s| *s == "s-old"), "{streams:?}");
 }
+
+/// #297: a chunk for a stream id the sender did not start is dropped, so
+/// nobody can inject frames into someone else's share.
+#[tokio::test]
+async fn a_chunk_for_someone_elses_stream_is_dropped() {
+    let (base, _state, _guard) = start_hub().await;
+    let alice_token = authenticate_http(&base, &Identity::generate()).await;
+    let mallory_token = authenticate_http(&base, &Identity::generate()).await;
+    let viewer_token = authenticate_http(&base, &Identity::generate()).await;
+    let ch = create_channel(&base, &alice_token, "general").await;
+
+    let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
+    let (mut alice_tx, _alice_rx) = connect_ws(&base, &alice_token).await;
+    let (mut mallory_tx, _mallory_rx) = connect_ws(&base, &mallory_token).await;
+    for tx in [&mut viewer_tx, &mut alice_tx, &mut mallory_tx] {
+        send_text(tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    }
+    send_text(
+        &mut alice_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "alice-stream",
+            "kind": "screen",
+            "mime": "video/webm",
+            "has_audio": false,
+        }),
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut viewer_rx).await["type"],
+        "screen_share_started"
+    );
+
+    for is_init in [true, false] {
+        send_text(
+            &mut mallory_tx,
+            json!({
+                "type": "screen_share_chunk",
+                "channel_id": ch.id,
+                "stream_id": "alice-stream",
+                "seq": 1,
+                "is_init": is_init,
+            }),
+        )
+        .await;
+        mallory_tx
+            .send(TsMessage::Binary(b"FORGED".to_vec()))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        first_after_ping(&mut viewer_tx, &mut viewer_rx).await["type"],
+        "pong",
+        "no forged chunk reaches the viewer"
+    );
+}

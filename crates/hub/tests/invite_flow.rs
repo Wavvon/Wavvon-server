@@ -1712,6 +1712,116 @@ async fn landing_appearance_refuses_bad_input_and_non_admins() {
         .assert_status(axum::http::StatusCode::FORBIDDEN);
 }
 
+/// A retired invite stops describing the hub: only a live code gets the
+/// landing preview.
+#[tokio::test]
+async fn join_preview_answers_only_for_a_live_invite() {
+    let server = common::setup_raw().await;
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    for (code, max_uses, uses, expires_at) in [
+        ("livecode", None, 0_i64, None),
+        ("usedcode", Some(1_i64), 1_i64, None),
+        ("oldcode", None, 0_i64, Some(now - 60)),
+    ] {
+        sqlx::query(
+            "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at)
+             VALUES ($1, 'system', $2, $3, $4, $5)",
+        )
+        .bind(code)
+        .bind(max_uses)
+        .bind(uses)
+        .bind(expires_at)
+        .bind(now)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+    }
+    let preview = |code: &'static str| {
+        server
+            .get(&format!("/join/{code}"))
+            .add_header("accept", "application/json")
+    };
+    preview("livecode").await.assert_status_ok();
+    preview("usedcode")
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+    preview("oldcode")
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
+/// Choosing the default invite role is assigning it to everyone who joins, so
+/// `hub.settings` alone must not reach a role at or above the caller, nor one
+/// carrying permissions the caller lacks.
+#[tokio::test]
+async fn hub_settings_holder_cannot_make_a_stronger_role_the_default() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let settings_role: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Settings", "permissions": ["hub.settings"], "priority": 500 }))
+        .await
+        .json();
+    let higher = create_role(&server, &owner_token, "Higher", 900).await;
+    let moderator: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Moderator", "permissions": ["moderation.kick"], "priority": 100 }))
+        .await
+        .json();
+    let plain = create_role(&server, &owner_token, "Plain", 100).await;
+
+    let manager = Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            settings_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    for role in [&higher, &moderator.id] {
+        server
+            .patch("/hub")
+            .authorization_bearer(&manager_token)
+            .json(&json!({ "default_invite_role_id": role }))
+            .await
+            .assert_status(axum::http::StatusCode::FORBIDDEN);
+    }
+    server
+        .patch("/hub")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "default_invite_role_id": plain }))
+        .await
+        .assert_status_success();
+}
+
+/// `/info` says whether a landing image exists, so a member's client asks
+/// for it only when there is one (it used to 404 on every load).
+#[tokio::test]
+async fn info_says_whether_a_landing_image_exists() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert_eq!(info["landing"], json!({}));
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "landing_image": landing_png() }))
+        .await
+        .assert_status_success();
+    let info: serde_json::Value = server.get("/info").await.json();
+    let path = info["landing"]["image"].as_str().expect("image path");
+    server.get(path).await.assert_status_success();
+}
+
 #[tokio::test]
 async fn create_invite_rejects_non_positive_and_overflowing_bounds() {
     let server = common::setup().await;
