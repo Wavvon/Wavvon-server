@@ -35,6 +35,22 @@ pub fn is_private_or_local(ip: &IpAddr) -> bool {
     }
 }
 
+/// The address the HTTP listener binds in LAN mode. The hub-wide default `::`
+/// also listens on every global IPv6 address the machine has, which LAN mode
+/// exists to stay off, so it narrows to IPv4 `0.0.0.0` (the pre-IPv6 default
+/// the guard was designed against). An address the operator chose must itself
+/// be private or local.
+pub fn lan_bind_addr(configured: IpAddr) -> Result<IpAddr> {
+    match configured {
+        IpAddr::V6(v6) if v6.is_unspecified() => Ok(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+        IpAddr::V4(v4) if v4.is_unspecified() => Ok(configured),
+        ip if is_private_or_local(&ip) => Ok(ip),
+        ip => bail!(
+            "WAVVON_BIND_ADDR={ip} is not a private or local address; LAN mode refuses to listen on it"
+        ),
+    }
+}
+
 /// Resolve the address LAN mode will advertise/be reached at, and enforce
 /// the hard private-address guard against it.
 ///
@@ -236,6 +252,17 @@ pub fn start_mdns_advertiser(params: &MdnsAnnounceParams) -> Result<mdns_sd::Ser
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lan_mode_never_binds_a_global_address() {
+        let bind = |s: &str| lan_bind_addr(s.parse().unwrap());
+        assert_eq!(bind("::").unwrap().to_string(), "0.0.0.0");
+        assert_eq!(bind("0.0.0.0").unwrap().to_string(), "0.0.0.0");
+        assert_eq!(bind("192.168.1.10").unwrap().to_string(), "192.168.1.10");
+        assert_eq!(bind("fe80::1").unwrap().to_string(), "fe80::1");
+        assert!(bind("2001:db8::1").is_err());
+        assert!(bind("8.8.8.8").is_err());
+    }
 
     #[test]
     fn private_v4_addresses_are_accepted() {
