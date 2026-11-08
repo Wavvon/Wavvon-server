@@ -374,7 +374,8 @@ async fn subscriptions_reject_message_created_without_channels() {
 #[tokio::test]
 async fn delivery_signs_and_posts_event_to_receiver() {
     let (server, db) = setup_with_pool().await;
-    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
 
     let (mock_url, mock_state) = start_mock_receiver().await;
 
@@ -397,7 +398,7 @@ async fn delivery_signs_and_posts_event_to_receiver() {
     .bind(&mock_url)
     .bind("Test Receiver")
     .bind(&signing_key_hex)
-    .bind("test-admin")
+    .bind(owner.public_key_hex())
     .bind(now)
     .execute(&db)
     .await
@@ -505,7 +506,8 @@ async fn delivery_signs_and_posts_event_to_receiver() {
 #[tokio::test]
 async fn delivery_failure_increments_failure_count() {
     let (server, db) = setup_with_pool().await;
-    let owner_token = common::authenticate(&server, &Identity::generate()).await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
 
     let (mock_url, mock_state) = start_mock_receiver().await;
     mock_state
@@ -529,7 +531,7 @@ async fn delivery_failure_increments_failure_count() {
     .bind(&mock_url)
     .bind("Flaky Receiver")
     .bind(&signing_key_hex)
-    .bind("test-admin")
+    .bind(owner.public_key_hex())
     .bind(now)
     .execute(&db)
     .await

@@ -120,6 +120,12 @@ pub async fn create_webhook(
     if ch_exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
+    // The webhook posts as its creator's delegate: into a channel they can
+    // send to, never one they cannot.
+    let ch_perms =
+        permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id).await?;
+    ch_perms.require(permissions::MESSAGES_READ)?;
+    ch_perms.require(permissions::MESSAGES_SEND)?;
 
     let id = Uuid::new_v4().to_string();
     let now = crate::auth::handlers::unix_timestamp();
@@ -310,10 +316,11 @@ pub async fn post_webhook_message(
         channel_id: String,
         secret_token_hash: String,
         display_name: String,
+        created_by_pubkey: String,
     }
 
     let webhook = sqlx::query_as::<_, WebhookRow>(
-        "SELECT channel_id, secret_token_hash, display_name
+        "SELECT channel_id, secret_token_hash, display_name, created_by_pubkey
          FROM webhooks WHERE id = $1 AND active = TRUE",
     )
     .bind(&webhook_id)
@@ -341,6 +348,22 @@ pub async fn post_webhook_message(
     // check: the hub keeps only the token's hash, so it holds no key a sender's
     // HMAC could be verified against, and a header it cannot verify must not
     // look accepted.
+
+    // Checked on every post, not only at creation: a creator who has since
+    // lost send in this channel takes their webhook's voice with them.
+    let may_send = permissions::channel_permissions(
+        &state.db,
+        &webhook.created_by_pubkey,
+        &webhook.channel_id,
+    )
+    .await
+    .is_ok_and(|p| p.has(permissions::MESSAGES_SEND));
+    if !may_send {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "The webhook's creator can no longer post in this channel".to_string(),
+        ));
+    }
 
     let content = req.content.trim();
     if content.is_empty() {

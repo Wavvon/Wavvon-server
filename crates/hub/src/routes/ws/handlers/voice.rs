@@ -1323,7 +1323,45 @@ pub(in crate::routes::ws) async fn handle_video_disable(
     DispatchResult::Continue
 }
 
-pub(in crate::routes::ws) fn handle_video_offer(
+/// Who has the camera on, in WebRTC signaling between `from` and `to`.
+#[derive(Clone, Copy)]
+enum CameraOn {
+    Sender,
+    Target,
+    Either,
+}
+
+/// Video signaling is relayed only between two members of the channel's voice
+/// session, and only when the side that sends video has turned its camera on
+/// there, which `video_enable` gates on `voice.camera`. Without this, anyone
+/// could push video into a call, and ICE candidates (every participant's IP
+/// addresses) reached people who were not in it.
+async fn may_signal_video(
+    state: &AppState,
+    channel_id: &str,
+    from: &str,
+    to: &str,
+    camera: CameraOn,
+) -> bool {
+    let both_in_voice = state
+        .voice_channels
+        .read()
+        .await
+        .get(channel_id)
+        .is_some_and(|c| c.contains_key(from) && c.contains_key(to));
+    if !both_in_voice {
+        return false;
+    }
+    let video = state.video_channels.read().await;
+    let on = |k: &str| video.get(channel_id).is_some_and(|s| s.contains(k));
+    match camera {
+        CameraOn::Sender => on(from),
+        CameraOn::Target => on(to),
+        CameraOn::Either => on(from) || on(to),
+    }
+}
+
+pub(in crate::routes::ws) async fn handle_video_offer(
     cs: &ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
@@ -1336,6 +1374,17 @@ pub(in crate::routes::ws) fn handle_video_offer(
         } => (channel_id, to_pubkey, sdp),
         _ => return DispatchResult::Continue,
     };
+    if !may_signal_video(
+        state,
+        &channel_id,
+        &cs.public_key,
+        &to_pubkey,
+        CameraOn::Sender,
+    )
+    .await
+    {
+        return DispatchResult::Continue;
+    }
     let reply = WsServerMessage::VideoOfferIn {
         channel_id: channel_id.clone(),
         from_pubkey: cs.public_key.clone(),
@@ -1349,7 +1398,7 @@ pub(in crate::routes::ws) fn handle_video_offer(
     DispatchResult::Continue
 }
 
-pub(in crate::routes::ws) fn handle_video_answer(
+pub(in crate::routes::ws) async fn handle_video_answer(
     cs: &ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
@@ -1362,6 +1411,17 @@ pub(in crate::routes::ws) fn handle_video_answer(
         } => (channel_id, to_pubkey, sdp),
         _ => return DispatchResult::Continue,
     };
+    if !may_signal_video(
+        state,
+        &channel_id,
+        &cs.public_key,
+        &to_pubkey,
+        CameraOn::Target,
+    )
+    .await
+    {
+        return DispatchResult::Continue;
+    }
     let reply = WsServerMessage::VideoAnswerIn {
         channel_id: channel_id.clone(),
         from_pubkey: cs.public_key.clone(),
@@ -1375,7 +1435,7 @@ pub(in crate::routes::ws) fn handle_video_answer(
     DispatchResult::Continue
 }
 
-pub(in crate::routes::ws) fn handle_video_ice(
+pub(in crate::routes::ws) async fn handle_video_ice(
     cs: &ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
@@ -1388,6 +1448,17 @@ pub(in crate::routes::ws) fn handle_video_ice(
         } => (channel_id, to_pubkey, candidate),
         _ => return DispatchResult::Continue,
     };
+    if !may_signal_video(
+        state,
+        &channel_id,
+        &cs.public_key,
+        &to_pubkey,
+        CameraOn::Either,
+    )
+    .await
+    {
+        return DispatchResult::Continue;
+    }
     let reply = WsServerMessage::VideoIceIn {
         channel_id: channel_id.clone(),
         from_pubkey: cs.public_key.clone(),

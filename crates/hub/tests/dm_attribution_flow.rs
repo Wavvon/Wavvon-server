@@ -818,3 +818,97 @@ async fn federated_dm_with_signer_cert_accepted_and_attributed() {
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["sender"], alice_canonical);
 }
+
+/// #303: a federated DM cannot bind a master to one of this hub's members.
+/// The attacker's master signs a cert naming the member as its subkey, serves
+/// it from a "home hub" it controls, and sends a DM as the member through a
+/// peer token. Before the fix the hub wrote that master into
+/// `users.master_pubkey`, and sign-in then seated the attacker's devices as
+/// the member.
+#[tokio::test]
+async fn a_federated_dm_cannot_bind_a_master_to_a_local_member() {
+    let (hub, state, _guard) = start_real_hub_with_state("hub-303").await;
+    let client = reqwest::Client::new();
+
+    let member = Identity::generate();
+    authenticate_http(&hub, &member).await;
+
+    let attacker_identity = Identity::generate();
+    let attacker_master = attacker_identity.master().unwrap();
+    let device = DeviceSubkey::generate("evil".into());
+    let device_cert = make_cert(&attacker_master, &device.public_key_hex(), "evil");
+    let claim = make_cert(&attacker_master, &member.public_key_hex(), "claim");
+
+    let devices = axum::Router::new().route(
+        "/identity/{master}/devices",
+        axum::routing::get(move || {
+            let claim = claim.clone();
+            async move { axum::Json(vec![claim]) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let evil_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, devices).await.unwrap() });
+
+    let peer = Identity::generate();
+    let peer_token = {
+        let challenge: ChallengeResponse = client
+            .post(format!("{hub}/auth/challenge"))
+            .json(&json!({ "public_key": peer.public_key_hex() }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let bytes = hex::decode(&challenge.challenge).unwrap();
+        let sig = peer.sign(&wavvon_identity::auth_challenge_signing_bytes(&bytes).unwrap());
+        let verify: VerifyResponse = client
+            .post(format!("{hub}/auth/verify"))
+            .json(&json!({
+                "public_key": peer.public_key_hex(),
+                "challenge": challenge.challenge,
+                "signature": hex::encode(sig.to_bytes()),
+                "is_hub": true,
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        verify.token
+    };
+
+    let conv_id = "30330330330330330330330330330303";
+    let content = "hello";
+    let signing = wavvon_identity::federated_plaintext_dm_signing_bytes(conv_id, "dm", content);
+    let resp = client
+        .post(format!("{hub}/federation/dm"))
+        .bearer_auth(&peer_token)
+        .json(&json!({
+            "message_id": "30330330330330330330330330330304",
+            "conversation_id": conv_id,
+            "conv_type": "dm",
+            "sender": member.public_key_hex(),
+            "members": [member.public_key_hex(), peer.public_key_hex()],
+            "content": content,
+            "attachments": [],
+            "signature": hex::encode(device.sign(&signing).to_bytes()),
+            "signer_cert": device_cert,
+            "sender_hub_url": evil_url,
+            "created_at": 1_700_000_003i64,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    let bound: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM users WHERE public_key = $1")
+            .bind(member.public_key_hex())
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(bound, None, "no master was bound to the member");
+}

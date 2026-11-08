@@ -568,6 +568,7 @@ pub async fn edit_message(
     }
 
     let updated = load_message(&state, &message_id).await?;
+    index_message(&state, &updated).await;
     {
         let ws_msg = crate::routes::chat_models::WsServerMessage::MessageEdited {
             channel_id: channel_id.clone(),
@@ -658,6 +659,27 @@ pub async fn delete_message(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn index_message(state: &AppState, msg: &MessageResponse) {
+    let indexed = crate::search::IndexedMessage {
+        id: msg.id.clone(),
+        channel_id: msg.channel_id.clone(),
+        author_pubkey: msg.sender.clone(),
+        content: msg.content.clone(),
+        timestamp: msg.created_at,
+    };
+    if let Err(e) = state.search.index(&indexed).await {
+        tracing::warn!("search index error: {e}");
+    }
+}
+
+/// Re-index a message whose text changed outside `edit_message`, so the old
+/// text stops being findable.
+pub(crate) async fn reindex_message(state: &AppState, message_id: &str) {
+    if let Ok(msg) = load_message(state, message_id).await {
+        index_message(state, &msg).await;
+    }
+}
+
 async fn load_message(
     state: &AppState,
     message_id: &str,
@@ -735,6 +757,7 @@ pub async fn get_messages(
             "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1 AND m.reply_to = $2
+               AND (m.visible_to_pubkey IS NULL OR m.visible_to_pubkey = $5)
                AND ($3::text IS NULL OR (m.created_at, m.id) >
                     ((SELECT created_at FROM messages WHERE id = $3), $3))
              ORDER BY m.created_at ASC, m.id ASC LIMIT $4",
@@ -743,6 +766,7 @@ pub async fn get_messages(
         .bind(root_id)
         .bind(params.cursor.as_deref())
         .bind(limit)
+        .bind(&user.public_key)
         .fetch_all(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
@@ -778,19 +802,22 @@ pub async fn get_messages(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.id IN ({placeholders})
-                     ORDER BY m.created_at DESC, m.id DESC"
+                       AND (m.visible_to_pubkey IS NULL OR m.visible_to_pubkey = ${viewer})
+                     ORDER BY m.created_at DESC, m.id DESC",
+                    viewer = hit_ids.len() + 1
                 );
                 let mut q_builder = sqlx::query_as::<_, MessageRow>(&sql);
                 for id in &hit_ids {
                     q_builder = q_builder.bind(id);
                 }
-                q_builder.fetch_all(&state.db).await
+                q_builder.bind(&user.public_key).fetch_all(&state.db).await
             }
             None => {
                 sqlx::query_as::<_, MessageRow>(
                     "SELECT m.id, m.channel_id, m.sender, u.display_name as sender_name, m.content, m.reply_to, m.created_at, m.edited_at, COALESCE(m.reply_count, 0) as reply_count, m.embeds, m.game, m.components, m.masquerade, m.sticker_id
                      FROM messages m LEFT JOIN users u ON m.sender = u.public_key
                      WHERE m.channel_id = $1
+                       AND (m.visible_to_pubkey IS NULL OR m.visible_to_pubkey = $4)
                        AND ($2::text IS NULL OR (m.created_at, m.id) <
                             ((SELECT created_at FROM messages WHERE id = $2), $2))
                      ORDER BY m.created_at DESC, m.id DESC LIMIT $3",
@@ -798,6 +825,7 @@ pub async fn get_messages(
                 .bind(&channel_id)
                 .bind(params.cursor.as_deref())
                 .bind(limit)
+                .bind(&user.public_key)
                 .fetch_all(&state.db)
                 .await
             }

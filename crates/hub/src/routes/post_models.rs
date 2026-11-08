@@ -365,7 +365,7 @@ pub fn post_to_summary(
         is_deleted,
         unread_reply_count: None,
         reactions,
-        attachments,
+        attachments: if is_deleted { Vec::new() } else { attachments },
         author_hub: if is_deleted && !viewer_can_moderate {
             None
         } else {
@@ -401,7 +401,7 @@ pub fn reply_to_view(
         reply_to_id: row.reply_to_id.clone(),
         is_deleted,
         reactions,
-        attachments,
+        attachments: if is_deleted { Vec::new() } else { attachments },
         author_hub: if is_deleted && !viewer_can_moderate {
             None
         } else {
