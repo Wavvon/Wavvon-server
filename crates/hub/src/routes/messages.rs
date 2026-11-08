@@ -568,6 +568,7 @@ pub async fn edit_message(
     }
 
     let updated = load_message(&state, &message_id).await?;
+    index_message(&state, &updated).await;
     {
         let ws_msg = crate::routes::chat_models::WsServerMessage::MessageEdited {
             channel_id: channel_id.clone(),
@@ -656,6 +657,27 @@ pub async fn delete_message(
     }
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn index_message(state: &AppState, msg: &MessageResponse) {
+    let indexed = crate::search::IndexedMessage {
+        id: msg.id.clone(),
+        channel_id: msg.channel_id.clone(),
+        author_pubkey: msg.sender.clone(),
+        content: msg.content.clone(),
+        timestamp: msg.created_at,
+    };
+    if let Err(e) = state.search.index(&indexed).await {
+        tracing::warn!("search index error: {e}");
+    }
+}
+
+/// Re-index a message whose text changed outside `edit_message`, so the old
+/// text stops being findable.
+pub(crate) async fn reindex_message(state: &AppState, message_id: &str) {
+    if let Ok(msg) = load_message(state, message_id).await {
+        index_message(state, &msg).await;
+    }
 }
 
 async fn load_message(
