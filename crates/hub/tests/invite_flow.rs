@@ -1731,3 +1731,39 @@ async fn info_says_whether_a_landing_image_exists() {
     let path = info["landing"]["image"].as_str().expect("image path");
     server.get(path).await.assert_status_success();
 }
+
+#[tokio::test]
+async fn create_invite_rejects_non_positive_and_overflowing_bounds() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    for body in [
+        json!({ "max_uses": 0 }),
+        json!({ "max_uses": -5 }),
+        json!({ "expires_in_seconds": 0 }),
+        json!({ "expires_in_seconds": -10 }),
+        json!({ "expires_in_seconds": i64::MAX }),
+    ] {
+        let resp = server
+            .post("/invites")
+            .authorization_bearer(&token)
+            .json(&body)
+            .await;
+        resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // Absent still means unlimited.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&token)
+        .json(&json!({}))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invites: Vec<InviteResponse> = server
+        .get("/invites")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    assert_eq!(invites.len(), 1);
+}

@@ -56,8 +56,29 @@ pub async fn create_invite(
     perms.require(INVITES_MANAGE)?;
 
     let now = crate::auth::handlers::unix_timestamp();
+    // Absent means unlimited. Zero or negative minted a code that was dead on
+    // arrival ("0/-5 uses", "expired 10s ago"), and a huge expiry overflowed
+    // `now + s`: a panic in debug, a timestamp in the past in release.
+    if req.max_uses.is_some_and(|m| m < 1) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "max_uses must be at least 1".to_string(),
+        ));
+    }
+    let mut expires_at = match req.expires_in_seconds {
+        None => None,
+        Some(s) if s < 1 => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "expires_in_seconds must be at least 1".to_string(),
+            ))
+        }
+        Some(s) => Some(now.checked_add(s).ok_or((
+            StatusCode::BAD_REQUEST,
+            "expires_in_seconds is too large".to_string(),
+        ))?),
+    };
     let mut max_uses = req.max_uses;
-    let mut expires_at = req.expires_in_seconds.map(|s| now + s);
 
     // A bound invite names its recipient, so it is single-use by definition
     // and the key had better be a key: a typo mints a code nobody on earth
