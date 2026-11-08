@@ -379,6 +379,7 @@ pub fn base_state(db: PgPool) -> AppState {
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
+        federated_masters: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),

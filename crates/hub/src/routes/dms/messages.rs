@@ -895,12 +895,18 @@ async fn master_of(state: &AppState, member: &str) -> Option<String> {
         return from_users;
     }
     // A cert registered without an auth that carried it still names the master.
-    sqlx::query_scalar("SELECT master_pubkey FROM subkey_certs WHERE subkey_pubkey = $1")
-        .bind(member)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten()
+    let from_certs: Option<String> =
+        sqlx::query_scalar("SELECT master_pubkey FROM subkey_certs WHERE subkey_pubkey = $1")
+            .bind(member)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+    if from_certs.is_some() {
+        return from_certs;
+    }
+    // A stranger met through federation, proven by resolve_master_binding.
+    state.federated_masters.read().await.get(member).cloned()
 }
 
 /// The hubs a master designated, fetched from `hub_url` and verified against
@@ -994,8 +1000,14 @@ async fn queue_home_hub_mirrors(state: &AppState, req: &FederatedDmRequest, now:
 /// populated it at auth time). Falls back to fetching the sender's device
 /// registry from `sender_hub_url` and checking for a self-cert
 /// (`subkey_pubkey == canonical`, signed by `master`), caching the result
-/// on success so future messages from the same sender skip the network
-/// round-trip.
+/// in memory so future messages from the same sender skip the round-trip.
+///
+/// That fallback is a cert fetched from a URL the request names and signed
+/// only by the master it vouches for, so it proves nothing a hostile peer
+/// could not mint. It is therefore never written to `users.master_pubkey`
+/// (sign-in would then seat that master as the member), and it is never
+/// consulted for a member of this hub: their binding comes from their own
+/// sign-in here or not at all.
 pub(super) async fn resolve_master_binding(
     state: &AppState,
     canonical: &str,
@@ -1011,6 +1023,19 @@ pub(super) async fn resolve_master_binding(
             .flatten();
 
     if let Some(m) = local_master {
+        return Ok(m == master);
+    }
+    let is_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_member)",
+    )
+    .bind(canonical)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if is_member {
+        return Ok(false);
+    }
+    if let Some(m) = state.federated_masters.read().await.get(canonical) {
         return Ok(m == master);
     }
 
@@ -1036,15 +1061,11 @@ pub(super) async fn resolve_master_binding(
         .any(|c| c.subkey_pubkey == canonical && c.master_pubkey == master && c.verify().is_ok());
 
     if proven {
-        // Best-effort cache; COALESCE preserves whatever a concurrent auth
-        // may have already recorded rather than racing it.
-        let _ = sqlx::query(
-            "UPDATE users SET master_pubkey = COALESCE(master_pubkey, $1) WHERE public_key = $2",
-        )
-        .bind(master)
-        .bind(canonical)
-        .execute(&state.db)
-        .await;
+        state
+            .federated_masters
+            .write()
+            .await
+            .insert(canonical.to_string(), master.to_string());
     }
 
     Ok(proven)
