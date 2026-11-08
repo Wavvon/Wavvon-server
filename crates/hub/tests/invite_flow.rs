@@ -1749,3 +1749,111 @@ async fn join_preview_answers_only_for_a_live_invite() {
         .await
         .assert_status(axum::http::StatusCode::NOT_FOUND);
 }
+
+/// Choosing the default invite role is assigning it to everyone who joins, so
+/// `hub.settings` alone must not reach a role at or above the caller, nor one
+/// carrying permissions the caller lacks.
+#[tokio::test]
+async fn hub_settings_holder_cannot_make_a_stronger_role_the_default() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let settings_role: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Settings", "permissions": ["hub.settings"], "priority": 500 }))
+        .await
+        .json();
+    let higher = create_role(&server, &owner_token, "Higher", 900).await;
+    let moderator: RoleResponse = server
+        .post("/roles")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Moderator", "permissions": ["moderation.kick"], "priority": 100 }))
+        .await
+        .json();
+    let plain = create_role(&server, &owner_token, "Plain", 100).await;
+
+    let manager = Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+    server
+        .put(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            settings_role.id
+        ))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status_ok();
+
+    for role in [&higher, &moderator.id] {
+        server
+            .patch("/hub")
+            .authorization_bearer(&manager_token)
+            .json(&json!({ "default_invite_role_id": role }))
+            .await
+            .assert_status(axum::http::StatusCode::FORBIDDEN);
+    }
+    server
+        .patch("/hub")
+        .authorization_bearer(&manager_token)
+        .json(&json!({ "default_invite_role_id": plain }))
+        .await
+        .assert_status_success();
+}
+
+/// `/info` says whether a landing image exists, so a member's client asks
+/// for it only when there is one (it used to 404 on every load).
+#[tokio::test]
+async fn info_says_whether_a_landing_image_exists() {
+    let (server, owner_token) = common::setup_with_owner().await;
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert_eq!(info["landing"], json!({}));
+
+    server
+        .patch("/hub")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "landing_image": landing_png() }))
+        .await
+        .assert_status_success();
+    let info: serde_json::Value = server.get("/info").await.json();
+    let path = info["landing"]["image"].as_str().expect("image path");
+    server.get(path).await.assert_status_success();
+}
+
+#[tokio::test]
+async fn create_invite_rejects_non_positive_and_overflowing_bounds() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let token = common::authenticate(&server, &owner).await;
+
+    for body in [
+        json!({ "max_uses": 0 }),
+        json!({ "max_uses": -5 }),
+        json!({ "expires_in_seconds": 0 }),
+        json!({ "expires_in_seconds": -10 }),
+        json!({ "expires_in_seconds": i64::MAX }),
+    ] {
+        let resp = server
+            .post("/invites")
+            .authorization_bearer(&token)
+            .json(&body)
+            .await;
+        resp.assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // Absent still means unlimited.
+    let resp = server
+        .post("/invites")
+        .authorization_bearer(&token)
+        .json(&json!({}))
+        .await;
+    resp.assert_status(axum::http::StatusCode::CREATED);
+    let invites: Vec<InviteResponse> = server
+        .get("/invites")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    assert_eq!(invites.len(), 1);
+}

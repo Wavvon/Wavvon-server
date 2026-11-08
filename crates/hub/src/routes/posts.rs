@@ -328,7 +328,7 @@ pub async fn list_posts_with(
     perms.require(permissions::MESSAGES_READ)?;
     let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
 
-    let limit = params.limit.unwrap_or(50).min(100);
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
 
     // Built with QueryBuilder rather than two static strings x a tag branch
     // (forum.md §10.2 tag filter) -- avoids a 2x2 combinatorial blowup of
@@ -566,7 +566,7 @@ pub async fn get_post_with(
     .unwrap_or(0);
     summary.unread_reply_count = Some(unread);
 
-    let limit = params.limit.unwrap_or(50).min(100);
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
 
     let reply_rows: Vec<ReplyRow> = if let Some(after_id) = &params.after {
         sqlx::query_as::<_, ReplyRow>(
