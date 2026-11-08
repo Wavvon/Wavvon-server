@@ -462,3 +462,65 @@ async fn member_list_carries_the_hoisted_role_priority() {
     assert_eq!(row["group_role"], "Mods");
     assert_eq!(row["group_role_priority"], 40);
 }
+
+/// A roles.manage holder cannot strip even a low role from a member who
+/// outranks them, but can still drop their own.
+#[tokio::test]
+async fn remove_role_checks_the_members_rank() {
+    let server = common::setup().await;
+    let owner = Identity::generate();
+    let owner_token = common::authenticate(&server, &owner).await;
+
+    let mk = |name: &'static str, perms: serde_json::Value, priority: i64| {
+        let server = &server;
+        let owner_token = owner_token.clone();
+        async move {
+            let r: RoleResponse = server
+                .post("/roles")
+                .authorization_bearer(&owner_token)
+                .json(&json!({ "name": name, "permissions": perms, "priority": priority }))
+                .await
+                .json();
+            r.id
+        }
+    };
+    let manager_role = mk("Manager", json!(["roles.manage"]), 500).await;
+    let senior_role = mk("Senior", json!([]), 800).await;
+    let low_role = mk("Low", json!([]), 100).await;
+
+    let manager = Identity::generate();
+    let manager_token = common::authenticate(&server, &manager).await;
+    let senior = Identity::generate();
+    common::authenticate(&server, &senior).await;
+    for (who, role) in [
+        (&manager, &manager_role),
+        (&manager, &low_role),
+        (&senior, &senior_role),
+        (&senior, &low_role),
+    ] {
+        server
+            .put(&format!("/users/{}/roles/{}", who.public_key_hex(), role))
+            .authorization_bearer(&owner_token)
+            .await
+            .assert_status_ok();
+    }
+
+    server
+        .delete(&format!(
+            "/users/{}/roles/{}",
+            senior.public_key_hex(),
+            low_role
+        ))
+        .authorization_bearer(&manager_token)
+        .await
+        .assert_status(axum::http::StatusCode::FORBIDDEN);
+    server
+        .delete(&format!(
+            "/users/{}/roles/{}",
+            manager.public_key_hex(),
+            low_role
+        ))
+        .authorization_bearer(&manager_token)
+        .await
+        .assert_status_success();
+}
