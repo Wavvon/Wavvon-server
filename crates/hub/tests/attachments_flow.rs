@@ -413,12 +413,10 @@ async fn a_full_budget_expires_the_oldest_and_the_upload_succeeds() {
     set_cap_to_floor(&server, &token).await;
 
     let first = upload(&server, &token, &ch, "first.bin", blob(24 * MB)).await;
-    let second = upload(&server, &token, &ch, "second.bin", blob(24 * MB)).await;
-    let (first_id, second_id) = (
-        first["id"].as_str().unwrap(),
-        second["id"].as_str().unwrap(),
-    );
+    let first_id = first["id"].as_str().unwrap();
     let msg1: Value = send(&server, &token, &ch, &[first_id]).await.json();
+    let second = upload(&server, &token, &ch, "second.bin", blob(24 * MB)).await;
+    let second_id = second["id"].as_str().unwrap();
     send(&server, &token, &ch, &[second_id])
         .await
         .assert_status(StatusCode::CREATED);
@@ -476,12 +474,13 @@ async fn orphans_are_dropped_before_anything_linked_is_expired() {
     let ch = channel(&server, &token, "text").await;
     set_cap_to_floor(&server, &token).await;
 
-    let orphan = upload(&server, &token, &ch, "orphan.bin", blob(24 * MB)).await;
     let kept = upload(&server, &token, &ch, "kept.bin", blob(24 * MB)).await;
-    let (orphan_id, kept_id) = (orphan["id"].as_str().unwrap(), kept["id"].as_str().unwrap());
+    let kept_id = kept["id"].as_str().unwrap();
     send(&server, &token, &ch, &[kept_id])
         .await
         .assert_status(StatusCode::CREATED);
+    let orphan = upload(&server, &token, &ch, "orphan.bin", blob(24 * MB)).await;
+    let orphan_id = orphan["id"].as_str().unwrap();
     // The orphan is the *newest* blob but has sat unclaimed past the delay.
     sqlx::query("UPDATE attachments SET created_at = 1 WHERE id = $1")
         .bind(orphan_id)
@@ -504,6 +503,47 @@ async fn orphans_are_dropped_before_anything_linked_is_expired() {
         .get(&format!("/uploads/{kept_id}"))
         .await
         .assert_status_ok();
+}
+
+/// #298: uploads that are never sent cannot crowd out posted files: one member
+/// holds at most a tenth of the budget unsent, and unsent blobs are evicted
+/// before anything a message uses.
+#[tokio::test]
+async fn unsent_uploads_are_capped_and_evicted_first() {
+    let server = common::setup().await;
+    let token = common::authenticate(&server, &Identity::generate()).await;
+    let ch = channel(&server, &token, "text").await;
+    set_cap_to_floor(&server, &token).await;
+
+    let posted = upload(&server, &token, &ch, "posted.bin", blob(24 * MB)).await;
+    let posted_id = posted["id"].as_str().unwrap();
+    send(&server, &token, &ch, &[posted_id])
+        .await
+        .assert_status(StatusCode::CREATED);
+
+    let pending = upload(&server, &token, &ch, "pending.bin", blob(24 * MB)).await;
+    let pending_id = pending["id"].as_str().unwrap();
+    upload_raw(&server, &token, &ch, "more.bin", blob(4 * MB), false)
+        .await
+        .assert_status(StatusCode::TOO_MANY_REQUESTS);
+
+    // The posted file is the older one, so by age alone it would go first.
+    sqlx::query("UPDATE attachment_blobs SET last_linked_at = 1 WHERE sha256 = (SELECT sha256 FROM attachments WHERE id = $1)")
+        .bind(posted_id)
+        .execute(&server.state().db)
+        .await
+        .unwrap();
+    let other = common::authenticate(&server, &Identity::generate()).await;
+    upload(&server, &other, &ch, "needs-room.bin", blob(24 * MB)).await;
+
+    server
+        .get(&format!("/uploads/{posted_id}"))
+        .await
+        .assert_status_ok();
+    server
+        .get(&format!("/uploads/{pending_id}"))
+        .await
+        .assert_status(StatusCode::GONE);
 }
 
 #[tokio::test]

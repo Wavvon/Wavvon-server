@@ -381,6 +381,9 @@ pub(super) async fn handle_socket(
                 // (`AppState::close_sessions_of`): ban, kick, leave, or a
                 // recovery that retired the key.
                 let Some(msg) = key_msg else { break };
+                if matches!(msg, WsServerMessage::AccessChanged) {
+                    recheck_access(&mut cs, &state).await;
+                }
                 let json = serde_json::to_string(&msg).unwrap();
                 if ws_tx.send(Message::Text(json.into())).await.is_err() {
                     break;
@@ -1166,4 +1169,43 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     // handler) so raw WS-disconnect teardown drops them from every
     // resolved target set too.
     super::voice::re_resolve_whisper_sessions(state).await;
+}
+
+/// Drop the channels this connection can no longer read, and leave voice it
+/// can no longer join. A room it was moved into keeps it there: the move was
+/// the authorization, the same exception the voice-join gate makes.
+async fn recheck_access(cs: &mut ConnState, state: &Arc<AppState>) {
+    let mut lost = Vec::new();
+    for ch in cs.subscribed.iter() {
+        let may_read = crate::permissions::channel_permissions(&state.db, &cs.public_key, ch)
+            .await
+            .is_ok_and(|p| p.has(crate::permissions::MESSAGES_READ));
+        if !may_read {
+            lost.push(ch.clone());
+        }
+    }
+    for ch in lost {
+        cs.subscribed.remove(&ch);
+    }
+
+    let Some(vc) = cs.voice_channel.clone() else {
+        return;
+    };
+    if cs.alliance_voice_channel.as_deref() == Some(vc.as_str()) {
+        return;
+    }
+    let may_join = crate::permissions::channel_permissions(&state.db, &cs.public_key, &vc)
+        .await
+        .is_ok_and(|p| p.has(crate::permissions::VOICE_JOIN));
+    let granted = state
+        .staging_voice_grants
+        .read()
+        .await
+        .get(&cs.public_key)
+        .is_some_and(|g| g.contains(&vc));
+    if !may_join && !granted {
+        let _ =
+            voice::handle_voice_leave(cs, state, WsClientMessage::VoiceLeave { channel_id: vc })
+                .await;
+    }
 }
