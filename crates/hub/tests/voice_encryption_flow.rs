@@ -139,20 +139,23 @@ async fn key_offer_routed_to_recipient() {
     let ch = create_channel(&base, &token_a, "enc-ch1").await;
 
     // Connect both users.
-    let (mut tx_a, _rx_a) = connect_ws(&base, &token_a).await;
+    let (mut tx_a, mut rx_a) = connect_ws(&base, &token_a).await;
     let (mut tx_b, mut rx_b) = connect_ws(&base, &token_b).await;
 
-    // Both join voice.
+    // Both join voice, and both are in the room before A offers: a key is
+    // relayed only between participants.
     send_ws(
         &mut tx_a,
         json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
     )
     .await;
+    let _ = next_msg_of_type(&mut rx_a, "voice_joined").await;
     send_ws(
         &mut tx_b,
         json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
     )
     .await;
+    let _ = next_msg_of_type(&mut rx_b, "voice_joined").await;
 
     // A sends a key bundle for B.
     send_ws(
