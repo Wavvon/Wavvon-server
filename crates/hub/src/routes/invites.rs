@@ -550,6 +550,16 @@ async fn get_join_info(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     .ok_or((StatusCode::NOT_FOUND, "Invite not found".to_string()))?;
 
+    // A retired code admits nobody, so it stops describing the hub too: an old
+    // leaked link used to keep serving the landing and a live online count.
+    let now = crate::auth::handlers::unix_timestamp();
+    if invite_status(invite.uses, invite.max_uses, invite.expires_at, now) != "live" {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "This invite is no longer valid".to_string(),
+        ));
+    }
+
     // Note: grant_role_id is intentionally never surfaced here — a public
     // preview must not leak that an invite grants an elevated role.
     let member_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
