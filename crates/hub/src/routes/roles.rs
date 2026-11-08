@@ -251,6 +251,8 @@ pub async fn update_role(
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         }
+        let holders = state.role_holders(&role_id).await;
+        state.recheck_access_of(holders).await;
     }
 
     if let Some(flag) = req.display_separately {
@@ -355,6 +357,7 @@ pub async fn delete_role(
     // setting rather than a foreign key, and would otherwise go on naming a
     // role that no longer exists.
     let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let holders = state.role_holders(&role_id).await;
     let mut tx = state.db.begin().await.map_err(db_err)?;
     for sql in [
         "UPDATE invites SET grant_role_id = NULL WHERE grant_role_id = $1",
@@ -370,6 +373,7 @@ pub async fn delete_role(
             .map_err(db_err)?;
     }
     tx.commit().await.map_err(db_err)?;
+    state.recheck_access_of(holders).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -434,6 +438,19 @@ pub async fn remove_role(
         ));
     }
 
+    // The role's rank was checked, the member's was not: a low role could be
+    // stripped from someone who outranks the caller. Your own roles stay
+    // yours to drop.
+    if public_key != user.public_key {
+        let target = permissions::user_permissions(&state.db, &public_key).await?;
+        if target.max_priority >= perms.max_priority {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Cannot remove roles from a member ranked at or above you".to_string(),
+            ));
+        }
+    }
+
     // Prevent removing the last owner
     if role_id == "builtin-owner" {
         let owner_count: i64 =
@@ -456,6 +473,8 @@ pub async fn remove_role(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Access narrowed: the open socket has to compute it again.
+    state.close_sessions_of(&public_key).await;
 
     Ok(StatusCode::OK)
 }
