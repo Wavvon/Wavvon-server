@@ -277,7 +277,7 @@ const FARM_SESSION_CHECK_TTL: i64 = 60;
 ///
 /// Fails closed: a farm-hosted hub cannot authenticate anyone while its farm
 /// is unreachable anyway, since the farm is where sign-in happens.
-async fn farm_session_live(state: &AppState, farm_url: &str, jti: &str) -> bool {
+async fn farm_session_live(state: &AppState, jti: &str) -> bool {
     let now = crate::auth::handlers::unix_timestamp();
     if let Some((live, at)) = state
         .farm_session_checks
@@ -289,6 +289,9 @@ async fn farm_session_live(state: &AppState, farm_url: &str, jti: &str) -> bool 
             return *live;
         }
     }
+    let Some(farm_url) = state.farm_url.as_deref() else {
+        return false;
+    };
     let answer = state
         .http_client
         .post(format!("{farm_url}/farm/auth/revoke-check"))
@@ -331,11 +334,7 @@ pub(crate) async fn resolve_farm_token(
     token: &str,
 ) -> Result<String, (StatusCode, String)> {
     let (sub, jti) = verify_farm_token_signature(state, token).await?;
-    let farm_url = state
-        .farm_url
-        .as_deref()
-        .ok_or((StatusCode::UNAUTHORIZED, "no_farm_configured".to_string()))?;
-    if !farm_session_live(state, farm_url, &jti).await {
+    if !farm_session_live(state, &jti).await {
         return Err((
             StatusCode::UNAUTHORIZED,
             "Farm session revoked or unverifiable".to_string(),

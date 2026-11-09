@@ -10,11 +10,16 @@ use wavvon_identity::Identity;
 #[path = "common.rs"]
 mod common;
 
+/// The jti every token here carries; `farm_hub` records it as live, which is
+/// what the hub would otherwise learn from the farm's revoke-check.
+const JTI: &str = "test-session";
+
 fn farm_token(farm: &Identity, sub: &str) -> String {
     let payload = json!({
         "exp": wavvon_hub::auth::handlers::unix_timestamp() + 600,
         "iss_pk": farm.public_key_hex(),
         "sub": sub,
+        "jti": JTI,
     });
     let bytes = serde_json::to_vec(&payload).unwrap();
     let sig = farm.sign(&bytes);
@@ -28,6 +33,10 @@ async fn farm_hub(invite_only: bool) -> (common::TestHarness, Identity, String) 
     common::authenticate(&server, &Identity::generate()).await;
     let farm = Identity::generate();
     *server.state().cached_farm_pubkey.write().await = Some(farm.public_key_hex());
+    server.state().farm_session_checks.lock().unwrap().insert(
+        JTI.to_string(),
+        (true, wavvon_hub::auth::handlers::unix_timestamp()),
+    );
     if invite_only {
         wavvon_hub::routes::hub::upsert_setting(&server.state().db, "invite_only", "true")
             .await
@@ -170,4 +179,20 @@ async fn banned_farm_user_is_refused_even_with_an_invite_route() {
         resp.assert_status(StatusCode::FORBIDDEN);
         assert_eq!(resp.text(), "User is banned");
     }
+}
+
+/// A validly signed farm token whose session the farm reports revoked is
+/// refused: the signature alone would honour it until it expires.
+#[tokio::test]
+async fn a_revoked_farm_session_is_refused() {
+    let (server, farm, _) = farm_hub(false).await;
+    server.state().farm_session_checks.lock().unwrap().insert(
+        JTI.to_string(),
+        (false, wavvon_hub::auth::handlers::unix_timestamp()),
+    );
+    server
+        .get("/me")
+        .authorization_bearer(farm_token(&farm, &Identity::generate().public_key_hex()))
+        .await
+        .assert_status(StatusCode::UNAUTHORIZED);
 }
