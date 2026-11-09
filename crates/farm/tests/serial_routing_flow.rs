@@ -68,7 +68,12 @@ async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
 
     let app = server::create_router(state.clone());
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -111,7 +116,17 @@ async fn start_stub_hub() -> u16 {
     let app = Router::new()
         .route("/info", get(info))
         .route("/ws", get(ws_echo))
-        .route("/report/{*rest}", get(ws_report));
+        .route("/report/{*rest}", get(ws_report))
+        .route(
+            "/xff",
+            get(|headers: axum::http::HeaderMap| async move {
+                headers
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string()
+            }),
+        );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -382,4 +397,26 @@ async fn a_released_slug_stops_routing_but_the_pubkey_does_not() {
         200,
         "the pubkey is the address of last resort and must never stop working"
     );
+}
+
+/// The hub behind the farm rate-limits and records by the address the farm
+/// forwards, so it has to be the client's as the farm saw it, never one the
+/// client wrote itself.
+#[tokio::test]
+async fn the_proxy_forwards_the_clients_address_not_its_own_claim() {
+    let (farm_url, state, _guard) = start_farm().await;
+    let hub_port = start_stub_hub().await;
+    let serial = random_serial();
+    insert_hub_row(&state, "hub00020", &serial, Some(hub_port), false).await;
+
+    let forwarded = Client::new()
+        .get(format!("{farm_url}/hub/{serial}/xff"))
+        .header("x-forwarded-for", "6.6.6.6")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(forwarded, "127.0.0.1");
 }

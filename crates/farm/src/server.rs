@@ -172,6 +172,11 @@ pub fn create_router_with_cors(
         // requests). Routed by the hub's pubkey ("serial"), not the opaque
         // `hubs.id` PK — see farm-impl.md "Serial routing — first slice".
         .merge(Router::new().route("/hub/{serial}/{*path}", any(crate::proxy::proxy_handler)))
+        // The client's address, resolved once, for the proxy to forward: a
+        // hub behind the farm otherwise sees every client as the farm.
+        .layer(axum::middleware::from_fn(move |req, next| {
+            wavvon_rate_limit::tag_client_ip(trusted_proxy, req, next)
+        }))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
