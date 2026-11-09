@@ -485,9 +485,7 @@ pub struct AppState {
     /// message to that user was dropped with nothing reporting it. For voice
     /// that means no sender key arrives, so every datagram is discarded at
     /// the key lookup and the call is silent — see `send_to_user`.
-    pub ws_key_senders: RwLock<
-        HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>>,
-    >,
+    pub ws_key_senders: RwLock<HashMap<String, HashMap<String, SocketSender>>>,
 
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
@@ -596,12 +594,11 @@ impl AppState {
     /// a permission tweak must not drop the whole hub out of its calls.
     pub async fn recheck_access_of(&self, holders: Option<Vec<String>>) {
         let senders = self.ws_key_senders.read().await;
-        let mut send =
-            |sessions: &HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>| {
-                for tx in sessions.values() {
-                    let _ = tx.send(WsServerMessage::AccessChanged);
-                }
-            };
+        let mut send = |sessions: &HashMap<String, SocketSender>| {
+            for tx in sessions.values() {
+                let _ = tx.try_send(WsServerMessage::AccessChanged);
+            }
+        };
         match holders {
             Some(pks) => {
                 for pk in pks {
@@ -651,10 +648,22 @@ impl AppState {
         };
         sessions
             .values()
-            .filter(|tx| tx.send(msg.clone()).is_ok())
+            .filter(|tx| tx.try_send(msg.clone()).is_ok())
             .count()
     }
 }
+
+/// A socket's queue of targeted messages. Bounded: a socket that stops
+/// reading must not grow hub memory without limit. A full queue drops the
+/// message; a client that far behind has lost the stream anyway.
+pub type SocketSender = tokio::sync::mpsc::Sender<WsServerMessage>;
+
+/// Targeted messages one socket may have waiting.
+pub const SOCKET_QUEUE: usize = 1024;
+
+/// Open sockets one identity may hold: tabs, devices and reconnect overlap
+/// fit well inside it; a script opening sockets in a loop does not.
+pub const MAX_SOCKETS_PER_IDENTITY: usize = 16;
 
 pub struct PendingChallenge {
     /// The pubkey the challenge was issued to; verify must present the same.
