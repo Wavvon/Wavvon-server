@@ -81,6 +81,10 @@ pub const CAPABILITIES: &[&str] = &[
     // sign it with its subkey. Gated because an older hub verifies the
     // signature against the canonical key alone and refuses the send.
     "dms.plaintext.signercert",
+    // A plaintext DM's signature is the v2 form, covering a client-chosen
+    // message_id and created_at (sent alongside) and the member set. A client
+    // seeing this signs v2; a hub without it still takes v1.
+    "dms.plaintext.v2",
     // `PATCH /hub` takes `landing_image` and `landing_colors`, and the
     // invite preview carries them with `description` and `online_count`.
     // An admin page must not offer fields an older hub would silently drop.

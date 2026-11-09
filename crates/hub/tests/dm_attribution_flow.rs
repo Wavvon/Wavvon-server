@@ -882,23 +882,24 @@ async fn a_federated_dm_cannot_bind_a_master_to_a_local_member() {
 
     let conv_id = "30330330330330330330330330330303";
     let content = "hello";
-    let signing = wavvon_identity::federated_plaintext_dm_signing_bytes(conv_id, "dm", content);
     let resp = client
         .post(format!("{hub}/federation/dm"))
         .bearer_auth(&peer_token)
-        .json(&json!({
-            "message_id": "30330330330330330330330330330304",
-            "conversation_id": conv_id,
-            "conv_type": "dm",
-            "sender": member.public_key_hex(),
-            "members": [member.public_key_hex(), peer.public_key_hex()],
-            "content": content,
-            "attachments": [],
-            "signature": hex::encode(device.sign(&signing).to_bytes()),
-            "signer_cert": device_cert,
-            "sender_hub_url": evil_url,
-            "created_at": 1_700_000_003i64,
-        }))
+        .json(&common::signed_fed_dm(
+            |b| device.sign(b).to_bytes(),
+            json!({
+                "message_id": "30330330330330330330330330330304",
+                "conversation_id": conv_id,
+                "conv_type": "dm",
+                "sender": member.public_key_hex(),
+                "members": [member.public_key_hex(), peer.public_key_hex()],
+                "content": content,
+                "attachments": [],
+                "signer_cert": device_cert,
+                "sender_hub_url": evil_url,
+                "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
+            }),
+        ))
         .send()
         .await
         .unwrap();

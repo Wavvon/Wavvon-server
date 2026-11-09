@@ -562,6 +562,43 @@ pub fn federated_plaintext_dm_signing_bytes(
     buf
 }
 
+/// Signing bytes for a plaintext federated DM, v2.
+///
+/// v1 covered only `conversation_id || conv_type || content`, so a peer hub
+/// could replay a message or deliver it into a new conversation with members
+/// the sender never chose. v2 also covers the message id and timestamp, both
+/// chosen by the sender's client (the hub adopts them), and the member set,
+/// sorted so every party computes the same bytes:
+///
+/// `tag || str(conversation_id) || str(conv_type) || str(content) ||
+/// str(message_id) || u64 LE created_at || u32 LE count || str(member)...`
+///
+/// Domain tag: `"wavvon/federated-dm/v2\0"`. A receiving hub refuses a
+/// message id it already holds and a timestamp too far from now.
+pub fn federated_plaintext_dm_v2_signing_bytes(
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+    message_id: &str,
+    created_at: u64,
+    members: &[String],
+) -> Vec<u8> {
+    let mut sorted: Vec<&str> = members.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut buf = b"wavvon/federated-dm/v2\0".to_vec();
+    write_str(&mut buf, conversation_id);
+    write_str(&mut buf, conv_type);
+    write_str(&mut buf, content);
+    write_str(&mut buf, message_id);
+    write_u64_le(&mut buf, created_at);
+    buf.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
+    for member in sorted {
+        write_str(&mut buf, member);
+    }
+    buf
+}
+
 /// What a group member signs to add members to a group DM or to leave it.
 /// A remote hub applies the change only on this signature, from someone its
 /// own roster already holds: trusting the member list a peer hub sends is what

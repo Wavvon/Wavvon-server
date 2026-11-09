@@ -509,3 +509,60 @@ pub async fn setup_with_owner() -> (TestHarness, String) {
     let token = authenticate(&server, &owner).await;
     (server, token)
 }
+
+/// A /federation/dm payload with its signature set over the payload's own
+/// fields, in the v2 form a sender's client signs: so the payload is the one
+/// source of the id, time and members, and a test cannot sign one and send
+/// another by accident.
+#[allow(dead_code)]
+pub fn signed_fed_dm(
+    sign: impl Fn(&[u8]) -> [u8; 64],
+    mut payload: serde_json::Value,
+) -> serde_json::Value {
+    let members: Vec<String> = payload["members"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let bytes = wavvon_identity::federated_plaintext_dm_v2_signing_bytes(
+        payload["conversation_id"].as_str().unwrap_or_default(),
+        payload["conv_type"].as_str().unwrap_or_default(),
+        payload["content"].as_str().unwrap_or_default(),
+        payload["message_id"].as_str().unwrap_or_default(),
+        payload["created_at"].as_i64().unwrap_or_default().max(0) as u64,
+        &members,
+    );
+    payload["signature"] = serde_json::json!(hex::encode(sign(&bytes)));
+    payload
+}
+
+/// The body of a plaintext DM a client sends: content, its v2 signature, and
+/// the id and time it signed.
+#[allow(dead_code)]
+pub fn signed_dm_body(
+    sender: &Identity,
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+    members: &[String],
+) -> serde_json::Value {
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let created_at = wavvon_hub::auth::handlers::unix_timestamp();
+    let bytes = wavvon_identity::federated_plaintext_dm_v2_signing_bytes(
+        conversation_id,
+        conv_type,
+        content,
+        &message_id,
+        created_at as u64,
+        members,
+    );
+    serde_json::json!({
+        "content": content,
+        "plaintext_signature": hex::encode(sender.sign(&bytes).to_bytes()),
+        "message_id": message_id,
+        "created_at": created_at,
+    })
+}
