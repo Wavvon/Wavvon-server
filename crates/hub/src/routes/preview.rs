@@ -95,18 +95,8 @@ fn is_global_v4(v4: Ipv4Addr) -> bool {
 }
 
 /// Perform SSRF-safe DNS resolution without blocking the runtime. Returns the
-/// validated SocketAddrs (all checked to be global) so the caller can pin the
+/// addresses, every one passing `allowed`, so the caller can pin the
 /// connection to them, preventing DNS-rebinding between check and connect.
-async fn resolve_and_check_ssrf(
-    host: &str,
-    port: u16,
-    allow_private: bool,
-) -> Result<Vec<SocketAddr>, &'static str> {
-    resolve_and_check(host, port, &|a| allow_private || !is_private_ip(a.ip())).await
-}
-
-/// [`resolve_and_check_ssrf`] with the verdict passed in, so a test can let
-/// one loopback server through and refuse the next.
 async fn resolve_and_check(
     host: &str,
     port: u16,
@@ -695,7 +685,7 @@ mod tests {
     #[tokio::test]
     async fn private_targets_are_refused_before_any_connection() {
         assert_eq!(
-            resolve_and_check_ssrf("localhost", 80, false).await,
+            resolve_and_check("localhost", 80, &|a| !is_private_ip(a.ip())).await,
             Err("ssrf_blocked")
         );
         for u in [
