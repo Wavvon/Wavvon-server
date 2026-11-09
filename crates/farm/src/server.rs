@@ -52,11 +52,38 @@ fn build_cors_layer(cors_origins: &str) -> CorsLayer {
 }
 
 pub fn create_router(state: Arc<FarmState>) -> Router {
-    create_router_with_cors(state, "*")
+    create_router_with_cors(state, "*", false)
 }
 
-pub fn create_router_with_cors(state: Arc<FarmState>, cors_origins: &str) -> Router {
+pub fn create_router_with_cors(
+    state: Arc<FarmState>,
+    cors_origins: &str,
+    trusted_proxy: bool,
+) -> Router {
+    use wavvon_rate_limit::{Config, RateLimiter};
+    // Anyone can reach these, and the TOTP routes take guesses at a 6-digit
+    // code: the hub's per-IP auth budget, applied to all of them.
+    let auth_limiter = RateLimiter::new(Config::auth(), trusted_proxy);
+    let limited = Router::new()
+        .route(
+            "/farm/admin/totp/setup",
+            post(routes::admin_auth::totp_setup),
+        )
+        .route(
+            "/farm/admin/totp/confirm",
+            post(routes::admin_auth::totp_confirm),
+        )
+        .route(
+            "/farm/admin/totp/disable",
+            post(routes::admin_auth::totp_disable),
+        )
+        .layer(axum::middleware::from_fn(move |req, next| {
+            let l = auth_limiter.clone();
+            async move { wavvon_rate_limit::enforce(l, req, next).await }
+        }));
+
     Router::new()
+        .merge(limited)
         // Public probe endpoint — the hub fetches this on startup to cache the pubkey.
         .route("/farm/info", get(routes::health::farm_info))
         // Auth endpoints — same wire shape as the hub's existing auth routes.
@@ -115,19 +142,6 @@ pub fn create_router_with_cors(state: Arc<FarmState>, cors_origins: &str) -> Rou
             patch(routes::servers::update_server),
         )
         .route("/ws/agent", get(routes::servers::ws_agent_handler))
-        // TOTP 2FA routes for admin account.
-        .route(
-            "/farm/admin/totp/setup",
-            post(routes::admin_auth::totp_setup),
-        )
-        .route(
-            "/farm/admin/totp/confirm",
-            post(routes::admin_auth::totp_confirm),
-        )
-        .route(
-            "/farm/admin/totp/disable",
-            post(routes::admin_auth::totp_disable),
-        )
         // Phase 3 — farm settings (admin).
         .route(
             "/farm/settings",

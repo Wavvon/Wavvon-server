@@ -6056,6 +6056,7 @@ dependencies = [
  "uuid",
  "wavvon-hub-env",
  "wavvon-identity",
+ "wavvon-rate-limit",
  "webpki-roots 0.26.11",
 ]
 
@@ -6106,6 +6107,7 @@ dependencies = [
  "uuid",
  "wavvon-hub-env",
  "wavvon-identity",
+ "wavvon-rate-limit",
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "wtransport",
@@ -6135,6 +6137,16 @@ dependencies = [
  "sha2 0.10.9",
  "x25519-dalek",
  "zeroize",
+]
+
+[[package]]
+name = "wavvon-rate-limit"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "tokio",
+ "tracing",
+ "wavvon-hub-env",
 ]
 
 [[package]]
