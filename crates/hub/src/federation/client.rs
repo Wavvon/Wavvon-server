@@ -114,16 +114,6 @@ impl FederationClient {
             .context("Invalid message response")
     }
 
-    /// An attachment from the hub that holds it, for the alliance read path.
-    /// Public on the holder's side, so no token.
-    pub async fn get_upload(&self, base_url: &str, id: &str) -> Result<reqwest::Response> {
-        self.http
-            .get(format!("{base_url}/uploads/{id}"))
-            .send()
-            .await
-            .context("Failed to fetch upload from peer")
-    }
-
     pub async fn get_messages(
         &self,
         base_url: &str,
