@@ -227,12 +227,51 @@ impl RateLimiter {
     }
 }
 
+/// The addresses a trusted proxy connects from, when the process names them.
+/// Unset means any peer may set `X-Forwarded-For`, which is only safe when
+/// the proxy is the only thing that can reach this process at all.
+// ponytail: process-wide, set once at startup; per-limiter config if two ever differ.
+static TRUSTED_PROXY_FROM: std::sync::OnceLock<Vec<IpAddr>> = std::sync::OnceLock::new();
+
+/// Trust `X-Forwarded-For` only from these peers. Call once, at startup.
+pub fn set_trusted_proxy_from(addrs: Vec<IpAddr>) {
+    let _ = TRUSTED_PROXY_FROM.set(addrs.into_iter().map(canonicalize_peer).collect());
+}
+
+/// Peer addresses compare exactly, except that an IPv4-mapped IPv6 peer is
+/// the IPv4 address it carries (a dual-stack socket reports it that way).
+fn canonicalize_peer(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    }
+}
+
 fn resolve_ip(
     trusted_proxy: bool,
     socket_ip: Option<IpAddr>,
     headers: &HeaderMap,
 ) -> Option<IpAddr> {
-    if trusted_proxy {
+    resolve_ip_from(
+        trusted_proxy,
+        TRUSTED_PROXY_FROM.get().map(Vec::as_slice),
+        socket_ip,
+        headers,
+    )
+}
+
+fn resolve_ip_from(
+    trusted_proxy: bool,
+    allowed: Option<&[IpAddr]>,
+    socket_ip: Option<IpAddr>,
+    headers: &HeaderMap,
+) -> Option<IpAddr> {
+    let from_trusted_peer = match (allowed, socket_ip) {
+        (None, _) => true,
+        (Some(allowed), Some(peer)) => allowed.contains(&canonicalize_peer(peer)),
+        (Some(_), None) => false,
+    };
+    if trusted_proxy && from_trusted_peer {
         xff_ip(headers).or(socket_ip)
     } else {
         socket_ip
@@ -424,6 +463,30 @@ mod tests {
     }
 
     /// Canonicalization is applied to XFF-sourced IPs too.
+    #[test]
+    fn xff_is_believed_only_from_a_named_proxy() {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
+        let farm: IpAddr = "10.0.0.1".parse().unwrap();
+        let other: IpAddr = "10.0.0.2".parse().unwrap();
+        let client: IpAddr = "1.2.3.4".parse().unwrap();
+        let allowed = [farm];
+        assert_eq!(
+            resolve_ip_from(true, Some(&allowed), Some(farm), &h),
+            Some(client)
+        );
+        assert_eq!(
+            resolve_ip_from(true, Some(&allowed), Some(other), &h),
+            Some(other)
+        );
+        let mapped: IpAddr = "::ffff:10.0.0.1".parse().unwrap();
+        assert_eq!(
+            resolve_ip_from(true, Some(&allowed), Some(mapped), &h),
+            Some(client)
+        );
+        assert_eq!(resolve_ip_from(true, None, Some(other), &h), Some(client));
+    }
+
     #[test]
     fn xff_ip_is_canonicalized() {
         // XFF delivers an IPv4-mapped address; it should collapse to plain IPv4.

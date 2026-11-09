@@ -1495,6 +1495,26 @@ async fn main() -> Result<()> {
         });
     }
 
+    if let Some(list) = settings.trusted_proxy_from.as_deref() {
+        let addrs: Vec<std::net::IpAddr> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .filter_map(|a| match a.parse() {
+                Ok(ip) => Some(ip),
+                Err(_) => {
+                    tracing::warn!(
+                        "{}: ignoring {a:?}, not an IP address",
+                        wavvon_hub_env::TRUSTED_PROXY_FROM
+                    );
+                    None
+                }
+            })
+            .collect();
+        tracing::info!("Rate limiter: X-Forwarded-For believed only from {addrs:?}");
+        wavvon_hub::rate_limit::set_trusted_proxy_from(addrs);
+    }
+
     // Log whether the rate limiter will trust X-Forwarded-For.
     if settings.trusted_proxy {
         tracing::info!(

@@ -142,6 +142,12 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          would allow limiter bypass.",
     ),
     (
+        wavvon_hub_env::TRUSTED_PROXY_FROM,
+        "(unset)",
+        "Comma-separated proxy addresses. With WAVVON_TRUSTED_PROXY, X-Forwarded-For is believed \
+         only from these peers. Unset: from any peer",
+    ),
+    (
         wavvon_hub_env::AUTH_RATE_BURST,
         "10",
         "Per-IP burst for the auth handshake. Raise it when your users share an address \
@@ -312,6 +318,8 @@ pub struct Settings {
     ///
     /// Env: WAVVON_TRUSTED_PROXY
     pub trusted_proxy: bool,
+    /// Env: WAVVON_TRUSTED_PROXY_FROM
+    pub trusted_proxy_from: Option<String>,
     /// Path to a directory of pre-built web-client assets.
     ///
     /// When set, the hub serves the browser client from `/` with SPA fallback:
