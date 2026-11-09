@@ -535,6 +535,47 @@ async fn suspend_hub_happy_path() {
     assert!(suspended.is_some());
 }
 
+/// Suspending must stop the process, not only the proxy: an agent-hosted hub
+/// gets a stop command over its agent's socket.
+#[tokio::test]
+async fn suspending_an_agent_hosted_hub_tells_the_agent_to_stop_it() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    insert_hub(&state, "hubagt", &admin.public_key_hex(), "Hub", "public").await;
+    set_admin(&state, &admin.public_key_hex()).await;
+    sqlx::query(
+        "INSERT INTO servers (id, token_hash, name, registered_at) VALUES ('node1', 'x', 'n', 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE hubs SET server_id = 'node1' WHERE id = 'hubagt'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    state
+        .agent_senders
+        .write()
+        .await
+        .insert("node1".to_string(), tx);
+
+    let token = authenticate(&server, &state, &admin).await;
+    server
+        .patch("/farm/hubs/hubagt/suspend")
+        .add_header(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .json(&json!({ "reason": "abuse" }))
+        .await
+        .assert_status_ok();
+
+    let cmd: Value = serde_json::from_str(&rx.try_recv().expect("a command")).unwrap();
+    assert_eq!(cmd["type"], "stop_hub");
+    assert_eq!(cmd["hub_id"], "hubagt");
+}
+
 #[tokio::test]
 async fn suspend_hub_returns_404_for_unknown() {
     let (server, state, _guard) = setup().await;

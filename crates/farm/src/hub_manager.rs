@@ -237,6 +237,7 @@ impl HubManager {
             .env(wavvon_hub_env::HTTP_PORT, port.to_string())
             .env(wavvon_hub_env::VOICE_UDP_PORT, voice_port.to_string())
             .env(wavvon_hub_env::FARM_URL, &self.farm_url)
+            .env(wavvon_hub_env::BIND_ADDR, "127.0.0.1")
             // Our row id for this hub. It reports this back on its first
             // heartbeat, which is the only way we learn its pubkey and can
             // start routing `/hub/<serial>` to it.
