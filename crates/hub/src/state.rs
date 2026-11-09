@@ -182,6 +182,9 @@ pub struct WebhookCircuit {
 pub struct RateLimiters {
     /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
     pub messages: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Slowmode: when each member last posted in each slowed channel, keyed
+    /// `(channel_id, public_key)`. In memory: a restart forgives one wait.
+    pub slowmode: Mutex<HashMap<(String, String), Instant>>,
     /// Per-user fixed-window rate limiter for link preview fetches (10 requests/60 s).
     /// Each preview may trigger an outbound HTTP fetch, so we throttle per user.
     pub preview: Mutex<HashMap<String, (u32, Instant)>>,
@@ -246,6 +249,7 @@ impl Default for RateLimiters {
     fn default() -> Self {
         Self {
             messages: Mutex::new(HashMap::new()),
+            slowmode: Mutex::new(HashMap::new()),
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
             forum_federated_write: Mutex::new(HashMap::new()),

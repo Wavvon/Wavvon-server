@@ -114,6 +114,32 @@ async fn run_doctor() -> bool {
         }
     }
 
+    // Voice is UDP and dialled at the public host unless told otherwise; an
+    // HTTP proxy in front of that host (Cloudflare's orange cloud) passes the
+    // site and the WebSocket and silently drops every voice datagram.
+    if settings.voice_public_host.is_none() {
+        let host = settings
+            .public_url
+            .as_deref()
+            .and_then(|u| Url::parse(u).ok())
+            .and_then(|u| u.host_str().map(str::to_string));
+        if let Some(host) = host {
+            if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), 443)).await {
+                if addrs
+                    .into_iter()
+                    .any(|a| wavvon_hub::udp_dropping_proxy(a.ip()))
+                {
+                    println!(
+                        "WARN  Voice: {host} resolves into Cloudflare's proxy, which drops UDP, so \
+                         voice will not connect. Make the record DNS-only, or set {} to a DNS-only \
+                         name for voice",
+                        wavvon_hub_env::VOICE_PUBLIC_HOST
+                    );
+                }
+            }
+        }
+    }
+
     // Check TLS files if configured
     match (settings.tls_cert.as_deref(), settings.tls_key.as_deref()) {
         (Some(cert), Some(key)) => {
@@ -1231,10 +1257,19 @@ async fn main() -> Result<()> {
     // (voice-transport-v2.md). Voice is dialled directly, never through the
     // farm's HTTP proxy — a datagram carries no path to route on — so only
     // the *host* is taken here, and the port is this hub's own allocated one.
-    let voice_udp_host: Option<String> = public_url
-        .as_deref()
-        .and_then(|u| Url::parse(u).ok())
-        .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
+    // WAVVON_VOICE_PUBLIC_HOST wins: a public host behind a proxy that drops
+    // UDP needs voice on a DNS-only name. The certificate is pinned by hash
+    // from /info, so that name needs no CA certificate of its own.
+    let voice_udp_host: Option<String> = settings
+        .voice_public_host
+        .clone()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| {
+            public_url
+                .as_deref()
+                .and_then(|u| Url::parse(u).ok())
+                .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
+        })
         .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
     let voice_wt_url: Option<String> =
         voice_udp_host.map(|host| format!("https://{host}:{voice_udp_port}/voice"));
