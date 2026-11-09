@@ -66,6 +66,10 @@ pub const CAPABILITIES: &[&str] = &[
     // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
     // it takes inline `attachments` only, so a client hides the attach button.
     "attachments.stored",
+    // A channel can have `slowmode_secs` (one message per member per that
+    // many seconds; `messages.slowmode.bypass` exempts). A refused send is a
+    // 429 whose JSON body carries `retry_after_secs`.
+    "channels.slowmode",
     // Voice works only in `voice` channels (decisions.md, "Voice lives in
     // voice channels"): the hub refuses a voice join, a voice move, an AFK
     // channel or an alliance voice grant anywhere else, and a text channel

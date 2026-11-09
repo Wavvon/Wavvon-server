@@ -1233,6 +1233,7 @@ pub async fn create_squad_rooms(
                         event_id: Some(event_id.clone()),
                         forum_require_tag: false,
                         nsfw: false,
+                        slowmode_secs: 0,
                     });
                     break;
                 }

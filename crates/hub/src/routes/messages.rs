@@ -64,6 +64,8 @@ pub(crate) async fn require_may_post(
         entry.0 += 1;
     }
 
+    enforce_slowmode(state, public_key, channel_id).await?;
+
     if crate::routes::moderation::is_muted(&state.db, public_key).await? {
         return Err((StatusCode::FORBIDDEN, "You are muted".to_string()));
     }
@@ -82,6 +84,54 @@ pub(crate) async fn require_may_post(
     if crate::routes::moderation::is_federated_banned(&state.db, public_key).await? {
         return Err((StatusCode::FORBIDDEN, "Access denied".to_string()));
     }
+    Ok(())
+}
+
+/// A channel's slowmode: one message per `slowmode_secs` per member, unless
+/// they hold `messages.slowmode.bypass` there. The refusal says how long is
+/// left, as JSON, so a client can count down.
+async fn enforce_slowmode(
+    state: &AppState,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<(), (StatusCode, String)> {
+    let secs: i32 = sqlx::query_scalar("SELECT slowmode_secs FROM channels WHERE id = $1")
+        .bind(channel_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+        .unwrap_or(0);
+    if secs <= 0 {
+        return Ok(());
+    }
+    let exempt = permissions::channel_permissions(&state.db, public_key, channel_id)
+        .await
+        .is_ok_and(|p| p.has(permissions::MESSAGES_SLOWMODE_BYPASS));
+    if exempt {
+        return Ok(());
+    }
+    let window = std::time::Duration::from_secs(secs as u64);
+    let now = std::time::Instant::now();
+    let mut map = state
+        .rate_limiters
+        .slowmode
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if map.len() >= 5_000 {
+        map.retain(|_, at| now.duration_since(*at) < std::time::Duration::from_secs(6 * 3600));
+    }
+    let key = (channel_id.to_string(), public_key.to_string());
+    if let Some(last) = map.get(&key) {
+        let waited = now.duration_since(*last);
+        if waited < window {
+            let left = (window - waited).as_secs().max(1);
+            return Err((
+                StatusCode::TOO_MANY_REQUESTS,
+                serde_json::json!({ "error": "slowmode", "retry_after_secs": left }).to_string(),
+            ));
+        }
+    }
+    map.insert(key, now);
     Ok(())
 }
 
