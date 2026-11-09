@@ -87,21 +87,46 @@ impl FarmState {
         voice_port: u16,
         owner_pubkey: Option<&str>,
     ) -> Result<(), AgentUnreachable> {
-        let sender = {
-            let map = self.agent_senders.read().await;
-            map.get(server_id).cloned()
-        };
-        let sender = sender.ok_or(AgentUnreachable)?;
-        let cmd = serde_json::json!({
-            "type": "restart_hub",
+        self.send_to_agent(
+            server_id,
+            serde_json::json!({
+                "type": "restart_hub",
             "hub_id": hub_id,
             "db_url": db_url,
             "port": port,
             "voice_port": voice_port,
             "owner_pubkey": owner_pubkey,
             "farm_url": self.farm_url,
-        });
+            }),
+        )
+        .await
+    }
+
+    /// Ask the agent hosting `hub_id` to stop its process. Same failure
+    /// reading as [`Self::send_restart_to_agent`].
+    pub async fn send_stop_to_agent(
+        &self,
+        server_id: &str,
+        hub_id: &str,
+    ) -> Result<(), AgentUnreachable> {
+        self.send_to_agent(
+            server_id,
+            serde_json::json!({ "type": "stop_hub", "hub_id": hub_id }),
+        )
+        .await
+    }
+
+    async fn send_to_agent(
+        &self,
+        server_id: &str,
+        cmd: serde_json::Value,
+    ) -> Result<(), AgentUnreachable> {
+        let sender = {
+            let map = self.agent_senders.read().await;
+            map.get(server_id).cloned()
+        };
         sender
+            .ok_or(AgentUnreachable)?
             .try_send(cmd.to_string())
             .map_err(|_| AgentUnreachable)
     }

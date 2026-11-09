@@ -581,8 +581,8 @@ pub async fn suspend_hub(
         ));
     }
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM hubs WHERE id = $1 AND deleted_at IS NULL")
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT server_id FROM hubs WHERE id = $1 AND deleted_at IS NULL")
             .bind(&hub_id)
             .fetch_optional(&state.db)
             .await
@@ -593,12 +593,12 @@ pub async fn suspend_hub(
                 )
             })?;
 
-    if exists.is_none() {
+    let Some((server_id,)) = row else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "hub_not_found"})),
         ));
-    }
+    };
 
     let now = unix_now();
     sqlx::query("UPDATE hubs SET suspended_at = $1, suspension_reason = $2 WHERE id = $3")
@@ -613,6 +613,26 @@ pub async fn suspend_hub(
                 Json(serde_json::json!({"error": format!("db_error: {e}")})),
             )
         })?;
+
+    // The proxy already refuses a suspended hub; stopping the process is what
+    // stops it answering anyone who reaches its port another way. Spawning on
+    // farm start and the monitor both skip suspended hubs, so it stays down.
+    match server_id {
+        None => {
+            if let Err(e) = state.hub_manager.stop_hub(&hub_id).await {
+                tracing::warn!(hub_id, error = %e, "Suspended hub could not be stopped");
+            }
+        }
+        Some(server_id) => {
+            if state.send_stop_to_agent(&server_id, &hub_id).await.is_err() {
+                tracing::warn!(
+                    hub_id,
+                    server_id,
+                    "Suspended hub's agent is offline; not stopped"
+                );
+            }
+        }
+    }
 
     Ok(Json(SuspendResponse {
         id: hub_id,
