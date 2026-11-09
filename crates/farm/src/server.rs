@@ -65,6 +65,14 @@ pub fn create_router_with_cors(
     // code: the hub's per-IP auth budget, applied to all of them.
     let auth_limiter = RateLimiter::new(Config::auth(), trusted_proxy);
     let limited = Router::new()
+        // Auth endpoints — same wire shape as the hub's existing auth routes.
+        .route("/auth/challenge", post(routes::auth::challenge))
+        .route("/auth/verify", post(routes::auth::verify))
+        .route("/auth/renew", post(routes::auth::renew))
+        .route(
+            "/farm/revocations",
+            post(routes::revoke::receive_revocation),
+        )
         .route(
             "/farm/admin/totp/setup",
             post(routes::admin_auth::totp_setup),
@@ -86,10 +94,6 @@ pub fn create_router_with_cors(
         .merge(limited)
         // Public probe endpoint — the hub fetches this on startup to cache the pubkey.
         .route("/farm/info", get(routes::health::farm_info))
-        // Auth endpoints — same wire shape as the hub's existing auth routes.
-        .route("/auth/challenge", post(routes::auth::challenge))
-        .route("/auth/verify", post(routes::auth::verify))
-        .route("/auth/renew", post(routes::auth::renew))
         // Belt-and-braces revocation check for hubs.
         .route(
             "/farm/auth/revoke-check",

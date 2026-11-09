@@ -344,5 +344,21 @@ pub async fn run(pool: &PgPool) -> Result<()> {
             .execute(pool)
             .await;
 
+    // Device revocations, forwarded by the hubs this farm hosts. Sign-in
+    // here is where a farm-hosted hub's clients authenticate, so a revoked
+    // device has to be refused here too.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS farm_subkey_revocations (
+            master_pubkey TEXT NOT NULL,
+            subkey_pubkey TEXT NOT NULL,
+            revoked_at    BIGINT NOT NULL,
+            signature     TEXT NOT NULL,
+            received_at   BIGINT NOT NULL,
+            PRIMARY KEY (master_pubkey, subkey_pubkey)
+        )",
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
