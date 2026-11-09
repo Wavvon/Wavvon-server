@@ -611,6 +611,33 @@ impl AppState {
         }
     }
 
+    /// Tell this hub's farm, if it has one, that a device was revoked. A
+    /// farm-hosted hub's clients sign in at the farm, which never sees the
+    /// revocation lists a hub learns from home hubs; without this the revoked
+    /// device keeps signing in there. Best effort: the farm verifies the
+    /// signature itself, and the next revocation sync forwards it again.
+    pub fn forward_revocation_to_farm(&self, entry: &wavvon_identity::RevocationEntry) {
+        let Some(farm_url) = self.farm_url.clone() else {
+            return;
+        };
+        let client = self.http_client.clone();
+        let body = serde_json::to_value(entry).unwrap_or_default();
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .post(format!(
+                    "{}/farm/revocations",
+                    farm_url.trim_end_matches('/')
+                ))
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+            {
+                tracing::warn!("Could not forward a device revocation to the farm: {e}");
+            }
+        });
+    }
+
     /// Close the sockets of the identity a revoked device belongs to. Tokens
     /// are refused from here on, but an open socket was authenticated once,
     /// at its handshake. Sockets are keyed by identity, not device, so the

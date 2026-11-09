@@ -41,3 +41,58 @@ pub(crate) async fn session_is_live(db: &sqlx::PgPool, jti: &str) -> bool {
             .await;
     matches!(row, Ok(Some((None, expires_at))) if crate::unix_now() < expires_at)
 }
+
+/// POST /farm/revocations — a device revocation a hosted hub learned of.
+///
+/// Unauthenticated like the hub's own revocation route: the master's
+/// signature is the whole proof, and anyone relaying a validly signed
+/// revocation is doing the user a favour. On a new one, every farm session
+/// that device opened is revoked (a session row records the signing device).
+pub async fn receive_revocation(
+    State(state): State<Arc<FarmState>>,
+    Json(entry): Json<wavvon_identity::RevocationEntry>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    entry
+        .verify()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Bad signature: {e}")))?;
+    let now = crate::unix_now();
+    let inserted = sqlx::query(
+        "INSERT INTO farm_subkey_revocations
+            (master_pubkey, subkey_pubkey, revoked_at, signature, received_at)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (master_pubkey, subkey_pubkey) DO NOTHING",
+    )
+    .bind(&entry.master_pubkey)
+    .bind(&entry.subkey_pubkey)
+    .bind(entry.revoked_at as i64)
+    .bind(&entry.signature)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if inserted.rows_affected() > 0 {
+        sqlx::query(
+            "UPDATE farm_sessions SET revoked_at = $1
+             WHERE public_key = $2 AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(&entry.subkey_pubkey)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Whether `subkey` is a device `master` has revoked. Fails closed.
+pub(crate) async fn device_revoked(db: &sqlx::PgPool, master: &str, subkey: &str) -> bool {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS (SELECT 1 FROM farm_subkey_revocations
+                        WHERE master_pubkey = $1 AND subkey_pubkey = $2)",
+    )
+    .bind(master)
+    .bind(subkey)
+    .fetch_one(db)
+    .await
+    .unwrap_or(true)
+}
