@@ -159,6 +159,7 @@ reaches `Settings`.
 
 - **`farm`** — fleet control plane: hub lifecycle (spawn, monitor, stop), server registration, reverse-proxy to hub processes, farm-level SSO. Partially implemented; see the wiki's `farm-model.md` and `farm-impl.md`.
 - **`agent`** — fleet worker node. Reverse-connects to farm over WebSocket, spawns and monitors local hub processes on its behalf. No HTTP surface.
+- **`rate-limit`** — the per-IP token-bucket limiter, shared by hub and farm so the farm's auth and TOTP routes get the same budget as the hub's. The hub re-exports it as `wavvon_hub::rate_limit`.
 - **`demo-seed`** — populates a running hub with realistic demo data for screenshots.
 
 ---

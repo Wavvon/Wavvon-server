@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/hub",
     "crates/hub-env",
+    "crates/rate-limit",
     "crates/identity",
     "crates/farm",
     "crates/agent",

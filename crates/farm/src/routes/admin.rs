@@ -25,8 +25,7 @@ pub(crate) async fn require_admin(
     headers: &HeaderMap,
     state: &FarmState,
 ) -> Result<String, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(headers, &farm_pubkey)?;
+    let payload = require_auth(headers, state).await?;
 
     let admin_pubkey = get_admin_pubkey(&state.db).await;
     if admin_pubkey.as_deref() != Some(payload.sub.as_str()) {
@@ -363,8 +362,7 @@ pub async fn me_hub_quota(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<HubQuotaResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     let row = fetch_farm_row(&state.db).await?;
 
