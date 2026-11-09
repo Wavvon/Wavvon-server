@@ -19,6 +19,9 @@ pub struct Settings {
     /// agent creates each hub's database here and the node's credentials never
     /// leave the node.
     pub db_template: Option<String>,
+    /// Root of the per-hub working directories. Each hub keeps its identity
+    /// and search index in its own, as the farm's hubs do. Env: WAVVON_HUBS_DIR
+    pub hubs_dir: String,
 }
 
 impl Settings {
@@ -47,6 +50,7 @@ impl Settings {
             .ok()
             .map(|t| t.trim().to_string())
             .filter(|t| !t.is_empty());
+        let hubs_dir = std::env::var("WAVVON_HUBS_DIR").unwrap_or_else(|_| "hubs".to_string());
         Ok(Self {
             farm_url,
             server_token,
@@ -55,6 +59,7 @@ impl Settings {
             node_tls,
             node_cert_sha256,
             db_template,
+            hubs_dir,
         })
     }
 }
