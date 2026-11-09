@@ -459,6 +459,7 @@ pub async fn create_hub(
             "voice_port": voice_port,
             "owner_pubkey": payload.sub,
             "farm_url": state.farm_url,
+            "hub_credential": state.hub_credential(&hub_id),
         });
         let _ = sqlx::query("UPDATE hubs SET server_id = $1 WHERE id = $2")
             .bind(&server_id)

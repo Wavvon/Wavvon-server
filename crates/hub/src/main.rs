@@ -1428,6 +1428,7 @@ async fn main() -> Result<()> {
         // it can manage but cannot route to, because the proxy keys on
         // `hubs.hub_pubkey`.
         let hb_farm_hub_id = settings.farm_hub_id.clone();
+        let hb_credential = settings.farm_hub_credential.clone();
         if hb_farm_hub_id.is_none() {
             tracing::warn!(
                 "{} is set but {} is not — the farm cannot bind this hub to its row, \
@@ -1453,6 +1454,7 @@ async fn main() -> Result<()> {
                 let uptime = hb_state.started_at.elapsed().as_secs();
                 let payload = serde_json::json!({
                     "hub_id": hb_farm_hub_id,
+                    "hub_credential": hb_credential,
                     "hub_pubkey": hb_state.hub_identity.public_key_hex(),
                     "online_users": online,
                     "storage_bytes": db_size,

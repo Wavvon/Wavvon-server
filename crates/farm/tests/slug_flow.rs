@@ -321,7 +321,11 @@ async fn the_heartbeat_reports_the_canonical_url_and_follows_a_rename() {
     let beat = || async {
         h.server
             .post("/farm/heartbeat")
-            .json(&json!({ "hub_id": "hub-1", "hub_pubkey": pubkey }))
+            .json(&json!({
+                "hub_id": "hub-1",
+                "hub_pubkey": pubkey,
+                "hub_credential": h.state.hub_credential("hub-1"),
+            }))
             .await
             .json::<serde_json::Value>()
     };
@@ -455,7 +459,11 @@ async fn the_heartbeat_reports_sibling_hubs_by_their_current_address() {
     let body: serde_json::Value = h
         .server
         .post("/farm/heartbeat")
-        .json(&json!({ "hub_id": "hub-a", "hub_pubkey": a }))
+        .json(&json!({
+            "hub_id": "hub-a",
+            "hub_pubkey": a,
+            "hub_credential": h.state.hub_credential("hub-a"),
+        }))
         .await
         .json();
 
@@ -488,7 +496,11 @@ async fn suspended_and_unclaimed_hubs_are_not_offered_as_siblings() {
     let body: serde_json::Value = h
         .server
         .post("/farm/heartbeat")
-        .json(&json!({ "hub_id": "hub-a", "hub_pubkey": a }))
+        .json(&json!({
+            "hub_id": "hub-a",
+            "hub_pubkey": a,
+            "hub_credential": h.state.hub_credential("hub-a"),
+        }))
         .await
         .json();
 

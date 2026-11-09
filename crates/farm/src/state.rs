@@ -54,15 +54,22 @@ impl FarmState {
         farm_url: String,
         hub_manager: Arc<HubManager>,
     ) -> Self {
+        let keypair = Arc::new(keypair);
+        hub_manager.set_credential_key(keypair.clone());
         Self {
             db,
-            keypair: Arc::new(keypair),
+            keypair,
             farm_url,
             hub_manager,
             http_client: reqwest::Client::new(),
             agent_senders: Arc::new(RwLock::new(HashMap::new())),
             node_clients: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// The heartbeat credential for `hub_id`; see [`crate::hub_manager::hub_credential`].
+    pub fn hub_credential(&self, hub_id: &str) -> String {
+        crate::hub_manager::hub_credential(&self.keypair, hub_id)
     }
 
     /// Farm public key as a lowercase hex string.
@@ -97,6 +104,7 @@ impl FarmState {
             "voice_port": voice_port,
             "owner_pubkey": owner_pubkey,
             "farm_url": self.farm_url,
+            "hub_credential": self.hub_credential(hub_id),
             }),
         )
         .await

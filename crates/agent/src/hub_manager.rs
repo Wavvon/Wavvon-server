@@ -8,6 +8,14 @@ struct HubProcess {
     _child: Child,
 }
 
+/// What the farm's spawn command says about the hub beyond where it runs.
+pub struct FarmGrant<'a> {
+    pub owner_pubkey: Option<&'a str>,
+    pub farm_url: Option<&'a str>,
+    /// The heartbeat credential the farm issued for this hub.
+    pub credential: Option<&'a str>,
+}
+
 pub struct HubManager {
     hubs: RwLock<HashMap<String, HubProcess>>,
     hub_bin: String,
@@ -46,8 +54,7 @@ impl HubManager {
         db_url: &str,
         port: u16,
         voice_port: u16,
-        owner_pubkey: Option<&str>,
-        farm_url: Option<&str>,
+        farm: &FarmGrant<'_>,
     ) -> Result<()> {
         // See the same block in farm/src/hub_manager.rs: these names used to
         // be literals, and WAVVON_HUB_HTTP_PORT was one the hub never reads,
@@ -77,11 +84,14 @@ impl HubManager {
             // row to the hub's pubkey and route to it.
             .env(wavvon_hub_env::FARM_HUB_ID, hub_id)
             .env(wavvon_hub_env::DATABASE_URL, db_url);
-        if let Some(pk) = owner_pubkey {
+        if let Some(pk) = farm.owner_pubkey {
             cmd.env(wavvon_hub_env::OWNER_PUBKEY, pk);
         }
-        if let Some(url) = farm_url {
+        if let Some(url) = farm.farm_url {
             cmd.env(wavvon_hub_env::FARM_URL, url);
+        }
+        if let Some(c) = farm.credential {
+            cmd.env(wavvon_hub_env::FARM_HUB_CREDENTIAL, c);
         }
         let child = cmd.spawn().with_context(|| format!("spawn hub {hub_id}"))?;
         self.hubs.write().await.insert(
@@ -111,12 +121,10 @@ impl HubManager {
         db_url: &str,
         port: u16,
         voice_port: u16,
-        owner_pubkey: Option<&str>,
-        farm_url: Option<&str>,
+        farm: &FarmGrant<'_>,
     ) -> Result<()> {
         self.stop_hub(hub_id).await?;
-        self.spawn_hub(hub_id, db_url, port, voice_port, owner_pubkey, farm_url)
-            .await
+        self.spawn_hub(hub_id, db_url, port, voice_port, farm).await
     }
 
     pub async fn list_hubs(&self) -> Vec<serde_json::Value> {
