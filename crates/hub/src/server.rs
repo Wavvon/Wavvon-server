@@ -235,6 +235,10 @@ pub fn create_router_full(
             get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
         )
         .route(
+            "/admin/settings/lockdown",
+            get(routes::lockdown::get_lockdown).put(routes::lockdown::put_lockdown),
+        )
+        .route(
             "/admin/settings/widget",
             get(routes::widget::get_widget_settings).put(routes::widget::put_widget_settings),
         )

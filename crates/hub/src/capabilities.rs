@@ -99,6 +99,10 @@ pub const CAPABILITIES: &[&str] = &[
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // GET/PUT /admin/settings/lockdown: one switch that stops new members
+    // joining (and optionally holds back recent joiners), plus a join-rate
+    // alert that can throw it. Events hub.lockdown and raid.suspected.
+    "hub.lockdown",
     // `GET /public/widget.json`, `GET /widget`, `/admin/settings/widget`
     // and `widget_hidden` on `/me`: an admin page offers the widget, and a
     // member the opt-out, only where the hub honours them.

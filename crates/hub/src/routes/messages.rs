@@ -65,6 +65,7 @@ pub(crate) async fn require_may_post(
     }
 
     enforce_slowmode(state, public_key, channel_id).await?;
+    crate::routes::lockdown::refuse_if_frozen(&state.db, public_key).await?;
 
     if crate::routes::moderation::is_muted(&state.db, public_key).await? {
         return Err((StatusCode::FORBIDDEN, "You are muted".to_string()));

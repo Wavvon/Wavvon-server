@@ -26,6 +26,7 @@ pub mod invite_models;
 pub mod invites;
 pub mod listing;
 pub mod lobby;
+pub mod lockdown;
 pub mod me;
 pub mod messages;
 pub mod metrics;

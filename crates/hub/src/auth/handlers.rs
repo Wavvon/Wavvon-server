@@ -799,7 +799,7 @@ pub async fn verify(
     // gate and nothing in between changes it.
 
     if !is_member && !peer {
-        admit_member(&state.db, &canonical_pubkey).await?;
+        admit_member(&state, &canonical_pubkey).await?;
         // Once the first-boot owner invite exists, ownership comes from that
         // invite (its role grant, below) and nowhere else. Without this, an
         // operator who switched `invite_only` off before claiming the hub
@@ -1060,7 +1060,14 @@ pub async fn validate_ws_token(
 /// `builtin-everyone` floor (no `user_roles` row). The caller additionally
 /// grants `builtin-owner` when this is the first user on the hub.
 /// Returns an error only for genuine DB failures so callers can propagate it.
-pub async fn admit_member(db: &PgPool, public_key: &str) -> Result<(), (StatusCode, String)> {
+pub async fn admit_member(
+    state: &std::sync::Arc<crate::state::AppState>,
+    public_key: &str,
+) -> Result<(), (StatusCode, String)> {
+    let db = &state.db;
+    // Every path that makes an identity a member comes through here, so the
+    // raid switch is enforced once (Wavvon-server#316).
+    crate::routes::lockdown::refuse_if_locked(db, public_key).await?;
     // Someone who left (DELETE /me) and comes back is a joiner again: 'left'
     // used to stick, refusing them certs and alliance voice and skipping the
     // approval queue on a hub that has one.
@@ -1079,6 +1086,7 @@ pub async fn admit_member(db: &PgPool, public_key: &str) -> Result<(), (StatusCo
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    crate::routes::lockdown::after_join(state).await;
     Ok(())
 }
 

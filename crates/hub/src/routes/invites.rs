@@ -675,7 +675,7 @@ pub async fn join_with_invite(
     // invite gate (the invite in the path is the gate), so the admission that
     // `/auth/verify` performs for a presented code happens here. A no-op for a
     // member.
-    crate::auth::handlers::admit_member(&state.db, &user.public_key).await?;
+    crate::auth::handlers::admit_member(&state, &user.public_key).await?;
 
     // Increment use count
     sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1")
