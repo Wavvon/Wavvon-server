@@ -694,3 +694,39 @@ async fn fleet_hub_url_is_routable_or_absent() {
     );
     assert!(by_id("fresh").get("hub_url").is_none());
 }
+
+/// The quota is counted under a lock at insert time: concurrent creations
+/// must not each see one slot left and all succeed.
+#[tokio::test]
+async fn concurrent_creations_cannot_exceed_the_per_user_quota() {
+    let (server, state, _guard) = setup().await;
+    sqlx::query("UPDATE farms SET max_hubs_per_user = 1 WHERE id = 1")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let user = Identity::generate();
+    let token = authenticate(&server, &state, &user).await;
+
+    let attempts = (0..4).map(|i| {
+        let req = server
+            .post("/farm/hubs")
+            .authorization_bearer(&token)
+            .json(&json!({ "name": format!("Race {i}") }));
+        async move { req.await }
+    });
+    let responses = futures_util::future::join_all(attempts).await;
+    let refused = responses
+        .iter()
+        .filter(|r| r.text().contains("user_quota_exceeded"))
+        .count();
+    assert!(refused >= 3, "only {refused} of 4 were refused");
+
+    let owned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = $1 AND deleted_at IS NULL",
+    )
+    .bind(user.public_key_hex())
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert!(owned <= 1, "{owned} hubs created under a quota of one");
+}

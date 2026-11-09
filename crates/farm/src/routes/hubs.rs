@@ -226,6 +226,7 @@ pub async fn create_hub(
     // -----------------------------------------------------------------------
     // Phase 3A: Enforce creation policy and quota before doing any real work.
     // -----------------------------------------------------------------------
+    let mut quotas: Option<(i64, i64)> = None;
     {
         let policy_row: Option<(String, i64, i64)> = sqlx::query_as(
             "SELECT creation_policy, max_hubs_per_user, max_hubs_total
@@ -260,50 +261,8 @@ pub async fn create_hub(
                     }
                 }
                 "open" => {
-                    // Per-user quota check.
-                    if max_hubs_per_user > 0 {
-                        let owned: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = $1 AND deleted_at IS NULL",
-                        )
-                        .bind(&payload.sub)
-                        .fetch_one(&state.db)
-                        .await
-                        .map_err(|e| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(serde_json::json!({"error": format!("db_error: {e}")})),
-                            )
-                        })?;
-
-                        if owned >= max_hubs_per_user {
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(serde_json::json!({"error": "user_quota_exceeded"})),
-                            ));
-                        }
-                    }
-
-                    // Farm-wide quota check.
-                    if max_hubs_total > 0 {
-                        let total: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM hubs WHERE deleted_at IS NULL",
-                        )
-                        .fetch_one(&state.db)
-                        .await
-                        .map_err(|e| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(serde_json::json!({"error": format!("db_error: {e}")})),
-                            )
-                        })?;
-
-                        if total >= max_hubs_total {
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(serde_json::json!({"error": "farm_quota_exceeded"})),
-                            ));
-                        }
-                    }
+                    // Counted at insert time, under a lock: see below.
+                    quotas = Some((max_hubs_per_user, max_hubs_total));
                 }
                 _ => {
                     // Unknown policy value — treat as admin_only (safe default).
@@ -384,6 +343,42 @@ pub async fn create_hub(
     })?;
     let chosen = chosen.server_id.clone();
 
+    let db_err = |e: sqlx::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("db_error: {e}")})),
+        )
+    };
+    // Count and insert under the farms row lock, so concurrent creations
+    // cannot each see the quota one short and all succeed.
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+    if let Some((max_hubs_per_user, max_hubs_total)) = quotas {
+        sqlx::query("SELECT id FROM farms WHERE id = 1 FOR UPDATE")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        let (owned, total): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE owner_pubkey = $1), COUNT(*)
+             FROM hubs WHERE deleted_at IS NULL",
+        )
+        .bind(&payload.sub)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let exceeded = if max_hubs_per_user > 0 && owned >= max_hubs_per_user {
+            Some("user_quota_exceeded")
+        } else if max_hubs_total > 0 && total >= max_hubs_total {
+            Some("farm_quota_exceeded")
+        } else {
+            None
+        };
+        if let Some(error) = exceeded {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": error })),
+            ));
+        }
+    }
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, description, visibility, created_at)
          VALUES ($1, $2, $3, $4, $5, $6)",
@@ -394,14 +389,10 @@ pub async fn create_hub(
     .bind(&req.description)
     .bind(visibility)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("db_error: {e}")})),
-        )
-    })?;
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
 
     // This hub's own database, created before anything is spawned. A failure
     // here fails the whole creation: a hub started without one falls back to
