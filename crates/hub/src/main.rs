@@ -1753,6 +1753,23 @@ async fn stop_embedded(embedded: Option<wavvon_hub::embedded_pg::EmbeddedPostgre
     }
 }
 
+/// The release signing key. Its private half lives only in the `release`
+/// environment of the Wavvon-server repository; the release workflow signs
+/// every binary with it, and `update` installs nothing it did not sign.
+const RELEASE_PUBKEY_HEX: &str = "e5b1b654ba7b7bfbe91d49dce46b691f76a4c481ffb7f3d808fe8924bcb87663";
+
+/// Whether `sig` is the release key's signature over this asset. The name is
+/// signed with the bytes, so a signed binary for one platform cannot be
+/// passed off as another's.
+fn verify_release_asset(asset_name: &str, bytes: &[u8], sig: &[u8]) -> anyhow::Result<()> {
+    let mut message = Vec::with_capacity(bytes.len() + 64);
+    message.extend_from_slice(b"wavvon/release-asset/v1\0");
+    message.extend_from_slice(asset_name.as_bytes());
+    message.push(0);
+    message.extend_from_slice(bytes);
+    wavvon_identity::verify_signature(RELEASE_PUBKEY_HEX, &message, sig)
+}
+
 fn self_update_asset_name() -> Option<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("wavvon-hub-linux-x86_64")
@@ -1831,6 +1848,29 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
         .await
         .context("Failed to read download body")?;
     println!("Downloaded {} bytes.", bytes.len());
+
+    let sig_name = format!("{asset_name}.sig");
+    let sig_url = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(sig_name.as_str()))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .with_context(|| {
+            format!("Release {tag} carries no signature ({sig_name}); refusing to install it")
+        })?;
+    let sig = client
+        .get(sig_url)
+        .send()
+        .await
+        .context("Signature download failed")?
+        .error_for_status()
+        .context("Signature download returned an error status")?
+        .bytes()
+        .await
+        .context("Failed to read the signature")?;
+    verify_release_asset(asset_name, &bytes, &sig).context(
+        "The downloaded binary is not signed by the Wavvon release key; nothing was installed",
+    )?;
+    println!("Signature verified.");
 
     let current_exe =
         std::env::current_exe().context("Cannot determine current executable path")?;
@@ -2219,5 +2259,23 @@ mod endorse_tests {
         std::fs::write(&old_path, "not json").unwrap();
         assert!(endorse_current_key(&old_path, &cur_path, &out).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod release_signature_tests {
+    use super::verify_release_asset;
+
+    // Made with the release key by the same `openssl pkeyutl -sign -rawin`
+    // call the release workflow runs, over the tag, "test-asset", NUL, "hello".
+    const FIXTURE_SIG: &str = "07640425038ffee7360138d41ab510bec6251e706151e818bb10100be2ccda77582107a8a8736caf3b876461f07ff7d1c37f73dc1cb62b79c364659f8fe01d05";
+
+    #[test]
+    fn a_release_signature_verifies_only_for_its_asset_and_bytes() {
+        let sig = hex::decode(FIXTURE_SIG).unwrap();
+        verify_release_asset("test-asset", b"hello", &sig).unwrap();
+        assert!(verify_release_asset("test-asset", b"hellO", &sig).is_err());
+        assert!(verify_release_asset("other-asset", b"hello", &sig).is_err());
+        assert!(verify_release_asset("test-asset", b"hello", &sig[..63]).is_err());
     }
 }
