@@ -103,6 +103,10 @@ pub const CAPABILITIES: &[&str] = &[
     // joining (and optionally holds back recent joiners), plus a join-rate
     // alert that can throw it. Events hub.lockdown and raid.suspected.
     "hub.lockdown",
+    // `GET /public/widget.json`, `GET /widget`, `/admin/settings/widget`
+    // and `widget_hidden` on `/me`: an admin page offers the widget, and a
+    // member the opt-out, only where the hub honours them.
+    "hub.widget",
     // `POST /invites` accepts `bound_pubkey`: the invite admits that identity
     // and nobody else, and redeeming it also satisfies the admission
     // challenge. A client that cannot see this string must not offer the

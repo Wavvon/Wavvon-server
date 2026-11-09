@@ -131,6 +131,13 @@ impl Config {
         refill_per_sec: 5.0,
     };
 
+    /// The public online widget: embedded on other sites, so every visitor of
+    /// a community's page is one request. Answers are cached for seconds.
+    pub const WIDGET: Config = Config {
+        burst: 30,
+        refill_per_sec: 2.0,
+    };
+
     /// Moderate limits for write endpoints: 30 burst, 10/s sustained.
     pub const WRITE: Config = Config {
         burst: 30,
