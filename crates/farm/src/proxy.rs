@@ -94,7 +94,7 @@ async fn resolve_hub(state: &FarmState, segment: &str) -> Option<ResolvedHub> {
 }
 
 pub async fn proxy_handler(
-    Path((serial, path)): Path<(String, String)>,
+    Path((serial, _path)): Path<(String, String)>,
     State(state): State<Arc<FarmState>>,
     req: Request<Body>,
 ) -> Response<Body> {
@@ -128,13 +128,10 @@ pub async fn proxy_handler(
     };
 
     // Build the upstream path: strip /hub/<serial> prefix, keep the rest.
-    let upstream_path = if path.is_empty() {
-        "/".to_string()
-    } else if path.starts_with('/') {
-        path.clone()
-    } else {
-        format!("/{path}")
-    };
+    // From the raw URI, still percent-encoded: the decoded `{*path}` can
+    // carry CR/LF into the request line the WebSocket bridge writes by hand.
+    let rest = req.uri().path().splitn(4, '/').nth(3).unwrap_or("");
+    let upstream_path = format!("/{rest}");
 
     let query = req
         .uri()

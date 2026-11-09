@@ -95,9 +95,23 @@ async fn start_stub_hub() -> u16 {
         })
     }
 
+    /// Upgrades, then sends the request line's path and whether a header
+    /// named `x-injected` arrived.
+    async fn ws_report(
+        ws: WebSocketUpgrade,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+    ) -> impl IntoResponse {
+        let report = format!("{} {}", uri.path(), headers.contains_key("x-injected"));
+        ws.on_upgrade(move |mut socket| async move {
+            let _ = socket.send(AxumWsMessage::Text(report.into())).await;
+        })
+    }
+
     let app = Router::new()
         .route("/info", get(info))
-        .route("/ws", get(ws_echo));
+        .route("/ws", get(ws_echo))
+        .route("/report/{*rest}", get(ws_report));
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -242,6 +256,32 @@ async fn websocket_upgrade_bridges_to_stub_hub() {
     assert_eq!(
         reply,
         TungsteniteMessage::Text("hello-through-the-bridge".into())
+    );
+}
+
+/// The bridge writes the request line by hand, so an encoded CR/LF in the
+/// path must reach the hub still encoded, never as a header break.
+#[tokio::test]
+async fn websocket_bridge_forwards_the_path_still_encoded() {
+    let (farm_url, state, _guard) = start_farm().await;
+    let hub_port = start_stub_hub().await;
+    let serial = random_serial();
+    insert_hub_row(&state, "hub00005", &serial, Some(hub_port), false).await;
+
+    let ws_base = farm_url.replacen("http://", "ws://", 1);
+    let ws_url = format!("{ws_base}/hub/{serial}/report/a%0D%0AX-Injected:%20yes");
+    let (mut ws_stream, _resp) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("WS upgrade through the farm proxy should succeed");
+
+    let reply = tokio::time::timeout(Duration::from_secs(5), ws_stream.next())
+        .await
+        .expect("timed out waiting for the report")
+        .expect("stream ended before the report arrived")
+        .unwrap();
+    assert_eq!(
+        reply,
+        TungsteniteMessage::Text("/report/a%0D%0AX-Injected:%20yes false".into())
     );
 }
 
