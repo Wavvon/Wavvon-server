@@ -214,9 +214,18 @@ export function identityFromSeed(seedHex) {
   };
 }
 
-/** The only auth-challenge answer a hub or farm accepts (scheme `tagged-v1`). */
-function tagged(challengeHex) {
-  return Buffer.concat([Buffer.from("wavvon/auth-challenge/v1\0"), Buffer.from(challengeHex, "hex")]);
+/** The auth-challenge answer a hub or farm accepts (scheme `tagged-v2`):
+ *  bound to the server's key, taken from its own /info as a client would. */
+function bound(serverKey, challengeHex) {
+  const key = Buffer.from(serverKey);
+  const len = Buffer.alloc(4);
+  len.writeUInt32LE(key.length);
+  return Buffer.concat([
+    Buffer.from("wavvon/auth-challenge/v2\0"),
+    len,
+    key,
+    Buffer.from(challengeHex, "hex"),
+  ]);
 }
 
 export function identity() {
@@ -236,7 +245,8 @@ export async function authenticate(hubUrl, id, extra = {}) {
     body: JSON.stringify({ public_key: id.pubkey }),
   });
   check(ch.status === 200, `challenge failed: ${ch.status} ${JSON.stringify(ch.body)}`);
-  const signature = id.sign(tagged(ch.body.challenge));
+  const info = await json(`${hubUrl}/info`);
+  const signature = id.sign(bound(info.body.public_key, ch.body.challenge));
   const v = await json(`${hubUrl}/auth/verify`, {
     method: "POST",
     body: JSON.stringify({
@@ -314,6 +324,10 @@ export async function farm(name, admin) {
       // Without this the farm has no admin, `creation_policy` is 'admin_only',
       // and every hub creation is refused with no way to appoint anyone.
       WAVVON_FARM_ADMIN_PUBKEY: admin.pubkey,
+      // Every identity in the suite signs in from 127.0.0.1, one address for
+      // the per-IP auth budget; the harness signs in far more than a person.
+      WAVVON_AUTH_RATE_BURST: "1000",
+      WAVVON_AUTH_RATE_PER_SEC: "100",
     },
   });
   await waitForHttp(entry, `${url}/farm/info`);
@@ -335,7 +349,8 @@ export async function farmToken(farmUrl, id) {
     body: JSON.stringify({ public_key: id.pubkey }),
   });
   check(ch.status === 200, `farm challenge: ${ch.status} ${JSON.stringify(ch.body)}`);
-  const signature = id.sign(tagged(ch.body.challenge));
+  const info = await json(`${farmUrl}/farm/info`);
+  const signature = id.sign(bound(info.body.public_key, ch.body.challenge));
   const v = await json(`${farmUrl}/auth/verify`, {
     method: "POST",
     body: JSON.stringify({

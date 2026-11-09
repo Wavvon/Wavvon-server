@@ -404,6 +404,9 @@ pub fn base_state(db: PgPool) -> AppState {
         owner_pubkey: None,
         apps_allow_camera: false,
         allow_private_webhooks: false,
+        // The helpers here answer challenges with the unbound v1 form; the
+        // bound form a running hub insists on has its own tests (auth_flow).
+        accept_unbound_auth: true,
         metrics_enabled: false,
         http_video_stream_budget: 2,
         webauthn: make_test_webauthn(),

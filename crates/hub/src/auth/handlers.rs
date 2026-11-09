@@ -140,7 +140,7 @@ pub async fn challenge(
         StatusCode::OK,
         Json(ChallengeResponse {
             challenge: challenge_hex,
-            scheme: Some(wavvon_identity::AUTH_CHALLENGE_SCHEME.to_string()),
+            scheme: Some(wavvon_identity::BOUND_AUTH_CHALLENGE_SCHEME.to_string()),
         }),
     ))
 }
@@ -181,8 +181,25 @@ pub async fn verify(
     let signature_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    wavvon_identity::verify_auth_challenge(&req.public_key, &challenge_bytes, &signature_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
+    // The answer has to name this hub: an unbound (v1) one could have been
+    // collected by any hub the user talked to and relayed here.
+    let bound = wavvon_identity::verify_bound_auth_challenge(
+        &req.public_key,
+        &state.hub_identity.public_key_hex(),
+        &challenge_bytes,
+        &signature_bytes,
+    )
+    .is_ok();
+    let legacy = state.accept_unbound_auth
+        && wavvon_identity::verify_auth_challenge(
+            &req.public_key,
+            &challenge_bytes,
+            &signature_bytes,
+        )
+        .is_ok();
+    if !(bound || legacy) {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid signature".to_string()));
+    }
 
     // Multi-device: if a cert is presented, resolve to the canonical
     // user identity (master or, for legacy upgrades, the existing

@@ -15,9 +15,7 @@ use axum::extract::ws::{Message as AxumWsMessage, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
-use rand::rngs::OsRng;
 use rand::RngCore;
 use reqwest::Client;
 use tokio::net::TcpListener;
@@ -32,7 +30,7 @@ async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
     let (db_pool, guard) = common::create_test_db().await;
     db::migrations::run(&db_pool).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let now = unix_now();
     sqlx::query("INSERT INTO farms (id, public_key, created_at) VALUES (1, $1, $2)")
