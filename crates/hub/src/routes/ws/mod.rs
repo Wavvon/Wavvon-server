@@ -23,6 +23,59 @@ pub use voice::get_voice_roster;
 pub use voice::push_event_move;
 pub use voice::voice_identity;
 
+/// How long a WebSocket ticket is good for: long enough to open the socket
+/// right after asking, not long enough to be worth lifting from a log.
+const WS_TICKET_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(serde::Serialize)]
+pub struct WsTicket {
+    pub ticket: String,
+    pub expires_in: u64,
+}
+
+/// POST /ws/ticket — trade the bearer token for a single-use ticket to put
+/// in the socket URL instead of the token. Browsers cannot set headers on a
+/// WebSocket handshake, so the credential has to ride in the URL, and a URL
+/// is what reverse proxies and request tracing write down.
+pub async fn create_ws_ticket(
+    State(state): State<Arc<AppState>>,
+    _user: crate::auth::middleware::AuthUser,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::Json<WsTicket>, (StatusCode, String)> {
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or((StatusCode::UNAUTHORIZED, "Missing bearer token".to_string()))?
+        .to_string();
+    let ticket = {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        hex::encode(bytes)
+    };
+    let now = std::time::Instant::now();
+    let mut tickets = state.ws_tickets.lock().unwrap_or_else(|e| e.into_inner());
+    if tickets.len() > 10_000 {
+        tickets.retain(|_, (_, exp)| *exp > now);
+    }
+    tickets.insert(ticket.clone(), (token, now + WS_TICKET_TTL));
+    Ok(axum::Json(WsTicket {
+        ticket,
+        expires_in: WS_TICKET_TTL.as_secs(),
+    }))
+}
+
+/// The session token a ticket stands for, consuming the ticket.
+fn redeem_ws_ticket(state: &AppState, ticket: &str) -> Option<String> {
+    let (token, exp) = state
+        .ws_tickets
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(ticket)?;
+    (exp > std::time::Instant::now()).then_some(token)
+}
+
 pub async fn ws_handler(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WsParams>,
@@ -32,7 +85,15 @@ pub async fn ws_handler(
     // Delegate to the shared session-validity helper so the WS admission
     // checks never drift from what the HTTP AuthUser middleware enforces
     // (session expiry, revocation, approval_status, bans).
-    let auth = crate::auth::handlers::validate_ws_token(&state, &params.token).await?;
+    let token = match (params.ticket.as_deref(), params.token.as_deref()) {
+        (Some(ticket), _) => redeem_ws_ticket(&state, ticket).ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Invalid or expired ticket".to_string(),
+        ))?,
+        (None, Some(token)) => token.to_string(),
+        (None, None) => return Err((StatusCode::UNAUTHORIZED, "Missing token".to_string())),
+    };
+    let auth = crate::auth::handlers::validate_ws_token(&state, &token).await?;
     let public_key = auth.public_key;
     let streams_on_request = params.streams.as_deref() == Some("on_request");
 
