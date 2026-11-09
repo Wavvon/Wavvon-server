@@ -55,4 +55,5 @@ pub mod uploads;
 pub mod users;
 pub mod webauthn;
 pub mod webhooks;
+pub mod widget;
 pub mod ws;

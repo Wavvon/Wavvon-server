@@ -188,6 +188,15 @@ pub fn create_router_full(
             async move { rate_limit::enforce(l, req, next).await }
         }));
 
+    let widget_limiter = RateLimiter::new(Config::WIDGET, trusted_proxy);
+    let widget_routes = Router::new()
+        .route("/public/widget.json", get(routes::widget::widget_json))
+        .route("/widget", get(routes::widget::widget_page))
+        .layer(from_fn(move |req, next| {
+            let l = widget_limiter.clone();
+            async move { rate_limit::enforce(l, req, next).await }
+        }));
+
     let sticker_limiter = RateLimiter::new(Config::STICKER_FEDERATION, trusted_proxy);
     let sticker_federation_routes = Router::new()
         .route(
@@ -224,6 +233,10 @@ pub fn create_router_full(
         .route(
             "/admin/settings/pow",
             get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
+        )
+        .route(
+            "/admin/settings/widget",
+            get(routes::widget::get_widget_settings).put(routes::widget::put_widget_settings),
         )
         .route(
             "/admin/settings/moderation",
@@ -276,6 +289,7 @@ pub fn create_router_full(
         .merge(auth_routes)
         .merge(write_routes)
         .merge(sticker_federation_routes)
+        .merge(widget_routes)
         .merge(inbox_routes)
         .route(
             "/me",

@@ -99,6 +99,10 @@ pub const CAPABILITIES: &[&str] = &[
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // `GET /public/widget.json`, `GET /widget`, `/admin/settings/widget`
+    // and `widget_hidden` on `/me`: an admin page offers the widget, and a
+    // member the opt-out, only where the hub honours them.
+    "hub.widget",
     // `POST /invites` accepts `bound_pubkey`: the invite admits that identity
     // and nobody else, and redeeming it also satisfies the admission
     // challenge. A client that cannot see this string must not offer the

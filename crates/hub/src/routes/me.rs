@@ -127,12 +127,12 @@ fn empty_row() -> MeProfileRow {
     )
 }
 
-async fn is_findable(db: &sqlx::PgPool, pk: &str) -> Result<bool, (StatusCode, String)> {
-    sqlx::query_scalar("SELECT findable_by_allies FROM users WHERE public_key = $1")
+async fn is_findable(db: &sqlx::PgPool, pk: &str) -> Result<(bool, bool), (StatusCode, String)> {
+    sqlx::query_as("SELECT findable_by_allies, widget_hidden FROM users WHERE public_key = $1")
         .bind(pk)
         .fetch_optional(db)
         .await
-        .map(|v| v.unwrap_or(false))
+        .map(|v| v.unwrap_or((false, false)))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))
 }
 
@@ -188,7 +188,7 @@ pub async fn me(
 
     let roles = fetch_user_roles(&state.db, &user.public_key).await?;
 
-    let findable_by_allies = is_findable(&state.db, &user.public_key).await?;
+    let (findable_by_allies, widget_hidden) = is_findable(&state.db, &user.public_key).await?;
     Ok(Json(MeResponse {
         public_key: user.public_key,
         display_name,
@@ -202,6 +202,7 @@ pub async fn me(
         favorite_hubs: parse_favorite_hubs(&favorite_hubs),
         show_hubs: show_hubs.unwrap_or(false),
         findable_by_allies,
+        widget_hidden,
         approval_status,
         roles,
         birthday,
@@ -357,6 +358,14 @@ pub async fn update_me(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     }
+    if let Some(hidden) = req.widget_hidden {
+        sqlx::query("UPDATE users SET widget_hidden = $1 WHERE public_key = $2")
+            .bind(hidden)
+            .bind(pk)
+            .execute(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
     if let Some(findable) = req.findable_by_allies {
         sqlx::query("UPDATE users SET findable_by_allies = $1 WHERE public_key = $2")
             .bind(findable)
@@ -441,7 +450,7 @@ pub async fn update_me(
         json,
     ));
 
-    let findable_by_allies = is_findable(&state.db, &user.public_key).await?;
+    let (findable_by_allies, widget_hidden) = is_findable(&state.db, &user.public_key).await?;
     Ok(Json(MeResponse {
         public_key: user.public_key,
         display_name,
@@ -455,6 +464,7 @@ pub async fn update_me(
         favorite_hubs: parse_favorite_hubs(&favorite_hubs),
         show_hubs: show_hubs.unwrap_or(false),
         findable_by_allies,
+        widget_hidden,
         approval_status,
         roles,
         birthday,
@@ -534,6 +544,9 @@ pub struct MeResponse {
     /// Listed to allied hubs' members (alliance-member-discovery.md). Off by default.
     #[serde(default)]
     pub findable_by_allies: bool,
+    /// Left out of the hub's public online widget, whatever its mode.
+    #[serde(default)]
+    pub widget_hidden: bool,
     #[serde(default = "default_approval_status")]
     pub approval_status: String,
     #[serde(default)]
@@ -577,6 +590,8 @@ pub struct UpdateMeRequest {
     pub show_hubs: Option<bool>,
     #[serde(default)]
     pub findable_by_allies: Option<bool>,
+    #[serde(default)]
+    pub widget_hidden: Option<bool>,
     /// "MM-DD", never a year. Empty string clears it. Rejected with 400 when
     /// `birthdays_enabled` is false hub-wide, or when the format doesn't
     /// match "MM-DD" with a valid month/day.
@@ -649,7 +664,7 @@ pub async fn leave_hub(
             display_name = NULL, avatar = NULL, bio = NULL, pronouns = NULL,
             interests = NULL, status_message = NULL, activities = NULL,
             accent_color = NULL, cover = NULL, favorite_hubs = NULL,
-            show_hubs = NULL, findable_by_allies = FALSE, birthday = NULL, name_color = NULL,
+            show_hubs = NULL, findable_by_allies = FALSE, widget_hidden = FALSE, birthday = NULL, name_color = NULL,
             presence_status = NULL, presence_custom = NULL,
             approval_status = 'left',
             is_member = FALSE
