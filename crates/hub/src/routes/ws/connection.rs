@@ -56,14 +56,14 @@ pub(super) async fn handle_socket(
     // the second session.
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    // V4 voice encryption: per-connection unbounded channel for targeted key
+    // V4 voice encryption: per-connection bounded channel for targeted key
     // distribution messages.  Registered in ws_key_senders so other connections
     // can send directly to this one without going through the broadcast bus.
     // Filed under this session's own id, for the reason app_sessions is: a
     // pubkey with two sockets used to leave one of them registered nowhere,
     // and a voice participant registered nowhere receives no sender key and
     // hears silence (state.rs, `ws_key_senders`).
-    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel::<WsServerMessage>();
+    let (key_tx, mut key_rx) = mpsc::channel::<WsServerMessage>(crate::state::SOCKET_QUEUE);
     state
         .ws_key_senders
         .write()

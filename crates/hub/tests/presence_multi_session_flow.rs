@@ -761,3 +761,36 @@ async fn status_is_not_surfaced_for_offline_users() {
         "offline user must show no status"
     );
 }
+
+/// One identity may hold a bounded number of sockets: the next upgrade is
+/// refused before it opens, and a closed socket frees its slot.
+#[tokio::test]
+async fn sockets_per_identity_are_capped() {
+    let (base, state, _guard) = start_hub().await;
+    let id = Identity::generate();
+    let token = authenticate(&base, &id).await;
+
+    let mut open = Vec::new();
+    for _ in 0..wavvon_hub::state::MAX_SOCKETS_PER_IDENTITY {
+        open.push(connect_ws(&base, &token).await);
+    }
+    let ws_url = format!("{}/ws?token={}", base.replace("http://", "ws://"), token);
+    let refused = tokio_tungstenite::connect_async(&ws_url).await;
+    match refused {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => {
+            assert_eq!(resp.status(), 429)
+        }
+        other => panic!("expected a 429, got {:?}", other.map(|_| ())),
+    }
+
+    close_ws(open.pop().unwrap()).await;
+    wait_for_sessions(
+        &state,
+        &id.public_key_hex(),
+        wavvon_hub::state::MAX_SOCKETS_PER_IDENTITY - 1,
+    )
+    .await;
+    // The registry entry goes with the socket's teardown, a beat after presence.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    open.push(connect_ws(&base, &token).await);
+}
