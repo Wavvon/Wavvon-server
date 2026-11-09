@@ -648,3 +648,54 @@ async fn auth_accepts_only_the_tagged_answer() {
         .await
         .assert_status_unauthorized();
 }
+
+/// A session expires a month after its last use: a fresh one carries an
+/// expiry, an expired one is refused, and one past half its life is pushed
+/// a full period out by being used.
+#[tokio::test]
+async fn sessions_expire_unless_used() {
+    let ttl = wavvon_hub::auth::handlers::SESSION_TTL_SECS;
+    let (h, token) = common::setup_with_owner().await;
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    let exp: i64 = sqlx::query_scalar("SELECT expires_at FROM sessions WHERE token = $1")
+        .bind(&token)
+        .fetch_one(&h.state().db)
+        .await
+        .unwrap();
+    assert!(
+        (exp - (now + ttl)).abs() < 60,
+        "fresh session expires in {}",
+        exp - now
+    );
+
+    sqlx::query("UPDATE sessions SET expires_at = $1 WHERE token = $2")
+        .bind(now + 60)
+        .bind(&token)
+        .execute(&h.state().db)
+        .await
+        .unwrap();
+    h.get("/me")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+    let renewed: i64 = sqlx::query_scalar("SELECT expires_at FROM sessions WHERE token = $1")
+        .bind(&token)
+        .fetch_one(&h.state().db)
+        .await
+        .unwrap();
+    assert!(
+        renewed > now + ttl / 2,
+        "using it should slide the expiry out"
+    );
+
+    sqlx::query("UPDATE sessions SET expires_at = $1 WHERE token = $2")
+        .bind(now - 1)
+        .bind(&token)
+        .execute(&h.state().db)
+        .await
+        .unwrap();
+    h.get("/me")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_unauthorized();
+}

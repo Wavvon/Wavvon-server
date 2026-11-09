@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 11;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -327,6 +327,17 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                 .execute(&mut *conn)
                 .await?;
             }
+        }
+        // Sessions used to never expire. Existing ones get the same sliding
+        // window new ones start with, counted from the upgrade.
+        11 => {
+            sqlx::query(
+                "UPDATE sessions SET expires_at = EXTRACT(EPOCH FROM now())::BIGINT + $1
+                 WHERE expires_at IS NULL",
+            )
+            .bind(crate::auth::handlers::SESSION_TTL_SECS)
+            .execute(&mut *conn)
+            .await?;
         }
         _ => unreachable!("no schema step {version}"),
     }

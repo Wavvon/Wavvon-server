@@ -467,9 +467,8 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             let (pk, approval_status) = if let Some((pk, status, expires_at, sess_scope)) = row {
-                // Enforce session expiry. NULL expires_at means the session
-                // never expires (human sessions). Non-NULL must be in the
-                // future.
+                // Enforce session expiry, sliding it forward on use (see
+                // SESSION_TTL_SECS). NULL never expires; nothing writes it now.
                 if let Some(exp) = expires_at {
                     let now_ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -481,6 +480,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                             r#"{"error":"token_expired"}"#.to_string(),
                         ));
                     }
+                    crate::auth::handlers::extend_session_if_due(&state.db, token, exp).await;
                 }
                 scope = sess_scope;
                 (pk, status)
