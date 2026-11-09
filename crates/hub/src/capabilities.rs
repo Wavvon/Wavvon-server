@@ -95,6 +95,10 @@ pub const CAPABILITIES: &[&str] = &[
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // GET/PUT /admin/settings/lockdown: one switch that stops new members
+    // joining (and optionally holds back recent joiners), plus a join-rate
+    // alert that can throw it. Events hub.lockdown and raid.suspected.
+    "hub.lockdown",
     // `POST /invites` accepts `bound_pubkey`: the invite admits that identity
     // and nobody else, and redeeming it also satisfies the admission
     // challenge. A client that cannot see this string must not offer the

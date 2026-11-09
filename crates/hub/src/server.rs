@@ -226,6 +226,10 @@ pub fn create_router_full(
             get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
         )
         .route(
+            "/admin/settings/lockdown",
+            get(routes::lockdown::get_lockdown).put(routes::lockdown::put_lockdown),
+        )
+        .route(
             "/admin/settings/moderation",
             get(routes::hub::get_moderation_settings).patch(routes::hub::patch_moderation_settings),
         )
