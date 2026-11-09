@@ -412,6 +412,7 @@ pub fn create_router_full(
             get(routes::channels::voice_channel_participants),
         )
         .route("/ws", get(routes::ws::ws_handler))
+        .route("/ws/ticket", post(routes::ws::create_ws_ticket))
         .route("/conversations", get(routes::dms::list_conversations))
         .route(
             "/conversations/{conversation_id}",

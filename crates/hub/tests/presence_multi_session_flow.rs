@@ -794,3 +794,47 @@ async fn sockets_per_identity_are_capped() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     open.push(connect_ws(&base, &token).await);
 }
+
+/// A socket can open with a single-use ticket instead of the session token,
+/// so the token never sits in a URL; a ticket works once.
+#[tokio::test]
+async fn a_ws_ticket_opens_one_socket() {
+    let (base, _state, _guard) = start_hub().await;
+    let id = Identity::generate();
+    let token = authenticate(&base, &id).await;
+    let client = reqwest::Client::new();
+    let ticket: serde_json::Value = client
+        .post(format!("{base}/ws/ticket"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ticket = ticket["ticket"].as_str().unwrap().to_string();
+    let ws_base = base.replace("http://", "ws://");
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("{ws_base}/ws?ticket={ticket}"))
+        .await
+        .expect("a fresh ticket opens a socket");
+    let _ = ws.close(None).await;
+
+    let reused = tokio_tungstenite::connect_async(format!("{ws_base}/ws?ticket={ticket}")).await;
+    match reused {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 401),
+        other => panic!(
+            "a spent ticket must be refused, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+
+    // Asking for a ticket needs a valid session.
+    let refused = client
+        .post(format!("{base}/ws/ticket"))
+        .bearer_auth("not-a-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 401);
+}

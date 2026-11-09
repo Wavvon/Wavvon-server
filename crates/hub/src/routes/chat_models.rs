@@ -479,7 +479,12 @@ pub struct PaginationParams {
 
 #[derive(Deserialize)]
 pub struct WsParams {
-    pub token: String,
+    /// The session token itself. Still accepted, for clients that predate
+    /// `ticket`; a URL is what reverse proxies log.
+    pub token: Option<String>,
+    /// A single-use, short-lived ticket from `POST /ws/ticket`, so the
+    /// session token never appears in a URL.
+    pub ticket: Option<String>,
     /// `on_request`: this connection receives a stream's bytes only after
     /// opening it with `stream_subscribe`, in its own channels too (#276).
     /// A query parameter rather than a message because the hub replays

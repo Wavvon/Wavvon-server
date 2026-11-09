@@ -736,7 +736,7 @@ pub async fn verify(
     .bind(&token)
     .bind(&canonical_pubkey)
     .bind(now)
-    .bind(Option::<i64>::None)
+    .bind(now + SESSION_TTL_SECS)
     .bind(&scope)
     .bind(&req.public_key)
     .execute(&state.db)
@@ -919,6 +919,24 @@ pub struct WsAuth {
 /// A `mini_app`-scoped session (mini-apps.md) is allowed through — the
 /// mini-app webview's whole purpose is to talk over `/ws` — but callers
 /// must consult `WsAuth::mini_app_channel_id` to confine what it can see.
+/// How long a session lives without being used. Every use past the halfway
+/// mark pushes it a full period out again, so a client in use never meets it,
+/// and a token lifted from a log stops working a month after its owner does.
+pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
+
+/// Slide a session's expiry forward when it is past half its life. Best
+/// effort: a failed write costs a renewal, not the request.
+pub(crate) async fn extend_session_if_due(db: &sqlx::PgPool, token: &str, expires_at: i64) {
+    let now = unix_timestamp();
+    if expires_at - now < SESSION_TTL_SECS / 2 {
+        let _ = sqlx::query("UPDATE sessions SET expires_at = $1 WHERE token = $2")
+            .bind(now + SESSION_TTL_SECS)
+            .bind(token)
+            .execute(db)
+            .await;
+    }
+}
+
 pub async fn validate_ws_token(
     state: &crate::state::AppState,
     token: &str,
@@ -954,6 +972,7 @@ pub async fn validate_ws_token(
                         r#"{"error":"token_expired"}"#.to_string(),
                     ));
                 }
+                extend_session_if_due(db, token, exp).await;
             }
             if scope == "lobby" {
                 return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));

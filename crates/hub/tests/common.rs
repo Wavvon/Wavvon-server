@@ -361,6 +361,7 @@ pub fn base_state(db: PgPool) -> AppState {
         hub_identity: Identity::generate(),
         db,
         pending_challenges: RwLock::new(HashMap::new()),
+        ws_tickets: std::sync::Mutex::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

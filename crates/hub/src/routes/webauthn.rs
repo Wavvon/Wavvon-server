@@ -412,11 +412,12 @@ async fn issue_session_token(
     let token = gen_token();
     sqlx::query(
         "INSERT INTO sessions (token, public_key, created_at, expires_at) \
-         VALUES ($1, $2, $3, NULL)",
+         VALUES ($1, $2, $3, $4)",
     )
     .bind(&token)
     .bind(public_key)
     .bind(now)
+    .bind(now + crate::auth::handlers::SESSION_TTL_SECS)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

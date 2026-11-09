@@ -178,6 +178,10 @@ pub const CAPABILITIES: &[&str] = &[
     // program can tell a hub that never sends it from a replayed request
     // stripped of it, and refuse the second.
     "webhooks.signedtimestamp",
+    // `POST /ws/ticket` and `/ws?ticket=`: a client that sees this opens
+    // its socket with a single-use ticket instead of the session token, so
+    // the token stays out of URLs (and the logs that keep them).
+    "ws.ticket",
 ];
 
 #[cfg(test)]
