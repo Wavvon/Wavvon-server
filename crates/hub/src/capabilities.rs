@@ -144,6 +144,9 @@ pub const CAPABILITIES: &[&str] = &[
     // the two spellings share no ids, and there is no dual-reading period
     // (permissions.md §6).
     "permissions.catalogue",
+    // Each `GET /permissions` entry carries `category`, the section a roles
+    // screen shows it under. Without it a client shows one flat section.
+    "permissions.categories",
     // `GET /recovery/requests/to-attest` lists the open rotation requests
     // that name the caller as a recovery contact, and a
     // `recovery_attestation_requested` WebSocket event says when one opens.
