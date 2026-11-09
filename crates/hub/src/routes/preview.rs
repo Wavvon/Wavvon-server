@@ -102,6 +102,16 @@ async fn resolve_and_check_ssrf(
     port: u16,
     allow_private: bool,
 ) -> Result<Vec<SocketAddr>, &'static str> {
+    resolve_and_check(host, port, &|a| allow_private || !is_private_ip(a.ip())).await
+}
+
+/// [`resolve_and_check_ssrf`] with the verdict passed in, so a test can let
+/// one loopback server through and refuse the next.
+async fn resolve_and_check(
+    host: &str,
+    port: u16,
+    allowed: &(dyn Fn(SocketAddr) -> bool + Sync),
+) -> Result<Vec<SocketAddr>, &'static str> {
     let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
         .map_err(|_| "dns_failed")?
@@ -111,7 +121,7 @@ async fn resolve_and_check_ssrf(
         return Err("dns_failed");
     }
 
-    if !allow_private && addrs.iter().any(|a| is_private_ip(a.ip())) {
+    if !addrs.iter().all(|a| allowed(*a)) {
         return Err("ssrf_blocked");
     }
 
@@ -300,6 +310,17 @@ pub(crate) async fn fetch_checked(
     allow_private: bool,
     timeout: std::time::Duration,
 ) -> Result<reqwest::Response, (StatusCode, String)> {
+    let host_ok = |h: &str| allow_private || !h.eq_ignore_ascii_case("localhost");
+    let addr_ok = |a: SocketAddr| allow_private || !is_private_ip(a.ip());
+    fetch_checked_with(url_str, &host_ok, &addr_ok, timeout).await
+}
+
+async fn fetch_checked_with(
+    url_str: &str,
+    host_ok: &(dyn Fn(&str) -> bool + Sync),
+    addr_ok: &(dyn Fn(SocketAddr) -> bool + Sync),
+    timeout: std::time::Duration,
+) -> Result<reqwest::Response, (StatusCode, String)> {
     let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
     let mut url = reqwest::Url::parse(url_str).map_err(|_| bad("invalid_url"))?;
     let mut hops = 0;
@@ -311,14 +332,12 @@ pub(crate) async fn fetch_checked(
             .host_str()
             .ok_or_else(|| bad("missing_host"))?
             .to_string();
-        if !allow_private && host.eq_ignore_ascii_case("localhost") {
+        if !host_ok(&host) {
             return Err(bad("ssrf_blocked"));
         }
         let port = url.port_or_known_default().unwrap_or(80);
         let bare = host.trim_start_matches('[').trim_end_matches(']');
-        let validated = resolve_and_check_ssrf(bare, port, allow_private)
-            .await
-            .map_err(bad)?;
+        let validated = resolve_and_check(bare, port, addr_ok).await.map_err(bad)?;
 
         // no_proxy(): a system proxy must not forward to addresses that passed
         // the check. Redirects are off: this loop is the redirect policy.
@@ -629,6 +648,48 @@ mod tests {
         ] {
             assert!(!blocked(ip), "{ip} should be allowed");
         }
+    }
+
+    /// Every redirect hop is re-resolved and re-checked: a public first hop
+    /// answering 3xx to a private address is refused at the second hop,
+    /// before anything connects to it. Loopback stands in for both, with the
+    /// verdict letting only the first server through.
+    #[tokio::test]
+    async fn a_redirect_to_a_refused_address_is_cut_before_connecting() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let target_app = axum::Router::new().fallback(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { "secret" }
+        });
+        tokio::spawn(async move { axum::serve(target, target_app).await.unwrap() });
+
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_addr = first.local_addr().unwrap();
+        let location = format!("http://localhost:{}/", target_addr.port());
+        let first_app = axum::Router::new().fallback(move || {
+            let location = location.clone();
+            async move {
+                (
+                    axum::http::StatusCode::FOUND,
+                    [(axum::http::header::LOCATION, location)],
+                )
+            }
+        });
+        tokio::spawn(async move { axum::serve(first, first_app).await.unwrap() });
+
+        let result = fetch_checked_with(
+            &format!("http://{first_addr}/"),
+            &|_| true,
+            &|a| a.port() == first_addr.port(),
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(result.err().map(|e| e.1).as_deref(), Some("ssrf_blocked"));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
