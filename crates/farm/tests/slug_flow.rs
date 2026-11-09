@@ -18,8 +18,30 @@ use wavvon_farm::token::{sign_token, FarmTokenPayload};
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
 
 /// Mint a member token for `pubkey`, the way `/auth/verify` would.
-fn token_for(state: &FarmState, pubkey: &str) -> String {
+async fn token_for(state: &FarmState, pubkey: &str) -> String {
     let now = unix_now();
+    let jti = hex::encode(rand::random::<[u8; 16]>());
+    // A token is only as good as its session row: the farm checks it.
+    sqlx::query(
+        "INSERT INTO farm_users (public_key, first_seen_at, last_seen_at) VALUES ($1, $2, $2)
+         ON CONFLICT (public_key) DO NOTHING",
+    )
+    .bind(pubkey)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO farm_sessions (jti, public_key, issued_at, expires_at, scope)
+         VALUES ($1, $2, $3, $4, 'member')",
+    )
+    .bind(&jti)
+    .bind(pubkey)
+    .bind(now)
+    .bind(now + 3600)
+    .execute(&state.db)
+    .await
+    .unwrap();
     sign_token(
         &state.keypair,
         &FarmTokenPayload {
@@ -28,7 +50,7 @@ fn token_for(state: &FarmState, pubkey: &str) -> String {
             iss_pk: state.public_key_hex(),
             sub: pubkey.to_string(),
             master: None,
-            jti: "test-jti".to_string(),
+            jti: jti.clone(),
             iat: now,
             exp: now + 3600,
             scope: "member".to_string(),
@@ -80,7 +102,7 @@ async fn setup() -> Harness {
     ));
 
     let owner_pubkey = "1".repeat(64);
-    let owner_token = token_for(&state, &owner_pubkey);
+    let owner_token = token_for(&state, &owner_pubkey).await;
 
     let app = server::create_router(state.clone());
     Harness {
@@ -278,7 +300,7 @@ async fn only_the_hub_owner_may_manage_its_slugs() {
     let h = setup().await;
     insert_hub(&h, "hub-1", None).await;
 
-    let stranger = token_for(&h.state, &"9".repeat(64));
+    let stranger = token_for(&h.state, &"9".repeat(64)).await;
     let res = h
         .server
         .post("/farm/hubs/hub-1/slugs")

@@ -22,10 +22,12 @@ use crate::unix_now;
 // Helper types
 // ---------------------------------------------------------------------------
 
-/// Extract and verify a Bearer farm token. Returns the `sub` (canonical pubkey) on success.
-pub(crate) fn require_auth(
+/// Extract and verify a Bearer farm token whose session is still live: not
+/// revoked, not expired. A signature alone would make a stolen token outlive
+/// every revocation.
+pub(crate) async fn require_auth(
     headers: &HeaderMap,
-    farm_pubkey: &str,
+    state: &FarmState,
 ) -> Result<crate::token::FarmTokenPayload, (StatusCode, Json<serde_json::Value>)> {
     let token_str = headers
         .get("authorization")
@@ -38,12 +40,19 @@ pub(crate) fn require_auth(
             )
         })?;
 
-    verify_token(farm_pubkey, token_str).map_err(|_| {
+    let payload = verify_token(&state.public_key_hex(), token_str).map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_token"})),
         )
-    })
+    })?;
+    if !crate::routes::revoke::session_is_live(&state.db, &payload.jti).await {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "session_revoked"})),
+        ));
+    }
+    Ok(payload)
 }
 
 /// Returns the admin pubkey stored in the `farms` singleton row, or `None`.
@@ -121,8 +130,7 @@ pub async fn list_hubs(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<ListHubsResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let authed_sub = require_auth(&headers, &farm_pubkey).ok().map(|p| p.sub);
+    let authed_sub = require_auth(&headers, &state).await.ok().map(|p| p.sub);
 
     #[allow(clippy::type_complexity)]
     let rows: Vec<(
@@ -220,8 +228,7 @@ pub async fn create_hub(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<CreateHubRequest>,
 ) -> Result<(StatusCode, Json<CreateHubResponse>), (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     // -----------------------------------------------------------------------
     // Phase 3A: Enforce creation policy and quota before doing any real work.
@@ -560,8 +567,7 @@ pub async fn suspend_hub(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<SuspendRequest>,
 ) -> Result<Json<SuspendResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     // Only farm admin may suspend.
     let admin_pubkey = get_admin_pubkey(&state.db).await;
@@ -655,8 +661,7 @@ pub async fn force_restart_hub(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<RestartResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     let admin_pubkey = get_admin_pubkey(&state.db).await;
     if admin_pubkey.as_deref() != Some(&payload.sub) {
@@ -777,8 +782,7 @@ pub async fn delete_hub(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     // Admin or owner may delete.
     let admin_pubkey = get_admin_pubkey(&state.db).await;

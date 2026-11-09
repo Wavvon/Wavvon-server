@@ -730,3 +730,100 @@ async fn concurrent_creations_cannot_exceed_the_per_user_quota() {
     .unwrap();
     assert!(owned <= 1, "{owned} hubs created under a quota of one");
 }
+
+fn current_totp(secret_b32: &str) -> String {
+    totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        totp_rs::Secret::Encoded(secret_b32.to_string())
+            .to_bytes()
+            .unwrap(),
+        None,
+        "test".to_string(),
+    )
+    .unwrap()
+    .generate_current()
+    .unwrap()
+}
+
+/// A revoked session stops working everywhere a farm token is accepted, and
+/// cannot be renewed back to life.
+#[tokio::test]
+async fn a_revoked_admin_session_is_refused_and_cannot_be_renewed() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    let token = authenticate(&server, &state, &admin).await;
+    set_admin(&state, &admin.public_key_hex()).await;
+    server
+        .get("/farm/users")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+
+    sqlx::query("UPDATE farm_sessions SET revoked_at = 1 WHERE public_key = $1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    server
+        .get("/farm/users")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_unauthorized();
+    server
+        .post("/auth/renew")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_unauthorized();
+}
+
+/// With TOTP on, a session alone cannot swap the second factor for its own.
+#[tokio::test]
+async fn replacing_an_enabled_totp_secret_needs_a_current_code() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    let token = authenticate(&server, &state, &admin).await;
+    set_admin(&state, &admin.public_key_hex()).await;
+
+    let setup_secret = |server: &TestServer, token: String| {
+        let req = server
+            .post("/farm/admin/totp/setup")
+            .authorization_bearer(&token);
+        async move {
+            req.await.json::<Value>()["secret"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let first = setup_secret(&server, token.clone()).await;
+    server
+        .post("/farm/admin/totp/confirm")
+        .authorization_bearer(&token)
+        .json(&json!({ "secret": first, "code": current_totp(&first) }))
+        .await
+        .assert_status_ok();
+
+    let second = setup_secret(&server, token.clone()).await;
+    let refused = server
+        .post("/farm/admin/totp/confirm")
+        .authorization_bearer(&token)
+        .json(&json!({ "secret": second, "code": current_totp(&second) }))
+        .await;
+    refused.assert_status_unauthorized();
+    assert_eq!(refused.json::<Value>()["error"], "current_totp_required");
+
+    server
+        .post("/farm/admin/totp/confirm")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "secret": second,
+            "code": current_totp(&second),
+            "current_code": current_totp(&first),
+        }))
+        .await
+        .assert_status_ok();
+}

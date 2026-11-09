@@ -1302,6 +1302,7 @@ async fn main() -> Result<()> {
         farm_url,
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
+        farm_session_checks: std::sync::Mutex::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
