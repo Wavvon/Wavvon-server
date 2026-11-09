@@ -17,14 +17,14 @@ use std::sync::OnceLock;
 use wavvon_identity::{
     auth_challenge_signing_bytes, bound_auth_challenge_signing_bytes, dm_envelope_signing_bytes,
     dm_member_change_signing_bytes, dr_envelope_signing_bytes,
-    federated_plaintext_dm_signing_bytes, group_dm_envelope_signing_bytes,
-    outgoing_webhook_signing_key, recovery_attestation_signing_bytes,
-    recovery_request_signing_bytes, sender_key_dist_signing_bytes, unwrap_blob_key,
-    voice_grant_signing_bytes, voice_key_unwrap, voice_key_wrap_with_nonce, voice_packet_open,
-    voice_packet_seal, webhook_delivery_signing_bytes, webhook_hmac_sha256, wrap_blob_key,
-    wrap_blob_key_with, DhKeyRecord, HomeHubList, MasterIdentity, PairingClaim, PairingComplete,
-    PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile, RevocationEntry,
-    SignedPrefsBlob, SubkeyCert,
+    federated_plaintext_dm_signing_bytes, federated_plaintext_dm_v2_signing_bytes,
+    group_dm_envelope_signing_bytes, outgoing_webhook_signing_key,
+    recovery_attestation_signing_bytes, recovery_request_signing_bytes,
+    sender_key_dist_signing_bytes, unwrap_blob_key, voice_grant_signing_bytes, voice_key_unwrap,
+    voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal,
+    webhook_delivery_signing_bytes, webhook_hmac_sha256, wrap_blob_key, wrap_blob_key_with,
+    DhKeyRecord, HomeHubList, MasterIdentity, PairingClaim, PairingComplete, PairingOffer,
+    PairingStatus, PublicHubEntry, PublicHubProfile, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
 fn doc() -> &'static Value {
@@ -559,6 +559,40 @@ fn bound_auth_challenge_vector() {
     for len in [0, 31, 33] {
         assert!(bound_auth_challenge_signing_bytes("ab", &vec![0u8; len]).is_err());
     }
+}
+
+#[test]
+fn federated_plaintext_dm_v2_vector() {
+    let v = vec_("federated_plaintext_dm_v2");
+    let members: Vec<String> = v["inputs"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(r)
+        .collect();
+    let sb = federated_plaintext_dm_v2_signing_bytes(
+        &s(v, "conversation_id"),
+        &s(v, "kind"),
+        &s(v, "content"),
+        &s(v, "message_id"),
+        v["inputs"]["created_at"].as_u64().unwrap(),
+        &members,
+    );
+    check_signed("federated_plaintext_dm_v2", "signature", &sb);
+    // Member order does not matter; the set does.
+    let mut reversed = members.clone();
+    reversed.reverse();
+    assert_eq!(
+        sb,
+        federated_plaintext_dm_v2_signing_bytes(
+            &s(v, "conversation_id"),
+            &s(v, "kind"),
+            &s(v, "content"),
+            &s(v, "message_id"),
+            v["inputs"]["created_at"].as_u64().unwrap(),
+            &reversed,
+        )
+    );
 }
 
 #[test]

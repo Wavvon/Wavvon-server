@@ -5,6 +5,14 @@ use axum::http::StatusCode;
 use axum::Json;
 use uuid::Uuid;
 
+/// How far a sender's clock may be from the hub's when it signs a plaintext DM.
+const PLAINTEXT_CLOCK_SKEW_SECS: i64 = 300;
+
+/// The oldest signed plaintext DM a hub still accepts from a peer: the outbox
+/// retries an unreachable hub for a while, and a message older than this is a
+/// replay rather than a late delivery.
+const PLAINTEXT_MAX_AGE_SECS: i64 = 30 * 24 * 3600;
+
 use crate::auth::middleware::{AuthUser, PeerHub};
 use crate::routes::dm_models::*;
 use crate::state::{AppState, DmEvent};
@@ -227,8 +235,37 @@ pub async fn send_dm(
         )
     };
 
-    let message_id = Uuid::new_v4().to_string();
-    let now = crate::auth::handlers::unix_timestamp();
+    // A signed plaintext DM carries the id and time its sender signed, and the
+    // hub adopts both: they are what lets a receiving hub refuse a replay. A
+    // signature without them is the v1 form, which covered neither, and is no
+    // longer federated.
+    let hub_now = crate::auth::handlers::unix_timestamp();
+    let signs_plaintext = !is_encrypted && !is_group_encrypted && req.plaintext_signature.is_some();
+    let (message_id, now) = match (signs_plaintext, req.message_id.as_deref(), req.created_at) {
+        (true, Some(id), Some(at)) => {
+            if Uuid::parse_str(id).is_err() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "message_id must be a UUID".to_string(),
+                ));
+            }
+            if (at - hub_now).abs() > PLAINTEXT_CLOCK_SKEW_SECS {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "created_at is too far from the hub's clock".to_string(),
+                ));
+            }
+            (id.to_string(), at)
+        }
+        (true, _, _) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "a signed plaintext DM needs message_id and created_at (federated-dm v2)"
+                    .to_string(),
+            ))
+        }
+        (false, _, _) => (Uuid::new_v4().to_string(), hub_now),
+    };
 
     if is_encrypted {
         let env = req.encrypted_envelope.as_ref().ok_or((
@@ -285,10 +322,14 @@ pub async fn send_dm(
         // storage) so we don't persist a message with a bad signature that would
         // be rejected by receiving hubs during federation.
         let plaintext_sig_hex: Option<String> = if let Some(ref sig_hex) = req.plaintext_signature {
-            let signing_bytes = wavvon_identity::federated_plaintext_dm_signing_bytes(
+            let member_keys: Vec<String> = members.iter().map(|m| m.public_key.clone()).collect();
+            let signing_bytes = wavvon_identity::federated_plaintext_dm_v2_signing_bytes(
                 &conversation_id,
                 &conv_type,
                 content,
+                &message_id,
+                now as u64,
+                &member_keys,
             );
             // Tiered: a paired device holds its subkey and a cert, never the
             // canonical key the conversation knows it by.
@@ -785,10 +826,25 @@ pub async fn receive_federated_dm(
             StatusCode::BAD_REQUEST,
             "plaintext federated DM requires a sender signature".to_string(),
         ))?;
-        let signing_bytes = wavvon_identity::federated_plaintext_dm_signing_bytes(
+        // v2 binds the message id, its time and the member set, so a peer can
+        // neither replay a message (its id is already here, ON CONFLICT below)
+        // nor deliver it into a conversation its sender did not choose.
+        let hub_now = crate::auth::handlers::unix_timestamp();
+        if req.created_at > hub_now + PLAINTEXT_CLOCK_SKEW_SECS
+            || req.created_at < hub_now - PLAINTEXT_MAX_AGE_SECS
+        {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "plaintext federated DM is outside the accepted time window".to_string(),
+            ));
+        }
+        let signing_bytes = wavvon_identity::federated_plaintext_dm_v2_signing_bytes(
             &req.conversation_id,
             &req.conv_type,
             content,
+            &req.message_id,
+            req.created_at.max(0) as u64,
+            &req.members,
         );
         // Tiered like the encrypted envelopes: a paired device signs with its
         // subkey, and the forwarded cert must chain it to the sender.
