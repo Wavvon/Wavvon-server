@@ -195,6 +195,15 @@ pub async fn verify(
             if cert.not_after.is_some_and(|exp| (now as u64) >= exp) {
                 return Err((StatusCode::UNAUTHORIZED, "subkey_cert expired".to_string()));
             }
+            if crate::routes::revoke::device_revoked(
+                &state.db,
+                &cert.master_pubkey,
+                &cert.subkey_pubkey,
+            )
+            .await
+            {
+                return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
+            }
             Some(cert.master_pubkey.clone())
         }
     };
@@ -331,6 +340,20 @@ pub async fn renew(
         return Err((StatusCode::UNAUTHORIZED, "Session revoked".to_string()));
     }
 
+    // The new session belongs to the device that opened the old one (the
+    // row's public_key), not to `sub`, which for a paired device is its
+    // master and has no farm_users row of its own.
+    let device: String = sqlx::query_scalar("SELECT public_key FROM farm_sessions WHERE jti = $1")
+        .bind(&old_payload.jti)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some(master) = old_payload.master.as_deref() {
+        if crate::routes::revoke::device_revoked(&state.db, master, &device).await {
+            return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
+        }
+    }
+
     // Issue a fresh session with a new jti and a new 30-day window.
     let now = unix_now();
     let new_jti = {
@@ -345,7 +368,7 @@ pub async fn renew(
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&new_jti)
-    .bind(&old_payload.sub)
+    .bind(&device)
     .bind(now)
     .bind(new_exp)
     .bind(&old_payload.scope)

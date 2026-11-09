@@ -689,3 +689,68 @@ async fn totp_applies_to_a_paired_device_of_the_admin() {
         "a device paired to the admin must still present the second factor"
     );
 }
+
+/// A device its master revoked cannot sign in at the farm: a hosted hub
+/// forwards the signed revocation, the farm keeps it, refuses the device,
+/// and ends the identity's live sessions.
+#[tokio::test]
+async fn a_forwarded_revocation_refuses_the_device_and_ends_sessions() {
+    let (server, _state, _guard) = setup().await;
+    let master = Identity::generate();
+    let device = Identity::generate();
+    let device_pubkey = device.public_key_hex();
+    let sign_in = || async {
+        let (challenge, signature) = challenge_and_sign(&server, &device).await;
+        server
+            .post("/auth/verify")
+            .json(&json!({
+                "public_key": device_pubkey,
+                "challenge": challenge,
+                "signature": signature,
+                "subkey_cert": subkey_cert(&master, &device_pubkey),
+            }))
+            .await
+    };
+    let token = sign_in().await.json::<Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A paired device renews as itself: its master has no farm_users row.
+    server
+        .post("/auth/renew")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+
+    let bytes = wavvon_identity::RevocationEntry::signing_bytes(
+        &master.public_key_hex(),
+        &device_pubkey,
+        5,
+    );
+    let entry = json!({
+        "master_pubkey": master.public_key_hex(),
+        "subkey_pubkey": device_pubkey,
+        "revoked_at": 5,
+        "signature": hex::encode(master.sign(&bytes).to_bytes()),
+    });
+    // A forged one is refused and changes nothing.
+    let mut forged = entry.clone();
+    forged["signature"] = json!("00".repeat(64));
+    server
+        .post("/farm/revocations")
+        .json(&forged)
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/farm/revocations")
+        .json(&entry)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    sign_in().await.assert_status_unauthorized();
+    server
+        .post("/auth/renew")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_unauthorized();
+}
