@@ -260,6 +260,46 @@ pub(crate) async fn fetch_capped_opts(
     max: usize,
     allow_private: bool,
 ) -> Result<(Vec<u8>, Option<String>), (StatusCode, String)> {
+    let resp = fetch_checked(
+        url_str,
+        allow_private,
+        std::time::Duration::from_secs(FETCH_TIMEOUT_SECS),
+    )
+    .await?;
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // Read up to `max` bytes
+    let bytes = {
+        use futures_util::StreamExt;
+        let mut body = resp.bytes_stream();
+        let mut buf = Vec::with_capacity(max);
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.map_err(|e| (StatusCode::BAD_GATEWAY, format!("read_error: {e}")))?;
+            let remaining = max - buf.len();
+            if chunk.len() >= remaining {
+                buf.extend_from_slice(&chunk[..remaining]);
+                break;
+            } else {
+                buf.extend_from_slice(&chunk);
+            }
+        }
+        buf
+    };
+    Ok((bytes, content_type))
+}
+
+/// The SSRF-checked request behind [`fetch_capped_opts`], handing back the
+/// response unread so a caller can stream it. After more than 3 redirects the
+/// last redirect response itself is returned.
+pub(crate) async fn fetch_checked(
+    url_str: &str,
+    allow_private: bool,
+    timeout: std::time::Duration,
+) -> Result<reqwest::Response, (StatusCode, String)> {
     let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
     let mut url = reqwest::Url::parse(url_str).map_err(|_| bad("invalid_url"))?;
     let mut hops = 0;
@@ -286,7 +326,7 @@ pub(crate) async fn fetch_capped_opts(
             .resolve_to_addrs(&host, &validated)
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(FETCH_TIMEOUT_SECS))
+            .timeout(timeout)
             .build()
             .map_err(|e| {
                 (
@@ -316,31 +356,7 @@ pub(crate) async fn fetch_capped_opts(
             _ => break resp,
         }
     };
-
-    let content_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
-
-    // Read up to `max` bytes
-    let bytes = {
-        use futures_util::StreamExt;
-        let mut body = resp.bytes_stream();
-        let mut buf = Vec::with_capacity(max);
-        while let Some(chunk) = body.next().await {
-            let chunk = chunk.map_err(|e| (StatusCode::BAD_GATEWAY, format!("read_error: {e}")))?;
-            let remaining = max - buf.len();
-            if chunk.len() >= remaining {
-                buf.extend_from_slice(&chunk[..remaining]);
-                break;
-            } else {
-                buf.extend_from_slice(&chunk);
-            }
-        }
-        buf
-    };
-    Ok((bytes, content_type))
+    Ok(resp)
 }
 
 /// Per-user budget for anything that makes this hub fetch a URL on a member's
