@@ -67,6 +67,8 @@ permission_catalogue! {
     /// someone from another network). The real sender stays on the message
     /// and clients show it, so this cannot pass for a member.
     MESSAGES_MASQUERADE => "messages.masquerade", HubAndChannel,
+    /// Post as often as the hub-wide limit allows in a channel with slowmode.
+    MESSAGES_SLOWMODE_BYPASS => "messages.slowmode.bypass", HubAndChannel,
 
     // ── Forum ───────────────────────────────────────────────────────────
     FORUM_POSTS_CREATE => "forum.posts.create", HubAndChannel,

@@ -66,6 +66,10 @@ pub const CAPABILITIES: &[&str] = &[
     // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
     // it takes inline `attachments` only, so a client hides the attach button.
     "attachments.stored",
+    // A channel can have `slowmode_secs` (one message per member per that
+    // many seconds; `messages.slowmode.bypass` exempts). A refused send is a
+    // 429 whose JSON body carries `retry_after_secs`.
+    "channels.slowmode",
     // Voice works only in `voice` channels (decisions.md, "Voice lives in
     // voice channels"): the hub refuses a voice join, a voice move, an AFK
     // channel or an alliance voice grant anywhere else, and a text channel
@@ -95,6 +99,10 @@ pub const CAPABILITIES: &[&str] = &[
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // GET/PUT /admin/settings/lockdown: one switch that stops new members
+    // joining (and optionally holds back recent joiners), plus a join-rate
+    // alert that can throw it. Events hub.lockdown and raid.suspected.
+    "hub.lockdown",
     // `POST /invites` accepts `bound_pubkey`: the invite admits that identity
     // and nobody else, and redeeming it also satisfies the admission
     // challenge. A client that cannot see this string must not offer the
