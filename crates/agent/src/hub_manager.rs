@@ -11,14 +11,33 @@ struct HubProcess {
 pub struct HubManager {
     hubs: RwLock<HashMap<String, HubProcess>>,
     hub_bin: String,
+    hubs_dir: std::path::PathBuf,
 }
 
 impl HubManager {
-    pub fn new(hub_bin: String) -> Self {
+    pub fn new(hub_bin: String, hubs_dir: String) -> Self {
         Self {
             hubs: RwLock::new(HashMap::new()),
             hub_bin,
+            hubs_dir: hubs_dir.into(),
         }
+    }
+
+    /// The hub's own working directory. A hub keeps `hub_identity.json` and
+    /// its search index in its working directory, so two hubs sharing one
+    /// share an identity. `hub_id` comes from the farm and becomes a path
+    /// segment, so it must be a plain one.
+    fn work_dir(&self, hub_id: &str) -> Result<std::path::PathBuf> {
+        if hub_id.is_empty()
+            || !hub_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            anyhow::bail!("refusing hub id {hub_id:?} as a directory name");
+        }
+        let dir = self.hubs_dir.join(hub_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("Cannot create {dir:?}"))?;
+        Ok(dir)
     }
 
     pub async fn spawn_hub(
@@ -40,7 +59,9 @@ impl HubManager {
         // communities. The caller resolves it now (provision.rs) and refuses
         // the spawn rather than starting a hub with nowhere of its own.
         let bin = std::env::var(wavvon_hub_env::HUB_BIN).unwrap_or_else(|_| self.hub_bin.clone());
+        let work_dir = self.work_dir(hub_id)?;
         let mut cmd = tokio::process::Command::new(&bin);
+        cmd.current_dir(&work_dir);
         // Tokio does NOT kill a child when its `Child` is dropped — it detaches
         // it. Without this, any path that drops the manager without calling
         // `stop_hub` (a panic, a test ending, the agent exiting) leaves a hub
@@ -105,5 +126,24 @@ impl HubManager {
             .iter()
             .map(|(id, p)| serde_json::json!({"hub_id": id, "port": p.port, "status": "running"}))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_hub_gets_its_own_directory_and_ids_stay_plain() {
+        let root = std::env::temp_dir().join(format!("wavvon-agent-dirs-{}", std::process::id()));
+        let m = HubManager::new("wavvon-hub".into(), root.to_string_lossy().into_owned());
+        let a = m.work_dir("hubA").unwrap();
+        let b = m.work_dir("hubB").unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        for bad in ["", "..", "../x", "a/b", r"a\b"] {
+            assert!(m.work_dir(bad).is_err(), "{bad:?} accepted");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }
