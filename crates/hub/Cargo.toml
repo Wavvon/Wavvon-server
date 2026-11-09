@@ -38,6 +38,7 @@ futures-util = "0.3"
 uuid = { workspace = true, features = ["v5"] }
 bytes = "1"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 socket2 = "0.6"
 opentelemetry        = { workspace = true }
 opentelemetry_sdk    = { workspace = true }

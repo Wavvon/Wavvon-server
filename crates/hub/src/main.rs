@@ -1537,7 +1537,7 @@ async fn main() -> Result<()> {
     let bound = std_listener.local_addr()?;
 
     let serve = async {
-        if let (Some(cert), Some(key)) =
+        let tls = if let (Some(cert), Some(key)) =
             (effective_tls_cert.as_deref(), effective_tls_key.as_deref())
         {
             let cert_path = PathBuf::from(cert);
@@ -1549,20 +1549,14 @@ async fn main() -> Result<()> {
                         format!("Failed to load TLS cert/key from {cert:?} / {key:?}")
                     })?;
             tracing::info!("Hub server listening on https://{bound} (TLS enabled)");
-            axum_server::from_tcp_rustls(std_listener, rustls_config)
-                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
+            Some(rustls_config)
         } else {
             tracing::info!(
                 "Hub server listening on http://{bound} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
             );
-            let listener = tokio::net::TcpListener::from_std(std_listener)?;
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await?;
-        }
+            None
+        };
+        wavvon_hub::listen::serve(std_listener, tls, app).await?;
         Ok::<(), anyhow::Error>(())
     };
 
