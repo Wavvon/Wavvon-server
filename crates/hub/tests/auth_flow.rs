@@ -608,7 +608,7 @@ async fn auth_accepts_only_the_tagged_answer() {
             .json(&json!({ "public_key": pk }))
             .await
             .json();
-        assert_eq!(ch["scheme"], wavvon_identity::AUTH_CHALLENGE_SCHEME);
+        assert_eq!(ch["scheme"], wavvon_identity::BOUND_AUTH_CHALLENGE_SCHEME);
         let bytes = hex::decode(ch["challenge"].as_str().unwrap()).unwrap();
         let msg = if tagged {
             wavvon_identity::auth_challenge_signing_bytes(&bytes).unwrap()
@@ -647,6 +647,57 @@ async fn auth_accepts_only_the_tagged_answer() {
         }))
         .await
         .assert_status_unauthorized();
+}
+
+/// A running hub (no legacy acceptance) takes only an answer that names it:
+/// one bound to another server's key, or the unbound v1 form, is exactly what
+/// a hostile hub could collect from a user and relay here.
+#[tokio::test]
+async fn a_running_hub_accepts_only_an_answer_bound_to_itself() {
+    let (db, _guard) = common::create_test_db().await;
+    let state = std::sync::Arc::new(wavvon_hub::state::AppState {
+        accept_unbound_auth: false,
+        ..common::base_state(db)
+    });
+    let hub_key = state.hub_identity.public_key_hex();
+    let server = axum_test::TestServer::new(wavvon_hub::server::create_router(state.clone()));
+    let other_hub = Identity::generate().public_key_hex();
+
+    for (answer, ok) in [
+        ("bound_here", true),
+        ("bound_elsewhere", false),
+        ("unbound", false),
+    ] {
+        let id = Identity::generate();
+        let pk = id.public_key_hex();
+        let ch: serde_json::Value = server
+            .post("/auth/challenge")
+            .json(&json!({ "public_key": pk }))
+            .await
+            .json();
+        let bytes = hex::decode(ch["challenge"].as_str().unwrap()).unwrap();
+        let msg = match answer {
+            "bound_here" => wavvon_identity::bound_auth_challenge_signing_bytes(&hub_key, &bytes),
+            "bound_elsewhere" => {
+                wavvon_identity::bound_auth_challenge_signing_bytes(&other_hub, &bytes)
+            }
+            _ => wavvon_identity::auth_challenge_signing_bytes(&bytes),
+        }
+        .unwrap();
+        let resp = server
+            .post("/auth/verify")
+            .json(&json!({
+                "public_key": pk,
+                "challenge": ch["challenge"],
+                "signature": hex::encode(id.sign(&msg).to_bytes()),
+            }))
+            .await;
+        if ok {
+            resp.assert_status_ok();
+        } else {
+            resp.assert_status_unauthorized();
+        }
+    }
 }
 
 /// A session expires a month after its last use: a fresh one carries an

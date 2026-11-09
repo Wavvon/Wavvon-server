@@ -174,3 +174,23 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
 
     (pool, guard)
 }
+
+/// The farm key every test farm signs with. Fixed so a client in a test knows
+/// it without asking, as a real client knows the farm it means to sign in to:
+/// a sign-in answer is bound to it (`bound_auth_challenge_signing_bytes`).
+#[allow(dead_code)]
+pub fn farm_keypair() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[42u8; 32])
+}
+
+/// Hex public key of [`farm_keypair`].
+#[allow(dead_code)]
+pub fn farm_key() -> String {
+    hex::encode(farm_keypair().verifying_key().as_bytes())
+}
+
+/// What a client signs to answer a test farm's challenge.
+#[allow(dead_code)]
+pub fn answer(challenge: &[u8]) -> Vec<u8> {
+    wavvon_identity::bound_auth_challenge_signing_bytes(&farm_key(), challenge).unwrap()
+}

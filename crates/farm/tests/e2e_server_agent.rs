@@ -19,9 +19,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
-use rand::rngs::OsRng;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::net::TcpListener;
@@ -108,7 +106,7 @@ async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let now = unix_now();
 
@@ -167,8 +165,7 @@ async fn authenticate(client: &Client, base: &str, identity: &Identity) -> Strin
     let body: Value = resp.json().await.unwrap();
     let challenge_hex = body["challenge"].as_str().unwrap();
     let challenge_bytes = hex::decode(challenge_hex).unwrap();
-    let signature =
-        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
+    let signature = identity.sign(&common::answer(&challenge_bytes));
 
     // Verify
     let resp = client
@@ -633,10 +630,7 @@ async fn totp_setup_confirm_and_login_enforcement() {
         .unwrap();
     let body: Value = resp.json().await.unwrap();
     let challenge_hex = body["challenge"].as_str().unwrap();
-    let sig = admin.sign(
-        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(challenge_hex).unwrap())
-            .unwrap(),
-    );
+    let sig = admin.sign(&common::answer(&hex::decode(challenge_hex).unwrap()));
 
     let resp = client
         .post(format!("{base}/auth/verify"))
@@ -667,8 +661,7 @@ async fn totp_setup_confirm_and_login_enforcement() {
         .unwrap();
     let body2: Value = resp2.json().await.unwrap();
     let ch2 = body2["challenge"].as_str().unwrap();
-    let sig2 = admin
-        .sign(&wavvon_identity::auth_challenge_signing_bytes(&hex::decode(ch2).unwrap()).unwrap());
+    let sig2 = admin.sign(&common::answer(&hex::decode(ch2).unwrap()));
 
     let code2 = totp_code_from_secret(&secret);
     let resp2 = client

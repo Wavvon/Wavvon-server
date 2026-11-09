@@ -99,7 +99,7 @@ pub async fn challenge(
 
     Ok(Json(ChallengeResponse {
         challenge: challenge_hex,
-        scheme: wavvon_identity::AUTH_CHALLENGE_SCHEME,
+        scheme: wavvon_identity::BOUND_AUTH_CHALLENGE_SCHEME,
     }))
 }
 
@@ -161,8 +161,15 @@ pub async fn verify(
     let sig_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    wavvon_identity::verify_auth_challenge(&req.public_key, &challenge_bytes, &sig_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
+    // Bound to this farm's key: an unbound answer is what a hostile hub could
+    // collect and relay here.
+    wavvon_identity::verify_bound_auth_challenge(
+        &req.public_key,
+        &state.public_key_hex(),
+        &challenge_bytes,
+        &sig_bytes,
+    )
+    .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
 
     // Delete the used challenge (single-use).
     sqlx::query("DELETE FROM pending_challenges_v2 WHERE challenge_hex = $1")

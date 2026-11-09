@@ -520,6 +520,10 @@ pub struct AppState {
 
     /// Mirror of `Settings::allow_private_webhooks`; see `webhook_url`.
     pub allow_private_webhooks: bool,
+    /// Accept a sign-in answer that does not name this hub (the v1 scheme).
+    /// Always false in a running hub: that answer is what a hostile hub can
+    /// relay. True only in the in-process test harness, whose helpers sign v1.
+    pub accept_unbound_auth: bool,
     /// Mirror of `Settings::metrics`: whether `GET /metrics` answers.
     pub metrics_enabled: bool,
 

@@ -61,14 +61,25 @@ impl FederationClient {
         // every structured object the hub signs is longer (each carries at
         // least a hex key or a UUID), so that length is all we sign;
         // `auth_challenge_signing_bytes` refuses any other.
-        anyhow::ensure!(
-            challenge.scheme.as_deref() == Some(wavvon_identity::AUTH_CHALLENGE_SCHEME),
-            "Peer named auth challenge scheme {:?}; refusing to sign",
-            challenge.scheme
-        );
-        let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
-            &challenge_bytes,
-        )?);
+        // A current peer wants the answer bound to its key, which we take
+        // from its own /info, never from the challenge: a hub relaying another
+        // hub's challenge then gets an answer naming itself, useless there.
+        // An older peer only knows the unbound form.
+        let signing_bytes = match challenge.scheme.as_deref() {
+            Some(s) if s == wavvon_identity::BOUND_AUTH_CHALLENGE_SCHEME => {
+                let peer_key = self
+                    .get_info(base_url)
+                    .await
+                    .context("Could not read the peer's /info to bind the answer")?
+                    .public_key;
+                wavvon_identity::bound_auth_challenge_signing_bytes(&peer_key, &challenge_bytes)?
+            }
+            Some(s) if s == wavvon_identity::AUTH_CHALLENGE_SCHEME => {
+                wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes)?
+            }
+            other => anyhow::bail!("Peer named auth challenge scheme {other:?}; refusing to sign"),
+        };
+        let signature = identity.sign(&signing_bytes);
 
         let verify: VerifyResponse = self
             .http

@@ -1323,6 +1323,7 @@ async fn main() -> Result<()> {
         owner_pubkey: settings.owner_pubkey.clone(),
         apps_allow_camera: settings.apps_allow_camera,
         allow_private_webhooks: settings.allow_private_webhooks,
+        accept_unbound_auth: false,
         metrics_enabled: settings.metrics,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,

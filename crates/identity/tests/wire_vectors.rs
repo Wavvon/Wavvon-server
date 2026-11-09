@@ -15,15 +15,16 @@ use serde_json::Value;
 use sha2::{Digest, Sha512};
 use std::sync::OnceLock;
 use wavvon_identity::{
-    auth_challenge_signing_bytes, dm_envelope_signing_bytes, dm_member_change_signing_bytes,
-    dr_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
-    group_dm_envelope_signing_bytes, outgoing_webhook_signing_key,
-    recovery_attestation_signing_bytes, recovery_request_signing_bytes,
-    sender_key_dist_signing_bytes, unwrap_blob_key, voice_grant_signing_bytes, voice_key_unwrap,
-    voice_key_wrap_with_nonce, voice_packet_open, voice_packet_seal,
-    webhook_delivery_signing_bytes, webhook_hmac_sha256, wrap_blob_key, wrap_blob_key_with,
-    DhKeyRecord, HomeHubList, MasterIdentity, PairingClaim, PairingComplete, PairingOffer,
-    PairingStatus, PublicHubEntry, PublicHubProfile, RevocationEntry, SignedPrefsBlob, SubkeyCert,
+    auth_challenge_signing_bytes, bound_auth_challenge_signing_bytes, dm_envelope_signing_bytes,
+    dm_member_change_signing_bytes, dr_envelope_signing_bytes,
+    federated_plaintext_dm_signing_bytes, group_dm_envelope_signing_bytes,
+    outgoing_webhook_signing_key, recovery_attestation_signing_bytes,
+    recovery_request_signing_bytes, sender_key_dist_signing_bytes, unwrap_blob_key,
+    voice_grant_signing_bytes, voice_key_unwrap, voice_key_wrap_with_nonce, voice_packet_open,
+    voice_packet_seal, webhook_delivery_signing_bytes, webhook_hmac_sha256, wrap_blob_key,
+    wrap_blob_key_with, DhKeyRecord, HomeHubList, MasterIdentity, PairingClaim, PairingComplete,
+    PairingOffer, PairingStatus, PublicHubEntry, PublicHubProfile, RevocationEntry,
+    SignedPrefsBlob, SubkeyCert,
 };
 
 fn doc() -> &'static Value {
@@ -546,6 +547,17 @@ fn auth_challenge_vector() {
 
     for len in [0, 31, 33, 64] {
         assert!(auth_challenge_signing_bytes(&vec![0u8; len]).is_err());
+    }
+}
+
+#[test]
+fn bound_auth_challenge_vector() {
+    let v = vec_("bound_auth_challenge");
+    let sb = bound_auth_challenge_signing_bytes(&s(v, "server_pubkey"), &bytes(&s(v, "challenge")))
+        .unwrap();
+    check_signed("bound_auth_challenge", "signature", &sb);
+    for len in [0, 31, 33] {
+        assert!(bound_auth_challenge_signing_bytes("ab", &vec![0u8; len]).is_err());
     }
 }
 

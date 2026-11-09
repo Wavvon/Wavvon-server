@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 use axum::http::HeaderValue;
 use axum_test::TestServer;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
@@ -35,7 +33,7 @@ async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>, com
     let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let pubkey_hex = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -90,11 +88,7 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(
-        identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
-            .to_bytes(),
-    );
+    let sig_hex = hex::encode(identity.sign(&common::answer(&challenge_bytes)).to_bytes());
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))

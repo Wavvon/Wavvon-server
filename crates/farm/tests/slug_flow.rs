@@ -11,8 +11,6 @@ mod common;
 use std::sync::Arc;
 
 use axum_test::TestServer;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use serde_json::json;
 use wavvon_farm::token::{sign_token, FarmTokenPayload};
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
@@ -72,7 +70,7 @@ async fn setup() -> Harness {
     let (db_pool, guard) = common::create_test_db().await;
     db::migrations::run(&db_pool).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     sqlx::query("INSERT INTO farms (id, public_key, created_at) VALUES (1, $1, $2)")
         .bind(&farm_pubkey)

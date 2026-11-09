@@ -29,9 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
-use rand::rngs::OsRng;
 use reqwest::Client;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -115,7 +113,7 @@ async fn start_farm(
         )
     };
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let admin = "e2e".repeat(21) + "a"; // 64 hex-ish chars, only used as an id
     sqlx::query(

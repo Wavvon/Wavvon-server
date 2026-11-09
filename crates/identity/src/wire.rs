@@ -430,6 +430,46 @@ pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// The scheme a hub or farm names in its `/auth/challenge` response when it
+/// wants an answer signed over [`bound_auth_challenge_signing_bytes`].
+pub const BOUND_AUTH_CHALLENGE_SCHEME: &str = "tagged-v2";
+
+/// What a client signs to answer a challenge, naming the server it means to
+/// sign in to. The v1 bytes named nothing, so a hostile hub could pass another
+/// hub's challenge through, collect the answer and sign in there as the user.
+/// `server_pubkey` is the key the *client* already holds for the server it
+/// is talking to (a saved hub's id, the key its `/info` presented), never one
+/// the challenge response supplies.
+pub fn bound_auth_challenge_signing_bytes(
+    server_pubkey: &str,
+    challenge: &[u8],
+) -> Result<Vec<u8>> {
+    if challenge.len() != AUTH_CHALLENGE_LEN {
+        return Err(anyhow!(
+            "auth challenge is {} bytes, expected {AUTH_CHALLENGE_LEN}",
+            challenge.len()
+        ));
+    }
+    let mut buf = b"wavvon/auth-challenge/v2\0".to_vec();
+    write_str(&mut buf, server_pubkey);
+    buf.extend_from_slice(challenge);
+    Ok(buf)
+}
+
+/// Checks an answer to a challenge this server (`server_pubkey`) issued.
+pub fn verify_bound_auth_challenge(
+    public_key_hex: &str,
+    server_pubkey: &str,
+    challenge: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    verify_signature(
+        public_key_hex,
+        &bound_auth_challenge_signing_bytes(server_pubkey, challenge)?,
+        signature,
+    )
+}
+
 /// Length of an auth challenge. A hub or farm issues exactly this many random
 /// bytes, and nothing else is signed as an answer.
 pub const AUTH_CHALLENGE_LEN: usize = 32;

@@ -276,6 +276,16 @@
       "signing_bytes": "776176766f6e2f617574682d6368616c6c656e67652f763100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
       "signature": "8a9cb870c40c8f1a4b88e7c8eb4a67bfae8115c98516e62d7bc383f421259cd452915257d6f7030af1e50249b3a08e820f482d1831f3a12a53524bffcd925f04"
     },
+    "bound_auth_challenge": {
+      "description": "What a client signs to answer a challenge from a hub or farm naming the tagged-v2 scheme: the v2 tag, the server's public key it means to sign in to (length-prefixed), then the 32 challenge bytes.",
+      "inputs": {
+        "server_pubkey": "@new_pub",
+        "challenge": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f617574682d6368616c6c656e67652f7632004000000061646331343031316638326431633536643935366161346639643733643838353833363161363036303438353235653064303863363338646337356464386337000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature": "88ef1677c81129d2181b2ab3c30f42dc25d5bf7bb20ec54e979ba39a1277c0d6f4517f6aa72ddbfd9a0212bd230acb34195b35d55bfd0525a172330e0fa19b0c"
+    },
     "dm_member_change": {
       "description": "What a group member signs to add members or to leave.",
       "inputs": {
