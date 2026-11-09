@@ -1276,6 +1276,7 @@ async fn main() -> Result<()> {
         hub_identity,
         db,
         pending_challenges: RwLock::new(HashMap::new()),
+        ws_tickets: std::sync::Mutex::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),

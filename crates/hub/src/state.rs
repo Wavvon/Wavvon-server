@@ -282,6 +282,9 @@ pub struct AppState {
     /// other's challenge — e.g. two simultaneous federated DM deliveries to
     /// the same peer hub.
     pub pending_challenges: RwLock<HashMap<String, PendingChallenge>>,
+    /// `POST /ws/ticket` tickets: ticket -> (session token, expiry). Taken,
+    /// never read twice, by the WebSocket handshake.
+    pub ws_tickets: Mutex<HashMap<String, (String, Instant)>>,
     /// `(issuer_pubkey, master_pubkey)` → `(fetched_at, portfolio)` for certs
     /// this hub pulled from a trusted issuer during admission
     /// (hub-certifications.md §11). Short-lived on purpose: a sibling that
