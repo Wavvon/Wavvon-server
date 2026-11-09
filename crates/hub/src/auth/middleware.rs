@@ -598,7 +598,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                     && parts.uri.path().starts_with("/join/");
                 if !redeeming {
                     crate::routes::invites::refuse_if_invite_only(&state.db).await?;
-                    crate::auth::handlers::admit_member(&state.db, &public_key).await?;
+                    crate::auth::handlers::admit_member(state, &public_key).await?;
                 }
             }
 
