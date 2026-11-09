@@ -53,11 +53,17 @@ jobs:
       - name: Checkout hub repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Read the pinned clients release
+        id: clients-ref
+        run: echo "ref=$(tr -d '[:space:]' < clients.ref)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout Wavvon-clients (for web client build)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Wavvon/Wavvon-clients
+          ref: ${{ steps.clients-ref.outputs.ref }}
           path: web-client-src
+          persist-credentials: false
 
       - name: Log in to GHCR
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
@@ -172,17 +178,20 @@ jobs:
             wavvon-hub-linux-x86_64-glibc
             crates/identity/wire-vectors.json
 
-  identity-crate:
-    name: Publish wavvon-identity to crates.io
+  identity-package:
+    name: Package wavvon-identity
     needs: changelog
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      exists: ${{ steps.published.outputs.exists }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Is this version on crates.io already?
         id: published
@@ -199,13 +208,33 @@ jobs:
         if: steps.published.outputs.exists == 'false'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
 
-      - name: Authenticate to crates.io
+      - name: Package and verify
         if: steps.published.outputs.exists == 'false'
+        run: cargo package -p wavvon-identity
+
+  identity-crate:
+    name: Publish wavvon-identity to crates.io
+    needs: identity-package
+    if: needs.identity-package.outputs.exists == 'false'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Authenticate to crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9
 
       - name: Publish
-        if: steps.published.outputs.exists == 'false'
-        run: cargo publish -p wavvon-identity
+        run: cargo publish -p wavvon-identity --no-verify
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
