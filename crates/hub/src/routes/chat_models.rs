@@ -70,6 +70,10 @@ pub struct ChannelResponse {
     /// `nsfw` flag surfaced on `/info`).
     #[serde(default)]
     pub nsfw: bool,
+    /// Slowmode: seconds a member must wait between messages here, 0 = off.
+    /// Advertised as `channels.slowmode`.
+    #[serde(default)]
+    pub slowmode_secs: i32,
     /// The caller's own `voice.move_members` here, resolved channel-scoped
     /// (events.md §7.1). A move-destination picker that offers every channel
     /// pushes the refusal to the moment the move is issued — or, for a queued
@@ -118,6 +122,8 @@ pub struct UpdateChannelRequest {
     /// a plain `NOT NULL BOOLEAN`, so absent = unchanged, `Some(bool)` = set.
     #[serde(default)]
     pub nsfw: Option<bool>,
+    /// Seconds between one member's messages here, 0 to turn it off.
+    pub slowmode_secs: Option<i32>,
     /// Switch a channel between `text` and `voice`; both keep their chat.
     #[serde(default)]
     pub channel_type: Option<String>,
