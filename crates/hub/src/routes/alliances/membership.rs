@@ -225,10 +225,11 @@ pub(super) async fn do_join_alliance(
         } else if m.hub_url == "self" || m.hub_url == inviter_url {
             m.hub_public_key == inviter_key
         } else {
-            matches!(
-                state.federation_client.get_info(&m.hub_url).await,
-                Ok(info) if info.public_key == m.hub_public_key
-            )
+            is_member_url(&m.hub_url)
+                && matches!(
+                    state.federation_client.get_info(&m.hub_url).await,
+                    Ok(info) if info.public_key == m.hub_public_key
+                )
         };
         if ok {
             verified.push(m);
@@ -664,6 +665,12 @@ pub async fn join_alliance(
     // The member is the hub that authenticated to make this call. The URL it
     // gives has to answer for that same key, or we would record a key paired
     // with an address someone else controls.
+    if !is_member_url(&req.hub_url) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "hub_url must be an http(s) URL without query or fragment".to_string(),
+        ));
+    }
     let hub_info = state
         .federation_client
         .get_info(&req.hub_url)
@@ -789,6 +796,12 @@ pub async fn receive_alliance_member(
     .map_err(|_| (StatusCode::FORBIDDEN, "Invalid voucher".to_string()))?;
 
     // The address it gives has to answer for the key that authenticated.
+    if !is_member_url(&req.hub_url) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "hub_url must be an http(s) URL without query or fragment".to_string(),
+        ));
+    }
     let hub_info = state
         .federation_client
         .get_info(&req.hub_url)
@@ -963,7 +976,14 @@ pub(super) async fn reconcile_members(state: &Arc<AppState>, alliance_id: &str) 
             } else {
                 reported.hub_url.clone()
             };
-            if url.is_empty() {
+            // The reporter's word is checked like a joiner's: the address has
+            // to answer for the key it is listed under.
+            if !is_member_url(&url)
+                || !matches!(
+                    state.federation_client.get_info(&url).await,
+                    Ok(info) if info.public_key == reported.hub_public_key
+                )
+            {
                 continue;
             }
             let now = crate::auth::handlers::unix_timestamp();
@@ -995,5 +1015,35 @@ pub(super) async fn reconcile_members(state: &Arc<AppState>, alliance_id: &str) 
                 &m.hub_public_key[..8.min(m.hub_public_key.len())],
             );
         }
+    }
+}
+
+/// A member address is a base URL the hub appends paths to. A path is fine
+/// (a farm hosts hubs under `/hub/<slug>`); a query or fragment would swallow
+/// the appended path and let the member choose what we fetch.
+fn is_member_url(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str().is_some()
+            && u.query().is_none()
+            && u.fragment().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_member_url;
+
+    #[test]
+    fn member_url_refuses_what_would_swallow_the_path() {
+        assert!(is_member_url("https://hub.example"));
+        assert!(is_member_url("https://farm.example/hub/abc"));
+        assert!(!is_member_url("https://evil.example/x#"));
+        assert!(!is_member_url("https://evil.example/x?a="));
+        assert!(!is_member_url("https://u:p@evil.example"));
+        assert!(!is_member_url("file:///etc/passwd"));
+        assert!(!is_member_url("self"));
     }
 }
