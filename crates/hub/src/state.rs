@@ -379,6 +379,9 @@ pub struct AppState {
     /// Unix timestamp of the last farm pubkey re-fetch attempt.
     /// Used to rate-limit re-fetch to at most once per 60s.
     pub last_farm_pubkey_fetch: Arc<RwLock<i64>>,
+    /// The farm's answer to "is this session still live?", per token `jti`,
+    /// with when it was asked. See `auth::middleware::farm_session_live`.
+    pub farm_session_checks: Mutex<HashMap<String, (bool, i64)>>,
 
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,

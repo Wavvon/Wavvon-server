@@ -26,26 +26,18 @@ pub async fn revoke_check(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<RevokeCheckRequest>,
 ) -> Result<Json<RevokeCheckResponse>, (StatusCode, String)> {
-    // A session is considered revoked if:
-    // - The jti doesn't exist in farm_sessions (unknown token → treat as revoked).
-    // - revoked_at IS NOT NULL.
-    // - expires_at is in the past.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-
-    let row: Option<(Option<i64>, i64)> =
-        sqlx::query_as("SELECT revoked_at, expires_at FROM farm_sessions WHERE jti = $1")
-            .bind(&req.jti)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-
-    let revoked = match row {
-        None => true, // unknown jti
-        Some((revoked_at, expires_at)) => revoked_at.is_some() || now >= expires_at,
-    };
-
+    let revoked = !session_is_live(&state.db, &req.jti).await;
     Ok(Json(RevokeCheckResponse { revoked }))
+}
+
+/// A session is live when its jti is known, not revoked and not expired. A
+/// database error reads as not live: this gates authentication, so it fails
+/// closed.
+pub(crate) async fn session_is_live(db: &sqlx::PgPool, jti: &str) -> bool {
+    let row: Result<Option<(Option<i64>, i64)>, _> =
+        sqlx::query_as("SELECT revoked_at, expires_at FROM farm_sessions WHERE jti = $1")
+            .bind(jti)
+            .fetch_optional(db)
+            .await;
+    matches!(row, Ok(Some((None, expires_at))) if crate::unix_now() < expires_at)
 }

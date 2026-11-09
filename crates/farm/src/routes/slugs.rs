@@ -43,8 +43,7 @@ async fn require_hub_control(
     state: &FarmState,
     hub_id: &str,
 ) -> Result<(), ApiError> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(headers, &farm_pubkey)?;
+    let payload = require_auth(headers, state).await?;
 
     let owner: Option<(String,)> =
         sqlx::query_as("SELECT owner_pubkey FROM hubs WHERE id = $1 AND deleted_at IS NULL")

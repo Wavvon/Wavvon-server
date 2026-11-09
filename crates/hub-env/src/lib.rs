@@ -53,6 +53,21 @@ pub const PUBLIC_URL: &str = "WAVVON_PUBLIC_URL";
 /// and until it is filled every farm-routed request 404s.
 pub const FARM_HUB_ID: &str = "WAVVON_FARM_HUB_ID";
 
+/// The farm's proof that this process is the hub it spawned under
+/// `FARM_HUB_ID`, sent with every heartbeat. Without it anyone could claim a
+/// new hub's row before the hub booted, or keep a crashed hub looking alive.
+pub const FARM_HUB_CREDENTIAL: &str = "WAVVON_FARM_HUB_CREDENTIAL";
+
+/// Read the client address from `X-Forwarded-For`. The farm sets it on the
+/// hubs it runs itself, which listen on loopback behind its proxy and so can
+/// hear from nobody else.
+pub const TRUSTED_PROXY: &str = "WAVVON_TRUSTED_PROXY";
+
+/// Address the hub's HTTP listener binds. The farm binds the hubs it runs
+/// itself to loopback: its proxy is their only way in, and the proxy is what
+/// refuses a suspended hub.
+pub const BIND_ADDR: &str = "WAVVON_BIND_ADDR";
+
 /// Path to the `wavvon-hub` binary. Read by the farm and the agent to decide
 /// what to launch — not read by the hub itself.
 pub const HUB_BIN: &str = "WAVVON_HUB_BIN";
@@ -83,6 +98,9 @@ pub const SPAWNABLE: &[&str] = &[
     OWNER_PUBKEY,
     FARM_HUB_ID,
     PUBLIC_URL,
+    BIND_ADDR,
+    FARM_HUB_CREDENTIAL,
+    TRUSTED_PROXY,
 ];
 
 #[cfg(test)]

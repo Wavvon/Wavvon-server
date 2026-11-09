@@ -28,6 +28,9 @@ struct HubProcess {
 
 pub struct HubManager {
     hubs: RwLock<HashMap<String, HubProcess>>,
+    /// The farm key, set by `FarmState::new`, that signs each hub's
+    /// heartbeat credential (see [`hub_credential`]).
+    credential_key: std::sync::OnceLock<Arc<ed25519_dalek::SigningKey>>,
     /// Absolute path (or name on PATH) of the `wavvon-hub` binary.
     hub_bin: String,
     /// Externally reachable farm URL — passed to hub processes as `WAVVON_FARM_URL`.
@@ -45,7 +48,45 @@ pub struct HubManager {
     hubs_dir: String,
 }
 
+/// What a hub presents with its heartbeats to prove it is the process the
+/// farm spawned for `hub_id`: the farm's own signature over the id. Ed25519
+/// signing is deterministic, so the farm recomputes nothing and stores
+/// nothing, and verifying it needs only the farm's key.
+pub fn hub_credential(key: &ed25519_dalek::SigningKey, hub_id: &str) -> String {
+    use ed25519_dalek::Signer;
+    hex::encode(key.sign(&credential_message(hub_id)).to_bytes())
+}
+
+/// Whether `credential` is the farm's signature over `hub_id`.
+pub fn verify_hub_credential(
+    key: &ed25519_dalek::SigningKey,
+    hub_id: &str,
+    credential: &str,
+) -> bool {
+    let Ok(bytes) = hex::decode(credential) else {
+        return false;
+    };
+    let Ok(sig) = ed25519_dalek::Signature::from_slice(&bytes) else {
+        return false;
+    };
+    key.verifying_key()
+        .verify_strict(&credential_message(hub_id), &sig)
+        .is_ok()
+}
+
+fn credential_message(hub_id: &str) -> Vec<u8> {
+    let mut m = b"wavvon/farm-hub-credential/v1\0".to_vec();
+    m.extend_from_slice(hub_id.as_bytes());
+    m
+}
+
 impl HubManager {
+    /// Hand the manager the farm key it signs hub credentials with. Called
+    /// once, by `FarmState::new`.
+    pub fn set_credential_key(&self, key: Arc<ed25519_dalek::SigningKey>) {
+        let _ = self.credential_key.set(key);
+    }
+
     pub fn new(
         hub_bin: String,
         farm_url: String,
@@ -56,6 +97,7 @@ impl HubManager {
     ) -> Self {
         Self {
             hubs: RwLock::new(HashMap::new()),
+            credential_key: std::sync::OnceLock::new(),
             hub_bin,
             farm_url,
             base_port,
@@ -237,10 +279,19 @@ impl HubManager {
             .env(wavvon_hub_env::HTTP_PORT, port.to_string())
             .env(wavvon_hub_env::VOICE_UDP_PORT, voice_port.to_string())
             .env(wavvon_hub_env::FARM_URL, &self.farm_url)
+            .env(wavvon_hub_env::BIND_ADDR, "127.0.0.1")
+            .env(wavvon_hub_env::TRUSTED_PROXY, "true")
             // Our row id for this hub. It reports this back on its first
             // heartbeat, which is the only way we learn its pubkey and can
             // start routing `/hub/<serial>` to it.
             .env(wavvon_hub_env::FARM_HUB_ID, hub_id)
+            .env(
+                wavvon_hub_env::FARM_HUB_CREDENTIAL,
+                self.credential_key
+                    .get()
+                    .map(|k| hub_credential(k, hub_id))
+                    .unwrap_or_default(),
+            )
             // This hub's own database (db/provision.rs). Passing nothing here
             // is what made every farm-spawned hub fall back to the same default
             // URL and share one database with all the others — invisibly, since

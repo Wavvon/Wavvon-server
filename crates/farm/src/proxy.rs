@@ -93,8 +93,21 @@ async fn resolve_hub(state: &FarmState, segment: &str) -> Option<ResolvedHub> {
     row
 }
 
+/// The client's address as the farm saw it (`tag_client_ip`), which the hub
+/// behind it rate-limits and records by. Loopback only when the transport
+/// gave none, as under an in-process test server.
+fn forwarded_for(req: &Request<Body>) -> axum::http::HeaderValue {
+    let ip = req
+        .extensions()
+        .get::<wavvon_rate_limit::ClientIp>()
+        .map(|c| c.0)
+        .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    axum::http::HeaderValue::from_str(&ip.to_string())
+        .unwrap_or(axum::http::HeaderValue::from_static("127.0.0.1"))
+}
+
 pub async fn proxy_handler(
-    Path((serial, path)): Path<(String, String)>,
+    Path((serial, _path)): Path<(String, String)>,
     State(state): State<Arc<FarmState>>,
     req: Request<Body>,
 ) -> Response<Body> {
@@ -128,13 +141,10 @@ pub async fn proxy_handler(
     };
 
     // Build the upstream path: strip /hub/<serial> prefix, keep the rest.
-    let upstream_path = if path.is_empty() {
-        "/".to_string()
-    } else if path.starts_with('/') {
-        path.clone()
-    } else {
-        format!("/{path}")
-    };
+    // From the raw URI, still percent-encoded: the decoded `{*path}` can
+    // carry CR/LF into the request line the WebSocket bridge writes by hand.
+    let rest = req.uri().path().splitn(4, '/').nth(3).unwrap_or("");
+    let upstream_path = format!("/{rest}");
 
     let query = req
         .uri()
@@ -205,11 +215,8 @@ async fn proxy_buffered(
     let method = req.method().clone();
     let mut headers = req.headers().clone();
 
-    // Add proxy headers.
-    // X-Forwarded-For: client IP (best effort from connection info).
-    if let Ok(hv) = axum::http::HeaderValue::from_str("127.0.0.1") {
-        headers.insert("x-forwarded-for", hv);
-    }
+    // Add proxy headers. Replacing any X-Forwarded-For the client sent.
+    headers.insert("x-forwarded-for", forwarded_for(&req));
     if let Ok(hv) = axum::http::HeaderValue::from_str(serial) {
         headers.insert("x-hub-serial", hv);
     }
@@ -303,9 +310,7 @@ async fn bridge_upgrade(
 ) -> Response<Body> {
     let method = req.method().clone();
     let mut headers = req.headers().clone();
-    if let Ok(hv) = axum::http::HeaderValue::from_str("127.0.0.1") {
-        headers.insert("x-forwarded-for", hv);
-    }
+    headers.insert("x-forwarded-for", forwarded_for(&req));
     if let Ok(hv) = axum::http::HeaderValue::from_str(serial) {
         headers.insert("x-hub-serial", hv);
     }

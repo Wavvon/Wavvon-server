@@ -1,6 +1,7 @@
 /// Farm heartbeat routes.
 ///
-/// POST /farm/heartbeat          — hub pushes stats every 60 s (unauthenticated by hub pubkey match)
+/// POST /farm/heartbeat          — hub pushes stats every 60 s, proving with the
+///                                 credential the farm issued at spawn
 /// GET  /farm/admin/fleet        — farm admin reads online/offline status of all hubs
 use std::sync::Arc;
 
@@ -77,6 +78,22 @@ pub async fn receive_heartbeat(
         .unwrap_or(0);
     let now = unix_now();
 
+    // Only the process the farm spawned for this row holds its credential.
+    // Without it, anyone reading a new hub's id off the public listing could
+    // claim the row first, and fake heartbeats could keep a crashed hub
+    // looking alive to the monitor.
+    let hub_id = match payload.get("hub_id").and_then(|v| v.as_str()) {
+        Some(id) if !id.is_empty() => id.to_string(),
+        _ => return (StatusCode::FORBIDDEN, Json(HeartbeatResponse::default())),
+    };
+    let credential = payload
+        .get("hub_credential")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if !crate::hub_manager::verify_hub_credential(&state.keypair, &hub_id, credential) {
+        return (StatusCode::FORBIDDEN, Json(HeartbeatResponse::default()));
+    }
+
     // First contact: bind the row to the pubkey ("claiming the serial").
     //
     // The farm allocates a `hubs` row before the process exists, so it cannot
@@ -96,7 +113,8 @@ pub async fn receive_heartbeat(
     // key is left alone and the mismatch is logged — that is either a hub
     // restored from another hub's backup or a misconfigured spawn, and both
     // want an operator, not a silent rebind.
-    if let Some(hub_id) = payload.get("hub_id").and_then(|v| v.as_str()) {
+    {
+        let hub_id = hub_id.as_str();
         let claimed = sqlx::query(
             "UPDATE hubs SET hub_pubkey = $1
              WHERE id = $2 AND hub_pubkey IS NULL AND deleted_at IS NULL",
@@ -137,10 +155,11 @@ pub async fn receive_heartbeat(
         }
     }
 
-    // Only accept heartbeats from hubs we recognise (hub_pubkey in hubs table).
+    // The row this credential is for must be bound to the reporting key.
     let known_count: Result<i64, _> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM hubs WHERE hub_pubkey = $1 AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM hubs WHERE id = $1 AND hub_pubkey = $2 AND deleted_at IS NULL",
     )
+    .bind(&hub_id)
     .bind(&hub_pubkey)
     .fetch_one(&state.db)
     .await;
