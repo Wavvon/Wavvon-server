@@ -892,3 +892,73 @@ async fn the_spawn_command_carries_the_database_name_and_template() {
         "this server's template must travel with the command"
     );
 }
+
+/// An agent reports spawns and stops only for hubs placed on its own node: a
+/// compromised node must not be able to redirect or take down another's hub.
+#[tokio::test]
+async fn an_agent_cannot_update_a_hub_on_another_node() {
+    let (base, state, _guard) = start_farm().await;
+    let client = Client::new();
+    let admin = Identity::generate();
+    let token = authenticate(&client, &base, &admin).await;
+    sqlx::query("UPDATE farms SET admin_pubkey = $1 WHERE id = 1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    let reg: Value = client
+        .post(format!("{base}/farm/admin/server-token"))
+        .bearer_auth(&token)
+        .json(&json!({ "name": "rogue", "region": "test" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let reg_token = reg["token"].as_str().unwrap().to_string();
+    let server_id = reg["server_id"].as_str().unwrap().to_string();
+
+    // A farm-local hub, running on 9300: not this agent's.
+    sqlx::query(
+        "INSERT INTO hubs (id, owner_pubkey, name, visibility, created_at, process_port)
+         VALUES ('victim', $1, 'Victim', 'private', 0, 9300)",
+    )
+    .bind(admin.public_key_hex())
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let ws_url = format!("{}/ws/agent", base.replacen("http://", "ws://", 1));
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await.unwrap();
+    let (mut ws_write, _ws_read) = ws_stream.split();
+    ws_write
+        .send(Message::Text(
+            json!({ "type": "hello", "version": "0.1.0", "token": reg_token, "host": "rogue.example" })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    wait_for_host(&state.db, &server_id, Some("rogue.example")).await;
+    for msg in [
+        json!({ "type": "hub_spawned", "hub_id": "victim", "port": 9999 }),
+        json!({ "type": "hub_stopped", "hub_id": "victim" }),
+    ] {
+        ws_write
+            .send(Message::Text(msg.to_string().into()))
+            .await
+            .unwrap();
+    }
+    // Give the farm time to process both frames before reading the row.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let (port, owner): (Option<i32>, Option<String>) =
+        sqlx::query_as("SELECT process_port, server_id FROM hubs WHERE id = 'victim'")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+    assert_eq!(port, Some(9300));
+    assert_eq!(owner, None);
+}
