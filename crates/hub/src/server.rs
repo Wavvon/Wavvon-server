@@ -495,6 +495,10 @@ pub fn create_router_full(
             get(routes::permission_catalogue::why),
         )
         .route(
+            "/roles/order",
+            axum::routing::put(routes::roles::reorder_roles),
+        )
+        .route(
             "/roles/{role_id}",
             axum::routing::patch(routes::roles::update_role).delete(routes::roles::delete_role),
         )

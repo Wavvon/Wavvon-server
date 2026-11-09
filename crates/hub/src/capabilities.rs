@@ -153,6 +153,10 @@ pub const CAPABILITIES: &[&str] = &[
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
     "recovery.attest.requests",
+    // `PUT /roles/order` reorders every role below the caller in one call.
+    // Without it a client renumbers roles with one PATCH each, which can
+    // half-apply, so it offers drag reordering only where this is present.
+    "roles.order",
     // `/info` and `GET /hub/settings` carry `stream_limits` (max width, height,
     // fps, kbps; each absent when uncapped), `PATCH /hub` sets them, and a
     // `screen_share_start` declaring more is refused (#278). An older hub has
