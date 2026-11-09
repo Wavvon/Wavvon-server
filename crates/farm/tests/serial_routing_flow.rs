@@ -420,3 +420,22 @@ async fn the_proxy_forwards_the_clients_address_not_its_own_claim() {
         .unwrap();
     assert_eq!(forwarded, "127.0.0.1");
 }
+
+/// The farm's auth routes spend the per-address auth budget: a burst of
+/// challenges ends in 429 rather than an unbounded table of rows.
+#[tokio::test]
+async fn auth_challenges_are_rate_limited_per_address() {
+    let (farm_url, _state, _guard) = start_farm().await;
+    let client = Client::new();
+    let mut statuses = Vec::new();
+    for _ in 0..15 {
+        let resp = client
+            .post(format!("{farm_url}/auth/challenge"))
+            .json(&serde_json::json!({ "public_key": "ab".repeat(32) }))
+            .send()
+            .await
+            .unwrap();
+        statuses.push(resp.status().as_u16());
+    }
+    assert!(statuses.contains(&429), "no 429 in {statuses:?}");
+}

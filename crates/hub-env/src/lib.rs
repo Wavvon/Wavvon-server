@@ -63,6 +63,12 @@ pub const FARM_HUB_CREDENTIAL: &str = "WAVVON_FARM_HUB_CREDENTIAL";
 /// hear from nobody else.
 pub const TRUSTED_PROXY: &str = "WAVVON_TRUSTED_PROXY";
 
+/// Comma-separated addresses a trusted proxy connects from. With
+/// `TRUSTED_PROXY`, `X-Forwarded-For` is believed only from these peers: an
+/// agent's hubs listen on the network, so anyone else reaching the port must
+/// not choose their own address.
+pub const TRUSTED_PROXY_FROM: &str = "WAVVON_TRUSTED_PROXY_FROM";
+
 /// Address the hub's HTTP listener binds. The farm binds the hubs it runs
 /// itself to loopback: its proxy is their only way in, and the proxy is what
 /// refuses a suspended hub.
@@ -101,6 +107,7 @@ pub const SPAWNABLE: &[&str] = &[
     BIND_ADDR,
     FARM_HUB_CREDENTIAL,
     TRUSTED_PROXY,
+    TRUSTED_PROXY_FROM,
 ];
 
 #[cfg(test)]

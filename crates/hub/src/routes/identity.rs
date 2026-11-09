@@ -402,6 +402,7 @@ pub async fn post_revocation(
     state
         .close_sessions_of_revoked(&entry.master_pubkey, &entry.subkey_pubkey)
         .await;
+    state.forward_revocation_to_farm(&entry);
 
     Ok(StatusCode::OK)
 }

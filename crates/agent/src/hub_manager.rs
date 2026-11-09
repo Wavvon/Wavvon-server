@@ -8,6 +8,41 @@ struct HubProcess {
     _child: Child,
 }
 
+/// The farm URL's host, resolved, comma-separated. Empty when it does not
+/// resolve: the hub then trusts no proxy, as before.
+async fn farm_addresses(farm_url: &str) -> String {
+    let Some(authority) = authority_of(farm_url) else {
+        return String::new();
+    };
+    match tokio::net::lookup_host(authority).await {
+        Ok(addrs) => addrs
+            .map(|a| a.ip().to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        Err(_) => String::new(),
+    }
+}
+
+/// `host:port` of an http(s) URL, the port defaulted by scheme.
+fn authority_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => return None,
+    };
+    let host_port = rest.split(['/', '?', '#']).next()?;
+    let has_port = match host_port.rfind(']') {
+        Some(end) => host_port[end..].contains(':'),
+        None => host_port.contains(':'),
+    };
+    Some(if has_port {
+        host_port.to_string()
+    } else {
+        format!("{host_port}:{default_port}")
+    })
+}
+
 /// What the farm's spawn command says about the hub beyond where it runs.
 pub struct FarmGrant<'a> {
     pub owner_pubkey: Option<&'a str>,
@@ -89,6 +124,17 @@ impl HubManager {
         }
         if let Some(url) = farm.farm_url {
             cmd.env(wavvon_hub_env::FARM_URL, url);
+            // The farm forwards each client's address. These hubs listen on the
+            // network, so the header is believed only from the farm's own
+            // addresses (WAVVON_FARM_EGRESS_IPS overrides, for a farm behind NAT).
+            let farm_ips = match std::env::var("WAVVON_FARM_EGRESS_IPS") {
+                Ok(list) => list,
+                Err(_) => farm_addresses(url).await,
+            };
+            if !farm_ips.is_empty() {
+                cmd.env(wavvon_hub_env::TRUSTED_PROXY, "true")
+                    .env(wavvon_hub_env::TRUSTED_PROXY_FROM, farm_ips);
+            }
         }
         if let Some(c) = farm.credential {
             cmd.env(wavvon_hub_env::FARM_HUB_CREDENTIAL, c);
@@ -140,6 +186,20 @@ impl HubManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_farm_url_gives_a_resolvable_authority() {
+        assert_eq!(
+            authority_of("https://farm.example").as_deref(),
+            Some("farm.example:443")
+        );
+        assert_eq!(
+            authority_of("http://10.0.0.2:4000/x").as_deref(),
+            Some("10.0.0.2:4000")
+        );
+        assert_eq!(authority_of("https://[::1]/").as_deref(), Some("[::1]:443"));
+        assert_eq!(authority_of("ftp://x"), None);
+    }
 
     #[test]
     fn each_hub_gets_its_own_directory_and_ids_stay_plain() {
