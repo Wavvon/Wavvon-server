@@ -203,6 +203,12 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          this many bot streams are already active; human screen shares are never counted.",
     ),
     (
+        wavvon_hub_env::VOICE_PUBLIC_HOST,
+        "(unset)",
+        "Host clients dial for voice when it differs from WAVVON_PUBLIC_URL's: set it to a \
+         DNS-only name when the public host sits behind a proxy that drops UDP (Cloudflare)",
+    ),
+    (
         wavvon_hub_env::PUBLIC_URL,
         "(unset)",
         "Public base URL of this hub (e.g. https://wavvon.example.com). Drives the \
@@ -350,6 +356,8 @@ pub struct Settings {
     /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
     /// Env: WAVVON_PUBLIC_URL
     pub public_url: Option<String>,
+    /// Env: WAVVON_VOICE_PUBLIC_HOST
+    pub voice_public_host: Option<String>,
     /// WebAuthn Relying Party ID override. Falls back to public_url hostname.
     /// Env: WAVVON_WEBAUTHN_RP_ID
     pub webauthn_rp_id: Option<String>,
