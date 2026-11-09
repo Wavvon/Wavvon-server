@@ -57,6 +57,9 @@ pub struct Settings {
     pub cors_origins: String,
     /// Logging format: "text" (default) or "json". Env: WAVVON_LOG_FORMAT
     pub log_format: String,
+    /// Read the client address from `X-Forwarded-For` for rate limiting.
+    /// Only behind a reverse proxy you run. Env: WAVVON_TRUSTED_PROXY
+    pub trusted_proxy: bool,
     /// OpenTelemetry OTLP collector endpoint. Leave empty to disable.
     /// Env: WAVVON_OTLP_ENDPOINT
     pub otlp_endpoint: Option<String>,
@@ -78,6 +81,7 @@ impl Settings {
 pub fn load() -> Result<Settings> {
     let settings = config::Config::builder()
         .set_default("http_port", 4000)?
+        .set_default("trusted_proxy", false)?
         .set_default("hub_base_port", 9100)?
         .set_default("hubs_dir", "hubs")?
         .set_default("cors_origins", "*")?

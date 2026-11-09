@@ -36,6 +36,19 @@ pub async fn ws_handler(
     let public_key = auth.public_key;
     let streams_on_request = params.streams.as_deref() == Some("on_request");
 
+    let open = state
+        .ws_key_senders
+        .read()
+        .await
+        .get(&public_key)
+        .map_or(0, |sessions| sessions.len());
+    if open >= crate::state::MAX_SOCKETS_PER_IDENTITY {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many open connections for this identity".to_string(),
+        ));
+    }
+
     // An alliance-voice visitor is confined to the one channel their grant
     // admitted them to. Resolved here, once, rather than per message: an
     // expired visit then reads as "not a visitor and not a member", which the

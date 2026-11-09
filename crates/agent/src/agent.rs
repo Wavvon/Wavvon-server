@@ -108,8 +108,7 @@ async fn handle_message(
                 &resolved,
                 port,
                 voice_port,
-                owner_pubkey.as_deref(),
-                farm_url.as_deref(),
+                &grant(&owner_pubkey, &farm_url, msg),
             ).await {
                 Ok(()) => Some(serde_json::json!({"type": "hub_spawned", "hub_id": hub_id, "port": port, "voice_port": voice_port}).to_string()),
                 Err(e) => Some(serde_json::json!({"type": "error", "hub_id": hub_id, "code": "spawn_failed", "message": e.to_string()}).to_string()),
@@ -146,8 +145,7 @@ async fn handle_message(
                     &resolved,
                     port,
                     voice_port,
-                    owner_pubkey.as_deref(),
-                    farm_url.as_deref(),
+                    &grant(&owner_pubkey, &farm_url, msg),
                 )
                 .await
             {
@@ -196,4 +194,16 @@ fn build_ws_url(farm_url: &str) -> String {
         base.replacen("http://", "ws://", 1)
     };
     format!("{ws_base}/ws/agent")
+}
+
+fn grant<'a>(
+    owner_pubkey: &'a Option<String>,
+    farm_url: &'a Option<String>,
+    msg: &'a serde_json::Value,
+) -> crate::hub_manager::FarmGrant<'a> {
+    crate::hub_manager::FarmGrant {
+        owner_pubkey: owner_pubkey.as_deref(),
+        farm_url: farm_url.as_deref(),
+        credential: msg.get("hub_credential").and_then(|v| v.as_str()),
+    }
 }

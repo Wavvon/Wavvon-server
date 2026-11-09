@@ -20,6 +20,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 tower = "0.5"
+wavvon-rate-limit = { path = "../rate-limit" }
 tower-http = { workspace = true }
 hex = "0.4"
 # Sticker ingest (sticker_image.rs): pure-Rust decode of PNG/JPEG/GIF/WebP/APNG and

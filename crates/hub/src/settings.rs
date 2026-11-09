@@ -74,6 +74,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "The farm's row id for this hub. Reported on heartbeat so the farm can route to it",
     ),
     (
+        wavvon_hub_env::FARM_HUB_CREDENTIAL,
+        "(unset)",
+        "Set by the farm at spawn; sent with every heartbeat to prove this is the hub it spawned",
+    ),
+    (
         "WAVVON_TEMPLATE_URL",
         "(unset)",
         "Bootstrap template URL applied on first boot when the channels table is empty",
@@ -264,6 +269,8 @@ pub struct Settings {
     /// without it the farm has a hub it cannot route to.
     /// Env: WAVVON_FARM_HUB_ID
     pub farm_hub_id: Option<String>,
+    /// Env: WAVVON_FARM_HUB_CREDENTIAL
+    pub farm_hub_credential: Option<String>,
     /// Owner's Ed25519 public key (64 hex chars). Seeded as builtin-owner on first boot.
     /// Env: WAVVON_OWNER_PUBKEY
     pub owner_pubkey: Option<String>,
@@ -523,6 +530,7 @@ mod tests {
         std::env::set_var(wavvon_hub_env::FARM_URL, "https://probe.farm");
         std::env::set_var(wavvon_hub_env::OWNER_PUBKEY, "abc123");
         std::env::set_var(wavvon_hub_env::FARM_HUB_ID, "hub-probe-id");
+        std::env::set_var(wavvon_hub_env::FARM_HUB_CREDENTIAL, "cred-probe");
         std::env::set_var(wavvon_hub_env::PUBLIC_URL, "https://probe.example");
 
         let s = load().expect("settings load with overrides");
@@ -568,6 +576,12 @@ mod tests {
             Some("hub-probe-id"),
             "{} is not read",
             wavvon_hub_env::FARM_HUB_ID
+        );
+        assert_eq!(
+            s.farm_hub_credential.as_deref(),
+            Some("cred-probe"),
+            "{} is not read",
+            wavvon_hub_env::FARM_HUB_CREDENTIAL
         );
         assert_eq!(
             s.public_url.as_deref(),

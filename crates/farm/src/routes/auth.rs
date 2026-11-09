@@ -326,6 +326,10 @@ pub async fn renew(
     let farm_pubkey = state.public_key_hex();
     let old_payload = verify_token(&farm_pubkey, token_str)
         .map_err(|e| (StatusCode::UNAUTHORIZED, format!("Invalid farm token: {e}")))?;
+    // Renewing a revoked session would undo the revocation.
+    if !crate::routes::revoke::session_is_live(&state.db, &old_payload.jti).await {
+        return Err((StatusCode::UNAUTHORIZED, "Session revoked".to_string()));
+    }
 
     // Issue a fresh session with a new jti and a new 30-day window.
     let now = unix_now();

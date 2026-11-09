@@ -250,13 +250,17 @@ async fn main() -> Result<()> {
 
     wavvon_farm::monitor::spawn(state.clone());
 
-    let app = server::create_router_with_cors(state, &cfg.cors_origins);
+    let app = server::create_router_with_cors(state, &cfg.cors_origins, cfg.trusted_proxy);
     let listener = tokio::net::TcpListener::from_std(dual_stack_listener(http_port)?)?;
     tracing::info!(
         "Farm server listening on http://{} (set WAVVON_FARM_URL for the external URL)",
         listener.local_addr()?
     );
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     if let Some(provider) = otlp_provider {
         let _ = provider.shutdown();

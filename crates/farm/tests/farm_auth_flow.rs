@@ -441,6 +441,8 @@ async fn heartbeat_accepts_known_hub_pubkey() {
     let resp = server
         .post("/farm/heartbeat")
         .json(&json!({
+            "hub_id": "hbhub",
+            "hub_credential": state.hub_credential("hbhub"),
             "hub_pubkey": hub_pubkey,
             "online_users": 5,
             "storage_bytes": 1024,
