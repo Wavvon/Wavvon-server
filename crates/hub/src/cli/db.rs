@@ -242,12 +242,6 @@ pub async fn backup(out_path: &str, db_url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Restore a backup archive over the configured database.
-///
-/// Refuses rather than half-writes, in this order: the destination must be
-/// empty, and its major must be at least the source's. `--force` waives only
-/// the emptiness check — the version rule is not the operator's to overrule,
-/// because past it `pg_restore` simply cannot parse the archive.
 /// Printing wrapper over [`db::dump::move_database`] — the mechanism lives in
 /// the library so it can be tested against two real databases.
 pub async fn db_move(
@@ -270,6 +264,12 @@ pub async fn db_move(
     Ok(())
 }
 
+/// Restore a backup archive over the configured database.
+///
+/// Refuses rather than half-writes, in this order: the destination must be
+/// empty, and its major must be at least the source's. `--force` waives only
+/// the emptiness check — the version rule is not the operator's to overrule,
+/// because past it `pg_restore` simply cannot parse the archive.
 pub async fn restore(src_path: &str, db_url: &str, force: bool) -> anyhow::Result<()> {
     let file = std::fs::File::open(src_path)
         .with_context(|| format!("Cannot open backup archive {src_path}"))?;
