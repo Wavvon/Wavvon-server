@@ -22,10 +22,12 @@ use crate::unix_now;
 // Helper types
 // ---------------------------------------------------------------------------
 
-/// Extract and verify a Bearer farm token. Returns the `sub` (canonical pubkey) on success.
-pub(crate) fn require_auth(
+/// Extract and verify a Bearer farm token whose session is still live: not
+/// revoked, not expired. A signature alone would make a stolen token outlive
+/// every revocation.
+pub(crate) async fn require_auth(
     headers: &HeaderMap,
-    farm_pubkey: &str,
+    state: &FarmState,
 ) -> Result<crate::token::FarmTokenPayload, (StatusCode, Json<serde_json::Value>)> {
     let token_str = headers
         .get("authorization")
@@ -38,12 +40,19 @@ pub(crate) fn require_auth(
             )
         })?;
 
-    verify_token(farm_pubkey, token_str).map_err(|_| {
+    let payload = verify_token(&state.public_key_hex(), token_str).map_err(|_| {
         (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_token"})),
         )
-    })
+    })?;
+    if !crate::routes::revoke::session_is_live(&state.db, &payload.jti).await {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "session_revoked"})),
+        ));
+    }
+    Ok(payload)
 }
 
 /// Returns the admin pubkey stored in the `farms` singleton row, or `None`.
@@ -121,8 +130,7 @@ pub async fn list_hubs(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<ListHubsResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let authed_sub = require_auth(&headers, &farm_pubkey).ok().map(|p| p.sub);
+    let authed_sub = require_auth(&headers, &state).await.ok().map(|p| p.sub);
 
     #[allow(clippy::type_complexity)]
     let rows: Vec<(
@@ -220,12 +228,12 @@ pub async fn create_hub(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<CreateHubRequest>,
 ) -> Result<(StatusCode, Json<CreateHubResponse>), (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     // -----------------------------------------------------------------------
     // Phase 3A: Enforce creation policy and quota before doing any real work.
     // -----------------------------------------------------------------------
+    let mut quotas: Option<(i64, i64)> = None;
     {
         let policy_row: Option<(String, i64, i64)> = sqlx::query_as(
             "SELECT creation_policy, max_hubs_per_user, max_hubs_total
@@ -260,50 +268,8 @@ pub async fn create_hub(
                     }
                 }
                 "open" => {
-                    // Per-user quota check.
-                    if max_hubs_per_user > 0 {
-                        let owned: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = $1 AND deleted_at IS NULL",
-                        )
-                        .bind(&payload.sub)
-                        .fetch_one(&state.db)
-                        .await
-                        .map_err(|e| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(serde_json::json!({"error": format!("db_error: {e}")})),
-                            )
-                        })?;
-
-                        if owned >= max_hubs_per_user {
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(serde_json::json!({"error": "user_quota_exceeded"})),
-                            ));
-                        }
-                    }
-
-                    // Farm-wide quota check.
-                    if max_hubs_total > 0 {
-                        let total: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(*) FROM hubs WHERE deleted_at IS NULL",
-                        )
-                        .fetch_one(&state.db)
-                        .await
-                        .map_err(|e| {
-                            (
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(serde_json::json!({"error": format!("db_error: {e}")})),
-                            )
-                        })?;
-
-                        if total >= max_hubs_total {
-                            return Err((
-                                StatusCode::FORBIDDEN,
-                                Json(serde_json::json!({"error": "farm_quota_exceeded"})),
-                            ));
-                        }
-                    }
+                    // Counted at insert time, under a lock: see below.
+                    quotas = Some((max_hubs_per_user, max_hubs_total));
                 }
                 _ => {
                     // Unknown policy value — treat as admin_only (safe default).
@@ -384,6 +350,42 @@ pub async fn create_hub(
     })?;
     let chosen = chosen.server_id.clone();
 
+    let db_err = |e: sqlx::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("db_error: {e}")})),
+        )
+    };
+    // Count and insert under the farms row lock, so concurrent creations
+    // cannot each see the quota one short and all succeed.
+    let mut tx = state.db.begin().await.map_err(db_err)?;
+    if let Some((max_hubs_per_user, max_hubs_total)) = quotas {
+        sqlx::query("SELECT id FROM farms WHERE id = 1 FOR UPDATE")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        let (owned, total): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*) FILTER (WHERE owner_pubkey = $1), COUNT(*)
+             FROM hubs WHERE deleted_at IS NULL",
+        )
+        .bind(&payload.sub)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        let exceeded = if max_hubs_per_user > 0 && owned >= max_hubs_per_user {
+            Some("user_quota_exceeded")
+        } else if max_hubs_total > 0 && total >= max_hubs_total {
+            Some("farm_quota_exceeded")
+        } else {
+            None
+        };
+        if let Some(error) = exceeded {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": error })),
+            ));
+        }
+    }
     sqlx::query(
         "INSERT INTO hubs (id, owner_pubkey, name, description, visibility, created_at)
          VALUES ($1, $2, $3, $4, $5, $6)",
@@ -394,14 +396,10 @@ pub async fn create_hub(
     .bind(&req.description)
     .bind(visibility)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("db_error: {e}")})),
-        )
-    })?;
+    .map_err(db_err)?;
+    tx.commit().await.map_err(db_err)?;
 
     // This hub's own database, created before anything is spawned. A failure
     // here fails the whole creation: a hub started without one falls back to
@@ -461,6 +459,7 @@ pub async fn create_hub(
             "voice_port": voice_port,
             "owner_pubkey": payload.sub,
             "farm_url": state.farm_url,
+            "hub_credential": state.hub_credential(&hub_id),
         });
         let _ = sqlx::query("UPDATE hubs SET server_id = $1 WHERE id = $2")
             .bind(&server_id)
@@ -569,8 +568,7 @@ pub async fn suspend_hub(
     State(state): State<Arc<FarmState>>,
     Json(req): Json<SuspendRequest>,
 ) -> Result<Json<SuspendResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     // Only farm admin may suspend.
     let admin_pubkey = get_admin_pubkey(&state.db).await;
@@ -581,8 +579,8 @@ pub async fn suspend_hub(
         ));
     }
 
-    let exists: Option<String> =
-        sqlx::query_scalar("SELECT id FROM hubs WHERE id = $1 AND deleted_at IS NULL")
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT server_id FROM hubs WHERE id = $1 AND deleted_at IS NULL")
             .bind(&hub_id)
             .fetch_optional(&state.db)
             .await
@@ -593,12 +591,12 @@ pub async fn suspend_hub(
                 )
             })?;
 
-    if exists.is_none() {
+    let Some((server_id,)) = row else {
         return Err((
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "hub_not_found"})),
         ));
-    }
+    };
 
     let now = unix_now();
     sqlx::query("UPDATE hubs SET suspended_at = $1, suspension_reason = $2 WHERE id = $3")
@@ -613,6 +611,26 @@ pub async fn suspend_hub(
                 Json(serde_json::json!({"error": format!("db_error: {e}")})),
             )
         })?;
+
+    // The proxy already refuses a suspended hub; stopping the process is what
+    // stops it answering anyone who reaches its port another way. Spawning on
+    // farm start and the monitor both skip suspended hubs, so it stays down.
+    match server_id {
+        None => {
+            if let Err(e) = state.hub_manager.stop_hub(&hub_id).await {
+                tracing::warn!(hub_id, error = %e, "Suspended hub could not be stopped");
+            }
+        }
+        Some(server_id) => {
+            if state.send_stop_to_agent(&server_id, &hub_id).await.is_err() {
+                tracing::warn!(
+                    hub_id,
+                    server_id,
+                    "Suspended hub's agent is offline; not stopped"
+                );
+            }
+        }
+    }
 
     Ok(Json(SuspendResponse {
         id: hub_id,
@@ -644,8 +662,7 @@ pub async fn force_restart_hub(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<Json<RestartResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     let admin_pubkey = get_admin_pubkey(&state.db).await;
     if admin_pubkey.as_deref() != Some(&payload.sub) {
@@ -766,8 +783,7 @@ pub async fn delete_hub(
     headers: HeaderMap,
     State(state): State<Arc<FarmState>>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let farm_pubkey = state.public_key_hex();
-    let payload = require_auth(&headers, &farm_pubkey)?;
+    let payload = require_auth(&headers, &state).await?;
 
     // Admin or owner may delete.
     let admin_pubkey = get_admin_pubkey(&state.db).await;

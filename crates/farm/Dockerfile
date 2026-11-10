@@ -23,6 +23,12 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Unprivileged, with the hub image's uid so one chown covers both. A
+# bind-mounted host directory has to be chowned to this uid by the operator.
+RUN groupadd --system --gid 10001 wavvon \
+    && useradd --system --uid 10001 --gid wavvon --home-dir /data wavvon \
+    && mkdir -p /data && chown wavvon:wavvon /data
+
 # The farm writes farm.db and farm_identity.json into the working directory.
 WORKDIR /data
 VOLUME ["/data"]
@@ -47,5 +53,7 @@ ENV WAVVON_HTTP_PORT=4000
 # ENV WAVVON_HUB_BIN=/usr/local/bin/wavvon-hub
 # ENV WAVVON_LOG_FORMAT=json
 # ENV WAVVON_OTLP_ENDPOINT=http://otel-collector:4318
+
+USER wavvon
 
 ENTRYPOINT ["/usr/local/bin/wavvon-farm"]

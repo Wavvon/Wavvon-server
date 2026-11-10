@@ -29,9 +29,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ed25519_dalek::SigningKey;
 use futures_util::StreamExt;
-use rand::rngs::OsRng;
 use reqwest::Client;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -55,8 +53,30 @@ fn hub_binary() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-fn token_for(state: &FarmState, pubkey: &str, farm_url: &str) -> String {
+async fn token_for(state: &FarmState, pubkey: &str, farm_url: &str) -> String {
     let now = unix_now();
+    let jti = hex::encode(rand::random::<[u8; 16]>());
+    // A token is only as good as its session row: the farm checks it.
+    sqlx::query(
+        "INSERT INTO farm_users (public_key, first_seen_at, last_seen_at) VALUES ($1, $2, $2)
+         ON CONFLICT (public_key) DO NOTHING",
+    )
+    .bind(pubkey)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO farm_sessions (jti, public_key, issued_at, expires_at, scope)
+         VALUES ($1, $2, $3, $4, 'member')",
+    )
+    .bind(&jti)
+    .bind(pubkey)
+    .bind(now)
+    .bind(now + 3600)
+    .execute(&state.db)
+    .await
+    .unwrap();
     sign_token(
         &state.keypair,
         &FarmTokenPayload {
@@ -65,7 +85,7 @@ fn token_for(state: &FarmState, pubkey: &str, farm_url: &str) -> String {
             iss_pk: state.public_key_hex(),
             sub: pubkey.to_string(),
             master: None,
-            jti: "e2e".to_string(),
+            jti: jti.clone(),
             iat: now,
             exp: now + 3600,
             scope: "member".to_string(),
@@ -93,7 +113,7 @@ async fn start_farm(
         )
     };
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let admin = "e2e".repeat(21) + "a"; // 64 hex-ish chars, only used as an id
     sqlx::query(
@@ -174,7 +194,7 @@ async fn a_hub_created_through_the_farm_becomes_reachable_through_it() {
 
     let (farm_url, state, _guard) = start_farm(hub_bin, 9800, 10800).await;
     let owner = "11".repeat(32);
-    let token = token_for(&state, &owner, &farm_url);
+    let token = token_for(&state, &owner, &farm_url).await;
     let client = Client::new();
 
     // 1. Create a hub. The farm provisions its database, picks a node, and
@@ -370,7 +390,7 @@ async fn a_schema_isolated_hub_gets_its_own_schema_and_not_public() {
         .await
         .unwrap();
 
-    let token = token_for(&state, &"22".repeat(32), &farm_url);
+    let token = token_for(&state, &"22".repeat(32), &farm_url).await;
     let created: serde_json::Value = Client::new()
         .post(format!("{farm_url}/farm/hubs"))
         .bearer_auth(&token)
@@ -471,7 +491,7 @@ async fn a_hub_with_its_own_role_still_boots_and_migrates() {
         .await
         .unwrap();
 
-    let token = token_for(&state, &"33".repeat(32), &farm_url);
+    let token = token_for(&state, &"33".repeat(32), &farm_url).await;
     let created: serde_json::Value = Client::new()
         .post(format!("{farm_url}/farm/hubs"))
         .bearer_auth(&token)

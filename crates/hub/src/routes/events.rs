@@ -615,7 +615,7 @@ pub async fn list_events(
     user: AuthUser,
     Query(params): Query<ListEventsParams>,
 ) -> Result<Json<Vec<EventWithRsvps>>, (StatusCode, String)> {
-    let limit = params.limit.unwrap_or(20).min(100);
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let upcoming = params.upcoming.unwrap_or(false);
     let now = crate::auth::handlers::unix_timestamp();
 
@@ -1233,6 +1233,7 @@ pub async fn create_squad_rooms(
                         event_id: Some(event_id.clone()),
                         forum_require_tag: false,
                         nsfw: false,
+                        slowmode_secs: 0,
                     });
                     break;
                 }

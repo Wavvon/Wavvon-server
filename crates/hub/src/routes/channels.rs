@@ -267,6 +267,7 @@ pub async fn create_channel(
         event_id: None,
         forum_require_tag: false,
         nsfw: req.nsfw,
+        slowmode_secs: 0,
     };
 
     // Publish channel.created audit event.
@@ -322,7 +323,17 @@ pub async fn update_channel(
         || req.parent_id.is_some()
         || req.banner_url.is_some()
         || req.banner_file_id.is_some()
-        || req.nsfw.is_some();
+        || req.nsfw.is_some()
+        || req.slowmode_secs.is_some();
+    if req
+        .slowmode_secs
+        .is_some_and(|s| !(0..=MAX_SLOWMODE_SECS).contains(&s))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("slowmode_secs must be 0 to {MAX_SLOWMODE_SECS}"),
+        ));
+    }
     let changing_appearance =
         req.icon.is_some() || req.color.is_some() || req.custom_icon_svg.is_some();
     let changing_talk_power = req.min_talk_power.is_some();
@@ -482,6 +493,7 @@ pub async fn update_channel(
         || req.banner_file_id.is_some()
         || req.forum_require_tag.is_some()
         || req.nsfw.is_some()
+        || req.slowmode_secs.is_some()
         || req.channel_type.is_some();
 
     if needs_update {
@@ -537,6 +549,10 @@ pub async fn update_channel(
             sep.push("nsfw = ");
             sep.push_bind_unseparated(nsfw);
         }
+        if let Some(secs) = req.slowmode_secs {
+            sep.push("slowmode_secs = ");
+            sep.push_bind_unseparated(secs);
+        }
         if let Some(ct) = req.channel_type.as_deref() {
             sep.push("channel_type = ");
             sep.push_bind_unseparated(ct);
@@ -587,12 +603,15 @@ pub async fn update_channel(
     Ok(StatusCode::OK)
 }
 
+/// The longest slowmode a channel takes: six hours.
+const MAX_SLOWMODE_SECS: i32 = 6 * 3600;
+
 pub async fn list_channels(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
 ) -> Result<Json<Vec<ChannelResponse>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ChannelRow>(
-        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id, is_temporary, owner_pubkey, spawner_name_template, event_id, forum_require_tag, nsfw
+        "SELECT id, name, created_by, parent_id, is_category, display_order, description, icon, color, custom_icon_svg, created_at, channel_type, banner_url, banner_file_id, is_temporary, owner_pubkey, spawner_name_template, event_id, forum_require_tag, nsfw, slowmode_secs
          FROM channels
          ORDER BY display_order, created_at",
     )
@@ -657,6 +676,7 @@ pub async fn list_channels(
             event_id: r.event_id,
             forum_require_tag: r.forum_require_tag,
             nsfw: r.nsfw,
+            slowmode_secs: r.slowmode_secs,
         })
         .collect();
 
@@ -828,6 +848,7 @@ struct ChannelRow {
     event_id: Option<String>,
     forum_require_tag: bool,
     nsfw: bool,
+    slowmode_secs: i32,
 }
 
 /// Returns the code-depth a new item would sit at if placed under `parent_id`

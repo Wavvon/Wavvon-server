@@ -8,17 +8,79 @@ struct HubProcess {
     _child: Child,
 }
 
+/// The farm URL's host, resolved, comma-separated. Empty when it does not
+/// resolve: the hub then trusts no proxy, as before.
+async fn farm_addresses(farm_url: &str) -> String {
+    let Some(authority) = authority_of(farm_url) else {
+        return String::new();
+    };
+    match tokio::net::lookup_host(authority).await {
+        Ok(addrs) => addrs
+            .map(|a| a.ip().to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        Err(_) => String::new(),
+    }
+}
+
+/// `host:port` of an http(s) URL, the port defaulted by scheme.
+fn authority_of(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let default_port = match scheme {
+        "https" => 443,
+        "http" => 80,
+        _ => return None,
+    };
+    let host_port = rest.split(['/', '?', '#']).next()?;
+    let has_port = match host_port.rfind(']') {
+        Some(end) => host_port[end..].contains(':'),
+        None => host_port.contains(':'),
+    };
+    Some(if has_port {
+        host_port.to_string()
+    } else {
+        format!("{host_port}:{default_port}")
+    })
+}
+
+/// What the farm's spawn command says about the hub beyond where it runs.
+pub struct FarmGrant<'a> {
+    pub owner_pubkey: Option<&'a str>,
+    pub farm_url: Option<&'a str>,
+    /// The heartbeat credential the farm issued for this hub.
+    pub credential: Option<&'a str>,
+}
+
 pub struct HubManager {
     hubs: RwLock<HashMap<String, HubProcess>>,
     hub_bin: String,
+    hubs_dir: std::path::PathBuf,
 }
 
 impl HubManager {
-    pub fn new(hub_bin: String) -> Self {
+    pub fn new(hub_bin: String, hubs_dir: String) -> Self {
         Self {
             hubs: RwLock::new(HashMap::new()),
             hub_bin,
+            hubs_dir: hubs_dir.into(),
         }
+    }
+
+    /// The hub's own working directory. A hub keeps `hub_identity.json` and
+    /// its search index in its working directory, so two hubs sharing one
+    /// share an identity. `hub_id` comes from the farm and becomes a path
+    /// segment, so it must be a plain one.
+    fn work_dir(&self, hub_id: &str) -> Result<std::path::PathBuf> {
+        if hub_id.is_empty()
+            || !hub_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            anyhow::bail!("refusing hub id {hub_id:?} as a directory name");
+        }
+        let dir = self.hubs_dir.join(hub_id);
+        std::fs::create_dir_all(&dir).with_context(|| format!("Cannot create {dir:?}"))?;
+        Ok(dir)
     }
 
     pub async fn spawn_hub(
@@ -27,8 +89,7 @@ impl HubManager {
         db_url: &str,
         port: u16,
         voice_port: u16,
-        owner_pubkey: Option<&str>,
-        farm_url: Option<&str>,
+        farm: &FarmGrant<'_>,
     ) -> Result<()> {
         // See the same block in farm/src/hub_manager.rs: these names used to
         // be literals, and WAVVON_HUB_HTTP_PORT was one the hub never reads,
@@ -40,7 +101,9 @@ impl HubManager {
         // communities. The caller resolves it now (provision.rs) and refuses
         // the spawn rather than starting a hub with nowhere of its own.
         let bin = std::env::var(wavvon_hub_env::HUB_BIN).unwrap_or_else(|_| self.hub_bin.clone());
+        let work_dir = self.work_dir(hub_id)?;
         let mut cmd = tokio::process::Command::new(&bin);
+        cmd.current_dir(&work_dir);
         // Tokio does NOT kill a child when its `Child` is dropped — it detaches
         // it. Without this, any path that drops the manager without calling
         // `stop_hub` (a panic, a test ending, the agent exiting) leaves a hub
@@ -56,11 +119,25 @@ impl HubManager {
             // row to the hub's pubkey and route to it.
             .env(wavvon_hub_env::FARM_HUB_ID, hub_id)
             .env(wavvon_hub_env::DATABASE_URL, db_url);
-        if let Some(pk) = owner_pubkey {
+        if let Some(pk) = farm.owner_pubkey {
             cmd.env(wavvon_hub_env::OWNER_PUBKEY, pk);
         }
-        if let Some(url) = farm_url {
+        if let Some(url) = farm.farm_url {
             cmd.env(wavvon_hub_env::FARM_URL, url);
+            // The farm forwards each client's address. These hubs listen on the
+            // network, so the header is believed only from the farm's own
+            // addresses (WAVVON_FARM_EGRESS_IPS overrides, for a farm behind NAT).
+            let farm_ips = match std::env::var("WAVVON_FARM_EGRESS_IPS") {
+                Ok(list) => list,
+                Err(_) => farm_addresses(url).await,
+            };
+            if !farm_ips.is_empty() {
+                cmd.env(wavvon_hub_env::TRUSTED_PROXY, "true")
+                    .env(wavvon_hub_env::TRUSTED_PROXY_FROM, farm_ips);
+            }
+        }
+        if let Some(c) = farm.credential {
+            cmd.env(wavvon_hub_env::FARM_HUB_CREDENTIAL, c);
         }
         let child = cmd.spawn().with_context(|| format!("spawn hub {hub_id}"))?;
         self.hubs.write().await.insert(
@@ -90,12 +167,10 @@ impl HubManager {
         db_url: &str,
         port: u16,
         voice_port: u16,
-        owner_pubkey: Option<&str>,
-        farm_url: Option<&str>,
+        farm: &FarmGrant<'_>,
     ) -> Result<()> {
         self.stop_hub(hub_id).await?;
-        self.spawn_hub(hub_id, db_url, port, voice_port, owner_pubkey, farm_url)
-            .await
+        self.spawn_hub(hub_id, db_url, port, voice_port, farm).await
     }
 
     pub async fn list_hubs(&self) -> Vec<serde_json::Value> {
@@ -105,5 +180,38 @@ impl HubManager {
             .iter()
             .map(|(id, p)| serde_json::json!({"hub_id": id, "port": p.port, "status": "running"}))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_farm_url_gives_a_resolvable_authority() {
+        assert_eq!(
+            authority_of("https://farm.example").as_deref(),
+            Some("farm.example:443")
+        );
+        assert_eq!(
+            authority_of("http://10.0.0.2:4000/x").as_deref(),
+            Some("10.0.0.2:4000")
+        );
+        assert_eq!(authority_of("https://[::1]/").as_deref(), Some("[::1]:443"));
+        assert_eq!(authority_of("ftp://x"), None);
+    }
+
+    #[test]
+    fn each_hub_gets_its_own_directory_and_ids_stay_plain() {
+        let root = std::env::temp_dir().join(format!("wavvon-agent-dirs-{}", std::process::id()));
+        let m = HubManager::new("wavvon-hub".into(), root.to_string_lossy().into_owned());
+        let a = m.work_dir("hubA").unwrap();
+        let b = m.work_dir("hubB").unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_dir() && b.is_dir());
+        for bad in ["", "..", "../x", "a/b", r"a\b"] {
+            assert!(m.work_dir(bad).is_err(), "{bad:?} accepted");
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 10;
+pub const SCHEMA_VERSION: i32 = 13;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -327,6 +327,33 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                 .execute(&mut *conn)
                 .await?;
             }
+        }
+        // Sessions used to never expire. Existing ones get the same sliding
+        // window new ones start with, counted from the upgrade.
+        11 => {
+            sqlx::query(
+                "UPDATE sessions SET expires_at = EXTRACT(EPOCH FROM now())::BIGINT + $1
+                 WHERE expires_at IS NULL",
+            )
+            .bind(crate::auth::handlers::SESSION_TTL_SECS)
+            .execute(&mut *conn)
+            .await?;
+        }
+        // Per-channel slowmode (Wavvon-server#315), off everywhere to start.
+        12 => {
+            sqlx::query(
+                "ALTER TABLE channels ADD COLUMN IF NOT EXISTS slowmode_secs INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+        // A member's opt-out of the public online widget (Wavvon-server#341).
+        13 => {
+            sqlx::query(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS widget_hidden BOOLEAN NOT NULL DEFAULT FALSE",
+            )
+            .execute(&mut *conn)
+            .await?;
         }
         _ => unreachable!("no schema step {version}"),
     }

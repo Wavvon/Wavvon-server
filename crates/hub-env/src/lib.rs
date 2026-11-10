@@ -44,6 +44,12 @@ pub const OWNER_PUBKEY: &str = "WAVVON_OWNER_PUBKEY";
 /// invite links and passkeys.
 pub const PUBLIC_URL: &str = "WAVVON_PUBLIC_URL";
 
+/// Host clients dial for voice (WebTransport over UDP), when it is not the
+/// public URL's host: a hub behind an HTTP proxy that drops UDP (Cloudflare's
+/// proxied records) keeps its site proxied and points voice at a DNS-only
+/// name.
+pub const VOICE_PUBLIC_HOST: &str = "WAVVON_VOICE_PUBLIC_HOST";
+
 /// The farm's own row id for this hub, handed to it at spawn.
 ///
 /// The farm allocates a hub row before the process exists, so it cannot know
@@ -52,6 +58,27 @@ pub const PUBLIC_URL: &str = "WAVVON_PUBLIC_URL";
 /// pubkey and can finally route to it: the proxy keys on `hubs.hub_pubkey`,
 /// and until it is filled every farm-routed request 404s.
 pub const FARM_HUB_ID: &str = "WAVVON_FARM_HUB_ID";
+
+/// The farm's proof that this process is the hub it spawned under
+/// `FARM_HUB_ID`, sent with every heartbeat. Without it anyone could claim a
+/// new hub's row before the hub booted, or keep a crashed hub looking alive.
+pub const FARM_HUB_CREDENTIAL: &str = "WAVVON_FARM_HUB_CREDENTIAL";
+
+/// Read the client address from `X-Forwarded-For`. The farm sets it on the
+/// hubs it runs itself, which listen on loopback behind its proxy and so can
+/// hear from nobody else.
+pub const TRUSTED_PROXY: &str = "WAVVON_TRUSTED_PROXY";
+
+/// Comma-separated addresses a trusted proxy connects from. With
+/// `TRUSTED_PROXY`, `X-Forwarded-For` is believed only from these peers: an
+/// agent's hubs listen on the network, so anyone else reaching the port must
+/// not choose their own address.
+pub const TRUSTED_PROXY_FROM: &str = "WAVVON_TRUSTED_PROXY_FROM";
+
+/// Address the hub's HTTP listener binds. The farm binds the hubs it runs
+/// itself to loopback: its proxy is their only way in, and the proxy is what
+/// refuses a suspended hub.
+pub const BIND_ADDR: &str = "WAVVON_BIND_ADDR";
 
 /// Path to the `wavvon-hub` binary. Read by the farm and the agent to decide
 /// what to launch — not read by the hub itself.
@@ -83,6 +110,10 @@ pub const SPAWNABLE: &[&str] = &[
     OWNER_PUBKEY,
     FARM_HUB_ID,
     PUBLIC_URL,
+    BIND_ADDR,
+    FARM_HUB_CREDENTIAL,
+    TRUSTED_PROXY,
+    TRUSTED_PROXY_FROM,
 ];
 
 #[cfg(test)]

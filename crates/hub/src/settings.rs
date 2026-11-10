@@ -74,6 +74,11 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "The farm's row id for this hub. Reported on heartbeat so the farm can route to it",
     ),
     (
+        wavvon_hub_env::FARM_HUB_CREDENTIAL,
+        "(unset)",
+        "Set by the farm at spawn; sent with every heartbeat to prove this is the hub it spawned",
+    ),
+    (
         "WAVVON_TEMPLATE_URL",
         "(unset)",
         "Bootstrap template URL applied on first boot when the channels table is empty",
@@ -137,6 +142,12 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          would allow limiter bypass.",
     ),
     (
+        wavvon_hub_env::TRUSTED_PROXY_FROM,
+        "(unset)",
+        "Comma-separated proxy addresses. With WAVVON_TRUSTED_PROXY, X-Forwarded-For is believed \
+         only from these peers. Unset: from any peer",
+    ),
+    (
         wavvon_hub_env::AUTH_RATE_BURST,
         "10",
         "Per-IP burst for the auth handshake. Raise it when your users share an address \
@@ -190,6 +201,12 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         "Max number of concurrent bot-initiated video streams across the whole hub \
          (apps.md §4 media budget). `screen_share_start` is rejected once \
          this many bot streams are already active; human screen shares are never counted.",
+    ),
+    (
+        wavvon_hub_env::VOICE_PUBLIC_HOST,
+        "(unset)",
+        "Host clients dial for voice when it differs from WAVVON_PUBLIC_URL's: set it to a \
+         DNS-only name when the public host sits behind a proxy that drops UDP (Cloudflare)",
     ),
     (
         wavvon_hub_env::PUBLIC_URL,
@@ -264,6 +281,8 @@ pub struct Settings {
     /// without it the farm has a hub it cannot route to.
     /// Env: WAVVON_FARM_HUB_ID
     pub farm_hub_id: Option<String>,
+    /// Env: WAVVON_FARM_HUB_CREDENTIAL
+    pub farm_hub_credential: Option<String>,
     /// Owner's Ed25519 public key (64 hex chars). Seeded as builtin-owner on first boot.
     /// Env: WAVVON_OWNER_PUBKEY
     pub owner_pubkey: Option<String>,
@@ -305,6 +324,8 @@ pub struct Settings {
     ///
     /// Env: WAVVON_TRUSTED_PROXY
     pub trusted_proxy: bool,
+    /// Env: WAVVON_TRUSTED_PROXY_FROM
+    pub trusted_proxy_from: Option<String>,
     /// Path to a directory of pre-built web-client assets.
     ///
     /// When set, the hub serves the browser client from `/` with SPA fallback:
@@ -335,6 +356,8 @@ pub struct Settings {
     /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
     /// Env: WAVVON_PUBLIC_URL
     pub public_url: Option<String>,
+    /// Env: WAVVON_VOICE_PUBLIC_HOST
+    pub voice_public_host: Option<String>,
     /// WebAuthn Relying Party ID override. Falls back to public_url hostname.
     /// Env: WAVVON_WEBAUTHN_RP_ID
     pub webauthn_rp_id: Option<String>,
@@ -523,6 +546,7 @@ mod tests {
         std::env::set_var(wavvon_hub_env::FARM_URL, "https://probe.farm");
         std::env::set_var(wavvon_hub_env::OWNER_PUBKEY, "abc123");
         std::env::set_var(wavvon_hub_env::FARM_HUB_ID, "hub-probe-id");
+        std::env::set_var(wavvon_hub_env::FARM_HUB_CREDENTIAL, "cred-probe");
         std::env::set_var(wavvon_hub_env::PUBLIC_URL, "https://probe.example");
 
         let s = load().expect("settings load with overrides");
@@ -568,6 +592,12 @@ mod tests {
             Some("hub-probe-id"),
             "{} is not read",
             wavvon_hub_env::FARM_HUB_ID
+        );
+        assert_eq!(
+            s.farm_hub_credential.as_deref(),
+            Some("cred-probe"),
+            "{} is not read",
+            wavvon_hub_env::FARM_HUB_CREDENTIAL
         );
         assert_eq!(
             s.public_url.as_deref(),

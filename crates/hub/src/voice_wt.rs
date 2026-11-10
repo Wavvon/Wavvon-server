@@ -228,10 +228,21 @@ fn extract_token(path: &str) -> Option<&str> {
     query.split('&').find_map(|kv| kv.strip_prefix("token="))
 }
 
+/// The first characters of a key, enough to recognise a member in the log.
+fn short(pubkey: &str) -> &str {
+    &pubkey[..pubkey.len().min(12)]
+}
+
+// Sessions are logged once each at INFO (opened, refused, closed), never per
+// datagram: "the QUIC session never reached the hub" and "it reached the hub
+// and was refused" must not look the same to an operator. The token is never
+// logged.
 async fn handle_session(incoming: IncomingSession, state: Arc<AppState>) -> anyhow::Result<()> {
     let session_request = incoming.await?;
+    let peer = session_request.remote_address();
 
     let Some(token) = extract_token(session_request.path()) else {
+        tracing::info!(%peer, "voice WT session refused: no token");
         session_request.not_found().await;
         return Ok(());
     };
@@ -245,11 +256,19 @@ async fn handle_session(incoming: IncomingSession, state: Arc<AppState>) -> anyh
         binds.remove(token)
     };
     let Some(bind) = bind else {
+        tracing::info!(%peer, "voice WT session refused: unknown, used or expired token");
         session_request.forbidden().await;
         return Ok(());
     };
 
     let connection = session_request.accept().await?;
+    let opened = std::time::Instant::now();
+    tracing::info!(
+        %peer,
+        member = short(&bind.pubkey),
+        channel = %bind.channel_id,
+        "voice WT session opened"
+    );
 
     {
         let mut channels = state.voice_channels.write().await;
@@ -259,19 +278,26 @@ async fn handle_session(incoming: IncomingSession, state: Arc<AppState>) -> anyh
             .insert(bind.pubkey.clone(), Some(connection.clone()));
     }
 
-    loop {
+    let ended = loop {
         tokio::select! {
             datagram = connection.receive_datagram() => {
                 match datagram {
                     Ok(datagram) => {
                         relay_datagram(&state, &bind.channel_id, &bind.pubkey, &datagram.payload()).await;
                     }
-                    Err(_) => break,
+                    Err(e) => break e.to_string(),
                 }
             }
-            _ = connection.closed() => break,
+            reason = connection.closed() => break reason.to_string(),
         }
-    }
+    };
+    tracing::info!(
+        member = short(&bind.pubkey),
+        channel = %bind.channel_id,
+        secs = opened.elapsed().as_secs(),
+        reason = %ended,
+        "voice WT session closed"
+    );
 
     // Session ended: clear the audio-carrying handle but leave the
     // roster/membership entry alone — WS `leave_voice` (disconnect or

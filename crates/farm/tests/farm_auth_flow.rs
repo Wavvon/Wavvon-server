@@ -9,8 +9,6 @@ use std::sync::Arc;
 
 use axum::http::HeaderValue;
 use axum_test::TestServer;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
@@ -27,7 +25,7 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_url = "https://farm.test".to_string();
 
     // Insert the singleton farms row (main.rs does this on real startup).
@@ -154,8 +152,7 @@ async fn verify_happy_path_returns_farm_token() {
 
     // 2. Sign the challenge.
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig =
-        identity.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
+    let sig = identity.sign(&common::answer(&challenge_bytes));
     let sig_hex = hex::encode(sig.to_bytes());
 
     // 3. Verify.
@@ -193,8 +190,7 @@ async fn verify_rejects_bad_signature() {
     // Sign with a different identity (wrong key).
     let wrong_identity = Identity::generate();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let bad_sig = wrong_identity
-        .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
+    let bad_sig = wrong_identity.sign(&common::answer(&challenge_bytes));
 
     let vr = server
         .post("/auth/verify")
@@ -252,11 +248,7 @@ async fn verify_two_outstanding_challenges_both_succeed_when_echoed() {
     // Verify the FIRST challenge, explicitly echoing it back — must succeed
     // even though it's no longer the newest pending challenge.
     let challenge1_bytes = hex::decode(&challenge1_hex).unwrap();
-    let sig1_hex = hex::encode(
-        identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge1_bytes).unwrap())
-            .to_bytes(),
-    );
+    let sig1_hex = hex::encode(identity.sign(&common::answer(&challenge1_bytes)).to_bytes());
     let vr1 = server
         .post("/auth/verify")
         .json(&json!({
@@ -270,11 +262,7 @@ async fn verify_two_outstanding_challenges_both_succeed_when_echoed() {
 
     // Verify the SECOND challenge the same way — must also succeed.
     let challenge2_bytes = hex::decode(&challenge2_hex).unwrap();
-    let sig2_hex = hex::encode(
-        identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge2_bytes).unwrap())
-            .to_bytes(),
-    );
+    let sig2_hex = hex::encode(identity.sign(&common::answer(&challenge2_bytes)).to_bytes());
     let vr2 = server
         .post("/auth/verify")
         .json(&json!({
@@ -307,11 +295,7 @@ async fn renew_returns_new_token_with_different_jti() {
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(
-        identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
-            .to_bytes(),
-    );
+    let sig_hex = hex::encode(identity.sign(&common::answer(&challenge_bytes)).to_bytes());
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
@@ -367,11 +351,7 @@ async fn revoke_check_returns_false_for_active_session() {
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(
-        identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
-            .to_bytes(),
-    );
+    let sig_hex = hex::encode(identity.sign(&common::answer(&challenge_bytes)).to_bytes());
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
@@ -441,6 +421,8 @@ async fn heartbeat_accepts_known_hub_pubkey() {
     let resp = server
         .post("/farm/heartbeat")
         .json(&json!({
+            "hub_id": "hbhub",
+            "hub_credential": state.hub_credential("hbhub"),
             "hub_pubkey": hub_pubkey,
             "online_users": 5,
             "storage_bytes": 1024,
@@ -553,10 +535,7 @@ async fn challenge_and_sign(server: &TestServer, id: &Identity) -> (String, Stri
         .as_str()
         .unwrap()
         .to_string();
-    let sig = id.sign(
-        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&challenge_hex).unwrap())
-            .unwrap(),
-    );
+    let sig = id.sign(&common::answer(&hex::decode(&challenge_hex).unwrap()));
     (challenge_hex, hex::encode(sig.to_bytes()))
 }
 
@@ -686,4 +665,69 @@ async fn totp_applies_to_a_paired_device_of_the_admin() {
         "totp_required",
         "a device paired to the admin must still present the second factor"
     );
+}
+
+/// A device its master revoked cannot sign in at the farm: a hosted hub
+/// forwards the signed revocation, the farm keeps it, refuses the device,
+/// and ends the identity's live sessions.
+#[tokio::test]
+async fn a_forwarded_revocation_refuses_the_device_and_ends_sessions() {
+    let (server, _state, _guard) = setup().await;
+    let master = Identity::generate();
+    let device = Identity::generate();
+    let device_pubkey = device.public_key_hex();
+    let sign_in = || async {
+        let (challenge, signature) = challenge_and_sign(&server, &device).await;
+        server
+            .post("/auth/verify")
+            .json(&json!({
+                "public_key": device_pubkey,
+                "challenge": challenge,
+                "signature": signature,
+                "subkey_cert": subkey_cert(&master, &device_pubkey),
+            }))
+            .await
+    };
+    let token = sign_in().await.json::<Value>()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A paired device renews as itself: its master has no farm_users row.
+    server
+        .post("/auth/renew")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+
+    let bytes = wavvon_identity::RevocationEntry::signing_bytes(
+        &master.public_key_hex(),
+        &device_pubkey,
+        5,
+    );
+    let entry = json!({
+        "master_pubkey": master.public_key_hex(),
+        "subkey_pubkey": device_pubkey,
+        "revoked_at": 5,
+        "signature": hex::encode(master.sign(&bytes).to_bytes()),
+    });
+    // A forged one is refused and changes nothing.
+    let mut forged = entry.clone();
+    forged["signature"] = json!("00".repeat(64));
+    server
+        .post("/farm/revocations")
+        .json(&forged)
+        .await
+        .assert_status_bad_request();
+    server
+        .post("/farm/revocations")
+        .json(&entry)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    sign_in().await.assert_status_unauthorized();
+    server
+        .post("/auth/renew")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_unauthorized();
 }

@@ -66,6 +66,10 @@ pub const CAPABILITIES: &[&str] = &[
     // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
     // it takes inline `attachments` only, so a client hides the attach button.
     "attachments.stored",
+    // A channel can have `slowmode_secs` (one message per member per that
+    // many seconds; `messages.slowmode.bypass` exempts). A refused send is a
+    // 429 whose JSON body carries `retry_after_secs`.
+    "channels.slowmode",
     // Voice works only in `voice` channels (decisions.md, "Voice lives in
     // voice channels"): the hub refuses a voice join, a voice move, an AFK
     // channel or an alliance voice grant anywhere else, and a text channel
@@ -81,6 +85,10 @@ pub const CAPABILITIES: &[&str] = &[
     // sign it with its subkey. Gated because an older hub verifies the
     // signature against the canonical key alone and refuses the send.
     "dms.plaintext.signercert",
+    // A plaintext DM's signature is the v2 form, covering a client-chosen
+    // message_id and created_at (sent alongside) and the member set. A client
+    // seeing this signs v2; a hub without it still takes v1.
+    "dms.plaintext.v2",
     // `PATCH /hub` takes `landing_image` and `landing_colors`, and the
     // invite preview carries them with `description` and `online_count`.
     // An admin page must not offer fields an older hub would silently drop.
@@ -91,6 +99,14 @@ pub const CAPABILITIES: &[&str] = &[
     // community" against a hub that would answer 404, leaving the person
     // believing they left.
     "hub.leave",
+    // GET/PUT /admin/settings/lockdown: one switch that stops new members
+    // joining (and optionally holds back recent joiners), plus a join-rate
+    // alert that can throw it. Events hub.lockdown and raid.suspected.
+    "hub.lockdown",
+    // `GET /public/widget.json`, `GET /widget`, `/admin/settings/widget`
+    // and `widget_hidden` on `/me`: an admin page offers the widget, and a
+    // member the opt-out, only where the hub honours them.
+    "hub.widget",
     // `POST /invites` accepts `bound_pubkey`: the invite admits that identity
     // and nobody else, and redeeming it also satisfies the admission
     // challenge. A client that cannot see this string must not offer the
@@ -128,12 +144,19 @@ pub const CAPABILITIES: &[&str] = &[
     // the two spellings share no ids, and there is no dual-reading period
     // (permissions.md §6).
     "permissions.catalogue",
+    // Each `GET /permissions` entry carries `category`, the section a roles
+    // screen shows it under. Without it a client shows one flat section.
+    "permissions.categories",
     // `GET /recovery/requests/to-attest` lists the open rotation requests
     // that name the caller as a recovery contact, and a
     // `recovery_attestation_requested` WebSocket event says when one opens.
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
     "recovery.attest.requests",
+    // `PUT /roles/order` reorders every role below the caller in one call.
+    // Without it a client renumbers roles with one PATCH each, which can
+    // half-apply, so it offers drag reordering only where this is present.
+    "roles.order",
     // `/info` and `GET /hub/settings` carry `stream_limits` (max width, height,
     // fps, kbps; each absent when uncapped), `PATCH /hub` sets them, and a
     // `screen_share_start` declaring more is refused (#278). An older hub has
@@ -178,6 +201,10 @@ pub const CAPABILITIES: &[&str] = &[
     // program can tell a hub that never sends it from a replayed request
     // stripped of it, and refuse the second.
     "webhooks.signedtimestamp",
+    // `POST /ws/ticket` and `/ws?ticket=`: a client that sees this opens
+    // its socket with a single-use ticket instead of the session token, so
+    // the token stays out of URLs (and the logs that keep them).
+    "ws.ticket",
 ];
 
 #[cfg(test)]

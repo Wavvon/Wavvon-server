@@ -328,7 +328,7 @@ pub async fn list_posts_with(
     perms.require(permissions::MESSAGES_READ)?;
     let can_moderate = perms.has(permissions::FORUM_POSTS_MANAGE);
 
-    let limit = params.limit.unwrap_or(50).min(100);
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
 
     // Built with QueryBuilder rather than two static strings x a tag branch
     // (forum.md §10.2 tag filter) -- avoids a 2x2 combinatorial blowup of
@@ -566,7 +566,7 @@ pub async fn get_post_with(
     .unwrap_or(0);
     summary.unread_reply_count = Some(unread);
 
-    let limit = params.limit.unwrap_or(50).min(100);
+    let limit = params.limit.unwrap_or(50).clamp(1, 100);
 
     let reply_rows: Vec<ReplyRow> = if let Some(after_id) = &params.after {
         sqlx::query_as::<_, ReplyRow>(
@@ -768,6 +768,7 @@ pub async fn delete_post(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Post, &post_id).await?;
 
     broadcast_forum_event(
         &state,
@@ -983,6 +984,8 @@ pub async fn delete_reply(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Reply, &reply_id)
+        .await?;
 
     // Decrement reply_count (don't go below 0).
     sqlx::query("UPDATE posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1")
@@ -1687,6 +1690,28 @@ fn require_write_policy(
 
 // ── POST /federation/forum/channels/:cid/posts ──────────────────────────────
 
+/// A peer speaks for its own members. A post, reply or reaction filed here
+/// under one of *ours* would read as theirs, with nothing to tell it apart.
+async fn refuse_local_author(
+    state: &AppState,
+    author_pubkey: &str,
+) -> Result<(), (StatusCode, String)> {
+    let local_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_member)",
+    )
+    .bind(author_pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if local_member {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "author is a member of this hub".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn federated_create_post(
     State(state): State<Arc<AppState>>,
     peer: PeerHub,
@@ -1708,6 +1733,7 @@ pub async fn federated_create_post(
             "author_pubkey_required".to_string(),
         ));
     }
+    refuse_local_author(&state, &author_pubkey).await?;
     if title.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "title_required".to_string()));
     }
@@ -1791,6 +1817,7 @@ pub async fn federated_create_reply(
             "author_pubkey_required".to_string(),
         ));
     }
+    refuse_local_author(&state, &author_pubkey).await?;
     if body.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "body_required".to_string()));
     }
@@ -1875,21 +1902,7 @@ pub async fn federated_add_post_reaction(
             "author_pubkey_required".to_string(),
         ));
     }
-    // A peer speaks for its own members. A reaction filed here under one of
-    // *ours* would read as theirs, with nothing to tell it apart.
-    let local_member: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE public_key = $1 AND is_member)",
-    )
-    .bind(&author_pubkey)
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if local_member {
-        return Err((
-            StatusCode::FORBIDDEN,
-            "author is a member of this hub".to_string(),
-        ));
-    }
+    refuse_local_author(&state, &author_pubkey).await?;
     let emoji = req.emoji.trim();
     if emoji.is_empty() || emoji.chars().count() > 8 {
         return Err((
@@ -1965,6 +1978,7 @@ pub async fn federated_delete_post(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Post, &post_id).await?;
 
     broadcast_forum_event(
         &state,
@@ -2008,6 +2022,8 @@ pub async fn federated_delete_reply(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::attachments::remove_owned(&state.db, crate::attachments::Owner::Reply, &reply_id)
+        .await?;
 
     sqlx::query("UPDATE posts SET reply_count = GREATEST(0, reply_count - 1) WHERE id = $1")
         .bind(&post_id)

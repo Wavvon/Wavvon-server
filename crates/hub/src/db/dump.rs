@@ -35,9 +35,31 @@ fn pg_binary(name: &str) -> PathBuf {
 /// Turns "the tool is missing" into the one sentence that fixes it, rather
 /// than a bare `NotFound` from the OS. Worth the lines: an operator running
 /// the official image hits this before they hit anything else.
-fn run(bin: &str, args: &[&str], what: &str) -> Result<()> {
+/// `url` without its password, and the password. A command line is readable
+/// by every local user (`ps`), so the password travels in `PGPASSWORD`.
+pub fn split_password(url: &str) -> (String, Option<String>) {
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return (url.to_string(), None);
+    };
+    let password = parsed.password().map(|p| {
+        percent_encoding::percent_decode_str(p)
+            .decode_utf8_lossy()
+            .into_owned()
+    });
+    if password.is_some() {
+        let _ = parsed.set_password(None);
+    }
+    (parsed.to_string(), password)
+}
+
+fn run(bin: &str, args: &[&str], password: Option<&str>, what: &str) -> Result<()> {
     let path = pg_binary(bin);
-    let output = Command::new(&path).args(args).output().map_err(|e| {
+    let mut cmd = Command::new(&path);
+    cmd.args(args);
+    if let Some(p) = password {
+        cmd.env("PGPASSWORD", p);
+    }
+    let output = cmd.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow::anyhow!(
                 "{bin} not found. Install the PostgreSQL client tools \
@@ -140,6 +162,8 @@ pub async fn is_empty(pool: &PgPool) -> Result<bool> {
 /// database where that schema is free. Restoring one hub's dump *as* another
 /// hub is not something this does.
 pub fn dump(db_url: &str, out: &Path, schema: &str) -> Result<()> {
+    let (db_url, password) = split_password(db_url);
+    let db_url = db_url.as_str();
     run(
         "pg_dump",
         &[
@@ -151,6 +175,7 @@ pub fn dump(db_url: &str, out: &Path, schema: &str) -> Result<()> {
             &out.to_string_lossy(),
             db_url,
         ],
+        password.as_deref(),
         "pg_dump",
     )
 }
@@ -174,6 +199,8 @@ pub fn dump(db_url: &str, out: &Path, schema: &str) -> Result<()> {
 /// populated one they now replace what the archive covers instead of merging
 /// rows into it — which is what "restore over this hub" should mean.
 pub fn restore(db_url: &str, archive: &Path) -> Result<()> {
+    let (db_url, password) = split_password(db_url);
+    let db_url = db_url.as_str();
     run(
         "pg_restore",
         &[
@@ -186,6 +213,7 @@ pub fn restore(db_url: &str, archive: &Path) -> Result<()> {
             db_url,
             &archive.to_string_lossy(),
         ],
+        password.as_deref(),
         "pg_restore",
     )
 }
@@ -311,6 +339,16 @@ pub async fn move_database(source_url: &str, target_url: &str, force: bool) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_password_leaves_the_url_before_it_reaches_a_command_line() {
+        let (url, pw) = split_password("postgres://postgres:s%40cret@127.0.0.1:5433/wavvon");
+        assert_eq!(url, "postgres://postgres@127.0.0.1:5433/wavvon");
+        assert_eq!(pw.as_deref(), Some("s@cret"));
+        let (url, pw) = split_password("postgres://localhost/wavvon");
+        assert_eq!(url, "postgres://localhost/wavvon");
+        assert_eq!(pw, None);
+    }
     use std::collections::BTreeMap;
 
     #[test]

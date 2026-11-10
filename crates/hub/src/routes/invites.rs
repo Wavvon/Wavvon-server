@@ -56,8 +56,29 @@ pub async fn create_invite(
     perms.require(INVITES_MANAGE)?;
 
     let now = crate::auth::handlers::unix_timestamp();
+    // Absent means unlimited. Zero or negative minted a code that was dead on
+    // arrival ("0/-5 uses", "expired 10s ago"), and a huge expiry overflowed
+    // `now + s`: a panic in debug, a timestamp in the past in release.
+    if req.max_uses.is_some_and(|m| m < 1) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "max_uses must be at least 1".to_string(),
+        ));
+    }
+    let mut expires_at = match req.expires_in_seconds {
+        None => None,
+        Some(s) if s < 1 => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "expires_in_seconds must be at least 1".to_string(),
+            ))
+        }
+        Some(s) => Some(now.checked_add(s).ok_or((
+            StatusCode::BAD_REQUEST,
+            "expires_in_seconds is too large".to_string(),
+        ))?),
+    };
     let mut max_uses = req.max_uses;
-    let mut expires_at = req.expires_in_seconds.map(|s| now + s);
 
     // A bound invite names its recipient, so it is single-use by definition
     // and the key had better be a key: a typo mints a code nobody on earth
@@ -550,6 +571,16 @@ async fn get_join_info(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
     .ok_or((StatusCode::NOT_FOUND, "Invite not found".to_string()))?;
 
+    // A retired code admits nobody, so it stops describing the hub too: an old
+    // leaked link used to keep serving the landing and a live online count.
+    let now = crate::auth::handlers::unix_timestamp();
+    if invite_status(invite.uses, invite.max_uses, invite.expires_at, now) != "live" {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "This invite is no longer valid".to_string(),
+        ));
+    }
+
     // Note: grant_role_id is intentionally never surfaced here — a public
     // preview must not leak that an invite grants an elevated role.
     let member_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
@@ -644,7 +675,7 @@ pub async fn join_with_invite(
     // invite gate (the invite in the path is the gate), so the admission that
     // `/auth/verify` performs for a presented code happens here. A no-op for a
     // member.
-    crate::auth::handlers::admit_member(&state.db, &user.public_key).await?;
+    crate::auth::handlers::admit_member(&state, &user.public_key).await?;
 
     // Increment use count
     sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1")

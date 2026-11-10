@@ -266,23 +266,6 @@ async fn authenticate_http(hub_url: &str, identity: &Identity) -> String {
     verify.token
 }
 
-/// Build a valid `plaintext_signature` for a plaintext DM.
-///
-/// The canonical form mirrors `wavvon_identity::federated_plaintext_dm_signing_bytes`:
-/// domain tag + len-prefixed(conversation_id) + len-prefixed(conv_type) + len-prefixed(content).
-/// `conv_type` is always `"dm"` for 1:1 conversations and `"group"` for group ones;
-/// tests that only deal with 1:1 DMs can pass `"dm"` directly.
-fn make_plaintext_sig(
-    sender: &Identity,
-    conversation_id: &str,
-    conv_type: &str,
-    content: &str,
-) -> String {
-    let bytes =
-        wavvon_identity::federated_plaintext_dm_signing_bytes(conversation_id, conv_type, content);
-    hex::encode(sender.sign(&bytes).to_bytes())
-}
-
 /// Deliver whatever the sending hub still has queued, now.
 ///
 /// `send_dm` writes the outbox row, then fires the first attempt in a spawned
@@ -405,11 +388,11 @@ async fn dm_delivered_across_hubs() {
 
     // Alice sends a DM. Hub A persists it locally and federates to Hub B.
     let content = "hi bob, from across hubs";
-    let sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, content);
+    let sig = common::signed_dm_body(&alice, &conv.id, &conv.conv_type, content, &conv.members);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": content, "plaintext_signature": sig }))
+        .json(&sig)
         .send()
         .await
         .unwrap();
@@ -463,11 +446,17 @@ async fn dm_retries_when_recipient_hub_comes_online() {
 
     // Send while Hub B is down. POST still succeeds (Hub A accepts and queues).
     let retry_content = "hi from retry land";
-    let retry_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, retry_content);
+    let retry_sig = common::signed_dm_body(
+        &alice,
+        &conv.id,
+        &conv.conv_type,
+        retry_content,
+        &conv.members,
+    );
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": retry_content, "plaintext_signature": retry_sig }))
+        .json(&retry_sig)
         .send()
         .await
         .unwrap();
@@ -700,11 +689,17 @@ async fn send_dm_uses_home_hub_designation_when_present() {
     // Alice sends a DM. Hub A should route via the designation to Hub B,
     // ignoring the placeholder hub_url.
     let desig_content = "routed via designation";
-    let desig_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, desig_content);
+    let desig_sig = common::signed_dm_body(
+        &alice,
+        &conv.id,
+        &conv.conv_type,
+        desig_content,
+        &conv.members,
+    );
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": desig_content, "plaintext_signature": desig_sig }))
+        .json(&desig_sig)
         .send()
         .await
         .unwrap();
@@ -791,11 +786,11 @@ async fn send_dm_uses_designation_when_master_is_known_only_from_a_cert() {
     .unwrap();
 
     let content = "routed via a cert-only link";
-    let sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, content);
+    let sig = common::signed_dm_body(&alice, &conv.id, &conv.conv_type, content, &conv.members);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": content, "plaintext_signature": sig }))
+        .json(&sig)
         .send()
         .await
         .unwrap();
@@ -841,11 +836,17 @@ async fn send_dm_falls_back_to_hub_url_when_no_designation() {
     let conv: ConversationResponse = resp.json().await.unwrap();
 
     let fallback_content = "fallback delivery";
-    let fallback_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, fallback_content);
+    let fallback_sig = common::signed_dm_body(
+        &alice,
+        &conv.id,
+        &conv.conv_type,
+        fallback_content,
+        &conv.members,
+    );
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": fallback_content, "plaintext_signature": fallback_sig }))
+        .json(&fallback_sig)
         .send()
         .await
         .unwrap();
@@ -1270,7 +1271,7 @@ async fn federated_dm_rejects_normal_user() {
         "content": "injected plaintext",
         "attachments": [],
         "signature": null,
-        "created_at": 1_700_000_000i64,
+        "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
     });
 
     let resp = client
@@ -1344,7 +1345,7 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
         "content": "injected without signature",
         "attachments": [],
         "signature": null,
-        "created_at": 1_700_000_000i64,
+        "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
     });
 
     let resp = client
@@ -1362,25 +1363,19 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
     );
 
     // --- Case 2: attacker signs with their OWN key but claims sender=victim ---
-    let wrong_sig = {
-        let bytes = wavvon_identity::federated_plaintext_dm_signing_bytes(
-            conv_id,
-            "dm",
-            "injected with wrong key",
-        );
-        hex::encode(attacker.sign(&bytes).to_bytes())
-    };
-    let payload_wrong_sig = serde_json::json!({
-        "message_id": "bbbbbbbbccccdddd0000111122223334",
-        "conversation_id": conv_id,
-        "conv_type": "dm",
-        "sender": victim.public_key_hex(),
-        "members": [attacker.public_key_hex(), victim.public_key_hex()],
-        "content": "injected with wrong key",
-        "attachments": [],
-        "signature": wrong_sig,
-        "created_at": 1_700_000_001i64,
-    });
+    let payload_wrong_sig = common::signed_fed_dm(
+        |b| attacker.sign(b).to_bytes(),
+        serde_json::json!({
+            "message_id": "bbbbbbbbccccdddd0000111122223334",
+            "conversation_id": conv_id,
+            "conv_type": "dm",
+            "sender": victim.public_key_hex(),
+            "members": [attacker.public_key_hex(), victim.public_key_hex()],
+            "content": "injected with wrong key",
+            "attachments": [],
+            "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
+        }),
+    );
 
     let resp = client
         .post(format!("{hub}/federation/dm"))
@@ -1400,27 +1395,22 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
     // It would reach dm_outbox through the mirror queue, where the worker
     // logs a prefix of it; a short one used to panic the worker for good.
     let content = "short id";
-    let sig = hex::encode(
-        attacker
-            .sign(&wavvon_identity::federated_plaintext_dm_signing_bytes(
-                conv_id, "dm", content,
-            ))
-            .to_bytes(),
-    );
     let resp = client
         .post(format!("{hub}/federation/dm"))
         .bearer_auth(&attacker_token)
-        .json(&serde_json::json!({
-            "message_id": "x",
-            "conversation_id": conv_id,
-            "conv_type": "dm",
-            "sender": attacker.public_key_hex(),
-            "members": [attacker.public_key_hex(), victim.public_key_hex()],
-            "content": content,
-            "attachments": [],
-            "signature": sig,
-            "created_at": 1_700_000_002i64,
-        }))
+        .json(&common::signed_fed_dm(
+            |b| attacker.sign(b).to_bytes(),
+            serde_json::json!({
+                "message_id": "x",
+                "conversation_id": conv_id,
+                "conv_type": "dm",
+                "sender": attacker.public_key_hex(),
+                "members": [attacker.public_key_hex(), victim.public_key_hex()],
+                "content": content,
+                "attachments": [],
+                "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
+            }),
+        ))
         .send()
         .await
         .unwrap();
@@ -1436,7 +1426,7 @@ async fn federated_dm_rejects_is_hub_attacker_with_spoofed_sender() {
 /// path of the signature check.
 #[tokio::test]
 async fn federated_dm_accepts_correctly_signed_plaintext() {
-    let (hub, _state, _guard) = start_real_hub("hub-h4-signed").await;
+    let (hub, state, _guard) = start_real_hub("hub-h4-signed").await;
     let client = reqwest::Client::new();
 
     // Register the "sending hub" via is_hub=true.
@@ -1476,19 +1466,19 @@ async fn federated_dm_accepts_correctly_signed_plaintext() {
     let conv_id = "dddd0000111122223333444455556666";
     let content = "legitimate message from real sender";
 
-    let sig = make_plaintext_sig(&sender, conv_id, "dm", content);
-
-    let payload = serde_json::json!({
-        "message_id": "ccccccccddddeeee0000111122223335",
-        "conversation_id": conv_id,
-        "conv_type": "dm",
-        "sender": sender.public_key_hex(),
-        "members": [sender.public_key_hex(), hub_identity.public_key_hex()],
-        "content": content,
-        "attachments": [],
-        "signature": sig,
-        "created_at": 1_700_000_002i64,
-    });
+    let payload = common::signed_fed_dm(
+        |b| sender.sign(b).to_bytes(),
+        serde_json::json!({
+            "message_id": "ccccccccddddeeee0000111122223335",
+            "conversation_id": conv_id,
+            "conv_type": "dm",
+            "sender": sender.public_key_hex(),
+            "members": [sender.public_key_hex(), hub_identity.public_key_hex()],
+            "content": content,
+            "attachments": [],
+            "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
+        }),
+    );
 
     let resp = client
         .post(format!("{hub}/federation/dm"))
@@ -1503,6 +1493,44 @@ async fn federated_dm_accepts_correctly_signed_plaintext() {
         reqwest::StatusCode::OK,
         "correctly-signed federated DM must be accepted"
     );
+
+    // v2 binds the id, the time and the members (Wavvon-server#311).
+    let post = |body: serde_json::Value| {
+        let (client, hub, token) = (client.clone(), hub.clone(), hub_token.clone());
+        async move {
+            client
+                .post(format!("{hub}/federation/dm"))
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    // A replay is a no-op: the signed id is already here.
+    assert_eq!(post(payload.clone()).await, reqwest::StatusCode::OK);
+    let stored: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dm_messages WHERE id = $1")
+        .bind(payload["message_id"].as_str().unwrap())
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(stored, 1);
+    // Into a conversation with members the sender did not sign: refused.
+    let mut moved = payload.clone();
+    moved["members"] = serde_json::json!([
+        sender.public_key_hex(),
+        Identity::generate().public_key_hex()
+    ]);
+    moved["message_id"] = serde_json::json!("ccccccccddddeeee0000111122223336");
+    assert_eq!(post(moved).await, reqwest::StatusCode::UNAUTHORIZED);
+    // Signed, but too long ago to be a late delivery.
+    let mut old = payload.clone();
+    old["message_id"] = serde_json::json!("ccccccccddddeeee0000111122223337");
+    old["created_at"] =
+        serde_json::json!(wavvon_hub::auth::handlers::unix_timestamp() - 40 * 24 * 3600);
+    let old = common::signed_fed_dm(|b| sender.sign(b).to_bytes(), old);
+    assert_eq!(post(old).await, reqwest::StatusCode::BAD_REQUEST);
 }
 
 /// A legitimate peer hub (Hub A) that has gone through the federation
@@ -1540,11 +1568,17 @@ async fn federated_dm_accepts_registered_peer_hub() {
 
     // Alice sends a DM; Hub A federates it to Hub B.
     let peer_content = "peer delivery test";
-    let peer_sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, peer_content);
+    let peer_sig = common::signed_dm_body(
+        &alice,
+        &conv.id,
+        &conv.conv_type,
+        peer_content,
+        &conv.members,
+    );
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&serde_json::json!({ "content": peer_content, "plaintext_signature": peer_sig }))
+        .json(&peer_sig)
         .send()
         .await
         .unwrap();
@@ -1675,11 +1709,11 @@ async fn an_accepting_hub_mirrors_a_dm_to_the_other_home_hubs() {
     let conv: ConversationResponse = resp.json().await.unwrap();
 
     let content = "you should see this on either hub";
-    let sig = make_plaintext_sig(&alice, &conv.id, &conv.conv_type, content);
+    let sig = common::signed_dm_body(&alice, &conv.id, &conv.conv_type, content, &conv.members);
     let resp = client
         .post(format!("{hub_a}/conversations/{}/messages", conv.id))
         .bearer_auth(&alice_token)
-        .json(&json!({ "content": content, "plaintext_signature": sig }))
+        .json(&sig)
         .send()
         .await
         .unwrap();
@@ -1849,29 +1883,24 @@ async fn federated_dm_block_check_ignores_an_empty_member_list() {
         let client = client.clone();
         let hub = hub.clone();
         let token = verify.token.clone();
-        let sender_pk = sender.public_key_hex();
-        let sig = hex::encode(
-            sender
-                .sign(&wavvon_identity::federated_plaintext_dm_signing_bytes(
-                    conv_id, "dm", message_id,
-                ))
-                .to_bytes(),
+        let body = common::signed_fed_dm(
+            |b| sender.sign(b).to_bytes(),
+            serde_json::json!({
+                "message_id": message_id,
+                "conversation_id": conv_id,
+                "conv_type": "dm",
+                "sender": sender.public_key_hex(),
+                "members": members,
+                "content": message_id,
+                "attachments": [],
+                "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
+            }),
         );
         async move {
             client
                 .post(format!("{hub}/federation/dm"))
                 .bearer_auth(&token)
-                .json(&serde_json::json!({
-                    "message_id": message_id,
-                    "conversation_id": conv_id,
-                    "conv_type": "dm",
-                    "sender": sender_pk,
-                    "members": members,
-                    "content": message_id,
-                    "attachments": [],
-                    "signature": sig,
-                    "created_at": 1_700_000_000i64,
-                }))
+                .json(&body)
                 .send()
                 .await
                 .unwrap()
@@ -1957,23 +1986,20 @@ async fn federated_plaintext_dm_accepts_a_cert_chained_signature() {
         let token = peer_token.clone();
         let canonical = canonical.clone();
         let members = vec![alice.public_key_hex(), canonical.clone()];
-        let sig = hex::encode(
-            device
-                .sign(&wavvon_identity::federated_plaintext_dm_signing_bytes(
-                    conv, "dm", id,
-                ))
-                .to_bytes(),
+        let body = common::signed_fed_dm(
+            |b| device.sign(b).to_bytes(),
+            serde_json::json!({
+                "message_id": id, "conversation_id": conv, "conv_type": "dm",
+                "sender": canonical, "members": members, "content": id,
+                "attachments": [], "signer_cert": cert,
+                "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
+            }),
         );
         async move {
             client
                 .post(format!("{hub}/federation/dm"))
                 .bearer_auth(&token)
-                .json(&serde_json::json!({
-                    "message_id": id, "conversation_id": conv, "conv_type": "dm",
-                    "sender": canonical, "members": members, "content": id,
-                    "attachments": [], "signature": sig, "signer_cert": cert,
-                    "created_at": 1_700_000_000i64,
-                }))
+                .json(&body)
                 .send()
                 .await
                 .unwrap()
@@ -2084,18 +2110,19 @@ async fn federated_group_roster_changes_only_on_a_signed_change() {
 
     let deliver = |n: u8, sender: &Identity, members: Vec<String>| {
         let message_id = format!("bbbb000011112222333344445555{n:04}");
-        let sig = make_plaintext_sig(sender, conv_id, "group", &message_id);
-        let body = json!({
-            "message_id": message_id,
-            "conversation_id": conv_id,
-            "conv_type": "group",
-            "sender": sender.public_key_hex(),
-            "members": members,
-            "content": message_id,
-            "attachments": [],
-            "signature": sig,
-            "created_at": 1_700_000_000i64,
-        });
+        let body = common::signed_fed_dm(
+            |b| sender.sign(b).to_bytes(),
+            json!({
+                "message_id": message_id,
+                "conversation_id": conv_id,
+                "conv_type": "group",
+                "sender": sender.public_key_hex(),
+                "members": members,
+                "content": message_id,
+                "attachments": [],
+                "created_at": wavvon_hub::auth::handlers::unix_timestamp(),
+            }),
+        );
         let (client, hub, token) = (client.clone(), hub.clone(), token.clone());
         async move {
             client
@@ -2173,6 +2200,36 @@ async fn federated_group_roster_changes_only_on_a_signed_change() {
 
 /// The origin half: a member added on one hub is carried to the other
 /// members' hubs, so what they then send is accepted there.
+/// Send a plaintext DM signed over the member set as it stands now, read back
+/// from the hub first, as a client does: the signature covers the members.
+async fn send_signed(
+    client: &reqwest::Client,
+    hub: &str,
+    conv_id: &str,
+    who: &Identity,
+    token: &str,
+    content: &str,
+) -> reqwest::StatusCode {
+    let current: ConversationResponse = client
+        .get(format!("{hub}/conversations/{conv_id}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let body = common::signed_dm_body(who, conv_id, "group", content, &current.members);
+    client
+        .post(format!("{hub}/conversations/{conv_id}/messages"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
 #[tokio::test]
 async fn a_signed_add_reaches_the_other_members_hubs() {
     let (hub_a, hub_a_state, _ga) = start_real_hub("hub-a-group").await;
@@ -2206,16 +2263,8 @@ async fn a_signed_add_reaches_the_other_members_hubs() {
         .unwrap();
     assert_eq!(conv.conv_type, "group");
 
-    let send = |who: &Identity, token: &str, content: &str| {
-        let sig = make_plaintext_sig(who, &conv.id, "group", content);
-        let req = client
-            .post(format!("{hub_a}/conversations/{}/messages", conv.id))
-            .bearer_auth(token)
-            .json(&json!({ "content": content, "plaintext_signature": sig }));
-        async move { req.send().await.unwrap().status() }
-    };
     assert_eq!(
-        send(&alice, &alice_token, "hello").await,
+        send_signed(&client, &hub_a, &conv.id, &alice, &alice_token, "hello").await,
         reqwest::StatusCode::CREATED
     );
     wait_for_federated_dms(&client, &hub_a_state, &hub_b, &bob_token, &conv.id, 1).await;
@@ -2263,7 +2312,15 @@ async fn a_signed_add_reaches_the_other_members_hubs() {
     }
 
     assert_eq!(
-        send(&dave, &dave_token, "hi, new here").await,
+        send_signed(
+            &client,
+            &hub_a,
+            &conv.id,
+            &dave,
+            &dave_token,
+            "hi, new here"
+        )
+        .await,
         reqwest::StatusCode::CREATED
     );
     let messages =

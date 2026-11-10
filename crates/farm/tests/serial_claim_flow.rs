@@ -21,8 +21,6 @@ mod common;
 use std::sync::Arc;
 
 use axum_test::TestServer;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use serde_json::json;
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
 
@@ -30,7 +28,7 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
     let (db_pool, guard) = common::create_test_db().await;
     db::migrations::run(&db_pool).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     sqlx::query("INSERT INTO farms (id, public_key, created_at) VALUES (1, $1, $2)")
         .bind(&farm_pubkey)
@@ -83,9 +81,10 @@ async fn stored_pubkey(state: &FarmState, id: &str) -> Option<String> {
         .unwrap()
 }
 
-fn heartbeat(hub_id: &str, hub_pubkey: &str) -> serde_json::Value {
+fn heartbeat(state: &FarmState, hub_id: &str, hub_pubkey: &str) -> serde_json::Value {
     json!({
         "hub_id": hub_id,
+        "hub_credential": state.hub_credential(hub_id),
         "hub_pubkey": hub_pubkey,
         "online_users": 0,
         "storage_bytes": 0,
@@ -106,7 +105,7 @@ async fn first_heartbeat_binds_the_row_to_the_hubs_pubkey() {
     let serial = "aa".repeat(32);
     let res = server
         .post("/farm/heartbeat")
-        .json(&heartbeat("hub-a", &serial))
+        .json(&heartbeat(&state, "hub-a", &serial))
         .await;
     assert_eq!(res.status_code(), 200);
 
@@ -128,7 +127,7 @@ async fn repeated_heartbeats_are_idempotent() {
     for _ in 0..3 {
         let res = server
             .post("/farm/heartbeat")
-            .json(&heartbeat("hub-b", &serial))
+            .json(&heartbeat(&state, "hub-b", &serial))
             .await;
         assert_eq!(res.status_code(), 200);
     }
@@ -153,12 +152,12 @@ async fn a_second_hub_cannot_steal_a_claimed_row() {
 
     server
         .post("/farm/heartbeat")
-        .json(&heartbeat("hub-c", &honest))
+        .json(&heartbeat(&state, "hub-c", &honest))
         .await;
     // The impostor knows the row id and claims it with its own key.
     server
         .post("/farm/heartbeat")
-        .json(&heartbeat("hub-c", &impostor))
+        .json(&heartbeat(&state, "hub-c", &impostor))
         .await;
 
     assert_eq!(
@@ -181,7 +180,7 @@ async fn a_deleted_row_cannot_be_claimed() {
 
     let res = server
         .post("/farm/heartbeat")
-        .json(&heartbeat("hub-d", &"ee".repeat(32)))
+        .json(&heartbeat(&state, "hub-d", &"ee".repeat(32)))
         .await;
 
     assert_eq!(
@@ -208,4 +207,30 @@ async fn a_heartbeat_without_hub_id_is_not_an_error() {
     // 403 because the hub is still unrecognised — not a crash, and not a claim.
     assert_eq!(res.status_code(), 403);
     assert_eq!(stored_pubkey(&state, "hub-e").await, None);
+}
+
+/// Knowing a row's id is not enough to claim it: the heartbeat has to carry
+/// the credential the farm issued for that id at spawn.
+#[tokio::test]
+async fn a_heartbeat_without_the_spawn_credential_cannot_claim_a_row() {
+    let (server, state, _guard) = setup().await;
+    insert_unclaimed_hub(&state, "hub-f").await;
+    insert_unclaimed_hub(&state, "hub-g").await;
+
+    for credential in [
+        String::new(),
+        "00".repeat(64),
+        state.hub_credential("hub-g"),
+    ] {
+        let res = server
+            .post("/farm/heartbeat")
+            .json(&json!({
+                "hub_id": "hub-f",
+                "hub_pubkey": "ab".repeat(32),
+                "hub_credential": credential,
+            }))
+            .await;
+        assert_eq!(res.status_code(), 403);
+    }
+    assert_eq!(stored_pubkey(&state, "hub-f").await, None);
 }

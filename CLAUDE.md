@@ -127,7 +127,13 @@ permissively licensed crates, never on another crate of this workspace.
 It is on crates.io. `release.yml` publishes it with each hub release when its
 `version` is not there yet (trusted publishing, no token), so **bump the
 crate's version when its public API or a wire format changes**, independently
-of the hub's version; an unchanged version is skipped.
+of the hub's version; an unchanged version is skipped. It is packaged and
+compiled in one job and published with `--no-verify` from another, so the
+OIDC credential never sits beside a build.
+
+The hub image bundles the web client from the Wavvon-clients tag named in
+`clients.ref`, not from its `develop`: **bump `clients.ref` to the latest
+clients release before a hub release**, or the image ships the older client.
 
 Defines every signed envelope type: `HomeHubList`, `SubkeyCert`, `PairingOffer`,
 DM envelopes, prefs blob, recovery request/attestation
@@ -159,6 +165,7 @@ reaches `Settings`.
 
 - **`farm`** — fleet control plane: hub lifecycle (spawn, monitor, stop), server registration, reverse-proxy to hub processes, farm-level SSO. Partially implemented; see the wiki's `farm-model.md` and `farm-impl.md`.
 - **`agent`** — fleet worker node. Reverse-connects to farm over WebSocket, spawns and monitors local hub processes on its behalf. No HTTP surface.
+- **`rate-limit`** — the per-IP token-bucket limiter, shared by hub and farm so the farm's auth and TOTP routes get the same budget as the hub's. The hub re-exports it as `wavvon_hub::rate_limit`.
 - **`demo-seed`** — populates a running hub with realistic demo data for screenshots.
 
 ---

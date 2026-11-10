@@ -121,6 +121,9 @@ async fn sync_one(state: &AppState, master_pubkey: &str, home_hub_url: &str) {
                     .close_sessions_of_revoked(&entry.master_pubkey, &entry.subkey_pubkey)
                     .await;
             }
+            // Every pass, not only on first insert: a farm that missed one
+            // (down, or added later) catches up on the next sync.
+            state.forward_revocation_to_farm(entry);
         }
     }
 

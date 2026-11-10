@@ -86,6 +86,9 @@ pub struct ScreenStreamMeta {
     /// "share started before I subscribed" (push needed) from
     /// "share started after I subscribed" (broadcast delivers it).
     pub started_at: Instant,
+    /// The bitrate the relay holds this stream to: what the sharer declared,
+    /// or the hub's cap when it declared nothing. None when neither exists.
+    pub max_kbps: Option<u32>,
 }
 
 /// All active streams for one (channel, sharer) pair.
@@ -179,6 +182,9 @@ pub struct WebhookCircuit {
 pub struct RateLimiters {
     /// Per-user fixed-window rate limiter for message posting (30 messages/60 s).
     pub messages: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Slowmode: when each member last posted in each slowed channel, keyed
+    /// `(channel_id, public_key)`. In memory: a restart forgives one wait.
+    pub slowmode: Mutex<HashMap<(String, String), Instant>>,
     /// Per-user fixed-window rate limiter for link preview fetches (10 requests/60 s).
     /// Each preview may trigger an outbound HTTP fetch, so we throttle per user.
     pub preview: Mutex<HashMap<String, (u32, Instant)>>,
@@ -243,6 +249,7 @@ impl Default for RateLimiters {
     fn default() -> Self {
         Self {
             messages: Mutex::new(HashMap::new()),
+            slowmode: Mutex::new(HashMap::new()),
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
             forum_federated_write: Mutex::new(HashMap::new()),
@@ -279,6 +286,9 @@ pub struct AppState {
     /// other's challenge — e.g. two simultaneous federated DM deliveries to
     /// the same peer hub.
     pub pending_challenges: RwLock<HashMap<String, PendingChallenge>>,
+    /// `POST /ws/ticket` tickets: ticket -> (session token, expiry). Taken,
+    /// never read twice, by the WebSocket handshake.
+    pub ws_tickets: Mutex<HashMap<String, (String, Instant)>>,
     /// `(issuer_pubkey, master_pubkey)` → `(fetched_at, portfolio)` for certs
     /// this hub pulled from a trusted issuer during admission
     /// (hub-certifications.md §11). Short-lived on purpose: a sibling that
@@ -334,6 +344,12 @@ pub struct AppState {
     /// Multiple concurrent sharers per channel are allowed (multi-stream overlay).
     /// In-memory only — cleared on process restart.
     pub screen_shares: RwLock<HashMap<(String, String), ActiveShare>>,
+    /// Sender pubkey to master, as proven by a remote hub's device registry
+    /// (`dms::messages::resolve_master_binding`). Kept apart from
+    /// `users.master_pubkey` on purpose: sign-in maps a master-signed cert to
+    /// the row holding that column, so a binding a federation peer could
+    /// supply must never land there.
+    pub federated_masters: RwLock<HashMap<String, String>>,
     /// Broadcast channel carrying binary chunk events to all WS connections.
     pub screen_share_tx: broadcast::Sender<ScreenChunkEvent>,
     /// Active bot WS sessions: app_pubkey → { session_id → mpsc sender }.
@@ -370,6 +386,9 @@ pub struct AppState {
     /// Unix timestamp of the last farm pubkey re-fetch attempt.
     /// Used to rate-limit re-fetch to at most once per 60s.
     pub last_farm_pubkey_fetch: Arc<RwLock<i64>>,
+    /// The farm's answer to "is this session still live?", per token `jti`,
+    /// with when it was asked. See `auth::middleware::farm_session_live`.
+    pub farm_session_checks: Mutex<HashMap<String, (bool, i64)>>,
 
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
@@ -473,9 +492,7 @@ pub struct AppState {
     /// message to that user was dropped with nothing reporting it. For voice
     /// that means no sender key arrives, so every datagram is discarded at
     /// the key lookup and the call is silent — see `send_to_user`.
-    pub ws_key_senders: RwLock<
-        HashMap<String, HashMap<String, tokio::sync::mpsc::UnboundedSender<WsServerMessage>>>,
-    >,
+    pub ws_key_senders: RwLock<HashMap<String, HashMap<String, SocketSender>>>,
 
     /// Grouped rate limiters (auth per-IP, messages per-user).
     pub rate_limiters: RateLimiters,
@@ -507,6 +524,10 @@ pub struct AppState {
 
     /// Mirror of `Settings::allow_private_webhooks`; see `webhook_url`.
     pub allow_private_webhooks: bool,
+    /// Accept a sign-in answer that does not name this hub (the v1 scheme).
+    /// Always false in a running hub: that answer is what a hostile hub can
+    /// relay. True only in the in-process test harness, whose helpers sign v1.
+    pub accept_unbound_auth: bool,
     /// Mirror of `Settings::metrics`: whether `GET /metrics` answers.
     pub metrics_enabled: bool,
 
@@ -561,6 +582,73 @@ impl AppState {
         self.ws_key_senders.write().await.remove(pubkey);
     }
 
+    /// Who holds `role_id`: everyone for @everyone. Read before a write that
+    /// removes the role, so the holders can still be found afterwards.
+    pub async fn role_holders(&self, role_id: &str) -> Option<Vec<String>> {
+        if role_id == "builtin-everyone" {
+            return None;
+        }
+        Some(
+            sqlx::query_scalar("SELECT user_public_key FROM user_roles WHERE role_id = $1")
+                .bind(role_id)
+                .fetch_all(&self.db)
+                .await
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Tell the sockets of the members a permission change reaches to check
+    /// their access again (see `WsServerMessage::AccessChanged`). A socket
+    /// computes its channels and voice rights once, at connect: a member who
+    /// lost a channel otherwise kept receiving it until they reconnected.
+    /// `None` (an @everyone change) reaches every socket. Nothing is closed:
+    /// a permission tweak must not drop the whole hub out of its calls.
+    pub async fn recheck_access_of(&self, holders: Option<Vec<String>>) {
+        let senders = self.ws_key_senders.read().await;
+        let mut send = |sessions: &HashMap<String, SocketSender>| {
+            for tx in sessions.values() {
+                let _ = tx.try_send(WsServerMessage::AccessChanged);
+            }
+        };
+        match holders {
+            Some(pks) => {
+                for pk in pks {
+                    if let Some(sessions) = senders.get(&pk) {
+                        send(sessions);
+                    }
+                }
+            }
+            None => senders.values().for_each(&mut send),
+        }
+    }
+
+    /// Tell this hub's farm, if it has one, that a device was revoked. A
+    /// farm-hosted hub's clients sign in at the farm, which never sees the
+    /// revocation lists a hub learns from home hubs; without this the revoked
+    /// device keeps signing in there. Best effort: the farm verifies the
+    /// signature itself, and the next revocation sync forwards it again.
+    pub fn forward_revocation_to_farm(&self, entry: &wavvon_identity::RevocationEntry) {
+        let Some(farm_url) = self.farm_url.clone() else {
+            return;
+        };
+        let client = self.http_client.clone();
+        let body = serde_json::to_value(entry).unwrap_or_default();
+        tokio::spawn(async move {
+            if let Err(e) = client
+                .post(format!(
+                    "{}/farm/revocations",
+                    farm_url.trim_end_matches('/')
+                ))
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+            {
+                tracing::warn!("Could not forward a device revocation to the farm: {e}");
+            }
+        });
+    }
+
     /// Close the sockets of the identity a revoked device belongs to. Tokens
     /// are refused from here on, but an open socket was authenticated once,
     /// at its handshake. Sockets are keyed by identity, not device, so the
@@ -598,10 +686,22 @@ impl AppState {
         };
         sessions
             .values()
-            .filter(|tx| tx.send(msg.clone()).is_ok())
+            .filter(|tx| tx.try_send(msg.clone()).is_ok())
             .count()
     }
 }
+
+/// A socket's queue of targeted messages. Bounded: a socket that stops
+/// reading must not grow hub memory without limit. A full queue drops the
+/// message; a client that far behind has lost the stream anyway.
+pub type SocketSender = tokio::sync::mpsc::Sender<WsServerMessage>;
+
+/// Targeted messages one socket may have waiting.
+pub const SOCKET_QUEUE: usize = 1024;
+
+/// Open sockets one identity may hold: tabs, devices and reconnect overlap
+/// fit well inside it; a script opening sockets in a loop does not.
+pub const MAX_SOCKETS_PER_IDENTITY: usize = 16;
 
 pub struct PendingChallenge {
     /// The pubkey the challenge was issued to; verify must present the same.

@@ -251,6 +251,8 @@ pub async fn update_role(
                 .await
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
         }
+        let holders = state.role_holders(&role_id).await;
+        state.recheck_access_of(holders).await;
     }
 
     if let Some(flag) = req.display_separately {
@@ -355,6 +357,7 @@ pub async fn delete_role(
     // setting rather than a foreign key, and would otherwise go on naming a
     // role that no longer exists.
     let db_err = |e: sqlx::Error| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}"));
+    let holders = state.role_holders(&role_id).await;
     let mut tx = state.db.begin().await.map_err(db_err)?;
     for sql in [
         "UPDATE invites SET grant_role_id = NULL WHERE grant_role_id = $1",
@@ -370,6 +373,7 @@ pub async fn delete_role(
             .map_err(db_err)?;
     }
     tx.commit().await.map_err(db_err)?;
+    state.recheck_access_of(holders).await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -434,6 +438,19 @@ pub async fn remove_role(
         ));
     }
 
+    // The role's rank was checked, the member's was not: a low role could be
+    // stripped from someone who outranks the caller. Your own roles stay
+    // yours to drop.
+    if public_key != user.public_key {
+        let target = permissions::user_permissions(&state.db, &public_key).await?;
+        if target.max_priority >= perms.max_priority {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "Cannot remove roles from a member ranked at or above you".to_string(),
+            ));
+        }
+    }
+
     // Prevent removing the last owner
     if role_id == "builtin-owner" {
         let owner_count: i64 =
@@ -456,6 +473,8 @@ pub async fn remove_role(
         .execute(&state.db)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // Access narrowed: the open socket has to compute it again.
+    state.close_sessions_of(&public_key).await;
 
     Ok(StatusCode::OK)
 }
@@ -489,6 +508,85 @@ pub async fn list_role_members(
 }
 
 // Helpers
+
+#[derive(serde::Deserialize)]
+pub struct RoleOrderRequest {
+    /// Every role the caller may move, highest first.
+    pub role_ids: Vec<String>,
+}
+
+/// PUT /roles/order — reorder roles in one call (Wavvon-clients#286).
+///
+/// The list must name exactly the roles the caller may move: every role but
+/// the built-ins below their own highest priority. Those roles keep the
+/// priorities they had between them, handed out again in the new order, so
+/// nothing can be raised to or above the caller and the roles above stay
+/// where they are. One transaction: a renumbering by per-role PATCHes could
+/// half-apply.
+pub async fn reorder_roles(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<RoleOrderRequest>,
+) -> Result<Json<Vec<RoleResponse>>, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(ROLES_MANAGE)?;
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let movable: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id, priority FROM roles
+         WHERE priority < $1 AND id NOT IN ('builtin-owner', 'builtin-everyone')
+         ORDER BY priority DESC
+         FOR UPDATE",
+    )
+    .bind(perms.max_priority)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let mut wanted: Vec<&str> = req.role_ids.iter().map(String::as_str).collect();
+    let mut have: Vec<&str> = movable.iter().map(|(id, _)| id.as_str()).collect();
+    wanted.sort_unstable();
+    have.sort_unstable();
+    if wanted != have {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "role_ids must list exactly the roles below your own, each once".to_string(),
+        ));
+    }
+
+    for (id, priority) in req.role_ids.iter().zip(strictly_descending(&movable)) {
+        sqlx::query("UPDATE roles SET priority = $1 WHERE id = $2")
+            .bind(priority)
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    list_roles(State(state), user).await
+}
+
+/// The priorities `roles` already hold (highest first), nudged down where two
+/// are equal: two roles at one priority have no order between them, and the
+/// one the admin put first must end up above.
+fn strictly_descending(roles: &[(String, i64)]) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::with_capacity(roles.len());
+    for (_, p) in roles {
+        let next = match out.last() {
+            Some(&prev) if *p >= prev => prev - 1,
+            _ => *p,
+        };
+        out.push(next);
+    }
+    out
+}
 
 fn require_not_builtin(role_id: &str) -> Result<(), (StatusCode, String)> {
     if role_id == "builtin-owner" || role_id == "builtin-everyone" {

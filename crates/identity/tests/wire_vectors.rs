@@ -15,8 +15,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha512};
 use std::sync::OnceLock;
 use wavvon_identity::{
-    auth_challenge_signing_bytes, dm_envelope_signing_bytes, dm_member_change_signing_bytes,
-    dr_envelope_signing_bytes, federated_plaintext_dm_signing_bytes,
+    auth_challenge_signing_bytes, bound_auth_challenge_signing_bytes, dm_envelope_signing_bytes,
+    dm_member_change_signing_bytes, dr_envelope_signing_bytes,
+    federated_plaintext_dm_signing_bytes, federated_plaintext_dm_v2_signing_bytes,
     group_dm_envelope_signing_bytes, outgoing_webhook_signing_key,
     recovery_attestation_signing_bytes, recovery_request_signing_bytes,
     sender_key_dist_signing_bytes, unwrap_blob_key, voice_grant_signing_bytes, voice_key_unwrap,
@@ -547,6 +548,51 @@ fn auth_challenge_vector() {
     for len in [0, 31, 33, 64] {
         assert!(auth_challenge_signing_bytes(&vec![0u8; len]).is_err());
     }
+}
+
+#[test]
+fn bound_auth_challenge_vector() {
+    let v = vec_("bound_auth_challenge");
+    let sb = bound_auth_challenge_signing_bytes(&s(v, "server_pubkey"), &bytes(&s(v, "challenge")))
+        .unwrap();
+    check_signed("bound_auth_challenge", "signature", &sb);
+    for len in [0, 31, 33] {
+        assert!(bound_auth_challenge_signing_bytes("ab", &vec![0u8; len]).is_err());
+    }
+}
+
+#[test]
+fn federated_plaintext_dm_v2_vector() {
+    let v = vec_("federated_plaintext_dm_v2");
+    let members: Vec<String> = v["inputs"]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(r)
+        .collect();
+    let sb = federated_plaintext_dm_v2_signing_bytes(
+        &s(v, "conversation_id"),
+        &s(v, "kind"),
+        &s(v, "content"),
+        &s(v, "message_id"),
+        v["inputs"]["created_at"].as_u64().unwrap(),
+        &members,
+    );
+    check_signed("federated_plaintext_dm_v2", "signature", &sb);
+    // Member order does not matter; the set does.
+    let mut reversed = members.clone();
+    reversed.reverse();
+    assert_eq!(
+        sb,
+        federated_plaintext_dm_v2_signing_bytes(
+            &s(v, "conversation_id"),
+            &s(v, "kind"),
+            &s(v, "content"),
+            &s(v, "message_id"),
+            v["inputs"]["created_at"].as_u64().unwrap(),
+            &reversed,
+        )
+    );
 }
 
 #[test]

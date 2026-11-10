@@ -34,9 +34,15 @@ pub(super) struct ConnState {
     /// When this connection last had a `voice_position_update` accepted;
     /// each one takes the zone write lock and fans out to the zone.
     pub last_position_update: Option<Instant>,
+    /// `set_status` changes this connection may still make, and when that
+    /// was last topped up.
+    pub status_allowance: Option<(f64, Instant)>,
     /// Pending screen-share chunk header waiting for the binary frame.
     /// Fields: (channel_id, stream_id, seq, is_init).
     pub pending_chunk: Option<(String, String, u32, bool)>,
+    /// Per stream id: bytes this connection may still relay, and when the
+    /// allowance was last topped up. See `screen::within_bitrate`.
+    pub chunk_allowance: HashMap<String, (f64, Instant)>,
     /// Channels whose events this connection currently receives.
     pub subscribed: HashSet<String>,
     /// Streams for which `screen_share_started` has already been sent to this
@@ -81,7 +87,9 @@ impl ConnState {
             voice_channel: None,
             watched_voice_channel: None,
             last_position_update: None,
+            status_allowance: None,
             pending_chunk: None,
+            chunk_allowance: HashMap::new(),
             subscribed,
             notified_streams: HashSet::new(),
             streams_on_request: false,

@@ -35,6 +35,9 @@ fn print_help() {
     println!("                   PostgreSQL. Copies only: it does not switch");
     println!("                   modes, and leaves the source untouched.");
     println!("  rotate-key       Generate a new hub keypair and sign a rotation payload");
+    println!(
+        "                   --endorse-from OLD.json: have an old identity endorse the current one"
+    );
     println!("  update [--check] Self-update binary from GitHub releases (Linux x86_64 only)");
     println!("  admin <cmd>      Admin CLI (stats|users|channels|tokens|backup|restore)\n");
     println!("OPTIONS:");
@@ -108,6 +111,32 @@ async fn run_doctor() -> bool {
         Err(e) => {
             println!("FAIL  Voice UDP port {}: {e}", settings.voice_udp_port);
             all_pass = false;
+        }
+    }
+
+    // Voice is UDP and dialled at the public host unless told otherwise; an
+    // HTTP proxy in front of that host (Cloudflare's orange cloud) passes the
+    // site and the WebSocket and silently drops every voice datagram.
+    if settings.voice_public_host.is_none() {
+        let host = settings
+            .public_url
+            .as_deref()
+            .and_then(|u| Url::parse(u).ok())
+            .and_then(|u| u.host_str().map(str::to_string));
+        if let Some(host) = host {
+            if let Ok(addrs) = tokio::net::lookup_host((host.as_str(), 443)).await {
+                if addrs
+                    .into_iter()
+                    .any(|a| wavvon_hub::udp_dropping_proxy(a.ip()))
+                {
+                    println!(
+                        "WARN  Voice: {host} resolves into Cloudflare's proxy, which drops UDP, so \
+                         voice will not connect. Make the record DNS-only, or set {} to a DNS-only \
+                         name for voice",
+                        wavvon_hub_env::VOICE_PUBLIC_HOST
+                    );
+                }
+            }
         }
     }
 
@@ -367,7 +396,8 @@ async fn run_doctor() -> bool {
             }
         }
         Err(e) => {
-            println!("INFO  database ({db_url}) unreachable, skipping owner check: {e}");
+            let (shown, _) = wavvon_hub::db::dump::split_password(&db_url);
+            println!("INFO  database ({shown}) unreachable, skipping owner check: {e}");
         }
     }
 
@@ -415,7 +445,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let settings = match wavvon_hub::settings::load() {
+    let mut settings = match wavvon_hub::settings::load() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to load configuration: {e}");
@@ -440,11 +470,13 @@ async fn main() -> Result<()> {
                 .with_endpoint(endpoint)
                 .build()
                 .ok()?;
-            let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-                .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new("service.name", env!("CARGO_PKG_NAME")),
-                ]))
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_resource(
+                    opentelemetry_sdk::Resource::builder()
+                        .with_service_name(env!("CARGO_PKG_NAME"))
+                        .build(),
+                )
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
             Some(provider)
@@ -582,6 +614,24 @@ async fn main() -> Result<()> {
     }
 
     if subcommand.as_deref() == Some("rotate-key") {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(i) = args.iter().position(|a| a == "--endorse-from") {
+            let old = args
+                .get(i + 1)
+                .context("--endorse-from needs the path of the old hub_identity.json")?;
+            endorse_current_key(
+                Path::new(old),
+                Path::new("hub_identity.json"),
+                Path::new("hub_rotation.json"),
+            )?;
+            println!("hub_rotation.json now says the old key handed over to the current one.");
+            println!("Restart the hub: clients that knew the old key will follow it here.");
+            println!(
+                "This does not restore membership: if the database was lost, members \
+                 still need an invite. It only keeps the hub in their list as the same hub."
+            );
+            return Ok(());
+        }
         rotate_hub_key(Path::new("hub_identity.json"))?;
         println!("Key rotation complete. hub_identity.json now contains the new key.");
         println!("hub_rotation.json contains the signed rotation payload.");
@@ -853,6 +903,13 @@ async fn main() -> Result<()> {
             }
         }
         let ip = lan_advertise_ip.expect("set immediately above");
+        match wavvon_hub::lan::lan_bind_addr(settings.bind_addr) {
+            Ok(addr) => settings.bind_addr = addr,
+            Err(e) => {
+                eprintln!("LAN mode configuration error: {e}");
+                std::process::exit(1);
+            }
+        }
 
         if has_ca_cert {
             tracing::info!(
@@ -927,7 +984,15 @@ async fn main() -> Result<()> {
     }
 
     if is_new {
-        tracing::info!("Generated new hub identity: {}", hub_identity);
+        let cwd = std::env::current_dir()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+        tracing::warn!(
+            "Generated a NEW hub identity: {hub_identity}. It is {cwd}/hub_identity.json; back it \
+             up with the database. Every client knows this hub by that key: losing the file makes \
+             this a different hub to all of them. If you reinstalled and kept the old file, \
+             `wavvon-hub rotate-key --endorse-from <old file>` lets clients follow."
+        );
     } else {
         tracing::info!("Loaded hub identity: {}", hub_identity);
     }
@@ -1192,10 +1257,19 @@ async fn main() -> Result<()> {
     // (voice-transport-v2.md). Voice is dialled directly, never through the
     // farm's HTTP proxy — a datagram carries no path to route on — so only
     // the *host* is taken here, and the port is this hub's own allocated one.
-    let voice_udp_host: Option<String> = public_url
-        .as_deref()
-        .and_then(|u| Url::parse(u).ok())
-        .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
+    // WAVVON_VOICE_PUBLIC_HOST wins: a public host behind a proxy that drops
+    // UDP needs voice on a DNS-only name. The certificate is pinned by hash
+    // from /info, so that name needs no CA certificate of its own.
+    let voice_udp_host: Option<String> = settings
+        .voice_public_host
+        .clone()
+        .filter(|h| !h.trim().is_empty())
+        .or_else(|| {
+            public_url
+                .as_deref()
+                .and_then(|u| Url::parse(u).ok())
+                .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
+        })
         .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
     let voice_wt_url: Option<String> =
         voice_udp_host.map(|host| format!("https://{host}:{voice_udp_port}/voice"));
@@ -1266,6 +1340,7 @@ async fn main() -> Result<()> {
         hub_identity,
         db,
         pending_challenges: RwLock::new(HashMap::new()),
+        ws_tickets: std::sync::Mutex::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -1286,11 +1361,13 @@ async fn main() -> Result<()> {
         dm_tx,
         online_users: RwLock::new(HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
+        federated_masters: RwLock::new(HashMap::new()),
         screen_share_tx,
         app_sessions: RwLock::new(HashMap::new()),
         farm_url,
         cached_farm_pubkey,
         last_farm_pubkey_fetch,
+        farm_session_checks: std::sync::Mutex::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         video_channels: RwLock::new(HashMap::new()),
         started_at: std::time::Instant::now(),
@@ -1310,6 +1387,7 @@ async fn main() -> Result<()> {
         owner_pubkey: settings.owner_pubkey.clone(),
         apps_allow_camera: settings.apps_allow_camera,
         allow_private_webhooks: settings.allow_private_webhooks,
+        accept_unbound_auth: false,
         metrics_enabled: settings.metrics,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
         webauthn,
@@ -1416,6 +1494,7 @@ async fn main() -> Result<()> {
         // it can manage but cannot route to, because the proxy keys on
         // `hubs.hub_pubkey`.
         let hb_farm_hub_id = settings.farm_hub_id.clone();
+        let hb_credential = settings.farm_hub_credential.clone();
         if hb_farm_hub_id.is_none() {
             tracing::warn!(
                 "{} is set but {} is not — the farm cannot bind this hub to its row, \
@@ -1441,6 +1520,7 @@ async fn main() -> Result<()> {
                 let uptime = hb_state.started_at.elapsed().as_secs();
                 let payload = serde_json::json!({
                     "hub_id": hb_farm_hub_id,
+                    "hub_credential": hb_credential,
                     "hub_pubkey": hb_state.hub_identity.public_key_hex(),
                     "online_users": online,
                     "storage_bytes": db_size,
@@ -1479,6 +1559,26 @@ async fn main() -> Result<()> {
                 }
             }
         });
+    }
+
+    if let Some(list) = settings.trusted_proxy_from.as_deref() {
+        let addrs: Vec<std::net::IpAddr> = list
+            .split(',')
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .filter_map(|a| match a.parse() {
+                Ok(ip) => Some(ip),
+                Err(_) => {
+                    tracing::warn!(
+                        "{}: ignoring {a:?}, not an IP address",
+                        wavvon_hub_env::TRUSTED_PROXY_FROM
+                    );
+                    None
+                }
+            })
+            .collect();
+        tracing::info!("Rate limiter: X-Forwarded-For believed only from {addrs:?}");
+        wavvon_hub::rate_limit::set_trusted_proxy_from(addrs);
     }
 
     // Log whether the rate limiter will trust X-Forwarded-For.
@@ -1525,7 +1625,7 @@ async fn main() -> Result<()> {
     let bound = std_listener.local_addr()?;
 
     let serve = async {
-        if let (Some(cert), Some(key)) =
+        let tls = if let (Some(cert), Some(key)) =
             (effective_tls_cert.as_deref(), effective_tls_key.as_deref())
         {
             let cert_path = PathBuf::from(cert);
@@ -1537,20 +1637,14 @@ async fn main() -> Result<()> {
                         format!("Failed to load TLS cert/key from {cert:?} / {key:?}")
                     })?;
             tracing::info!("Hub server listening on https://{bound} (TLS enabled)");
-            axum_server::from_tcp_rustls(std_listener, rustls_config)
-                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await?;
+            Some(rustls_config)
         } else {
             tracing::info!(
                 "Hub server listening on http://{bound} (plaintext — set WAVVON_TLS_CERT and WAVVON_TLS_KEY to enable TLS)"
             );
-            let listener = tokio::net::TcpListener::from_std(std_listener)?;
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-            )
-            .await?;
-        }
+            None
+        };
+        wavvon_hub::listen::serve(std_listener, tls, app).await?;
         Ok::<(), anyhow::Error>(())
     };
 
@@ -1659,6 +1753,23 @@ async fn stop_embedded(embedded: Option<wavvon_hub::embedded_pg::EmbeddedPostgre
     }
 }
 
+/// The release signing key. Its private half lives only in the `release`
+/// environment of the Wavvon-server repository; the release workflow signs
+/// every binary with it, and `update` installs nothing it did not sign.
+const RELEASE_PUBKEY_HEX: &str = "e5b1b654ba7b7bfbe91d49dce46b691f76a4c481ffb7f3d808fe8924bcb87663";
+
+/// Whether `sig` is the release key's signature over this asset. The name is
+/// signed with the bytes, so a signed binary for one platform cannot be
+/// passed off as another's.
+fn verify_release_asset(asset_name: &str, bytes: &[u8], sig: &[u8]) -> anyhow::Result<()> {
+    let mut message = Vec::with_capacity(bytes.len() + 64);
+    message.extend_from_slice(b"wavvon/release-asset/v1\0");
+    message.extend_from_slice(asset_name.as_bytes());
+    message.push(0);
+    message.extend_from_slice(bytes);
+    wavvon_identity::verify_signature(RELEASE_PUBKEY_HEX, &message, sig)
+}
+
 fn self_update_asset_name() -> Option<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("wavvon-hub-linux-x86_64")
@@ -1737,6 +1848,29 @@ async fn run_self_update(check_only: bool) -> anyhow::Result<()> {
         .await
         .context("Failed to read download body")?;
     println!("Downloaded {} bytes.", bytes.len());
+
+    let sig_name = format!("{asset_name}.sig");
+    let sig_url = assets
+        .iter()
+        .find(|a| a["name"].as_str() == Some(sig_name.as_str()))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .with_context(|| {
+            format!("Release {tag} carries no signature ({sig_name}); refusing to install it")
+        })?;
+    let sig = client
+        .get(sig_url)
+        .send()
+        .await
+        .context("Signature download failed")?
+        .error_for_status()
+        .context("Signature download returned an error status")?
+        .bytes()
+        .await
+        .context("Failed to read the signature")?;
+    verify_release_asset(asset_name, &bytes, &sig).context(
+        "The downloaded binary is not signed by the Wavvon release key; nothing was installed",
+    )?;
+    println!("Signature verified.");
 
     let current_exe =
         std::env::current_exe().context("Cannot determine current executable path")?;
@@ -2010,6 +2144,36 @@ fn copy_dir_all(src: &std::path::Path, dest: &std::path::Path) -> anyhow::Result
     Ok(())
 }
 
+/// For a hub already restarted under a new key while its old identity file
+/// was kept (Wavvon-server#342): the old key signs the same handover payload
+/// `rotate-key` writes, naming the *current* key, so clients that knew the
+/// old key follow. The live identity is left alone.
+fn endorse_current_key(old_path: &Path, current_path: &Path, out: &Path) -> anyhow::Result<()> {
+    let old = Identity::load(old_path)
+        .with_context(|| format!("Could not read an identity from {}", old_path.display()))?;
+    let current =
+        Identity::load(current_path).context("Failed to load the current hub identity")?;
+    let (old_pubkey_hex, new_pubkey_hex) = (old.public_key_hex(), current.public_key_hex());
+    anyhow::ensure!(
+        old_pubkey_hex != new_pubkey_hex,
+        "The old file holds the current key: nothing to endorse"
+    );
+    let effective_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let payload_str = format!("{old_pubkey_hex}:{new_pubkey_hex}:{effective_at}");
+    let sig = old.sign(payload_str.as_bytes());
+    let rotation = serde_json::json!({
+        "old_pubkey": old_pubkey_hex,
+        "new_pubkey": new_pubkey_hex,
+        "effective_at": effective_at,
+        "signature": hex::encode(sig.to_bytes()),
+    });
+    std::fs::write(out, serde_json::to_string_pretty(&rotation)?)?;
+    Ok(())
+}
+
 /// Generate a new hub keypair, sign a rotation payload with the old key,
 /// write it to `hub_rotation.json`, and replace `hub_identity.json` with
 /// the new key. The operator must restart the hub afterwards.
@@ -2047,4 +2211,71 @@ fn rotate_hub_key(current_path: &Path) -> anyhow::Result<()> {
     new_identity.save(current_path)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod endorse_tests {
+    use super::*;
+
+    #[test]
+    fn an_old_key_endorses_the_current_one_and_nothing_else() {
+        let dir = std::env::temp_dir().join(format!("wavvon-endorse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old_path, cur_path, out) = (
+            dir.join("old.json"),
+            dir.join("hub_identity.json"),
+            dir.join("hub_rotation.json"),
+        );
+        let old = Identity::generate();
+        let current = Identity::generate();
+        old.save(&old_path).unwrap();
+        current.save(&cur_path).unwrap();
+
+        endorse_current_key(&old_path, &cur_path, &out).unwrap();
+        let r: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+        assert_eq!(r["old_pubkey"], old.public_key_hex());
+        assert_eq!(r["new_pubkey"], current.public_key_hex());
+        let payload = format!(
+            "{}:{}:{}",
+            r["old_pubkey"].as_str().unwrap(),
+            r["new_pubkey"].as_str().unwrap(),
+            r["effective_at"]
+        );
+        wavvon_identity::verify_signature(
+            &old.public_key_hex(),
+            payload.as_bytes(),
+            &hex::decode(r["signature"].as_str().unwrap()).unwrap(),
+        )
+        .unwrap();
+        // The live identity is untouched.
+        assert_eq!(
+            Identity::load(&cur_path).unwrap().public_key_hex(),
+            current.public_key_hex()
+        );
+
+        // Refused: the same key twice, and a file that is not an identity.
+        assert!(endorse_current_key(&cur_path, &cur_path, &out).is_err());
+        std::fs::write(&old_path, "not json").unwrap();
+        assert!(endorse_current_key(&old_path, &cur_path, &out).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod release_signature_tests {
+    use super::verify_release_asset;
+
+    // Made with the release key by the same `openssl pkeyutl -sign -rawin`
+    // call the release workflow runs, over the tag, "test-asset", NUL, "hello".
+    const FIXTURE_SIG: &str = "07640425038ffee7360138d41ab510bec6251e706151e818bb10100be2ccda77582107a8a8736caf3b876461f07ff7d1c37f73dc1cb62b79c364659f8fe01d05";
+
+    #[test]
+    fn a_release_signature_verifies_only_for_its_asset_and_bytes() {
+        let sig = hex::decode(FIXTURE_SIG).unwrap();
+        verify_release_asset("test-asset", b"hello", &sig).unwrap();
+        assert!(verify_release_asset("test-asset", b"hellO", &sig).is_err());
+        assert!(verify_release_asset("other-asset", b"hello", &sig).is_err());
+        assert!(verify_release_asset("test-asset", b"hello", &sig[..63]).is_err());
+    }
 }

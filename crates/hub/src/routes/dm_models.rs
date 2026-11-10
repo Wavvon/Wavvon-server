@@ -52,6 +52,13 @@ pub struct SendDmRequest {
     /// canonical via cert-chained envelopes").
     #[serde(default)]
     pub plaintext_signer_cert: Option<SubkeyCert>,
+    /// The id the sender's client chose and signed for a plaintext DM
+    /// (`federated_plaintext_dm_v2_signing_bytes`); the hub adopts it.
+    #[serde(default)]
+    pub message_id: Option<String>,
+    /// The time the sender's client signed, adopted like `message_id`.
+    #[serde(default)]
+    pub created_at: Option<i64>,
 }
 
 fn default_envelope_version() -> u8 {

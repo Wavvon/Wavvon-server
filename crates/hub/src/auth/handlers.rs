@@ -140,7 +140,7 @@ pub async fn challenge(
         StatusCode::OK,
         Json(ChallengeResponse {
             challenge: challenge_hex,
-            scheme: Some(wavvon_identity::AUTH_CHALLENGE_SCHEME.to_string()),
+            scheme: Some(wavvon_identity::BOUND_AUTH_CHALLENGE_SCHEME.to_string()),
         }),
     ))
 }
@@ -181,8 +181,25 @@ pub async fn verify(
     let signature_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    wavvon_identity::verify_auth_challenge(&req.public_key, &challenge_bytes, &signature_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
+    // The answer has to name this hub: an unbound (v1) one could have been
+    // collected by any hub the user talked to and relayed here.
+    let bound = wavvon_identity::verify_bound_auth_challenge(
+        &req.public_key,
+        &state.hub_identity.public_key_hex(),
+        &challenge_bytes,
+        &signature_bytes,
+    )
+    .is_ok();
+    let legacy = state.accept_unbound_auth
+        && wavvon_identity::verify_auth_challenge(
+            &req.public_key,
+            &challenge_bytes,
+            &signature_bytes,
+        )
+        .is_ok();
+    if !(bound || legacy) {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid signature".to_string()));
+    }
 
     // Multi-device: if a cert is presented, resolve to the canonical
     // user identity (master or, for legacy upgrades, the existing
@@ -719,7 +736,7 @@ pub async fn verify(
     .bind(&token)
     .bind(&canonical_pubkey)
     .bind(now)
-    .bind(Option::<i64>::None)
+    .bind(now + SESSION_TTL_SECS)
     .bind(&scope)
     .bind(&req.public_key)
     .execute(&state.db)
@@ -782,7 +799,7 @@ pub async fn verify(
     // gate and nothing in between changes it.
 
     if !is_member && !peer {
-        admit_member(&state.db, &canonical_pubkey).await?;
+        admit_member(&state, &canonical_pubkey).await?;
         // Once the first-boot owner invite exists, ownership comes from that
         // invite (its role grant, below) and nowhere else. Without this, an
         // operator who switched `invite_only` off before claiming the hub
@@ -902,6 +919,24 @@ pub struct WsAuth {
 /// A `mini_app`-scoped session (mini-apps.md) is allowed through — the
 /// mini-app webview's whole purpose is to talk over `/ws` — but callers
 /// must consult `WsAuth::mini_app_channel_id` to confine what it can see.
+/// How long a session lives without being used. Every use past the halfway
+/// mark pushes it a full period out again, so a client in use never meets it,
+/// and a token lifted from a log stops working a month after its owner does.
+pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
+
+/// Slide a session's expiry forward when it is past half its life. Best
+/// effort: a failed write costs a renewal, not the request.
+pub(crate) async fn extend_session_if_due(db: &sqlx::PgPool, token: &str, expires_at: i64) {
+    let now = unix_timestamp();
+    if expires_at - now < SESSION_TTL_SECS / 2 {
+        let _ = sqlx::query("UPDATE sessions SET expires_at = $1 WHERE token = $2")
+            .bind(now + SESSION_TTL_SECS)
+            .bind(token)
+            .execute(db)
+            .await;
+    }
+}
+
 pub async fn validate_ws_token(
     state: &crate::state::AppState,
     token: &str,
@@ -937,6 +972,7 @@ pub async fn validate_ws_token(
                         r#"{"error":"token_expired"}"#.to_string(),
                     ));
                 }
+                extend_session_if_due(db, token, exp).await;
             }
             if scope == "lobby" {
                 return Err((StatusCode::FORBIDDEN, "lobby_scope_confined".to_string()));
@@ -1024,7 +1060,14 @@ pub async fn validate_ws_token(
 /// `builtin-everyone` floor (no `user_roles` row). The caller additionally
 /// grants `builtin-owner` when this is the first user on the hub.
 /// Returns an error only for genuine DB failures so callers can propagate it.
-pub async fn admit_member(db: &PgPool, public_key: &str) -> Result<(), (StatusCode, String)> {
+pub async fn admit_member(
+    state: &std::sync::Arc<crate::state::AppState>,
+    public_key: &str,
+) -> Result<(), (StatusCode, String)> {
+    let db = &state.db;
+    // Every path that makes an identity a member comes through here, so the
+    // raid switch is enforced once (Wavvon-server#316).
+    crate::routes::lockdown::refuse_if_locked(db, public_key).await?;
     // Someone who left (DELETE /me) and comes back is a joiner again: 'left'
     // used to stick, refusing them certs and alliance voice and skipping the
     // approval queue on a hub that has one.
@@ -1043,6 +1086,7 @@ pub async fn admit_member(db: &PgPool, public_key: &str) -> Result<(), (StatusCo
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
+    crate::routes::lockdown::after_join(state).await;
     Ok(())
 }
 

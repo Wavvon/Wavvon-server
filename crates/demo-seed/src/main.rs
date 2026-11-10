@@ -180,9 +180,19 @@ async fn authenticate(
     .await
     .context("challenge response parse failed")?;
 
-    // Step 2: sign the raw challenge bytes
+    // Step 2: sign the challenge, bound to the key the hub's /info presents
     let challenge_bytes = hex::decode(&resp.challenge).context("challenge is not valid hex")?;
-    let signature = identity.sign(&wavvon_identity::auth_challenge_signing_bytes(
+    let info: serde_json::Value = send(client.get(format!("{hub}/info")))
+        .await
+        .context("GET /info failed")?
+        .json()
+        .await
+        .context("/info parse failed")?;
+    let hub_key = info["public_key"]
+        .as_str()
+        .context("/info has no public_key")?;
+    let signature = identity.sign(&wavvon_identity::bound_auth_challenge_signing_bytes(
+        hub_key,
         &challenge_bytes,
     )?);
     let sig_hex = hex::encode(signature.to_bytes());
