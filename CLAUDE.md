@@ -88,7 +88,10 @@ Several hubs is not one of those: two hubs are two processes of one binary.
 
 ### `hub` — the community server
 
-Entry: `crates/hub/src/main.rs` -> `lib.rs` -> `server.rs`
+Entry: `crates/hub/src/main.rs` only dispatches the command line: each
+subcommand (`--doctor`, `admin`, `migrate`/`backup`/`restore`/`db move`,
+`update`, `rotate-key`) lives in its own module under `cli/`, and running the hub is
+`serve.rs` -> `lib.rs` -> `server.rs`.
 
 Axum HTTP + WebSocket (port 3000), WebTransport/QUIC voice relay over UDP 3001
 (voice transport v2 — the raw-UDP and `/voice/ws` relays it replaced are gone),
