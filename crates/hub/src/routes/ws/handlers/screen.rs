@@ -8,7 +8,7 @@ use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 
-type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
+use super::{send_error, WsTx};
 
 pub(in crate::routes::ws) async fn handle_subscribe(
     cs: &mut ConnState,
@@ -32,14 +32,12 @@ pub(in crate::routes::ws) async fn handle_subscribe(
             Err(_) => false,
         };
     if !can_read {
-        let err = WsServerMessage::Error {
-            context: "subscribe".to_string(),
-            message: "You do not have access to this channel.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "subscribe",
+            "You do not have access to this channel.".to_string(),
+        )
+        .await;
     }
 
     let newly_subscribed = cs.subscribed.insert(channel_id.clone());
@@ -223,14 +221,12 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
 
     let limits = crate::routes::hub::read_stream_limits(&state.db).await;
     if let Some(what) = limits.exceeded_by(width, height, fps, kbps) {
-        let err = WsServerMessage::Error {
-            context: "screen_share_start".to_string(),
-            message: format!("This hub caps a stream's {what}; choose a lower setting."),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "screen_share_start",
+            format!("This hub caps a stream's {what}; choose a lower setting."),
+        )
+        .await;
     }
 
     // Channel-scoped VOICE_JOIN: a screen share is something you do once
@@ -246,14 +242,12 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
             if perms.has(crate::permissions::VOICE_JOIN)
                 && perms.has(crate::permissions::VOICE_SCREEN_SHARE) => {}
         _ => {
-            let err = WsServerMessage::Error {
-                context: "screen_share_start".to_string(),
-                message: "You cannot share into this channel.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            return send_error(
+                ws_tx,
+                "screen_share_start",
+                "You cannot share into this channel.".to_string(),
+            )
+            .await;
         }
     }
 
@@ -423,14 +417,12 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
             .unwrap_or(false);
 
     if !can_view {
-        let err = WsServerMessage::Error {
-            context: "stream_subscribe".to_string(),
-            message: "Channel not found or access denied.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "stream_subscribe",
+            "Channel not found or access denied.".to_string(),
+        )
+        .await;
     }
 
     let found: Option<(String, String, String, bool)> = {
@@ -494,13 +486,12 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
             }
         }
     } else {
-        let err = WsServerMessage::Error {
-            context: "stream_subscribe".to_string(),
-            message: "No active stream with that ID in the specified channel.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
+        return send_error(
+            ws_tx,
+            "stream_subscribe",
+            "No active stream with that ID in the specified channel.".to_string(),
+        )
+        .await;
     }
     DispatchResult::Continue
 }

@@ -9,7 +9,7 @@ use crate::state::AppState;
 use crate::routes::chat_models::WsClientMessage;
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 
-type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
+use super::WsTx;
 
 pub(in crate::routes::ws) async fn handle_resume(
     cs: &mut ConnState,
