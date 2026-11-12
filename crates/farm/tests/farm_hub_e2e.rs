@@ -44,7 +44,8 @@ use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_no
 /// the Cargo version: `target/<profile>/deps/` up to 1.99, and
 /// `target/<profile>/build/<pkg>/<hash>/out/` since 1.100 moved test
 /// binaries into the build dir. A fixed number of `parent()` calls broke on
-/// that move and read as "hub not built".
+/// that move and read as "hub not built". The match must be a file: the
+/// new layout also has a `build/wavvon-hub/` *directory* on the way up.
 fn hub_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let name = if cfg!(windows) {
@@ -55,7 +56,7 @@ fn hub_binary() -> Option<PathBuf> {
     exe.ancestors()
         .skip(1)
         .map(|dir| dir.join(name))
-        .find(|path| path.exists())
+        .find(|path| path.is_file())
 }
 
 async fn token_for(state: &FarmState, pubkey: &str, farm_url: &str) -> String {
