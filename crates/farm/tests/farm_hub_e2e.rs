@@ -36,21 +36,27 @@ use tokio::net::TcpListener;
 use wavvon_farm::token::{sign_token, FarmTokenPayload};
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
 
-/// Locate the `wavvon-hub` binary next to this test executable.
+/// Locate the `wavvon-hub` binary above this test executable.
 ///
 /// `CARGO_BIN_EXE_*` only exists for binaries in the *same* package, and the
-/// hub lives in another one — so this walks up from the test binary
-/// (`target/<profile>/deps/farm_hub_e2e-<hash>`) to `target/<profile>/`.
+/// hub lives in another one — so this walks up from the test binary to the
+/// first directory holding the hub. How deep the test binary sits depends on
+/// the Cargo version: `target/<profile>/deps/` up to 1.99, and
+/// `target/<profile>/build/<pkg>/<hash>/out/` since 1.100 moved test
+/// binaries into the build dir. A fixed number of `parent()` calls broke on
+/// that move and read as "hub not built". The match must be a file: the
+/// new layout also has a `build/wavvon-hub/` *directory* on the way up.
 fn hub_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?.parent()?; // deps/ -> <profile>/
     let name = if cfg!(windows) {
         "wavvon-hub.exe"
     } else {
         "wavvon-hub"
     };
-    let path = dir.join(name);
-    path.exists().then_some(path)
+    exe.ancestors()
+        .skip(1)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
 }
 
 async fn token_for(state: &FarmState, pubkey: &str, farm_url: &str) -> String {
