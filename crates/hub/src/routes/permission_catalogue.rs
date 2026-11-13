@@ -30,6 +30,40 @@ pub struct CatalogueEntry {
     /// drifting from the catalogue. `moderation.ban.permanent` groups under
     /// `moderation`.
     pub group: String,
+    /// The section a roles screen shows it under: coarser than `group`, a
+    /// handful an admin recognises (Wavvon-clients#285). Decided here, beside
+    /// the catalogue, so a new permission lands in its section without a
+    /// client release.
+    pub category: &'static str,
+}
+
+/// See [`CatalogueEntry::category`]. A test holds every catalogue entry to
+/// one of the named sections, so a new permission cannot fall into "other".
+pub fn category(id: &str) -> &'static str {
+    match id {
+        "stickers.external" => "messages",
+        "audit.read" => "moderation",
+        "members.read" | "roles.manage" | "invites.manage" | "badges.manage" | "hub.admission" => {
+            "members"
+        }
+        "hub.settings"
+        | "hub.appearance"
+        | "stickers.packs.manage"
+        | "stickers.moderate"
+        | "directory.publish" => "hub",
+        "apps.register" => "integrations",
+        "alliances.manage" => "federation",
+        _ => match id.split('.').next().unwrap_or(id) {
+            "messages" | "forum" => "messages",
+            "voice" => "voice",
+            "moderation" | "banlist" => "moderation",
+            "channels" => "channels",
+            "events" | "surveys" => "events",
+            "webhooks" => "integrations",
+            "certs" => "federation",
+            _ => "other",
+        },
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -51,6 +85,7 @@ pub async fn get_catalogue(_user: AuthUser) -> Json<CatalogueResponse> {
                 id: p.id.to_string(),
                 scope: p.scope,
                 group: p.id.split('.').next().unwrap_or(p.id).to_string(),
+                category: category(p.id),
             })
             .collect(),
     })
@@ -183,4 +218,16 @@ pub async fn why(
         channel_id: q.channel_id,
         sources,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::category;
+
+    #[test]
+    fn every_permission_has_a_named_section() {
+        for p in crate::permissions::CATALOGUE {
+            assert_ne!(category(p.id), "other", "{} has no section", p.id);
+        }
+    }
 }

@@ -32,11 +32,13 @@ fn nonce_at(secs: u64) -> String {
 
 /// Build the canonical JSON payload exactly as the discovery API expects.
 ///
-/// Keys are in alphabetical order: bio, hub_url, language, nonce, tags.
-/// Tags are sorted alphabetically for determinism.
+/// Keys are in alphabetical order: bio, hub_url, [invite_code,] language,
+/// nonce, tags. Tags are sorted alphabetically for determinism. The invite is
+/// signed when present so nobody else can rewrite a listing's invite link.
 fn build_canonical_payload(
     bio: &str,
     hub_url: &str,
+    invite_code: Option<&str>,
     language: &str,
     nonce: &str,
     tags: &[String],
@@ -51,13 +53,16 @@ fn build_canonical_payload(
         .map(|t| serde_json::Value::String(t.clone()))
         .collect();
 
-    let obj = serde_json::json!({
+    let mut obj = serde_json::json!({
         "bio": bio,
         "hub_url": hub_url,
         "language": language,
         "nonce": nonce,
         "tags": tags_json,
     });
+    if let Some(code) = invite_code.filter(|c| !c.is_empty()) {
+        obj["invite_code"] = serde_json::Value::String(code.to_string());
+    }
 
     // serde_json::json! uses an IndexMap-backed object when the
     // "preserve_order" feature is enabled, but the default Map uses BTreeMap
@@ -99,8 +104,14 @@ pub async fn sign_for_directory(
     perms.require(DIRECTORY_PUBLISH)?;
 
     let nonce = current_nonce();
-    let canonical_payload =
-        build_canonical_payload(&req.bio, &req.hub_url, &req.language, &nonce, &req.tags);
+    let canonical_payload = build_canonical_payload(
+        &req.bio,
+        &req.hub_url,
+        req.invite_code.as_deref(),
+        &req.language,
+        &nonce,
+        &req.tags,
+    );
 
     let signature = state.hub_identity.sign(canonical_payload.as_bytes());
     let hub_pubkey = state.hub_identity.public_key_hex();
@@ -138,6 +149,7 @@ mod tests {
         let payload = build_canonical_payload(
             "A community hub",
             "https://hub.example.com",
+            None,
             "en",
             "2026-05-10T20:15Z",
             &["rust".to_string(), "gaming".to_string(), "art".to_string()],
@@ -159,6 +171,19 @@ mod tests {
             .map(|t| t.as_str().unwrap())
             .collect();
         assert_eq!(tags, vec!["art", "gaming", "rust"]);
+    }
+
+    #[test]
+    fn canonical_payload_signs_the_invite_when_present() {
+        let with = build_canonical_payload("", "https://h", Some("abc"), "en", "n", &[]);
+        assert_eq!(
+            with,
+            r#"{"bio":"","hub_url":"https://h","invite_code":"abc","language":"en","nonce":"n","tags":[]}"#
+        );
+        assert_eq!(
+            build_canonical_payload("", "https://h", Some(""), "en", "n", &[]),
+            build_canonical_payload("", "https://h", None, "en", "n", &[]),
+        );
     }
 
     #[test]

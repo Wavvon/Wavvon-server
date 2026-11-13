@@ -2405,6 +2405,36 @@ try {
       const after = await json(`${hubUrl}/me`, { headers: await as(stranger) });
       checkEq(after.status, 200, `a redeemed farm user is a member: ${JSON.stringify(after.body)}`);
     });
+
+    await scenario("a farm session the admin revokes stops working on the hub too", async () => {
+      // The hub verifies a farm token's signature locally; without asking the
+      // farm about its jti, a revoked (or stolen) token lived for 30 days.
+      const hubUrl = `${farmA.url}/hub/${state.farmHubPubkey}`;
+      const member = identity();
+      const memberToken = await farmToken(farmA.url, member);
+      const adminAuth = { Authorization: `Bearer ${await farmToken(farmA.url, admin)}` };
+      const inv = await json(`${hubUrl}/invites`, { method: "POST", headers: adminAuth, body: "{}" });
+      const joined = await json(`${hubUrl}/join/${inv.body.code}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${memberToken}` },
+      });
+      checkEq(joined.status, 204, `the member joins: ${JSON.stringify(joined.body)}`);
+
+      const revoked = await json(`${farmA.url}/farm/users/${member.pubkey}/revoke-sessions`, {
+        method: "POST",
+        headers: adminAuth,
+      });
+      checkEq(revoked.status, 200, `revoke-sessions: ${JSON.stringify(revoked.body)}`);
+
+      // The hub trusts the farm's answer about a session for a minute.
+      let me;
+      for (let i = 0; i < 75; i++) {
+        me = await json(`${hubUrl}/me`, { headers: { Authorization: `Bearer ${memberToken}` } });
+        if (me.status === 401) break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      checkEq(me.status, 401, `a revoked farm token at the hub: ${JSON.stringify(me.body)}`);
+    });
   }
 
   // ── two farms, and an alliance across the boundary ──────────────────────

@@ -75,11 +75,13 @@ async fn main() -> Result<()> {
                 .with_endpoint(endpoint)
                 .build()
                 .ok()?;
-            let provider = opentelemetry_sdk::trace::TracerProvider::builder()
-                .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio)
-                .with_resource(opentelemetry_sdk::Resource::new(vec![
-                    opentelemetry::KeyValue::new("service.name", env!("CARGO_PKG_NAME")),
-                ]))
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_resource(
+                    opentelemetry_sdk::Resource::builder()
+                        .with_service_name(env!("CARGO_PKG_NAME"))
+                        .build(),
+                )
                 .build();
             opentelemetry::global::set_tracer_provider(provider.clone());
             Some(provider)
@@ -248,13 +250,17 @@ async fn main() -> Result<()> {
 
     wavvon_farm::monitor::spawn(state.clone());
 
-    let app = server::create_router_with_cors(state, &cfg.cors_origins);
+    let app = server::create_router_with_cors(state, &cfg.cors_origins, cfg.trusted_proxy);
     let listener = tokio::net::TcpListener::from_std(dual_stack_listener(http_port)?)?;
     tracing::info!(
         "Farm server listening on http://{} (set WAVVON_FARM_URL for the external URL)",
         listener.local_addr()?
     );
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
 
     if let Some(provider) = otlp_provider {
         let _ = provider.shutdown();

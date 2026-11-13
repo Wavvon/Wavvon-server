@@ -298,6 +298,21 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|h| !h.is_empty());
+        // The proxy dials this and hands it every request for this node's
+        // hubs, tokens included: it has to be a bare host, nothing more.
+        if let Some(h) = host.filter(|h| !is_node_host(h)) {
+            tracing::warn!(
+                server_id,
+                host = h,
+                "Agent WS: refusing an invalid node host"
+            );
+            let _ = ws_sender
+                .send(Message::Text(
+                    r#"{"type":"error","code":"invalid_host"}"#.into(),
+                ))
+                .await;
+            return;
+        }
         let tls_mode = hello
             .get("tls_mode")
             .and_then(|v| v.as_str())
@@ -369,7 +384,9 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
                             // the next restart.
                             let voice_port = val.get("voice_port").and_then(|v| v.as_u64());
                             let _ = sqlx::query(
-                                "UPDATE hubs SET process_port = $1, voice_port = $2, server_id = $3 WHERE id = $4",
+                                // Only a hub the farm placed on this node: an
+                                // agent must not move another node's traffic.
+                                "UPDATE hubs SET process_port = $1, voice_port = $2 WHERE id = $4 AND server_id = $3",
                             )
                             .bind(port as i32)
                             .bind(voice_port.map(|v| v as i32))
@@ -388,9 +405,10 @@ async fn handle_agent_socket(socket: WebSocket, state: Arc<FarmState>) {
                     } else if msg_type == "hub_stopped" {
                         if let Some(hub_id) = val.get("hub_id").and_then(|v| v.as_str()) {
                             let _ = sqlx::query(
-                                "UPDATE hubs SET process_port = NULL, voice_port = NULL WHERE id = $1",
+                                "UPDATE hubs SET process_port = NULL, voice_port = NULL WHERE id = $1 AND server_id = $2",
                             )
                             .bind(hub_id)
+                            .bind(&server_id)
                             .execute(&state.db)
                             .await;
                             tracing::info!(server_id, hub_id, "Hub stopped on remote server");
@@ -506,4 +524,51 @@ pub async fn update_server(
         ));
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// A hostname, an IPv4 address or a bracketed IPv6 address: what goes before
+/// `:port` in an authority, with no port, path or credentials of its own.
+fn is_node_host(host: &str) -> bool {
+    if let Some(v6) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        return v6.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+    if host.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    host.len() <= 253
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_node_host;
+
+    #[test]
+    fn node_host_is_a_bare_host() {
+        for ok in [
+            "node1.example.com",
+            "10.0.0.5",
+            "[2001:db8::1]",
+            "localhost",
+        ] {
+            assert!(is_node_host(ok), "{ok}");
+        }
+        for bad in [
+            "evil.example/x",
+            "user@evil.example",
+            "evil.example:443",
+            "2001:db8::1",
+            "-bad.example",
+            "a..b",
+            "",
+        ] {
+            assert!(!is_node_host(bad), "{bad}");
+        }
+    }
 }

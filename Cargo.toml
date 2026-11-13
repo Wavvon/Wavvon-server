@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/hub",
     "crates/hub-env",
+    "crates/rate-limit",
     "crates/identity",
     "crates/farm",
     "crates/agent",
@@ -22,9 +23,9 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "macros", "uu
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-opentelemetry       = "0.27"
-opentelemetry_sdk   = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp  = { version = "0.27", features = ["http-proto", "reqwest-rustls"] }
-tracing-opentelemetry = "0.28"
+opentelemetry       = "0.33"
+opentelemetry_sdk   = { version = "0.33", features = ["rt-tokio"] }
+opentelemetry-otlp  = { version = "0.33", features = ["http-proto", "reqwest-rustls"] }
+tracing-opentelemetry = "0.34"
 config = { version = "0.14", features = ["toml"] }
 tantivy = "0.27"

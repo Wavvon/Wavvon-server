@@ -26,6 +26,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Release only a tag on main
+        run: |
+          test "$GITHUB_REF_TYPE" = tag
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
       - name: Generate release notes (current tag only)
         uses: orhun/git-cliff-action@a9a95522b26fe6403f7bb24031f21fb573d0f5ff # v4
         with:
@@ -45,6 +51,7 @@ jobs:
     name: Build & push Docker images
     needs: changelog
     runs-on: ubuntu-22.04
+    environment: release
     permissions:
       contents: read
       packages: write
@@ -53,11 +60,17 @@ jobs:
       - name: Checkout hub repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Read the pinned clients release
+        id: clients-ref
+        run: echo "ref=$(tr -d '[:space:]' < clients.ref)" >> "$GITHUB_OUTPUT"
+
       - name: Checkout Wavvon-clients (for web client build)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Wavvon/Wavvon-clients
+          ref: ${{ steps.clients-ref.outputs.ref }}
           path: web-client-src
+          persist-credentials: false
 
       - name: Log in to GHCR
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
@@ -119,6 +132,7 @@ jobs:
     name: Build Linux binaries
     needs: changelog
     runs-on: ubuntu-22.04
+    environment: release
     permissions:
       contents: write
 
@@ -162,27 +176,48 @@ jobs:
           cp target/aarch64-unknown-linux-musl/release/wavvon-hub wavvon-hub-linux-aarch64
           cp target/x86_64-unknown-linux-gnu/release/wavvon-hub   wavvon-hub-linux-x86_64-glibc
 
+      - name: Sign binaries
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          test -n "$RELEASE_SIGNING_KEY"
+          umask 077
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/release.pem"
+          for f in wavvon-hub-linux-x86_64 wavvon-farm-linux-x86_64 wavvon-hub-linux-aarch64 wavvon-hub-linux-x86_64-glibc; do
+            { printf 'wavvon/release-asset/v1\0%s\0' "$f"; cat "$f"; } > "$RUNNER_TEMP/msg"
+            openssl pkeyutl -sign -inkey "$RUNNER_TEMP/release.pem" -rawin -in "$RUNNER_TEMP/msg" -out "$f.sig"
+            test "$(stat -c %s "$f.sig")" = 64
+          done
+          rm -f "$RUNNER_TEMP/release.pem" "$RUNNER_TEMP/msg"
+
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             wavvon-hub-linux-x86_64
+            wavvon-hub-linux-x86_64.sig
             wavvon-farm-linux-x86_64
+            wavvon-farm-linux-x86_64.sig
             wavvon-hub-linux-aarch64
+            wavvon-hub-linux-aarch64.sig
             wavvon-hub-linux-x86_64-glibc
+            wavvon-hub-linux-x86_64-glibc.sig
             crates/identity/wire-vectors.json
 
-  identity-crate:
-    name: Publish wavvon-identity to crates.io
+  identity-package:
+    name: Package wavvon-identity
     needs: changelog
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      exists: ${{ steps.published.outputs.exists }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Is this version on crates.io already?
         id: published
@@ -199,13 +234,34 @@ jobs:
         if: steps.published.outputs.exists == 'false'
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
 
-      - name: Authenticate to crates.io
+      - name: Package and verify
         if: steps.published.outputs.exists == 'false'
+        run: cargo package -p wavvon-identity
+
+  identity-crate:
+    name: Publish wavvon-identity to crates.io
+    needs: identity-package
+    if: needs.identity-package.outputs.exists == 'false'
+    runs-on: ubuntu-22.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Authenticate to crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9
 
       - name: Publish
-        if: steps.published.outputs.exists == 'false'
-        run: cargo publish -p wavvon-identity
+        run: cargo publish -p wavvon-identity --no-verify
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

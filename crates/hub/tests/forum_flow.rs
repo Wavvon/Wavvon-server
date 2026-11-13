@@ -612,6 +612,65 @@ async fn forum_post_with_attachments() {
     assert_eq!(v2["attachments"].as_array().map(|a| a.len()), Some(1));
 }
 
+/// #299: deleting a post takes its files down, and the tombstone lists none.
+#[tokio::test]
+async fn deleting_a_post_takes_its_attachments_down() {
+    let server = common::setup().await;
+    let token = common::authenticate(&server, &Identity::generate()).await;
+    let channel_id = create_forum_channel(&server, &token).await;
+    let att = upload_file(
+        &server,
+        &token,
+        &channel_id,
+        "abuse.pdf",
+        b"%PDF-1.4 x".to_vec(),
+    )
+    .await;
+    let post: Value = server
+        .post(&format!("/channels/{channel_id}/posts"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "title": "T", "body": "b", "attachment_ids": [att] }))
+        .await
+        .json();
+    let post_id = post["id"].as_str().unwrap();
+    let reply_att = upload_file(&server, &token, &channel_id, "reply.txt", b"hello".to_vec()).await;
+    let reply: Value = server
+        .post(&format!("/channels/{channel_id}/posts/{post_id}/replies"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .json(&json!({ "body": "r", "attachment_ids": [reply_att] }))
+        .await
+        .json();
+    let reply_id = reply["id"].as_str().unwrap();
+
+    server
+        .delete(&format!(
+            "/channels/{channel_id}/posts/{post_id}/replies/{reply_id}"
+        ))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+    server
+        .delete(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    for id in [&att, &reply_att] {
+        let resp = server
+            .get(&format!("/uploads/{id}"))
+            .add_header("Authorization", format!("Bearer {token}"))
+            .await;
+        assert_eq!(resp.status_code(), 410, "{}", resp.text());
+    }
+    let tomb: Value = server
+        .get(&format!("/channels/{channel_id}/posts/{post_id}"))
+        .add_header("Authorization", format!("Bearer {token}"))
+        .await
+        .json();
+    assert_eq!(tomb["attachments"], json!([]));
+    assert_eq!(tomb["replies"][0]["attachments"], json!([]));
+}
+
 #[tokio::test]
 async fn forum_post_refuses_outside_urls() {
     let server = common::setup().await;
@@ -1663,4 +1722,51 @@ async fn forum_list_carries_a_bounded_excerpt() {
         excerpt.chars().count(),
         wavvon_hub::routes::post_models::EXCERPT_CHARS + 1
     );
+}
+
+/// #305: an allied hub cannot file a post or reply under one of our members.
+#[tokio::test]
+async fn alliance_forum_refuses_a_local_member_as_federated_author() {
+    let s = setup_forum_alliance(Some("posts_and_replies")).await;
+    let me: Value = s
+        .client
+        .get(format!("{}/me", s.hub_b_url))
+        .bearer_auth(&s.token_b)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let local_author = me["public_key"].as_str().unwrap().to_string();
+
+    let peer_token = FederationClient::new()
+        .authenticate(&s.hub_b_url, &s.hub_a_state.hub_identity)
+        .await
+        .unwrap();
+    let reply = s
+        .client
+        .post(format!(
+            "{}/federation/forum/channels/{}/posts/{}/replies",
+            s.hub_b_url, s.channel_id, s.post_id
+        ))
+        .bearer_auth(&peer_token)
+        .json(&json!({ "author_pubkey": local_author, "body": "not really me" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), 403, "{}", reply.text().await.unwrap());
+
+    let post = s
+        .client
+        .post(format!(
+            "{}/federation/forum/channels/{}/posts",
+            s.hub_b_url, s.channel_id
+        ))
+        .bearer_auth(&peer_token)
+        .json(&json!({ "author_pubkey": local_author, "title": "t", "body": "b" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(post.status(), 403, "{}", post.text().await.unwrap());
 }

@@ -267,6 +267,23 @@
       "signing_bytes": "776176766f6e2f6665646572617465642d646d2f76310006000000636f6e762d3102000000646d0600000068c3a96c6c6f",
       "signature": "19cb16f7d84ee382ee5d2b01ac60e340b6011fe912a733f10b53785ce555e5844e4a49eab1f44fd5543c4a0d5b3a5efdc227bb02ced6c72705c9de15f5e49a0a"
     },
+    "federated_plaintext_dm_v2": {
+      "description": "Plaintext federated DM, tag wavvon/federated-dm/v2: conversation id, kind and content as v1, then the sender-chosen message id, created_at as u64 LE, and the member set sorted lexicographically (u32 LE count, then each length-prefixed).",
+      "inputs": {
+        "conversation_id": "conv-1",
+        "kind": "group",
+        "content": "héllo",
+        "message_id": "00000000-0000-4000-8000-000000000001",
+        "created_at": 1700000000,
+        "members": [
+          "@subkey_pub",
+          "@master_pub"
+        ],
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f6665646572617465642d646d2f76320006000000636f6e762d310500000067726f75700600000068c3a96c6c6f2400000030303030303030302d303030302d343030302d383030302d30303030303030303030303100f15365000000000200000040000000373962353536326538666536353466393430373862313132653861393862613739303166383533616536393562656437653065333931306261643034393636344000000065376631363261313062656335353961666561313935653464636538346236393536386435643263623039363365623434366330363835653262313766326630",
+      "signature": "0a24268d65a2e48bc097d04f00adc9343432afa60950ef91f4e21450a4f14257850f5db86e382898da7da28d9df8a473dd04d1a9ff2fc91f3be71f5f49832604"
+    },
     "auth_challenge": {
       "description": "What a client signs to answer a challenge from a hub or farm naming the tagged-v1 scheme.",
       "inputs": {
@@ -275,6 +292,16 @@
       },
       "signing_bytes": "776176766f6e2f617574682d6368616c6c656e67652f763100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
       "signature": "8a9cb870c40c8f1a4b88e7c8eb4a67bfae8115c98516e62d7bc383f421259cd452915257d6f7030af1e50249b3a08e820f482d1831f3a12a53524bffcd925f04"
+    },
+    "bound_auth_challenge": {
+      "description": "What a client signs to answer a challenge from a hub or farm naming the tagged-v2 scheme: the v2 tag, the server's public key it means to sign in to (length-prefixed), then the 32 challenge bytes.",
+      "inputs": {
+        "server_pubkey": "@new_pub",
+        "challenge": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "signer_seed": "@master_seed"
+      },
+      "signing_bytes": "776176766f6e2f617574682d6368616c6c656e67652f7632004000000061646331343031316638326431633536643935366161346639643733643838353833363161363036303438353235653064303863363338646337356464386337000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "signature": "88ef1677c81129d2181b2ab3c30f42dc25d5bf7bb20ec54e979ba39a1277c0d6f4517f6aa72ddbfd9a0212bd230acb34195b35d55bfd0525a172330e0fa19b0c"
     },
     "dm_member_change": {
       "description": "What a group member signs to add members or to leave.",

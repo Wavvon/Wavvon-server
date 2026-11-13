@@ -112,6 +112,20 @@ pub(super) async fn do_join_alliance(
     invite_token: &str,
     own_hub_url: &str,
 ) -> Result<AllianceDetailResponse, (StatusCode, String)> {
+    // An invite to an alliance this hub is already in can only be an attempt
+    // to add the inviter to it: the detail below would list it as a member.
+    let already: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM alliances WHERE id = $1)")
+        .bind(alliance_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if already {
+        return Err((
+            StatusCode::CONFLICT,
+            "This hub is already a member of the alliance.".to_string(),
+        ));
+    }
+
     let token = state
         .federation_client
         .authenticate(inviter_url, &state.hub_identity)
@@ -178,6 +192,56 @@ pub(super) async fn do_join_alliance(
             )
         })?;
 
+    if detail.id != alliance_id {
+        tracing::warn!(
+            "Alliance join: {inviter_url} answered for alliance {} when asked for {alliance_id}",
+            detail.id
+        );
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "The inviting hub described a different alliance than the invite named.".to_string(),
+        ));
+    }
+
+    // The member list is the inviter's word. Each hub on it is kept only if
+    // the hub at its address presents that key, the inviter included, so an
+    // inviter cannot seat keys of its choosing in the alliance.
+    let inviter_key = match state.federation_client.get_info(inviter_url).await {
+        Ok(info) => info.public_key,
+        Err(e) => {
+            tracing::warn!("Alliance join: could not read {inviter_url}/info: {e}");
+            return Err((
+                StatusCode::BAD_GATEWAY,
+                "Could not reach the inviting hub. It may be offline or its URL has changed."
+                    .to_string(),
+            ));
+        }
+    };
+    let own_key = state.hub_identity.public_key_hex();
+    let mut verified = Vec::with_capacity(detail.members.len());
+    for m in &detail.members {
+        let ok = if m.hub_public_key == own_key {
+            true
+        } else if m.hub_url == "self" || m.hub_url == inviter_url {
+            m.hub_public_key == inviter_key
+        } else {
+            is_member_url(&m.hub_url)
+                && matches!(
+                    state.federation_client.get_info(&m.hub_url).await,
+                    Ok(info) if info.public_key == m.hub_public_key
+                )
+        };
+        if ok {
+            verified.push(m);
+        } else {
+            tracing::warn!(
+                "Alliance join: {inviter_url} listed {} at {} and that address does not present it; skipping",
+                m.hub_public_key,
+                m.hub_url
+            );
+        }
+    }
+
     // Mirror locally
     let now = crate::auth::handlers::unix_timestamp();
     sqlx::query(
@@ -192,7 +256,7 @@ pub(super) async fn do_join_alliance(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    for m in &detail.members {
+    for m in &verified {
         // `m.hub_url` is "self" whenever the inviter reported its OWN row --
         // that only means "self" from the inviter's point of view. From here
         // (the joiner), the inviter's real address is `inviter_url`. Without
@@ -374,9 +438,22 @@ pub async fn push_invite_handler(
     };
 
     let target_url = req.target_hub_url.trim_end_matches('/').to_string();
+    // The target shows the sender to its admins, so it takes the sender from
+    // who authenticated, not from the payload.
+    let token = state
+        .federation_client
+        .authenticate(&target_url, &state.hub_identity)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("Failed to reach target hub: {e}"),
+            )
+        })?;
     let resp = state
         .http_client
         .post(format!("{target_url}/federation/alliance-invite"))
+        .bearer_auth(&token)
         .json(&payload)
         .send()
         .await
@@ -399,13 +476,37 @@ pub async fn push_invite_handler(
     Ok(StatusCode::OK)
 }
 
+const MAX_PENDING_INVITES_PER_SENDER: i64 = 5;
+
 /// `POST /federation/alliance-invite`
 /// Hub B receives a pushed invite from Hub A (no auth required).
 pub async fn receive_federation_alliance_invite(
     State(state): State<Arc<AppState>>,
+    peer: crate::auth::middleware::PeerHub,
     Json(payload): Json<crate::routes::alliance_models::FederationAllianceInvitePayload>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    if payload.from_hub_public_key != peer.public_key {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "from_hub_public_key is not the calling hub".to_string(),
+        ));
+    }
     let now = crate::auth::handlers::unix_timestamp();
+
+    // Each invite waits in front of an admin; a sender gets a few at a time.
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM pending_alliance_invites WHERE from_hub_public_key = $1",
+    )
+    .bind(&peer.public_key)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if pending >= MAX_PENDING_INVITES_PER_SENDER {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many pending invites from this hub".to_string(),
+        ));
+    }
 
     sqlx::query(
         "INSERT INTO pending_alliance_invites
@@ -564,6 +665,12 @@ pub async fn join_alliance(
     // The member is the hub that authenticated to make this call. The URL it
     // gives has to answer for that same key, or we would record a key paired
     // with an address someone else controls.
+    if !is_member_url(&req.hub_url) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "hub_url must be an http(s) URL without query or fragment".to_string(),
+        ));
+    }
     let hub_info = state
         .federation_client
         .get_info(&req.hub_url)
@@ -689,6 +796,12 @@ pub async fn receive_alliance_member(
     .map_err(|_| (StatusCode::FORBIDDEN, "Invalid voucher".to_string()))?;
 
     // The address it gives has to answer for the key that authenticated.
+    if !is_member_url(&req.hub_url) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "hub_url must be an http(s) URL without query or fragment".to_string(),
+        ));
+    }
     let hub_info = state
         .federation_client
         .get_info(&req.hub_url)
@@ -863,7 +976,14 @@ pub(super) async fn reconcile_members(state: &Arc<AppState>, alliance_id: &str) 
             } else {
                 reported.hub_url.clone()
             };
-            if url.is_empty() {
+            // The reporter's word is checked like a joiner's: the address has
+            // to answer for the key it is listed under.
+            if !is_member_url(&url)
+                || !matches!(
+                    state.federation_client.get_info(&url).await,
+                    Ok(info) if info.public_key == reported.hub_public_key
+                )
+            {
                 continue;
             }
             let now = crate::auth::handlers::unix_timestamp();
@@ -895,5 +1015,35 @@ pub(super) async fn reconcile_members(state: &Arc<AppState>, alliance_id: &str) 
                 &m.hub_public_key[..8.min(m.hub_public_key.len())],
             );
         }
+    }
+}
+
+/// A member address is a base URL the hub appends paths to. A path is fine
+/// (a farm hosts hubs under `/hub/<slug>`); a query or fragment would swallow
+/// the appended path and let the member choose what we fetch.
+fn is_member_url(url: &str) -> bool {
+    reqwest::Url::parse(url).is_ok_and(|u| {
+        matches!(u.scheme(), "http" | "https")
+            && u.host_str().is_some()
+            && u.query().is_none()
+            && u.fragment().is_none()
+            && u.username().is_empty()
+            && u.password().is_none()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_member_url;
+
+    #[test]
+    fn member_url_refuses_what_would_swallow_the_path() {
+        assert!(is_member_url("https://hub.example"));
+        assert!(is_member_url("https://farm.example/hub/abc"));
+        assert!(!is_member_url("https://evil.example/x#"));
+        assert!(!is_member_url("https://evil.example/x?a="));
+        assert!(!is_member_url("https://u:p@evil.example"));
+        assert!(!is_member_url("file:///etc/passwd"));
+        assert!(!is_member_url("self"));
     }
 }

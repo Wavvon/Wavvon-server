@@ -430,6 +430,46 @@ pub fn auth_challenge_signing_bytes(challenge: &[u8]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// The scheme a hub or farm names in its `/auth/challenge` response when it
+/// wants an answer signed over [`bound_auth_challenge_signing_bytes`].
+pub const BOUND_AUTH_CHALLENGE_SCHEME: &str = "tagged-v2";
+
+/// What a client signs to answer a challenge, naming the server it means to
+/// sign in to. The v1 bytes named nothing, so a hostile hub could pass another
+/// hub's challenge through, collect the answer and sign in there as the user.
+/// `server_pubkey` is the key the *client* already holds for the server it
+/// is talking to (a saved hub's id, the key its `/info` presented), never one
+/// the challenge response supplies.
+pub fn bound_auth_challenge_signing_bytes(
+    server_pubkey: &str,
+    challenge: &[u8],
+) -> Result<Vec<u8>> {
+    if challenge.len() != AUTH_CHALLENGE_LEN {
+        return Err(anyhow!(
+            "auth challenge is {} bytes, expected {AUTH_CHALLENGE_LEN}",
+            challenge.len()
+        ));
+    }
+    let mut buf = b"wavvon/auth-challenge/v2\0".to_vec();
+    write_str(&mut buf, server_pubkey);
+    buf.extend_from_slice(challenge);
+    Ok(buf)
+}
+
+/// Checks an answer to a challenge this server (`server_pubkey`) issued.
+pub fn verify_bound_auth_challenge(
+    public_key_hex: &str,
+    server_pubkey: &str,
+    challenge: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    verify_signature(
+        public_key_hex,
+        &bound_auth_challenge_signing_bytes(server_pubkey, challenge)?,
+        signature,
+    )
+}
+
 /// Length of an auth challenge. A hub or farm issues exactly this many random
 /// bytes, and nothing else is signed as an answer.
 pub const AUTH_CHALLENGE_LEN: usize = 32;
@@ -519,6 +559,43 @@ pub fn federated_plaintext_dm_signing_bytes(
     write_str(&mut buf, conversation_id);
     write_str(&mut buf, conv_type);
     write_str(&mut buf, content);
+    buf
+}
+
+/// Signing bytes for a plaintext federated DM, v2.
+///
+/// v1 covered only `conversation_id || conv_type || content`, so a peer hub
+/// could replay a message or deliver it into a new conversation with members
+/// the sender never chose. v2 also covers the message id and timestamp, both
+/// chosen by the sender's client (the hub adopts them), and the member set,
+/// sorted so every party computes the same bytes:
+///
+/// `tag || str(conversation_id) || str(conv_type) || str(content) ||
+/// str(message_id) || u64 LE created_at || u32 LE count || str(member)...`
+///
+/// Domain tag: `"wavvon/federated-dm/v2\0"`. A receiving hub refuses a
+/// message id it already holds and a timestamp too far from now.
+pub fn federated_plaintext_dm_v2_signing_bytes(
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+    message_id: &str,
+    created_at: u64,
+    members: &[String],
+) -> Vec<u8> {
+    let mut sorted: Vec<&str> = members.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut buf = b"wavvon/federated-dm/v2\0".to_vec();
+    write_str(&mut buf, conversation_id);
+    write_str(&mut buf, conv_type);
+    write_str(&mut buf, content);
+    write_str(&mut buf, message_id);
+    write_u64_le(&mut buf, created_at);
+    buf.extend_from_slice(&(sorted.len() as u32).to_le_bytes());
+    for member in sorted {
+        write_str(&mut buf, member);
+    }
     buf
 }
 

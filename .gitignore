@@ -22,3 +22,6 @@ voice_wt_cert*
 # without overriding the env var.
 crates/hub/uploads/
 /uploads/
+# Bundled PostgreSQL: binaries, and a data directory holding its password
+/pg/
+/pgdata/

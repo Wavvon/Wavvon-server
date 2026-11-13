@@ -100,6 +100,10 @@ pub async fn totp_setup(
 pub struct TotpConfirmRequest {
     pub secret: String,
     pub code: String,
+    /// A code from the secret being replaced, required while TOTP is on:
+    /// otherwise a stolen session could swap the second factor for its own.
+    #[serde(default)]
+    pub current_code: Option<String>,
 }
 
 pub async fn totp_confirm(
@@ -114,6 +118,29 @@ pub async fn totp_confirm(
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid_totp"})),
         ));
+    }
+
+    let current: Option<(Option<String>, bool)> =
+        sqlx::query_as("SELECT totp_secret, totp_enabled FROM farms WHERE id = 1")
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("db_error: {e}")})),
+                )
+            })?;
+    if let Some((Some(old_secret), true)) = current {
+        let proven = req
+            .current_code
+            .as_deref()
+            .is_some_and(|c| verify_totp(&old_secret, c));
+        if !proven {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "current_totp_required"})),
+            ));
+        }
     }
 
     sqlx::query("UPDATE farms SET totp_secret = $1, totp_enabled = true WHERE id = 1")

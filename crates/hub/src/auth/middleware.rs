@@ -167,6 +167,7 @@ fn peer_path_allowed(method: &axum::http::Method, path: &str) -> bool {
         (&Method::POST, ["federation", "dm"]) => true,
         (&Method::POST, ["federation", "dm-member-change"]) => true,
         (&Method::POST | &Method::DELETE, ["federation", "alliance-member"]) => true,
+        (&Method::POST, ["federation", "alliance-invite"]) => true,
         (_, ["federation", "forum", ..]) => true,
         _ => false,
     }
@@ -186,6 +187,8 @@ struct FarmTokenPayload {
     pub iss_pk: String,
     /// Canonical user pubkey hex.
     pub sub: String,
+    /// Session id, which the farm can revoke.
+    pub jti: String,
 }
 
 /// Base64url engine (no padding) matching the farm's token encoder.
@@ -199,11 +202,11 @@ fn b64() -> base64::engine::GeneralPurpose {
 }
 
 /// Try to verify a farm token string against `farm_pubkey_hex`.
-/// Returns the canonical user pubkey (`sub`) on success.
+/// Returns the canonical user pubkey (`sub`) and the session's `jti`.
 fn try_verify_farm_token(
     farm_pubkey_hex: &str,
     token_str: &str,
-) -> Result<String, (StatusCode, String)> {
+) -> Result<(String, String), (StatusCode, String)> {
     let dot = token_str
         .find('.')
         .ok_or((StatusCode::UNAUTHORIZED, "Malformed farm token".to_string()))?;
@@ -262,7 +265,57 @@ fn try_verify_farm_token(
         ));
     }
 
-    Ok(payload.sub)
+    Ok((payload.sub, payload.jti))
+}
+
+/// How long the farm's answer about a session is trusted.
+const FARM_SESSION_CHECK_TTL: i64 = 60;
+
+/// Whether the farm still considers session `jti` live, asked at most once a
+/// minute per session. A signature check alone would honour a revoked or
+/// stolen farm token until it expires, 30 days later.
+///
+/// Fails closed: a farm-hosted hub cannot authenticate anyone while its farm
+/// is unreachable anyway, since the farm is where sign-in happens.
+async fn farm_session_live(state: &AppState, jti: &str) -> bool {
+    let now = crate::auth::handlers::unix_timestamp();
+    if let Some((live, at)) = state
+        .farm_session_checks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(jti)
+    {
+        if now - at < FARM_SESSION_CHECK_TTL {
+            return *live;
+        }
+    }
+    let Some(farm_url) = state.farm_url.as_deref() else {
+        return false;
+    };
+    let answer = state
+        .http_client
+        .post(format!("{farm_url}/farm/auth/revoke-check"))
+        .json(&serde_json::json!({ "jti": jti }))
+        .send()
+        .await
+        .ok()
+        .filter(|r| r.status().is_success());
+    let live = match answer {
+        Some(r) => matches!(
+            r.json::<serde_json::Value>().await,
+            Ok(v) if v.get("revoked") == Some(&serde_json::Value::Bool(false))
+        ),
+        None => false,
+    };
+    let mut checks = state
+        .farm_session_checks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if checks.len() > 10_000 {
+        checks.retain(|_, (_, at)| now - *at < FARM_SESSION_CHECK_TTL);
+    }
+    checks.insert(jti.to_string(), (live, now));
+    live
 }
 
 /// Resolve a farm-issued token to the pubkey it speaks for.
@@ -280,6 +333,20 @@ pub(crate) async fn resolve_farm_token(
     state: &AppState,
     token: &str,
 ) -> Result<String, (StatusCode, String)> {
+    let (sub, jti) = verify_farm_token_signature(state, token).await?;
+    if !farm_session_live(state, &jti).await {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Farm session revoked or unverifiable".to_string(),
+        ));
+    }
+    Ok(sub)
+}
+
+async fn verify_farm_token_signature(
+    state: &AppState,
+    token: &str,
+) -> Result<(String, String), (StatusCode, String)> {
     Ok({
         // --- Farm token path ---
         let cached_pubkey = state.cached_farm_pubkey.read().await.clone();
@@ -400,9 +467,8 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
             let (pk, approval_status) = if let Some((pk, status, expires_at, sess_scope)) = row {
-                // Enforce session expiry. NULL expires_at means the session
-                // never expires (human sessions). Non-NULL must be in the
-                // future.
+                // Enforce session expiry, sliding it forward on use (see
+                // SESSION_TTL_SECS). NULL never expires; nothing writes it now.
                 if let Some(exp) = expires_at {
                     let now_ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -414,6 +480,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                             r#"{"error":"token_expired"}"#.to_string(),
                         ));
                     }
+                    crate::auth::handlers::extend_session_if_due(&state.db, token, exp).await;
                 }
                 scope = sess_scope;
                 (pk, status)
@@ -531,7 +598,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
                     && parts.uri.path().starts_with("/join/");
                 if !redeeming {
                     crate::routes::invites::refuse_if_invite_only(&state.db).await?;
-                    crate::auth::handlers::admit_member(&state.db, &public_key).await?;
+                    crate::auth::handlers::admit_member(state, &public_key).await?;
                 }
             }
 

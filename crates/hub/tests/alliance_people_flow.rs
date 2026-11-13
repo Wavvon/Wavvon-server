@@ -244,3 +244,34 @@ async fn the_member_switch_defaults_off_and_round_trips() {
         .json();
     assert_eq!(me["findable_by_allies"], true);
 }
+
+/// The upload proxy is anonymous and a member hub picks what its URL answers,
+/// so a member address on loopback is refused before any connection, even
+/// though a server there would serve the file.
+#[tokio::test]
+async fn the_upload_proxy_refuses_a_member_on_a_private_address() {
+    let (h, owner) = common::setup_with_owner().await;
+    let (alliance, _) = alliance_with_ally(&h, &owner, false).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = hits.clone();
+    let app = axum::Router::new().fallback(move || {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { "secret" }
+    });
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    sqlx::query("UPDATE alliance_members SET hub_url = $1 WHERE alliance_id = $2")
+        .bind(format!("http://{addr}"))
+        .bind(&alliance)
+        .execute(&h.state().db)
+        .await
+        .unwrap();
+
+    let id = uuid::Uuid::new_v4();
+    h.get(&format!("/alliances/{alliance}/uploads/{id}"))
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+}

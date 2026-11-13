@@ -15,9 +15,7 @@ use axum::extract::ws::{Message as AxumWsMessage, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
-use ed25519_dalek::SigningKey;
 use futures_util::{SinkExt, StreamExt};
-use rand::rngs::OsRng;
 use rand::RngCore;
 use reqwest::Client;
 use tokio::net::TcpListener;
@@ -32,7 +30,7 @@ async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
     let (db_pool, guard) = common::create_test_db().await;
     db::migrations::run(&db_pool).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let now = unix_now();
     sqlx::query("INSERT INTO farms (id, public_key, created_at) VALUES (1, $1, $2)")
@@ -68,7 +66,12 @@ async fn start_farm() -> (String, Arc<FarmState>, common::TestDbGuard) {
 
     let app = server::create_router(state.clone());
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     tokio::time::sleep(Duration::from_millis(10)).await;
 
@@ -95,9 +98,33 @@ async fn start_stub_hub() -> u16 {
         })
     }
 
+    /// Upgrades, then sends the request line's path and whether a header
+    /// named `x-injected` arrived.
+    async fn ws_report(
+        ws: WebSocketUpgrade,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+    ) -> impl IntoResponse {
+        let report = format!("{} {}", uri.path(), headers.contains_key("x-injected"));
+        ws.on_upgrade(move |mut socket| async move {
+            let _ = socket.send(AxumWsMessage::Text(report.into())).await;
+        })
+    }
+
     let app = Router::new()
         .route("/info", get(info))
-        .route("/ws", get(ws_echo));
+        .route("/ws", get(ws_echo))
+        .route("/report/{*rest}", get(ws_report))
+        .route(
+            "/xff",
+            get(|headers: axum::http::HeaderMap| async move {
+                headers
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string()
+            }),
+        );
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -245,6 +272,32 @@ async fn websocket_upgrade_bridges_to_stub_hub() {
     );
 }
 
+/// The bridge writes the request line by hand, so an encoded CR/LF in the
+/// path must reach the hub still encoded, never as a header break.
+#[tokio::test]
+async fn websocket_bridge_forwards_the_path_still_encoded() {
+    let (farm_url, state, _guard) = start_farm().await;
+    let hub_port = start_stub_hub().await;
+    let serial = random_serial();
+    insert_hub_row(&state, "hub00005", &serial, Some(hub_port), false).await;
+
+    let ws_base = farm_url.replacen("http://", "ws://", 1);
+    let ws_url = format!("{ws_base}/hub/{serial}/report/a%0D%0AX-Injected:%20yes");
+    let (mut ws_stream, _resp) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("WS upgrade through the farm proxy should succeed");
+
+    let reply = tokio::time::timeout(Duration::from_secs(5), ws_stream.next())
+        .await
+        .expect("timed out waiting for the report")
+        .expect("stream ended before the report arrived")
+        .unwrap();
+    assert_eq!(
+        reply,
+        TungsteniteMessage::Text("/report/a%0D%0AX-Injected:%20yes false".into())
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Slug routing — the same resolution, the other key space
 // ---------------------------------------------------------------------------
@@ -342,4 +395,45 @@ async fn a_released_slug_stops_routing_but_the_pubkey_does_not() {
         200,
         "the pubkey is the address of last resort and must never stop working"
     );
+}
+
+/// The hub behind the farm rate-limits and records by the address the farm
+/// forwards, so it has to be the client's as the farm saw it, never one the
+/// client wrote itself.
+#[tokio::test]
+async fn the_proxy_forwards_the_clients_address_not_its_own_claim() {
+    let (farm_url, state, _guard) = start_farm().await;
+    let hub_port = start_stub_hub().await;
+    let serial = random_serial();
+    insert_hub_row(&state, "hub00020", &serial, Some(hub_port), false).await;
+
+    let forwarded = Client::new()
+        .get(format!("{farm_url}/hub/{serial}/xff"))
+        .header("x-forwarded-for", "6.6.6.6")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert_eq!(forwarded, "127.0.0.1");
+}
+
+/// The farm's auth routes spend the per-address auth budget: a burst of
+/// challenges ends in 429 rather than an unbounded table of rows.
+#[tokio::test]
+async fn auth_challenges_are_rate_limited_per_address() {
+    let (farm_url, _state, _guard) = start_farm().await;
+    let client = Client::new();
+    let mut statuses = Vec::new();
+    for _ in 0..15 {
+        let resp = client
+            .post(format!("{farm_url}/auth/challenge"))
+            .json(&serde_json::json!({ "public_key": "ab".repeat(32) }))
+            .send()
+            .await
+            .unwrap();
+        statuses.push(resp.status().as_u16());
+    }
+    assert!(statuses.contains(&429), "no 429 in {statuses:?}");
 }

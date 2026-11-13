@@ -433,6 +433,9 @@ pub async fn start(data_root: &Path) -> Result<EmbeddedPostgres> {
     if first_run {
         write_persisted(&state_file, &Persisted { port, password })?;
     }
+    // The embedded crate writes its password file with default permissions;
+    // it holds the superuser password.
+    wavvon_identity::restrict_secret(install_root.join(".pgpass"));
 
     if !postgres.database_exists(DATABASE_NAME).await? {
         postgres

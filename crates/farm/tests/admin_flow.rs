@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 use axum::http::HeaderValue;
 use axum_test::TestServer;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
@@ -32,7 +30,7 @@ async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let pubkey_hex = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let now = unix_now();
 
@@ -82,11 +80,7 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(
-        identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
-            .to_bytes(),
-    );
+    let sig_hex = hex::encode(identity.sign(&common::answer(&challenge_bytes)).to_bytes());
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
@@ -693,4 +687,137 @@ async fn fleet_hub_url_is_routable_or_absent() {
         format!("https://farm.test/hub/{hub_pubkey}")
     );
     assert!(by_id("fresh").get("hub_url").is_none());
+}
+
+/// The quota is counted under a lock at insert time: concurrent creations
+/// must not each see one slot left and all succeed.
+#[tokio::test]
+async fn concurrent_creations_cannot_exceed_the_per_user_quota() {
+    let (server, state, _guard) = setup().await;
+    sqlx::query("UPDATE farms SET max_hubs_per_user = 1 WHERE id = 1")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let user = Identity::generate();
+    let token = authenticate(&server, &state, &user).await;
+
+    let attempts = (0..4).map(|i| {
+        let req = server
+            .post("/farm/hubs")
+            .authorization_bearer(&token)
+            .json(&json!({ "name": format!("Race {i}") }));
+        async move { req.await }
+    });
+    let responses = futures_util::future::join_all(attempts).await;
+    let refused = responses
+        .iter()
+        .filter(|r| r.text().contains("user_quota_exceeded"))
+        .count();
+    assert!(refused >= 3, "only {refused} of 4 were refused");
+
+    let owned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM hubs WHERE owner_pubkey = $1 AND deleted_at IS NULL",
+    )
+    .bind(user.public_key_hex())
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert!(owned <= 1, "{owned} hubs created under a quota of one");
+}
+
+fn current_totp(secret_b32: &str) -> String {
+    totp_rs::TOTP::new(
+        totp_rs::Algorithm::SHA1,
+        6,
+        1,
+        30,
+        totp_rs::Secret::Encoded(secret_b32.to_string())
+            .to_bytes()
+            .unwrap(),
+        None,
+        "test".to_string(),
+    )
+    .unwrap()
+    .generate_current()
+    .unwrap()
+}
+
+/// A revoked session stops working everywhere a farm token is accepted, and
+/// cannot be renewed back to life.
+#[tokio::test]
+async fn a_revoked_admin_session_is_refused_and_cannot_be_renewed() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    let token = authenticate(&server, &state, &admin).await;
+    set_admin(&state, &admin.public_key_hex()).await;
+    server
+        .get("/farm/users")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_ok();
+
+    sqlx::query("UPDATE farm_sessions SET revoked_at = 1 WHERE public_key = $1")
+        .bind(admin.public_key_hex())
+        .execute(&state.db)
+        .await
+        .unwrap();
+
+    server
+        .get("/farm/users")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_unauthorized();
+    server
+        .post("/auth/renew")
+        .authorization_bearer(&token)
+        .await
+        .assert_status_unauthorized();
+}
+
+/// With TOTP on, a session alone cannot swap the second factor for its own.
+#[tokio::test]
+async fn replacing_an_enabled_totp_secret_needs_a_current_code() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    let token = authenticate(&server, &state, &admin).await;
+    set_admin(&state, &admin.public_key_hex()).await;
+
+    let setup_secret = |server: &TestServer, token: String| {
+        let req = server
+            .post("/farm/admin/totp/setup")
+            .authorization_bearer(&token);
+        async move {
+            req.await.json::<Value>()["secret"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let first = setup_secret(&server, token.clone()).await;
+    server
+        .post("/farm/admin/totp/confirm")
+        .authorization_bearer(&token)
+        .json(&json!({ "secret": first, "code": current_totp(&first) }))
+        .await
+        .assert_status_ok();
+
+    let second = setup_secret(&server, token.clone()).await;
+    let refused = server
+        .post("/farm/admin/totp/confirm")
+        .authorization_bearer(&token)
+        .json(&json!({ "secret": second, "code": current_totp(&second) }))
+        .await;
+    refused.assert_status_unauthorized();
+    assert_eq!(refused.json::<Value>()["error"], "current_totp_required");
+
+    server
+        .post("/farm/admin/totp/confirm")
+        .authorization_bearer(&token)
+        .json(&json!({
+            "secret": second,
+            "code": current_totp(&second),
+            "current_code": current_totp(&first),
+        }))
+        .await
+        .assert_status_ok();
 }

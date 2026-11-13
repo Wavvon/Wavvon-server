@@ -887,6 +887,9 @@ pub async fn delete_alliance_forum_reply(
 /// `/uploads/{id}`: an `<img>` sends no token, and this adds nothing the
 /// holding hub does not already serve. The reader's own headers are applied
 /// whatever the holder sent, and only a re-encoded image stays inline.
+/// Bounds one member hub's answer, body included.
+const UPLOAD_PROXY_TIMEOUT_SECS: u64 = 60;
+
 pub async fn get_alliance_upload(
     State(state): State<Arc<AppState>>,
     Path((alliance_id, id)): Path<(String, String)>,
@@ -910,7 +913,16 @@ pub async fn get_alliance_upload(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     for hub_url in members {
-        let Ok(resp) = state.federation_client.get_upload(&hub_url, &id).await else {
+        // Anonymous callers drive this fetch, and a member hub chooses what
+        // its URL answers: every hop goes through the SSRF check.
+        let url = format!("{}/uploads/{id}", hub_url.trim_end_matches('/'));
+        let Ok(resp) = crate::routes::preview::fetch_checked(
+            &url,
+            state.allow_private_webhooks,
+            std::time::Duration::from_secs(UPLOAD_PROXY_TIMEOUT_SECS),
+        )
+        .await
+        else {
             continue;
         };
         let status = resp.status();
@@ -1012,6 +1024,7 @@ pub async fn get_alliance_channel_messages(
                     m.masquerade
              FROM messages m LEFT JOIN users u ON m.sender = u.public_key
              WHERE m.channel_id = $1
+               AND m.visible_to_pubkey IS NULL
                AND ($2::text IS NULL OR (m.created_at, m.id) <
                     ((SELECT created_at FROM messages WHERE id = $2), $2))
              ORDER BY m.created_at DESC, m.id DESC LIMIT $3",

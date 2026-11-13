@@ -8,7 +8,7 @@ use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 
-type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
+use super::{send_error, WsTx};
 
 pub(in crate::routes::ws) async fn handle_subscribe(
     cs: &mut ConnState,
@@ -32,14 +32,12 @@ pub(in crate::routes::ws) async fn handle_subscribe(
             Err(_) => false,
         };
     if !can_read {
-        let err = WsServerMessage::Error {
-            context: "subscribe".to_string(),
-            message: "You do not have access to this channel.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "subscribe",
+            "You do not have access to this channel.".to_string(),
+        )
+        .await;
     }
 
     let newly_subscribed = cs.subscribed.insert(channel_id.clone());
@@ -124,18 +122,65 @@ pub(in crate::routes::ws) fn handle_screen_share_chunk_header(
     DispatchResult::Continue
 }
 
+/// How many seconds of the cap a stream may send at once: a keyframe is far
+/// larger than the frames around it.
+const BITRATE_BURST_SECS: f64 = 4.0;
+
+/// Token bucket over relayed bytes. The cap a stream declared used to be
+/// checked only as a number at start, so a modified client could then send at
+/// any rate; past the allowance a chunk is dropped instead of relayed.
+fn within_bitrate(
+    allowance: &mut (f64, std::time::Instant),
+    kbps: u32,
+    len: usize,
+    now: std::time::Instant,
+) -> bool {
+    let bytes_per_sec = f64::from(kbps) * 125.0;
+    let (tokens, last) = allowance;
+    let elapsed = now.saturating_duration_since(*last).as_secs_f64();
+    *tokens = (*tokens + elapsed * bytes_per_sec).min(bytes_per_sec * BITRATE_BURST_SECS);
+    *last = now;
+    if *tokens < len as f64 {
+        return false;
+    }
+    *tokens -= len as f64;
+    true
+}
+
 pub(in crate::routes::ws) async fn handle_binary_chunk(
     cs: &mut ConnState,
     state: &Arc<AppState>,
     data: bytes::Bytes,
 ) -> DispatchResult {
     if let Some((ch_id, st_id, seq, is_init)) = cs.pending_chunk.take() {
+        // Viewers key chunks by stream id, so a chunk for a stream this sender
+        // did not start would play under the real sharer's name.
+        let key = (ch_id.clone(), cs.public_key.clone());
         if is_init {
             let mut shares = state.screen_shares.write().await;
-            let key = (ch_id.clone(), cs.public_key.clone());
-            if let Some(active) = shares.get_mut(&key) {
-                if let Some(meta) = active.streams.get_mut(&st_id) {
-                    meta.init_chunk = Some(data.clone());
+            let Some(meta) = shares
+                .get_mut(&key)
+                .and_then(|active| active.streams.get_mut(&st_id))
+            else {
+                return DispatchResult::Continue;
+            };
+            meta.init_chunk = Some(data.clone());
+        } else {
+            let max_kbps = {
+                let shares = state.screen_shares.read().await;
+                match shares.get(&key).and_then(|a| a.streams.get(&st_id)) {
+                    Some(meta) => meta.max_kbps,
+                    None => return DispatchResult::Continue,
+                }
+            };
+            if let Some(kbps) = max_kbps {
+                let now = std::time::Instant::now();
+                let entry = cs
+                    .chunk_allowance
+                    .entry(st_id.clone())
+                    .or_insert((f64::from(kbps) * 125.0 * BITRATE_BURST_SECS, now));
+                if !within_bitrate(entry, kbps, data.len(), now) {
+                    return DispatchResult::Continue;
                 }
             }
         }
@@ -176,14 +221,12 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
 
     let limits = crate::routes::hub::read_stream_limits(&state.db).await;
     if let Some(what) = limits.exceeded_by(width, height, fps, kbps) {
-        let err = WsServerMessage::Error {
-            context: "screen_share_start".to_string(),
-            message: format!("This hub caps a stream's {what}; choose a lower setting."),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "screen_share_start",
+            format!("This hub caps a stream's {what}; choose a lower setting."),
+        )
+        .await;
     }
 
     // Channel-scoped VOICE_JOIN: a screen share is something you do once
@@ -199,14 +242,12 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
             if perms.has(crate::permissions::VOICE_JOIN)
                 && perms.has(crate::permissions::VOICE_SCREEN_SHARE) => {}
         _ => {
-            let err = WsServerMessage::Error {
-                context: "screen_share_start".to_string(),
-                message: "You cannot share into this channel.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            return send_error(
+                ws_tx,
+                "screen_share_start",
+                "You cannot share into this channel.".to_string(),
+            )
+            .await;
         }
     }
 
@@ -229,6 +270,10 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
                 session_id: cs.session_id.clone(),
                 init_chunk: None,
                 started_at: std::time::Instant::now(),
+                max_kbps: match (kbps, limits.max_kbps) {
+                    (Some(d), Some(m)) => Some(d.min(m)),
+                    (d, m) => d.or(m),
+                },
             },
         );
     }
@@ -372,14 +417,12 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
             .unwrap_or(false);
 
     if !can_view {
-        let err = WsServerMessage::Error {
-            context: "stream_subscribe".to_string(),
-            message: "Channel not found or access denied.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "stream_subscribe",
+            "Channel not found or access denied.".to_string(),
+        )
+        .await;
     }
 
     let found: Option<(String, String, String, bool)> = {
@@ -443,13 +486,12 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
             }
         }
     } else {
-        let err = WsServerMessage::Error {
-            context: "stream_subscribe".to_string(),
-            message: "No active stream with that ID in the specified channel.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
+        return send_error(
+            ws_tx,
+            "stream_subscribe",
+            "No active stream with that ID in the specified channel.".to_string(),
+        )
+        .await;
     }
     DispatchResult::Continue
 }
@@ -478,4 +520,28 @@ pub(in crate::routes::ws) async fn handle_stream_unsubscribe(
         active.cross_channel_subscribers.remove(&cs.public_key);
     }
     DispatchResult::Continue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_relay_holds_a_stream_to_its_bitrate() {
+        let start = Instant::now();
+        // 8 kbps = 1000 bytes a second, 4000 of burst.
+        let mut allowance = (4000.0, start);
+        assert!(within_bitrate(&mut allowance, 8, 4000, start));
+        assert!(!within_bitrate(&mut allowance, 8, 1, start), "burst spent");
+        let later = start + Duration::from_secs(1);
+        assert!(within_bitrate(&mut allowance, 8, 1000, later));
+        assert!(!within_bitrate(&mut allowance, 8, 1, later));
+        let much_later = start + Duration::from_secs(60);
+        assert!(within_bitrate(&mut allowance, 8, 4000, much_later));
+        assert!(
+            !within_bitrate(&mut allowance, 8, 1, much_later),
+            "refill stops at the burst"
+        );
+    }
 }

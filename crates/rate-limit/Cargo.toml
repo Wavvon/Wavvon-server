@@ -1,0 +1,11 @@
+[package]
+name = "wavvon-rate-limit"
+version = "0.1.0"
+edition = "2021"
+description = "Per-IP token-bucket limiter shared by the hub and the farm."
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+wavvon-hub-env = { path = "../hub-env" }

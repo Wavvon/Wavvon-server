@@ -361,6 +361,7 @@ pub fn base_state(db: PgPool) -> AppState {
         hub_identity: Identity::generate(),
         db,
         pending_challenges: RwLock::new(HashMap::new()),
+        ws_tickets: std::sync::Mutex::new(HashMap::new()),
         cert_portfolio_cache: RwLock::new(HashMap::new()),
         chat_tx,
         federation_client: FederationClient::new(),
@@ -379,12 +380,14 @@ pub fn base_state(db: PgPool) -> AppState {
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
         screen_shares: RwLock::new(HashMap::new()),
+        federated_masters: RwLock::new(HashMap::new()),
         screen_share_tx: broadcast::channel(16).0,
         app_sessions: RwLock::new(std::collections::HashMap::new()),
         http_client: reqwest::Client::new(),
         farm_url: None,
         cached_farm_pubkey: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         last_farm_pubkey_fetch: std::sync::Arc::new(tokio::sync::RwLock::new(0)),
+        farm_session_checks: std::sync::Mutex::new(std::collections::HashMap::new()),
         video_channels: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         started_at: std::time::Instant::now(),
         whisper_target_defs: tokio::sync::RwLock::new(std::collections::HashMap::new()),
@@ -402,6 +405,9 @@ pub fn base_state(db: PgPool) -> AppState {
         owner_pubkey: None,
         apps_allow_camera: false,
         allow_private_webhooks: false,
+        // The helpers here answer challenges with the unbound v1 form; the
+        // bound form a running hub insists on has its own tests (auth_flow).
+        accept_unbound_auth: true,
         metrics_enabled: false,
         http_video_stream_budget: 2,
         webauthn: make_test_webauthn(),
@@ -502,4 +508,61 @@ pub async fn setup_with_owner() -> (TestHarness, String) {
     let owner = Identity::generate();
     let token = authenticate(&server, &owner).await;
     (server, token)
+}
+
+/// A /federation/dm payload with its signature set over the payload's own
+/// fields, in the v2 form a sender's client signs: so the payload is the one
+/// source of the id, time and members, and a test cannot sign one and send
+/// another by accident.
+#[allow(dead_code)]
+pub fn signed_fed_dm(
+    sign: impl Fn(&[u8]) -> [u8; 64],
+    mut payload: serde_json::Value,
+) -> serde_json::Value {
+    let members: Vec<String> = payload["members"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let bytes = wavvon_identity::federated_plaintext_dm_v2_signing_bytes(
+        payload["conversation_id"].as_str().unwrap_or_default(),
+        payload["conv_type"].as_str().unwrap_or_default(),
+        payload["content"].as_str().unwrap_or_default(),
+        payload["message_id"].as_str().unwrap_or_default(),
+        payload["created_at"].as_i64().unwrap_or_default().max(0) as u64,
+        &members,
+    );
+    payload["signature"] = serde_json::json!(hex::encode(sign(&bytes)));
+    payload
+}
+
+/// The body of a plaintext DM a client sends: content, its v2 signature, and
+/// the id and time it signed.
+#[allow(dead_code)]
+pub fn signed_dm_body(
+    sender: &Identity,
+    conversation_id: &str,
+    conv_type: &str,
+    content: &str,
+    members: &[String],
+) -> serde_json::Value {
+    let message_id = uuid::Uuid::new_v4().to_string();
+    let created_at = wavvon_hub::auth::handlers::unix_timestamp();
+    let bytes = wavvon_identity::federated_plaintext_dm_v2_signing_bytes(
+        conversation_id,
+        conv_type,
+        content,
+        &message_id,
+        created_at as u64,
+        members,
+    );
+    serde_json::json!({
+        "content": content,
+        "plaintext_signature": hex::encode(sender.sign(&bytes).to_bytes()),
+        "message_id": message_id,
+        "created_at": created_at,
+    })
 }

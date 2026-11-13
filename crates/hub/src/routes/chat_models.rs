@@ -70,6 +70,10 @@ pub struct ChannelResponse {
     /// `nsfw` flag surfaced on `/info`).
     #[serde(default)]
     pub nsfw: bool,
+    /// Slowmode: seconds a member must wait between messages here, 0 = off.
+    /// Advertised as `channels.slowmode`.
+    #[serde(default)]
+    pub slowmode_secs: i32,
     /// The caller's own `voice.move_members` here, resolved channel-scoped
     /// (events.md §7.1). A move-destination picker that offers every channel
     /// pushes the refusal to the moment the move is issued — or, for a queued
@@ -118,6 +122,8 @@ pub struct UpdateChannelRequest {
     /// a plain `NOT NULL BOOLEAN`, so absent = unchanged, `Some(bool)` = set.
     #[serde(default)]
     pub nsfw: Option<bool>,
+    /// Seconds between one member's messages here, 0 to turn it off.
+    pub slowmode_secs: Option<i32>,
     /// Switch a channel between `text` and `voice`; both keep their chat.
     #[serde(default)]
     pub channel_type: Option<String>,
@@ -479,7 +485,12 @@ pub struct PaginationParams {
 
 #[derive(Deserialize)]
 pub struct WsParams {
-    pub token: String,
+    /// The session token itself. Still accepted, for clients that predate
+    /// `ticket`; a URL is what reverse proxies log.
+    pub token: Option<String>,
+    /// A single-use, short-lived ticket from `POST /ws/ticket`, so the
+    /// session token never appears in a URL.
+    pub ticket: Option<String>,
     /// `on_request`: this connection receives a stream's bytes only after
     /// opening it with `stream_subscribe`, in its own channels too (#276).
     /// A query parameter rather than a message because the hub replays
@@ -718,6 +729,11 @@ pub enum WsClientMessage {
 #[derive(Serialize, Clone)]
 #[serde(tag = "type")]
 pub enum WsServerMessage {
+    /// What this connection may read or join changed. The connection drops
+    /// channels it can no longer read and leaves voice it can no longer join
+    /// before forwarding this, so a client can refetch its channel list.
+    #[serde(rename = "access_changed")]
+    AccessChanged,
     #[serde(rename = "message")]
     ChatMessage {
         channel_id: String,

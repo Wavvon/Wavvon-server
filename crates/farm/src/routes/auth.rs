@@ -99,7 +99,7 @@ pub async fn challenge(
 
     Ok(Json(ChallengeResponse {
         challenge: challenge_hex,
-        scheme: wavvon_identity::AUTH_CHALLENGE_SCHEME,
+        scheme: wavvon_identity::BOUND_AUTH_CHALLENGE_SCHEME,
     }))
 }
 
@@ -161,8 +161,15 @@ pub async fn verify(
     let sig_bytes = hex::decode(&req.signature)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid signature hex".to_string()))?;
 
-    wavvon_identity::verify_auth_challenge(&req.public_key, &challenge_bytes, &sig_bytes)
-        .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
+    // Bound to this farm's key: an unbound answer is what a hostile hub could
+    // collect and relay here.
+    wavvon_identity::verify_bound_auth_challenge(
+        &req.public_key,
+        &state.public_key_hex(),
+        &challenge_bytes,
+        &sig_bytes,
+    )
+    .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid signature".to_string()))?;
 
     // Delete the used challenge (single-use).
     sqlx::query("DELETE FROM pending_challenges_v2 WHERE challenge_hex = $1")
@@ -194,6 +201,15 @@ pub async fn verify(
             })?;
             if cert.not_after.is_some_and(|exp| (now as u64) >= exp) {
                 return Err((StatusCode::UNAUTHORIZED, "subkey_cert expired".to_string()));
+            }
+            if crate::routes::revoke::device_revoked(
+                &state.db,
+                &cert.master_pubkey,
+                &cert.subkey_pubkey,
+            )
+            .await
+            {
+                return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
             }
             Some(cert.master_pubkey.clone())
         }
@@ -326,6 +342,24 @@ pub async fn renew(
     let farm_pubkey = state.public_key_hex();
     let old_payload = verify_token(&farm_pubkey, token_str)
         .map_err(|e| (StatusCode::UNAUTHORIZED, format!("Invalid farm token: {e}")))?;
+    // Renewing a revoked session would undo the revocation.
+    if !crate::routes::revoke::session_is_live(&state.db, &old_payload.jti).await {
+        return Err((StatusCode::UNAUTHORIZED, "Session revoked".to_string()));
+    }
+
+    // The new session belongs to the device that opened the old one (the
+    // row's public_key), not to `sub`, which for a paired device is its
+    // master and has no farm_users row of its own.
+    let device: String = sqlx::query_scalar("SELECT public_key FROM farm_sessions WHERE jti = $1")
+        .bind(&old_payload.jti)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if let Some(master) = old_payload.master.as_deref() {
+        if crate::routes::revoke::device_revoked(&state.db, master, &device).await {
+            return Err((StatusCode::UNAUTHORIZED, "Key has been revoked".to_string()));
+        }
+    }
 
     // Issue a fresh session with a new jti and a new 30-day window.
     let now = unix_now();
@@ -341,7 +375,7 @@ pub async fn renew(
          VALUES ($1, $2, $3, $4, $5)",
     )
     .bind(&new_jti)
-    .bind(&old_payload.sub)
+    .bind(&device)
     .bind(now)
     .bind(new_exp)
     .bind(&old_payload.scope)

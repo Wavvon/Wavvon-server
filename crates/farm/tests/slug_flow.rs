@@ -11,15 +11,35 @@ mod common;
 use std::sync::Arc;
 
 use axum_test::TestServer;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use serde_json::json;
 use wavvon_farm::token::{sign_token, FarmTokenPayload};
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
 
 /// Mint a member token for `pubkey`, the way `/auth/verify` would.
-fn token_for(state: &FarmState, pubkey: &str) -> String {
+async fn token_for(state: &FarmState, pubkey: &str) -> String {
     let now = unix_now();
+    let jti = hex::encode(rand::random::<[u8; 16]>());
+    // A token is only as good as its session row: the farm checks it.
+    sqlx::query(
+        "INSERT INTO farm_users (public_key, first_seen_at, last_seen_at) VALUES ($1, $2, $2)
+         ON CONFLICT (public_key) DO NOTHING",
+    )
+    .bind(pubkey)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO farm_sessions (jti, public_key, issued_at, expires_at, scope)
+         VALUES ($1, $2, $3, $4, 'member')",
+    )
+    .bind(&jti)
+    .bind(pubkey)
+    .bind(now)
+    .bind(now + 3600)
+    .execute(&state.db)
+    .await
+    .unwrap();
     sign_token(
         &state.keypair,
         &FarmTokenPayload {
@@ -28,7 +48,7 @@ fn token_for(state: &FarmState, pubkey: &str) -> String {
             iss_pk: state.public_key_hex(),
             sub: pubkey.to_string(),
             master: None,
-            jti: "test-jti".to_string(),
+            jti: jti.clone(),
             iat: now,
             exp: now + 3600,
             scope: "member".to_string(),
@@ -50,7 +70,7 @@ async fn setup() -> Harness {
     let (db_pool, guard) = common::create_test_db().await;
     db::migrations::run(&db_pool).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let farm_pubkey = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     sqlx::query("INSERT INTO farms (id, public_key, created_at) VALUES (1, $1, $2)")
         .bind(&farm_pubkey)
@@ -80,7 +100,7 @@ async fn setup() -> Harness {
     ));
 
     let owner_pubkey = "1".repeat(64);
-    let owner_token = token_for(&state, &owner_pubkey);
+    let owner_token = token_for(&state, &owner_pubkey).await;
 
     let app = server::create_router(state.clone());
     Harness {
@@ -278,7 +298,7 @@ async fn only_the_hub_owner_may_manage_its_slugs() {
     let h = setup().await;
     insert_hub(&h, "hub-1", None).await;
 
-    let stranger = token_for(&h.state, &"9".repeat(64));
+    let stranger = token_for(&h.state, &"9".repeat(64)).await;
     let res = h
         .server
         .post("/farm/hubs/hub-1/slugs")
@@ -299,7 +319,11 @@ async fn the_heartbeat_reports_the_canonical_url_and_follows_a_rename() {
     let beat = || async {
         h.server
             .post("/farm/heartbeat")
-            .json(&json!({ "hub_id": "hub-1", "hub_pubkey": pubkey }))
+            .json(&json!({
+                "hub_id": "hub-1",
+                "hub_pubkey": pubkey,
+                "hub_credential": h.state.hub_credential("hub-1"),
+            }))
             .await
             .json::<serde_json::Value>()
     };
@@ -433,7 +457,11 @@ async fn the_heartbeat_reports_sibling_hubs_by_their_current_address() {
     let body: serde_json::Value = h
         .server
         .post("/farm/heartbeat")
-        .json(&json!({ "hub_id": "hub-a", "hub_pubkey": a }))
+        .json(&json!({
+            "hub_id": "hub-a",
+            "hub_pubkey": a,
+            "hub_credential": h.state.hub_credential("hub-a"),
+        }))
         .await
         .json();
 
@@ -466,7 +494,11 @@ async fn suspended_and_unclaimed_hubs_are_not_offered_as_siblings() {
     let body: serde_json::Value = h
         .server
         .post("/farm/heartbeat")
-        .json(&json!({ "hub_id": "hub-a", "hub_pubkey": a }))
+        .json(&json!({
+            "hub_id": "hub-a",
+            "hub_pubkey": a,
+            "hub_credential": h.state.hub_credential("hub-a"),
+        }))
         .await
         .json();
 

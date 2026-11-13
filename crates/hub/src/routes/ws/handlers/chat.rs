@@ -1,15 +1,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::Message;
-use futures_util::SinkExt;
-
 use crate::routes::chat_models::{WsClientMessage, WsServerMessage};
 use crate::state::AppState;
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 
-type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
+use super::{send_error, WsTx};
 
 pub(in crate::routes::ws) async fn handle_typing(
     cs: &ConnState,
@@ -69,7 +66,7 @@ pub(in crate::routes::ws) async fn handle_typing(
 /// client tracks its invisible state locally and does not rely on this
 /// broadcast to know it's invisible.
 pub(in crate::routes::ws) async fn handle_set_status(
-    cs: &ConnState,
+    cs: &mut ConnState,
     state: &Arc<AppState>,
     msg: WsClientMessage,
 ) -> DispatchResult {
@@ -77,6 +74,16 @@ pub(in crate::routes::ws) async fn handle_set_status(
         WsClientMessage::SetStatus { status, custom } => (status, custom),
         _ => return DispatchResult::Continue,
     };
+    // Every accepted change is broadcast hub-wide, so a socket gets a burst of
+    // five and then one a second; a flood would otherwise lag every client.
+    let now = std::time::Instant::now();
+    let (tokens, last) = cs.status_allowance.get_or_insert((5.0, now));
+    *tokens = (*tokens + now.duration_since(*last).as_secs_f64()).min(5.0);
+    *last = now;
+    if *tokens < 1.0 {
+        return DispatchResult::Continue;
+    }
+    *tokens -= 1.0;
 
     let status = match status.as_str() {
         "online" => None,
@@ -260,14 +267,12 @@ pub(in crate::routes::ws) async fn handle_component_interaction(
     let now_inst = Instant::now();
     if let Some(last) = cs.component_rate_limit.get(&rl_key) {
         if now_inst.duration_since(*last) < Duration::from_secs(3) {
-            let err = WsServerMessage::Error {
-                context: "component_interaction".to_string(),
-                message: "Please wait before interacting again.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            return send_error(
+                ws_tx,
+                "component_interaction",
+                "Please wait before interacting again.".to_string(),
+            )
+            .await;
         }
     }
     cs.component_rate_limit.insert(rl_key, now_inst);

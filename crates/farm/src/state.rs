@@ -54,15 +54,22 @@ impl FarmState {
         farm_url: String,
         hub_manager: Arc<HubManager>,
     ) -> Self {
+        let keypair = Arc::new(keypair);
+        hub_manager.set_credential_key(keypair.clone());
         Self {
             db,
-            keypair: Arc::new(keypair),
+            keypair,
             farm_url,
             hub_manager,
             http_client: reqwest::Client::new(),
             agent_senders: Arc::new(RwLock::new(HashMap::new())),
             node_clients: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// The heartbeat credential for `hub_id`; see [`crate::hub_manager::hub_credential`].
+    pub fn hub_credential(&self, hub_id: &str) -> String {
+        crate::hub_manager::hub_credential(&self.keypair, hub_id)
     }
 
     /// Farm public key as a lowercase hex string.
@@ -87,21 +94,47 @@ impl FarmState {
         voice_port: u16,
         owner_pubkey: Option<&str>,
     ) -> Result<(), AgentUnreachable> {
-        let sender = {
-            let map = self.agent_senders.read().await;
-            map.get(server_id).cloned()
-        };
-        let sender = sender.ok_or(AgentUnreachable)?;
-        let cmd = serde_json::json!({
-            "type": "restart_hub",
+        self.send_to_agent(
+            server_id,
+            serde_json::json!({
+                "type": "restart_hub",
             "hub_id": hub_id,
             "db_url": db_url,
             "port": port,
             "voice_port": voice_port,
             "owner_pubkey": owner_pubkey,
             "farm_url": self.farm_url,
-        });
+            "hub_credential": self.hub_credential(hub_id),
+            }),
+        )
+        .await
+    }
+
+    /// Ask the agent hosting `hub_id` to stop its process. Same failure
+    /// reading as [`Self::send_restart_to_agent`].
+    pub async fn send_stop_to_agent(
+        &self,
+        server_id: &str,
+        hub_id: &str,
+    ) -> Result<(), AgentUnreachable> {
+        self.send_to_agent(
+            server_id,
+            serde_json::json!({ "type": "stop_hub", "hub_id": hub_id }),
+        )
+        .await
+    }
+
+    async fn send_to_agent(
+        &self,
+        server_id: &str,
+        cmd: serde_json::Value,
+    ) -> Result<(), AgentUnreachable> {
+        let sender = {
+            let map = self.agent_senders.read().await;
+            map.get(server_id).cloned()
+        };
         sender
+            .ok_or(AgentUnreachable)?
             .try_send(cmd.to_string())
             .map_err(|_| AgentUnreachable)
     }

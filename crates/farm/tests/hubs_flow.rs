@@ -14,8 +14,6 @@ use std::sync::Arc;
 
 use axum::http::HeaderValue;
 use axum_test::TestServer;
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
@@ -35,7 +33,7 @@ async fn setup_with_farm_url(farm_url: &str) -> (TestServer, Arc<FarmState>, com
     let (db, guard) = common::create_test_db().await;
     db::migrations::run(&db).await.unwrap();
 
-    let keypair = SigningKey::generate(&mut OsRng);
+    let keypair = common::farm_keypair();
     let pubkey_hex = hex::encode(ed25519_dalek::VerifyingKey::from(&keypair).as_bytes());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -90,11 +88,7 @@ async fn authenticate(server: &TestServer, _state: &FarmState, identity: &Identi
         .unwrap()
         .to_string();
     let challenge_bytes = hex::decode(&challenge_hex).unwrap();
-    let sig_hex = hex::encode(
-        identity
-            .sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap())
-            .to_bytes(),
-    );
+    let sig_hex = hex::encode(identity.sign(&common::answer(&challenge_bytes)).to_bytes());
     let vr = server
         .post("/auth/verify")
         .json(&json!({ "public_key": pubkey, "signature": sig_hex }))
@@ -533,6 +527,47 @@ async fn suspend_hub_happy_path() {
             .await
             .unwrap();
     assert!(suspended.is_some());
+}
+
+/// Suspending must stop the process, not only the proxy: an agent-hosted hub
+/// gets a stop command over its agent's socket.
+#[tokio::test]
+async fn suspending_an_agent_hosted_hub_tells_the_agent_to_stop_it() {
+    let (server, state, _guard) = setup().await;
+    let admin = Identity::generate();
+    insert_hub(&state, "hubagt", &admin.public_key_hex(), "Hub", "public").await;
+    set_admin(&state, &admin.public_key_hex()).await;
+    sqlx::query(
+        "INSERT INTO servers (id, token_hash, name, registered_at) VALUES ('node1', 'x', 'n', 0)",
+    )
+    .execute(&state.db)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE hubs SET server_id = 'node1' WHERE id = 'hubagt'")
+        .execute(&state.db)
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    state
+        .agent_senders
+        .write()
+        .await
+        .insert("node1".to_string(), tx);
+
+    let token = authenticate(&server, &state, &admin).await;
+    server
+        .patch("/farm/hubs/hubagt/suspend")
+        .add_header(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        )
+        .json(&json!({ "reason": "abuse" }))
+        .await
+        .assert_status_ok();
+
+    let cmd: Value = serde_json::from_str(&rx.try_recv().expect("a command")).unwrap();
+    assert_eq!(cmd["type"], "stop_hub");
+    assert_eq!(cmd["hub_id"], "hubagt");
 }
 
 #[tokio::test]
