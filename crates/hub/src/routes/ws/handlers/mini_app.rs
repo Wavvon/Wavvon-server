@@ -8,7 +8,7 @@ use crate::routes::chat_models::{ChatEvent, WsClientMessage, WsServerMessage};
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 use crate::state::AppState;
 
-type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
+use super::WsTx;
 
 /// Bot → hub → channel: fan out a mini-app launch card.
 pub(in crate::routes::ws) async fn handle_app_announce(

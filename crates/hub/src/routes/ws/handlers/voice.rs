@@ -13,7 +13,7 @@ use crate::routes::ws::voice::{
     re_resolve_whisper_sessions, resolve_whisper_target_pubkeys, send_whisper_notification,
 };
 
-type WsTx = futures_util::stream::SplitSink<axum::extract::ws::WebSocket, Message>;
+use super::{send_error, WsTx};
 
 pub(in crate::routes::ws) async fn handle_voice_join(
     cs: &mut ConnState,
@@ -31,14 +31,12 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     // endpoint enforced (voice-transport-v2.md), re-applied here since the
     // unified `voice_join` handler is now the only voice-join code path.
     if cs.is_mini_app {
-        let err = WsServerMessage::Error {
-            context: "voice_join".to_string(),
-            message: "Mini-app sessions cannot join voice.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "voice_join",
+            "Mini-app sessions cannot join voice.".to_string(),
+        )
+        .await;
     }
 
     // An alliance-voice visitor was admitted to *one* shared channel
@@ -56,14 +54,12 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                 admitted = %admitted,
                 "Alliance voice visitor tried to join a channel outside its grant"
             );
-            let err = WsServerMessage::Error {
-                context: "voice_join".to_string(),
-                message: "This visit is scoped to one channel.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            return send_error(
+                ws_tx,
+                "voice_join",
+                "This visit is scoped to one channel.".to_string(),
+            )
+            .await;
         }
     }
 
@@ -72,14 +68,12 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .await
         .unwrap_or(false);
     if is_hub_muted {
-        let err = WsServerMessage::Error {
-            context: "voice_join".to_string(),
-            message: "You are voice-muted on this hub.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "voice_join",
+            "You are voice-muted on this hub.".to_string(),
+        )
+        .await;
     }
 
     // Per-channel voice mute check.
@@ -88,14 +82,12 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             .await
             .unwrap_or(false);
     if is_ch_muted {
-        let err = WsServerMessage::Error {
-            context: "voice_join".to_string(),
-            message: "You are voice-muted in this channel.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "voice_join",
+            "You are voice-muted in this channel.".to_string(),
+        )
+        .await;
     }
 
     // Voice admission gate (permissions.md §3, Voice). This used to ask for
@@ -124,25 +116,21 @@ pub(in crate::routes::ws) async fn handle_voice_join(
             // their authorization, and it was matched to this channel above.
             let visiting = cs.alliance_voice_channel.as_deref() == Some(channel_id.as_str());
             if !has_grant && !visiting {
-                let err = WsServerMessage::Error {
-                    context: "voice_join".to_string(),
-                    message: "You do not have access to this channel.".to_string(),
-                };
-                let _ = ws_tx
-                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                    .await;
-                return DispatchResult::Continue;
+                return send_error(
+                    ws_tx,
+                    "voice_join",
+                    "You do not have access to this channel.".to_string(),
+                )
+                .await;
             }
         }
         Err(_) => {
-            let err = WsServerMessage::Error {
-                context: "voice_join".to_string(),
-                message: "Unable to verify channel access.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            return send_error(
+                ws_tx,
+                "voice_join",
+                "Unable to verify channel access.".to_string(),
+            )
+            .await;
         }
         Ok(_) => {}
     }
@@ -167,15 +155,12 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     .unwrap_or(false);
 
     if squad_room_event_ended {
-        let err = WsServerMessage::Error {
-            context: "voice_join".to_string(),
-            message: "This event has ended; its squad room no longer accepts new joins."
-                .to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "voice_join",
+            "This event has ended; its squad room no longer accepts new joins.".to_string(),
+        )
+        .await;
     }
 
     // Spawn-on-join (join-to-create temp voice channels,
@@ -220,14 +205,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                     .send((crate::routes::chat_models::ChatEvent::ChannelsUpdated, json));
             }
             Err((_, message)) => {
-                let err = WsServerMessage::Error {
-                    context: "voice_join".to_string(),
-                    message,
-                };
-                let _ = ws_tx
-                    .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                    .await;
-                return DispatchResult::Continue;
+                return send_error(ws_tx, "voice_join", message).await;
             }
         }
     } else {
@@ -248,14 +226,12 @@ pub(in crate::routes::ws) async fn handle_voice_join(
     if target_channel_type.as_deref() != Some("spawner")
         && target_channel_type.as_deref() != Some("voice")
     {
-        let err = WsServerMessage::Error {
-            context: "voice_join".to_string(),
-            message: "This channel has no voice. Join a voice channel instead.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "voice_join",
+            "This channel has no voice. Join a voice channel instead.".to_string(),
+        )
+        .await;
     }
 
     // Talk-power check.
@@ -777,18 +753,6 @@ pub(in crate::routes::ws) async fn handle_voice_whisper_optout(
     DispatchResult::Continue
 }
 
-/// Sends a `voice_move`-context `Error` back to the mover on `ws_tx`.
-async fn send_voice_move_error(ws_tx: &mut WsTx, message: impl Into<String>) -> DispatchResult {
-    let err = WsServerMessage::Error {
-        context: "voice_move".to_string(),
-        message: message.into(),
-    };
-    let _ = ws_tx
-        .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-        .await;
-    DispatchResult::Continue
-}
-
 /// Move primitive (events.md §7.1, §7.3, §7.4): the mover asks the hub to
 /// move `target_pubkey` into `target_channel_id`. The hub never yanks the
 /// target server-side — it pushes a `voice_move` control message and the
@@ -826,14 +790,15 @@ pub(in crate::routes::ws) async fn handle_voice_move(
     {
         Ok(perms) if perms.has(crate::permissions::VOICE_MOVE_MEMBERS) => {}
         Ok(_) => {
-            return send_voice_move_error(
+            return send_error(
                 ws_tx,
+                "voice_move",
                 "You do not have permission to move members into this channel.",
             )
             .await;
         }
         Err(_) => {
-            return send_voice_move_error(ws_tx, "Unable to verify move permission.").await;
+            return send_error(ws_tx, "voice_move", "Unable to verify move permission.").await;
         }
     }
 
@@ -848,7 +813,7 @@ pub(in crate::routes::ws) async fn handle_voice_move(
     let target_channel_name = match target_channel_name {
         Some(name) => name,
         None => {
-            return send_voice_move_error(ws_tx, "Target is not a voice channel.").await;
+            return send_error(ws_tx, "voice_move", "Target is not a voice channel.").await;
         }
     };
 
@@ -869,7 +834,7 @@ pub(in crate::routes::ws) async fn handle_voice_move(
             // rejection still applies (there's no later trigger to apply
             // a bare, event-less move against).
             let Some(eid) = &event_id else {
-                return send_voice_move_error(ws_tx, "Target is not currently in voice.").await;
+                return send_error(ws_tx, "voice_move", "Target is not currently in voice.").await;
             };
 
             let now = crate::auth::handlers::unix_timestamp();
@@ -891,8 +856,12 @@ pub(in crate::routes::ws) async fn handle_voice_move(
             .await;
 
             if let Err(e) = res {
-                return send_voice_move_error(ws_tx, format!("Unable to queue assignment: {e}"))
-                    .await;
+                return send_error(
+                    ws_tx,
+                    "voice_move",
+                    format!("Unable to queue assignment: {e}"),
+                )
+                .await;
             }
 
             // No ack to the mover on success (mirrors the live-push path
@@ -923,7 +892,12 @@ pub(in crate::routes::ws) async fn handle_voice_move(
     {
         Ok(perms) => perms.has(crate::permissions::VOICE_JOIN),
         Err(_) => {
-            return send_voice_move_error(ws_tx, "Unable to verify target's channel access.").await;
+            return send_error(
+                ws_tx,
+                "voice_move",
+                "Unable to verify target's channel access.",
+            )
+            .await;
         }
     };
 
@@ -1020,14 +994,12 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
     let ch_id = match cs.voice_channel.clone() {
         Some(ch) => ch,
         None => {
-            let err = WsServerMessage::Error {
-                context: "voice_zone_create".to_string(),
-                message: "Must be in voice to create a zone.".to_string(),
-            };
-            let _ = ws_tx
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-                .await;
-            return DispatchResult::Continue;
+            return send_error(
+                ws_tx,
+                "voice_zone_create",
+                "Must be in voice to create a zone.".to_string(),
+            )
+            .await;
         }
     };
 
@@ -1038,28 +1010,24 @@ pub(in crate::routes::ws) async fn handle_voice_zone_create(
         .map(|p| p.has(crate::permissions::CHANNELS_MANAGE))
         .unwrap_or(false);
     if !can_create {
-        let err = WsServerMessage::Error {
-            context: "voice_zone_create".to_string(),
-            message: "Requires the channels.manage permission.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "voice_zone_create",
+            "Requires the channels.manage permission.".to_string(),
+        )
+        .await;
     }
 
     // `session_roster` was accepted here and then refused every position
     // update, so a zone created with it could never be used. Refuse it up
     // front until a session roster exists to check against.
     if !matches!(auth_mode.as_str(), "creator_only" | "any_channel_member") {
-        let err = WsServerMessage::Error {
-            context: "voice_zone_create".to_string(),
-            message: format!("Unsupported zone auth_mode \"{auth_mode}\"."),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "voice_zone_create",
+            format!("Unsupported zone auth_mode \"{auth_mode}\"."),
+        )
+        .await;
     }
 
     let zone = crate::state::VoiceZone {
@@ -1245,14 +1213,12 @@ pub(in crate::routes::ws) async fn handle_video_enable(
         .map(|c| c.contains_key(&cs.public_key))
         .unwrap_or(false);
     if !in_voice {
-        let err = WsServerMessage::Error {
-            context: "video_enable".to_string(),
-            message: "Must be in voice to enable video.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "video_enable",
+            "Must be in voice to enable video.".to_string(),
+        )
+        .await;
     }
 
     // Being in the call is not enough: the camera is its own grant (#277).
@@ -1263,14 +1229,12 @@ pub(in crate::routes::ws) async fn handle_video_enable(
             Err(_) => false,
         };
     if !may_camera {
-        let err = WsServerMessage::Error {
-            context: "video_enable".to_string(),
-            message: "You cannot turn a camera on in this channel.".to_string(),
-        };
-        let _ = ws_tx
-            .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
-            .await;
-        return DispatchResult::Continue;
+        return send_error(
+            ws_tx,
+            "video_enable",
+            "You cannot turn a camera on in this channel.".to_string(),
+        )
+        .await;
     }
 
     state
