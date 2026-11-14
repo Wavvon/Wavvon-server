@@ -1,8 +1,10 @@
 # Wavvon Server
 
-[![Build check](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml/badge.svg)](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml)
-[![Release](https://github.com/Wavvon/Wavvon-server/actions/workflows/release.yml/badge.svg)](https://github.com/Wavvon/Wavvon-server/actions/workflows/release.yml)
-[![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/Wavvon/Wavvon-server?sort=semver)](https://github.com/Wavvon/Wavvon-server/releases/latest)
+[![Build](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml/badge.svg)](https://github.com/Wavvon/Wavvon-server/actions/workflows/build.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+[![Docker: ghcr.io/wavvon/hub](https://img.shields.io/badge/docker-ghcr.io%2Fwavvon%2Fhub-2496ED?logo=docker&logoColor=white)](https://github.com/Wavvon/Wavvon-server/pkgs/container/hub)
+[![crates.io: wavvon-identity](https://img.shields.io/crates/v/wavvon-identity?label=wavvon-identity)](https://crates.io/crates/wavvon-identity)
 
 **Run your community on your own terms.** Wavvon is an open-source,
 federated voice + text chat platform with no central servers and no
