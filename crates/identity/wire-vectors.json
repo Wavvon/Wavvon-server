@@ -17,7 +17,11 @@
     "opus_frame": "6f7075732d6672616d652d766563746f72",
     "ecies_eph_secret": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
     "ecies_nonce": "c0c1c2c3c4c5c6c7c8c9cacb",
-    "ecies_blob_key": "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef"
+    "ecies_blob_key": "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
+    "dm_v1_nonce": "1112131415161718191a1b1c",
+    "dr_alice_eph_secret": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+    "dr_bob_eph_secret": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+    "group_chain_key": "1111111111111111111111111111111111111111111111111111111111111111"
   },
   "vectors": {
     "master_pubkey": {
@@ -400,6 +404,70 @@
         "opus": "@opus_frame"
       },
       "packet": "0000006300000000000000070000138823adf6d5a771baa49d8de5ed1c99e5d5f12e9fffa9ba4fb471ca80882171360024"
+    },
+    "dm_key_v1": {
+      "description": "1:1 static-key DM (dm-ciphertext/v1, receive-only today). key = HKDF-SHA256(X25519(a, b pub), salt = conversation_id UTF-8, info wavvon/dm-key/v1); symmetric, so either side derives it. ciphertext = AES-256-GCM(key, nonce, plaintext UTF-8), tag appended. Seeds are Ed25519 seeds; the X25519 scalar is SHA-512(seed)[0..32] clamped.",
+      "inputs": {
+        "alice_seed": "@master_seed",
+        "bob_seed": "@subkey_seed",
+        "conversation_id": "conv-dm-v1",
+        "nonce": "@dm_v1_nonce",
+        "plaintext": "{\"content\":\"hello v1\"}"
+      },
+      "key": "3a33dc463278816b87bdf6cc3adfa65faba3f35f7959c369b0d492f97522dfa6",
+      "ciphertext": "34cf2582effa166ebdfe5fdb52b4bc64a55d11079c94af32232dfa5ca113bb6403b7ef71213c"
+    },
+    "dr_session": {
+      "description": "1:1 double ratchet (dm-ciphertext/v2). Alice initiates: rk0 = HKDF(X25519(alice, bob static), salt conv, info wavvon/dr-init/v2); (rk, cks) = KDF_RK(rk0, X25519(alice_eph, bob static)). Message 0 uses (message_key, next_cks) = KDF_CK(cks), nonce = derive_nonce(message_key), AES-256-GCM. Bob initialises from alice_eph_pub: (rk1, ckr) = KDF_RK(rk0, X25519(bob static, alice_eph_pub)), then (bob_rk, bob_cks) = KDF_RK(rk1, X25519(bob_eph, alice_eph_pub)); bob_ckr equals alice_cks. Bob's reply is message 0 of bob_cks. Alice, on the reply's new ratchet key, steps (reply_step_rk, reply_step_ckr) = KDF_RK(alice_rk, X25519(alice_eph, bob_eph_pub)), which equal bob_rk and bob_cks.",
+      "inputs": {
+        "alice_seed": "@master_seed",
+        "bob_seed": "@subkey_seed",
+        "conversation_id": "conv-dr-vector",
+        "alice_eph_secret": "@dr_alice_eph_secret",
+        "bob_eph_secret": "@dr_bob_eph_secret",
+        "plaintext": "{\"content\":\"hello dr\"}",
+        "reply_plaintext": "{\"content\":\"reply dr\"}"
+      },
+      "rk0": "d713c37a816c36c0a0318825c3bec38ec41bf55dc76a15630b50b1c994120e6f",
+      "alice_eph_pub": "675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f",
+      "alice_rk": "cacd0a073342ab8df7752ba4a9a9a22aa58970f56a9d4c300500faff2cfca15d",
+      "alice_cks": "5f0deebf1c43aca3fd43856973d30587f003c28df8989210465f0fe9fed9be7a",
+      "message_key": "43a5a026f2e9f5577bee708d73bca01ae0bb8ce5942437e65a7322d0c75c2efa",
+      "nonce": "caef665d51eab6fc083c195e",
+      "next_cks": "9a56c471c8934f94554d4e94cfb79e406d8d448a55440509f90702e505812a80",
+      "ciphertext": "7bef06715d3c574372e50a61426cb3927a2dbf99058a871ec531dade854ddfbad516c7a4c0f3",
+      "bob_rk": "5e04d0f8ac09fbd100d84d4021b5d5241670b1fd77f70fc5f0978a5cc72df80b",
+      "bob_ckr": "5f0deebf1c43aca3fd43856973d30587f003c28df8989210465f0fe9fed9be7a",
+      "bob_cks": "d829c77d6e9203e664982636beec769291cfc52039551453dd5247f931dd0633",
+      "bob_eph_pub": "79a631eede1bf9c98f12032cdeadd0e7a079398fc786b88cc846ec89af85a51a",
+      "reply_message_key": "e70f3c900db45b6baec50fa55a2b7dc9c66f55c0c223f3c13d402c4b3c05bf39",
+      "reply_ciphertext": "02b4235397984593ad16c180c01453b9454d189d5a379ba49105fb7b22821c9ed86aae559f68",
+      "reply_step_rk": "5e04d0f8ac09fbd100d84d4021b5d5241670b1fd77f70fc5f0978a5cc72df80b",
+      "reply_step_ckr": "d829c77d6e9203e664982636beec769291cfc52039551453dd5247f931dd0633"
+    },
+    "group_ratchet": {
+      "description": "Group sender-key ratchet at iteration 2. message_key = HKDF(chain_key, salt = iteration u32 BE, info wavvon/group-msg/v1); next_chain_key uses info wavvon/group-chain/v1; nonce is the iteration u32 BE in the last 4 of 12 zero bytes; AES-256-GCM, tag appended.",
+      "inputs": {
+        "chain_key": "@group_chain_key",
+        "iteration": 2,
+        "plaintext": "{\"content\":\"group msg\"}"
+      },
+      "message_key": "7de5c477aadff1d7633bce5fc6d6974b908b9d05a3897cd5aba30c6490eba427",
+      "next_chain_key": "fd8b5df061c574c9c5ecdb3d87c37f54bb6c48585a6253b7914a1144d75939dc",
+      "nonce": "000000000000000000000002",
+      "ciphertext": "ade0be0141b152e06407c63aceac1e15aec50ab013d8fcccdd1f4158a532e3aecfb83bca1f0a90"
+    },
+    "group_key_wrap": {
+      "description": "A sender's group chain key wrapped for one member: key = HKDF(X25519(sender, recipient pub), salt = conversation_id UTF-8, info wavvon/group-key-dist/v1); plaintext = chain_key || iteration u32 BE; AES-256-GCM with the given nonce, tag appended. Symmetric: the recipient unwraps with its secret and the sender's pub.",
+      "inputs": {
+        "sender_seed": "@master_seed",
+        "recipient_seed": "@subkey_seed",
+        "conversation_id": "conv123",
+        "nonce": "@voice_wrap_nonce",
+        "chain_key": "@group_chain_key",
+        "iteration": 2
+      },
+      "ciphertext": "354ebd62de34d85fbd7179d96abf4202938c5609e18bc6015926550c48ec21bd5702ae96b979f0bf45ab36a7158bc5d204e173e7"
     }
   }
 }

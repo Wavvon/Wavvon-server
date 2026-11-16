@@ -758,3 +758,131 @@ fn public_hub_profile_vector() {
     let sb = PublicHubProfile::signing_bytes(&s(v, "pubkey"), &hubs, n(v, "issued_at"));
     check_signed("public_hub_profile", "signature", &sb);
 }
+
+// ---------------------------------------------------------------------------
+// E2E DM crypto (dm module)
+// ---------------------------------------------------------------------------
+
+fn dh_pair(seed_field: &str, v: &Value) -> ([u8; 32], [u8; 32]) {
+    let seed: [u8; 32] = arr(&s(v, seed_field));
+    (x25519_scalar(&seed), x25519_pub(&seed))
+}
+
+fn eph_pub(secret: &[u8; 32]) -> [u8; 32] {
+    *x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(*secret)).as_bytes()
+}
+
+#[test]
+fn dm_key_v1_vector() {
+    use wavvon_identity::dm::{dm_key_v1, dm_v1_open, dm_v1_seal};
+    let v = vec_("dm_key_v1");
+    let (a_sec, a_pub) = dh_pair("alice_seed", v);
+    let (b_sec, b_pub) = dh_pair("bob_seed", v);
+    let conv = s(v, "conversation_id");
+    let key = dm_key_v1(&a_sec, &b_pub, &conv);
+    assert_eq!(key, dm_key_v1(&b_sec, &a_pub, &conv));
+    expect("dm_key_v1", "key", &key);
+    let ct = dm_v1_seal(&key, &arr(&s(v, "nonce")), s(v, "plaintext").as_bytes()).unwrap();
+    expect("dm_key_v1", "ciphertext", &ct);
+    let pt = dm_v1_open(&key, &bytes(&s(v, "nonce")), &ct).unwrap();
+    assert_eq!(pt, s(v, "plaintext").as_bytes());
+}
+
+#[test]
+fn dr_session_vector() {
+    use wavvon_identity::dm::*;
+    let n = "dr_session";
+    let v = vec_(n);
+    let (a_sec, a_pub) = dh_pair("alice_seed", v);
+    let (b_sec, b_pub) = dh_pair("bob_seed", v);
+    let conv = s(v, "conversation_id");
+    let a_eph: [u8; 32] = arr(&s(v, "alice_eph_secret"));
+    let b_eph: [u8; 32] = arr(&s(v, "bob_eph_secret"));
+
+    let rk0 = dr_root_key(&a_sec, &b_pub, &conv);
+    assert_eq!(rk0, dr_root_key(&b_sec, &a_pub, &conv));
+    expect(n, "rk0", &rk0);
+
+    let alice = dr_initiator_init(&a_sec, &b_pub, &conv, &a_eph);
+    expect(n, "alice_eph_pub", &alice.eph_pub);
+    expect(n, "alice_rk", &alice.rk);
+    expect(n, "alice_cks", &alice.cks);
+
+    let (mk, next) = dr_kdf_ck(&alice.cks);
+    expect(n, "message_key", &mk);
+    expect(n, "nonce", &dr_derive_nonce(&mk));
+    expect(n, "next_cks", &next);
+    let ct = dr_message_seal(&mk, s(v, "plaintext").as_bytes()).unwrap();
+    expect(n, "ciphertext", &ct);
+
+    let bob = dr_responder_init(&b_sec, &a_pub, &conv, &alice.eph_pub, &b_eph);
+    expect(n, "bob_rk", &bob.rk);
+    expect(n, "bob_ckr", &bob.ckr);
+    expect(n, "bob_cks", &bob.cks);
+    expect(n, "bob_eph_pub", &bob.eph_pub);
+    assert_eq!(bob.ckr, alice.cks);
+    let (bob_mk, _) = dr_kdf_ck(&bob.ckr);
+    assert_eq!(
+        dr_message_open(&bob_mk, &ct).unwrap(),
+        s(v, "plaintext").as_bytes()
+    );
+
+    let (reply_mk, _) = dr_kdf_ck(&bob.cks);
+    expect(n, "reply_message_key", &reply_mk);
+    let reply = dr_message_seal(&reply_mk, s(v, "reply_plaintext").as_bytes()).unwrap();
+    expect(n, "reply_ciphertext", &reply);
+
+    let (step_rk, step_ckr) = dr_kdf_rk(&alice.rk, &dr_dh(&a_eph, &eph_pub(&b_eph)));
+    expect(n, "reply_step_rk", &step_rk);
+    expect(n, "reply_step_ckr", &step_ckr);
+    let (alice_mk, _) = dr_kdf_ck(&step_ckr);
+    assert_eq!(
+        dr_message_open(&alice_mk, &reply).unwrap(),
+        s(v, "reply_plaintext").as_bytes()
+    );
+}
+
+#[test]
+fn group_ratchet_vector() {
+    use wavvon_identity::dm::*;
+    let n = "group_ratchet";
+    let v = vec_(n);
+    let ck: [u8; 32] = arr(&s(v, "chain_key"));
+    let it = self::n(v, "iteration") as u32;
+    expect(n, "message_key", &group_msg_key(&ck, it));
+    expect(n, "next_chain_key", &group_next_chain_key(&ck, it));
+    let (ct, nonce, _) = group_message_seal(&ck, it, s(v, "plaintext").as_bytes()).unwrap();
+    expect(n, "nonce", &nonce);
+    expect(n, "ciphertext", &ct);
+    assert_eq!(
+        group_message_open(&ck, it, it, &nonce, &ct).unwrap(),
+        s(v, "plaintext").as_bytes()
+    );
+    // A holder one iteration behind advances to the message; a later holder cannot read it.
+    let (ct3, nonce3, _) =
+        group_message_seal(&group_next_chain_key(&ck, it), it + 1, b"x").unwrap();
+    assert_eq!(
+        group_message_open(&ck, it, it + 1, &nonce3, &ct3).unwrap(),
+        b"x"
+    );
+    assert!(group_message_open(&group_next_chain_key(&ck, it), it + 1, it, &nonce, &ct).is_err());
+}
+
+#[test]
+fn group_key_wrap_vector() {
+    use wavvon_identity::dm::{group_key_unwrap, group_key_wrap};
+    let n = "group_key_wrap";
+    let v = vec_(n);
+    let (a_sec, a_pub) = dh_pair("sender_seed", v);
+    let (b_sec, b_pub) = dh_pair("recipient_seed", v);
+    let conv = s(v, "conversation_id");
+    let nonce: [u8; 12] = arr(&s(v, "nonce"));
+    let ck: [u8; 32] = arr(&s(v, "chain_key"));
+    let it = self::n(v, "iteration") as u32;
+    let wrapped = group_key_wrap(&a_sec, &b_pub, &conv, &ck, it, &nonce).unwrap();
+    expect(n, "ciphertext", &wrapped);
+    assert_eq!(
+        group_key_unwrap(&b_sec, &a_pub, &conv, &nonce, &wrapped).unwrap(),
+        (ck, it)
+    );
+}
