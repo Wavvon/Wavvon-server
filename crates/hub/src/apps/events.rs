@@ -74,13 +74,13 @@ pub async fn publish_hub_event(
     // for hub events (see module doc above), so we call directly rather than
     // subscribing to one. Delivery tasks are spawned internally and never
     // block this function.
-    crate::outgoing_webhooks::worker::dispatch_event(
-        state, event_type, channel_id, seq, now, &payload,
-    )
-    .await;
-
-    // Fetch the hub_url once.
     let hub_url = crate::apps::dispatch::hub_url_public(state).await;
+    let mut envelope = HubEvent::new(seq, event_type, hub_url.as_str(), now, payload);
+    envelope.actor_pubkey = actor_pubkey.map(str::to_string);
+    envelope.target_pubkey = target_pubkey.map(str::to_string);
+    envelope.channel_id = channel_id.map(str::to_string);
+
+    crate::outgoing_webhooks::worker::dispatch_event(state, &envelope).await;
 
     // Query every app subscribed to this event_type, hub-wide or for this channel.
     // A subscription row with channel_id = '' means hub-wide (no channel filter).
@@ -134,14 +134,7 @@ pub async fn publish_hub_event(
             }
         }
 
-        let json = serde_json::to_string(&HubEvent::new(
-            seq,
-            event_type,
-            hub_url.as_str(),
-            now,
-            payload.clone(),
-        ))
-        .unwrap_or_default();
+        let json = serde_json::to_string(&envelope).unwrap_or_default();
         // Deliver to every active session for this pubkey. Non-blocking
         // send; a full channel drops the event for that session only.
         for tx in per_app.values() {
