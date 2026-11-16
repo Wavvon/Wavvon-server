@@ -11,6 +11,8 @@ bot or hub exchanges, the exact bytes each one signs, and the crypto they use.
   attestations, voice grants, the auth challenge, webhook deliveries.
 - X25519 from an Ed25519 seed, AES-256-GCM, voice key wrap and packet seal,
   outgoing-webhook HKDF and HMAC.
+- E2E DM crypto (`dm` module): the v1 key, the double-ratchet KDFs and session
+  init, the group sender-key ratchet and key wrap.
 
 Pure Rust, no async, no I/O. This crate is the authority the Wavvon hub uses;
 every other implementation must match it byte for byte. The test vectors are
