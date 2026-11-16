@@ -265,13 +265,13 @@ pub struct HubEvent {
     pub event: String,
     pub hub_url: String,
     pub at: i64,
-    /// Replay only: the audit-log row's actor.
+    /// The audit-log row's actor; absent when empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub actor_pubkey: Option<String>,
-    /// Replay only: the audit-log row's target.
+    /// The audit-log row's target; absent when empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_pubkey: Option<String>,
-    /// Replay only: the audit-log row's channel.
+    /// The audit-log row's channel; absent when empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<String>,
     pub payload: serde_json::Value,

@@ -164,3 +164,35 @@ async fn authenticate(base: &str, identity: &Identity) -> String {
         .unwrap();
     v["token"].as_str().unwrap().to_string()
 }
+
+#[tokio::test]
+async fn the_live_push_carries_who_joined() {
+    let (server, _owner_token) = common::setup_with_owner().await;
+    let _app_token = subscribed_app(&server, &["member.joined"]).await;
+    let app_pk: String = sqlx::query_scalar("SELECT DISTINCT app_pubkey FROM app_subscriptions")
+        .fetch_one(&server.state().db)
+        .await
+        .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+    server
+        .state()
+        .app_sessions
+        .write()
+        .await
+        .entry(app_pk)
+        .or_default()
+        .insert("s1".into(), tx);
+
+    let newcomer = Identity::generate();
+    common::authenticate(&server, &newcomer).await;
+
+    let raw = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .expect("no live push")
+        .unwrap();
+    let live: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(live["event"], "member.joined");
+    assert_eq!(live["target_pubkey"], newcomer.public_key_hex());
+    assert!(live.get("channel_id").is_none(), "{live}");
+    assert!(live.get("replayed").is_none());
+}
