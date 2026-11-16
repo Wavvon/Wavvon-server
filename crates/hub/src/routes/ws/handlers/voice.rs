@@ -529,7 +529,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         let _ = ws_tx.send(Message::Text(json.into())).await;
     }
 
-    // Publish member.joined audit event.
+    // Publish voice.joined audit event.
     {
         let state_c = state.clone();
         let pk = cs.public_key.clone();
@@ -538,7 +538,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         tokio::spawn(async move {
             crate::apps::events::publish_hub_event(
                 &state_c,
-                "member.joined",
+                "voice.joined",
                 Some(&pk),
                 None,
                 Some(&ch),
@@ -579,7 +579,7 @@ pub(in crate::routes::ws) async fn handle_voice_leave(
         tokio::spawn(async move {
             crate::apps::events::publish_hub_event(
                 &state_c,
-                "member.left",
+                "voice.left",
                 Some(&pk),
                 None,
                 Some(&ch),

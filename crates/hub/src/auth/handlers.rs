@@ -1087,6 +1087,25 @@ pub async fn admit_member(
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     crate::routes::lockdown::after_join(state).await;
+
+    // The display name is usually still unset at first contact (the profile
+    // is filled in afterwards), so it is best-effort.
+    let display_name: Option<String> =
+        sqlx::query_scalar("SELECT display_name FROM users WHERE public_key = $1")
+            .bind(public_key)
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    crate::apps::events::publish_hub_event(
+        state,
+        "member.joined",
+        Some(public_key),
+        Some(public_key),
+        None,
+        serde_json::json!({ "display_name": display_name }),
+    )
+    .await;
     Ok(())
 }
 
