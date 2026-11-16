@@ -690,5 +690,15 @@ pub async fn leave_hub(
     tx.commit().await.map_err(db_err)?;
     state.close_sessions_of(pk).await;
 
+    crate::apps::events::publish_hub_event(
+        &state,
+        "member.left",
+        Some(pk),
+        Some(pk),
+        None,
+        serde_json::json!({}),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }

@@ -224,16 +224,12 @@ async fn polling_returns_hub_event_envelopes_after_the_cursor() {
     server
         .put("/me/app/subscriptions")
         .authorization_bearer(&token)
-        .json(&json!({ "subscriptions": [{ "event": "member.joined" }] }))
+        .json(&json!({ "subscriptions": [{ "event": "ping.one" }] }))
         .await
         .assert_status_success();
 
     let state = server.state_arc();
-    for (event, who) in [
-        ("member.joined", "a"),
-        ("member.left", "a"),
-        ("member.joined", "b"),
-    ] {
+    for (event, who) in [("ping.one", "a"), ("ping.two", "a"), ("ping.one", "b")] {
         wavvon_hub::apps::events::publish_hub_event(
             &state,
             event,
@@ -258,7 +254,7 @@ async fn polling_returns_hub_event_envelopes_after_the_cursor() {
     let all: Vec<serde_json::Value> = poll(String::new()).await.json();
     assert_eq!(all.len(), 2, "only the subscribed event type: {all:?}");
     assert_eq!(all[0]["type"], "hub_event");
-    assert_eq!(all[0]["event"], "member.joined");
+    assert_eq!(all[0]["event"], "ping.one");
     assert_eq!(all[0]["payload"]["pubkey"], "a");
     assert!(all[0]["seq"].as_i64().unwrap() < all[1]["seq"].as_i64().unwrap());
 
