@@ -21,6 +21,7 @@ pub mod friends;
 pub mod health;
 pub mod hub;
 pub mod hub_icons;
+pub mod hub_theme;
 pub mod identity;
 pub mod invite_models;
 pub mod invites;

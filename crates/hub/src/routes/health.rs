@@ -183,6 +183,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         stream_limits,
         canonical_url: state.canonical_url.read().await.clone(),
         landing: Some(crate::routes::hub::read_landing(&state.db).await),
+        theme: crate::routes::hub_theme::read_theme_info(&state.db).await,
     })
 }
 
@@ -315,6 +316,9 @@ pub struct InfoResponse {
     /// Absent on older hubs, which a client reads as "unknown, try the image".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<crate::routes::hub::Landing>,
+    /// The hub default theme, while one is set (`hub.theme`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<crate::routes::hub_theme::HubThemeInfo>,
 }
 
 fn default_true() -> bool {
