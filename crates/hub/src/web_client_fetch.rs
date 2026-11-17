@@ -199,7 +199,7 @@ fn unpack(bytes: &[u8], dest: &Path) -> anyhow::Result<()> {
         let mut ar = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
         for i in 0..ar.len() {
             let mut f = ar.by_index(i)?;
-            let name = f.name().to_string();
+            let name = f.name().map_or_else(|_| "?".to_string(), |n| n.to_string());
             let rel = match f.enclosed_name() {
                 Some(p) => safe_rel(&p)?,
                 None => bail!("archive entry '{name}' escapes the archive root"),
