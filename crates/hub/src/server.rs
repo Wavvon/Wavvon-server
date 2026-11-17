@@ -238,6 +238,20 @@ pub fn create_router_full(
         )
         .route("/hub/theme/{sha256}", get(routes::hub_theme::get_theme))
         .route(
+            "/hub/languages",
+            get(routes::hub_languages::list_languages)
+                .put(routes::hub_languages::put_language)
+                .layer(DefaultBodyLimit::max(routes::hub_languages::BODY_LIMIT)),
+        )
+        .route(
+            "/hub/languages/default",
+            axum::routing::put(routes::hub_languages::put_default),
+        )
+        .route(
+            "/hub/languages/{sha256}",
+            get(routes::hub_languages::get_language).delete(routes::hub_languages::delete_language),
+        )
+        .route(
             "/hub/theme/{sha256}/preview",
             get(routes::hub_theme::get_theme_preview),
         )
