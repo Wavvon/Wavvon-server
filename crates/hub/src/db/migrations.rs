@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -351,6 +351,22 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
         13 => {
             sqlx::query(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS widget_hidden BOOLEAN NOT NULL DEFAULT FALSE",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+        // The hub default theme (Wavvon-server#400): one package, single row.
+        14 => {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS hub_theme (
+                    id           BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+                    sha256       TEXT NOT NULL,
+                    package      BYTEA NOT NULL,
+                    preview      BYTEA,
+                    preview_mime TEXT,
+                    uploaded_by  TEXT NOT NULL,
+                    uploaded_at  BIGINT NOT NULL
+                )",
             )
             .execute(&mut *conn)
             .await?;

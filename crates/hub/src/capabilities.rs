@@ -108,6 +108,11 @@ pub const CAPABILITIES: &[&str] = &[
     // joining (and optionally holds back recent joiners), plus a join-rate
     // alert that can throw it. Events hub.lockdown and raid.suspected.
     "hub.lockdown",
+    // `PUT`/`DELETE /hub/theme` take a `.wavvontheme` package (themes.md §4),
+    // `GET /hub/theme/{sha256}` serves it with immutable caching, and `/info`
+    // carries `theme { sha256, has_preview }` while one is set. Gated so a
+    // client offers the upload, and fetches a theme, only where both exist.
+    "hub.theme",
     // `GET /public/widget.json`, `GET /widget`, `/admin/settings/widget`
     // and `widget_hidden` on `/me`: an admin page offers the widget, and a
     // member the opt-out, only where the hub honours them.

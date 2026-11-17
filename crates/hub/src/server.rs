@@ -231,6 +231,17 @@ pub fn create_router_full(
                 .delete(routes::hub_icons::delete_icon),
         )
         .route(
+            "/hub/theme",
+            axum::routing::put(routes::hub_theme::put_theme)
+                .delete(routes::hub_theme::delete_theme)
+                .layer(DefaultBodyLimit::max(routes::hub_theme::BODY_LIMIT)),
+        )
+        .route("/hub/theme/{sha256}", get(routes::hub_theme::get_theme))
+        .route(
+            "/hub/theme/{sha256}/preview",
+            get(routes::hub_theme::get_theme_preview),
+        )
+        .route(
             "/admin/settings/pow",
             get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
         )
