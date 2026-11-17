@@ -95,7 +95,7 @@ async fn mark_channel_read_resets_unread_count() {
         .post(&format!("/channels/{}/read", ch.id))
         .authorization_bearer(&token)
         .await
-        .assert_status(axum::http::StatusCode::NO_CONTENT);
+        .assert_status_ok();
 
     // Now unread count should be 0
     let resp = server
@@ -195,15 +195,17 @@ async fn mark_unread_from_a_message_moves_the_marker_back() {
             .post(&format!("/channels/{}/read", ch.id))
             .authorization_bearer(t)
             .await
-            .assert_status(axum::http::StatusCode::NO_CONTENT);
+            .assert_status_ok();
     }
 
-    server
+    let marked: serde_json::Value = server
         .post(&format!("/channels/{}/read", ch.id))
         .authorization_bearer(&token)
         .json(&json!({ "message_id": ids[1] }))
         .await
-        .assert_status(axum::http::StatusCode::NO_CONTENT);
+        .json();
+    // The marker set by the plain mark-read above.
+    assert!(marked["previous_last_read_at"].as_i64().unwrap() > 0);
 
     let unread = |t: String| {
         let server = &server;
@@ -220,7 +222,6 @@ async fn mark_unread_from_a_message_moves_the_marker_back() {
     // msg 2 and msg 3 are unread again, unless they share a millisecond with
     // msg 2 (then at least those two).
     assert!(mine["unread_count"].as_i64().unwrap() >= 2);
-    assert!(mine["last_read_at"].as_i64().unwrap() > 0);
     // Only the caller's marker moved.
     assert_eq!(unread(bob_token).await["unread_count"].as_i64().unwrap(), 0);
 }

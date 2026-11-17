@@ -1040,9 +1040,6 @@ pub(crate) async fn read_max_depth(db: &sqlx::PgPool) -> u32 {
 pub struct UnreadCount {
     pub channel_id: String,
     pub unread_count: i64,
-    /// The caller's read marker (unix ms, 0 = never read). Messages with a
-    /// later `created_at` are the unread ones.
-    pub last_read_at: i64,
 }
 
 /// GET /channels/unread — returns [{channel_id, unread_count}] for every
@@ -1083,7 +1080,6 @@ pub async fn get_unread_counts(
         result.push(UnreadCount {
             channel_id,
             unread_count,
-            last_read_at,
         });
     }
 
@@ -1096,6 +1092,13 @@ pub struct MarkReadRequest {
     pub message_id: Option<String>,
 }
 
+#[derive(serde::Serialize)]
+pub struct MarkReadResponse {
+    /// The marker before this call (unix ms, 0 = never read): a client opening
+    /// the channel draws its new-messages divider above the first later message.
+    pub previous_last_read_at: i64,
+}
+
 /// POST /channels/:id/read — upsert last_read_at for the authenticated user.
 /// With `message_id`, the marker moves back to just before that message
 /// ("mark unread"); without, it moves to now.
@@ -1104,7 +1107,7 @@ pub async fn mark_channel_read(
     user: AuthUser,
     Path(channel_id): Path<String>,
     body: Option<Json<MarkReadRequest>>,
-) -> Result<StatusCode, (StatusCode, String)> {
+) -> Result<Json<MarkReadResponse>, (StatusCode, String)> {
     // Verify the channel exists
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
         .bind(&channel_id)
@@ -1114,6 +1117,16 @@ pub async fn mark_channel_read(
     if exists.is_none() {
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
+
+    let previous_last_read_at: i64 = sqlx::query_scalar(
+        "SELECT last_read_at FROM channel_last_read WHERE user_pubkey = $1 AND channel_id = $2",
+    )
+    .bind(&user.public_key)
+    .bind(&channel_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?
+    .unwrap_or(0);
 
     let marker = match body.and_then(|Json(b)| b.message_id) {
         Some(message_id) => {
@@ -1141,5 +1154,7 @@ pub async fn mark_channel_read(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(MarkReadResponse {
+        previous_last_read_at,
+    }))
 }
