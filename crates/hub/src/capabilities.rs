@@ -70,7 +70,7 @@ pub const CAPABILITIES: &[&str] = &[
     // caller's read marker back to just before that message ("mark unread").
     // An older hub ignores the body and marks the channel read, the opposite
     // of what was asked, so a client offers the action only on this string.
-    "channels.mark_unread",
+    "channels.markunread",
     // A channel can have `slowmode_secs` (one message per member per that
     // many seconds; `messages.slowmode.bypass` exempts). A refused send is a
     // 429 whose JSON body carries `retry_after_secs`.
