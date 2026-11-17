@@ -144,7 +144,12 @@ pub async fn run(
     );
     match settings.web_client_dir.as_deref() {
         Some(dir) => tracing::info!("web client: serving from {dir}"),
-        None => tracing::info!("web client: disabled (set WAVVON_WEB_CLIENT_DIR to enable)"),
+        None => match settings.web_client_url.as_deref() {
+            Some(url) => tracing::info!("web client: serving the pinned download from {url}"),
+            None => tracing::info!(
+                "web client: disabled (set WAVVON_WEB_CLIENT_DIR or WAVVON_WEB_CLIENT_URL to enable)"
+            ),
+        },
     }
 
     if is_new {
@@ -761,12 +766,20 @@ pub async fn run(
     // Load and validate the web client directory when configured.
     // Fail fast here so a misconfigured path doesn't silently result in a
     // running hub that 404s everything at /.
-    let web_client_cfg = match settings.web_client_dir.as_deref() {
-        Some(dir) => match wavvon_hub::web_client::WebClientConfig::load(dir) {
+    let web_client_dir = match wavvon_hub::web_client_fetch::resolve_settings(&settings).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("web client configuration error: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    let web_client_cfg = match web_client_dir {
+        Some(dir) => match wavvon_hub::web_client::WebClientConfig::load(&dir) {
             Ok(cfg) => {
                 tracing::info!(
-                    "web client: loaded {} bytes for index.html from {dir}",
-                    cfg.index_html.len()
+                    "web client: loaded {} bytes for index.html from {}",
+                    cfg.index_html.len(),
+                    dir.display()
                 );
                 Some(std::sync::Arc::new(cfg))
             }

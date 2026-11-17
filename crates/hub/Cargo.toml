@@ -50,6 +50,7 @@ tantivy = { workspace = true }
 
 flate2 = "1"
 tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] } # unpacking a pinned web-client archive
 tempfile = "3"
 # 0.6.x is the first line that does not link OpenSSL: it swapped it for
 # crypto-glue (RustCrypto). That removes the last C dependency in the hub and

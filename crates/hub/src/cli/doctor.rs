@@ -127,28 +127,45 @@ pub async fn run_doctor() -> bool {
     }
 
     // Check web client directory when configured
-    match settings.web_client_dir.as_deref() {
-        None => {
-            println!("INFO  web client: disabled (WAVVON_WEB_CLIENT_DIR not set)");
-        }
-        Some(dir) => {
-            let dir_path = std::path::Path::new(dir);
-            if !dir_path.exists() {
-                println!("FAIL  web client dir '{dir}': directory does not exist");
+    if settings.web_client_url.is_some() || settings.web_client_sha256.is_some() {
+        match wavvon_hub::web_client_fetch::resolve_settings(&settings).await {
+            Ok(Some(dir)) => println!(
+                "PASS  web client (pinned download): sha256 verified, serving {}",
+                dir.display()
+            ),
+            Ok(None) => {}
+            Err(e) => {
+                println!("FAIL  web client (pinned download): {e:#}");
                 all_pass = false;
-            } else {
-                let index = dir_path.join("index.html");
-                match std::fs::read(&index) {
-                    Ok(bytes) if !bytes.is_empty() => {
-                        println!("PASS  web client dir '{dir}': directory exists, index.html readable ({} bytes)", bytes.len());
-                    }
-                    Ok(_) => {
-                        println!("FAIL  web client dir '{dir}': index.html exists but is empty");
-                        all_pass = false;
-                    }
-                    Err(e) => {
-                        println!("FAIL  web client dir '{dir}': cannot read index.html: {e}");
-                        all_pass = false;
+            }
+        }
+    } else {
+        match settings.web_client_dir.as_deref() {
+            None => {
+                println!("INFO  web client: disabled (WAVVON_WEB_CLIENT_DIR not set)");
+            }
+
+            Some(dir) => {
+                let dir_path = std::path::Path::new(dir);
+                if !dir_path.exists() {
+                    println!("FAIL  web client dir '{dir}': directory does not exist");
+                    all_pass = false;
+                } else {
+                    let index = dir_path.join("index.html");
+                    match std::fs::read(&index) {
+                        Ok(bytes) if !bytes.is_empty() => {
+                            println!("PASS  web client dir '{dir}': directory exists, index.html readable ({} bytes)", bytes.len());
+                        }
+                        Ok(_) => {
+                            println!(
+                                "FAIL  web client dir '{dir}': index.html exists but is empty"
+                            );
+                            all_pass = false;
+                        }
+                        Err(e) => {
+                            println!("FAIL  web client dir '{dir}': cannot read index.html: {e}");
+                            all_pass = false;
+                        }
                     }
                 }
             }

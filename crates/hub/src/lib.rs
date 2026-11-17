@@ -32,6 +32,7 @@ pub mod temp_channel_worker;
 pub mod voice_loss;
 pub mod voice_wt;
 pub mod web_client;
+pub mod web_client_fetch;
 pub mod webhook_url;
 
 /// Whether `ip` is in Cloudflare's published proxy ranges: a record proxied
