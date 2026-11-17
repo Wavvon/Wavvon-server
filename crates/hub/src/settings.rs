@@ -171,6 +171,22 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          this to /web-client automatically.",
     ),
     (
+        "WAVVON_WEB_CLIENT_URL",
+        "(unset)",
+        "https URL of a built web client (.tar.gz or .zip) to serve at / instead of a local \
+         directory. Requires WAVVON_WEB_CLIENT_SHA256 and cannot be combined with \
+         WAVVON_WEB_CLIENT_DIR. Downloaded once, verified, and cached under \
+         web-client-cache/ in the working directory; a hash mismatch or failed download \
+         stops the hub rather than falling back.",
+    ),
+    (
+        "WAVVON_WEB_CLIENT_SHA256",
+        "(unset)",
+        "Hex SHA-256 of the archive named by WAVVON_WEB_CLIENT_URL. Required with it: the \
+         web client holds its users' keys, so the operator pins an exact build. To upgrade, \
+         change URL and hash together.",
+    ),
+    (
         "WAVVON_APPS_ALLOW_CAMERA",
         "false",
         "Set to `true` to allow bot mini-apps that declare `requires_camera: true` to \
@@ -335,6 +351,16 @@ pub struct Settings {
     ///
     /// Env: WAVVON_WEB_CLIENT_DIR
     pub web_client_dir: Option<String>,
+    /// `https` URL of a built web client (`.tar.gz` or `.zip`) the hub downloads
+    /// at boot and serves in place of `WAVVON_WEB_CLIENT_DIR`. Needs
+    /// `web_client_sha256`; exclusive with `web_client_dir`.
+    ///
+    /// Env: WAVVON_WEB_CLIENT_URL
+    pub web_client_url: Option<String>,
+    /// SHA-256 (hex) the archive at `web_client_url` must have.
+    ///
+    /// Env: WAVVON_WEB_CLIENT_SHA256
+    pub web_client_sha256: Option<String>,
     /// Allow bot mini-apps that declare `requires_camera: true` to receive
     /// camera access in client webview/iframe sandboxes.
     ///
