@@ -930,7 +930,7 @@ async fn dispatch_client_msg(
             voice::handle_voice_zone_destroy(cs, state, msg).await
         }
         WsClientMessage::VoicePositionUpdate { .. } => {
-            voice::handle_voice_position_update(cs, state, msg).await
+            voice::handle_voice_position_update(cs, state, ws_tx, msg).await
         }
 
         // ── Video signaling ────────────────────────────────────────────────
