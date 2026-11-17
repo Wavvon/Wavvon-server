@@ -572,6 +572,13 @@ pub fn create_router_full(
         // ---- Unread counts (Feature 2) ----
         // Must be registered before /channels/{channel_id} to avoid "unread" being matched as a path param.
         .route("/channels/unread", get(routes::channels::get_unread_counts))
+        // ---- Web Push (push.rs) ----
+        .route("/push/vapid-key", get(routes::push::get_vapid_key))
+        .route(
+            "/push/subscriptions",
+            axum::routing::put(routes::push::put_subscription)
+                .delete(routes::push::delete_subscription),
+        )
         .route(
             "/channels/{channel_id}/read",
             post(routes::channels::mark_channel_read),

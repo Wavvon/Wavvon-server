@@ -59,6 +59,11 @@ tempfile = "3"
 # prereleases, which a caret requirement would not resolve.
 webauthn-rs = { version = "0.6.1-dev", features = ["danger-allow-state-serialisation"] }
 url = "2"
+# Web Push (push.rs): RFC 8291 payload encryption in pure Rust. Default
+# features off: the VAPID half pulls jwt-simple and an RSA stack for one
+# ES256 signature, which push.rs signs with p256 directly.
+web-push-native = { version = "0.5", default-features = false }
+p256 = { version = "0.13", features = ["ecdsa"] }
 percent-encoding = "2"
 mdns-sd = "0.20" # LAN mode: `_wavvon._tcp.local` mDNS/DNS-SD advertisement
 rcgen = "0.14" # LAN mode: self-signed TLS cert generation for the fingerprint-pinning trust tier

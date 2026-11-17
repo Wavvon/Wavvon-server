@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -381,6 +381,31 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                     package      BYTEA NOT NULL,
                     uploaded_by  TEXT NOT NULL,
                     uploaded_at  BIGINT NOT NULL
+                )",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+        // Web Push (Wavvon-server#402): the hub's VAPID key, one row, and a
+        // browser subscription per identity and endpoint.
+        16 => {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS push_vapid (
+                    id          BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+                    private_key TEXT NOT NULL
+                )",
+            )
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS push_subscriptions (
+                    user_pubkey TEXT NOT NULL,
+                    endpoint    TEXT NOT NULL,
+                    p256dh      TEXT NOT NULL,
+                    auth        TEXT NOT NULL,
+                    notify      TEXT NOT NULL DEFAULT '{}',
+                    created_at  BIGINT NOT NULL,
+                    PRIMARY KEY (user_pubkey, endpoint)
                 )",
             )
             .execute(&mut *conn)

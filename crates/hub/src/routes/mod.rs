@@ -43,6 +43,7 @@ pub mod post_models;
 pub mod posts;
 pub mod preview;
 pub mod profile;
+pub mod push;
 pub mod recovery;
 pub mod reports;
 pub mod role_categories;

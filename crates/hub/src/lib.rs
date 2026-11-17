@@ -17,6 +17,7 @@ pub mod lan;
 pub mod listen;
 pub mod outgoing_webhooks;
 pub mod permissions;
+pub mod push;
 pub use wavvon_rate_limit as rate_limit;
 pub mod lang_package;
 pub mod reminder_worker;
