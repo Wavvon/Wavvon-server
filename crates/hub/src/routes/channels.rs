@@ -1040,6 +1040,9 @@ pub(crate) async fn read_max_depth(db: &sqlx::PgPool) -> u32 {
 pub struct UnreadCount {
     pub channel_id: String,
     pub unread_count: i64,
+    /// The caller's read marker (unix ms, 0 = never read). Messages with a
+    /// later `created_at` are the unread ones.
+    pub last_read_at: i64,
 }
 
 /// GET /channels/unread — returns [{channel_id, unread_count}] for every
@@ -1080,17 +1083,27 @@ pub async fn get_unread_counts(
         result.push(UnreadCount {
             channel_id,
             unread_count,
+            last_read_at,
         });
     }
 
     Ok(Json(result))
 }
 
+#[derive(serde::Deserialize)]
+pub struct MarkReadRequest {
+    /// Mark unread from this message: the marker lands just before it.
+    pub message_id: Option<String>,
+}
+
 /// POST /channels/:id/read — upsert last_read_at for the authenticated user.
+/// With `message_id`, the marker moves back to just before that message
+/// ("mark unread"); without, it moves to now.
 pub async fn mark_channel_read(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(channel_id): Path<String>,
+    body: Option<Json<MarkReadRequest>>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Verify the channel exists
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM channels WHERE id = $1")
@@ -1102,7 +1115,20 @@ pub async fn mark_channel_read(
         return Err((StatusCode::NOT_FOUND, "Channel not found".to_string()));
     }
 
-    let now = crate::auth::handlers::unix_timestamp_ms();
+    let marker = match body.and_then(|Json(b)| b.message_id) {
+        Some(message_id) => {
+            let created_at: Option<i64> = sqlx::query_scalar(
+                "SELECT created_at FROM messages WHERE id = $1 AND channel_id = $2",
+            )
+            .bind(&message_id)
+            .bind(&channel_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+            created_at.ok_or((StatusCode::NOT_FOUND, "Message not found".to_string()))? - 1
+        }
+        None => crate::auth::handlers::unix_timestamp_ms(),
+    };
     sqlx::query(
         "INSERT INTO channel_last_read (user_pubkey, channel_id, last_read_at)
          VALUES ($1, $2, $3)
@@ -1110,7 +1136,7 @@ pub async fn mark_channel_read(
     )
     .bind(&user.public_key)
     .bind(&channel_id)
-    .bind(now)
+    .bind(marker)
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;

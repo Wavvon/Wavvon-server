@@ -165,6 +165,97 @@ async fn mark_read_on_nonexistent_channel_returns_404() {
         .assert_status(axum::http::StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn mark_unread_from_a_message_moves_the_marker_back() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let token = common::authenticate(&server, &alice).await;
+    let bob = Identity::generate();
+    let bob_token = common::authenticate(&server, &bob).await;
+
+    let ch: ChannelResponse = server
+        .post("/channels")
+        .authorization_bearer(&token)
+        .json(&json!({ "name": "general" }))
+        .await
+        .json();
+
+    let mut ids = Vec::new();
+    for i in 1..=3 {
+        let m: serde_json::Value = server
+            .post(&format!("/channels/{}/messages", ch.id))
+            .authorization_bearer(&token)
+            .json(&json!({ "content": format!("msg {i}") }))
+            .await
+            .json();
+        ids.push(m["id"].as_str().unwrap().to_string());
+    }
+    for t in [&token, &bob_token] {
+        server
+            .post(&format!("/channels/{}/read", ch.id))
+            .authorization_bearer(t)
+            .await
+            .assert_status(axum::http::StatusCode::NO_CONTENT);
+    }
+
+    server
+        .post(&format!("/channels/{}/read", ch.id))
+        .authorization_bearer(&token)
+        .json(&json!({ "message_id": ids[1] }))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let unread = |t: String| {
+        let server = &server;
+        async move {
+            let counts: Vec<serde_json::Value> = server
+                .get("/channels/unread")
+                .authorization_bearer(&t)
+                .await
+                .json();
+            counts[0].clone()
+        }
+    };
+    let mine = unread(token.clone()).await;
+    // msg 2 and msg 3 are unread again, unless they share a millisecond with
+    // msg 2 (then at least those two).
+    assert!(mine["unread_count"].as_i64().unwrap() >= 2);
+    assert!(mine["last_read_at"].as_i64().unwrap() > 0);
+    // Only the caller's marker moved.
+    assert_eq!(unread(bob_token).await["unread_count"].as_i64().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn mark_unread_rejects_a_message_from_another_channel() {
+    let server = common::setup().await;
+    let alice = Identity::generate();
+    let token = common::authenticate(&server, &alice).await;
+
+    let mut chans = Vec::new();
+    for name in ["a", "b"] {
+        let ch: ChannelResponse = server
+            .post("/channels")
+            .authorization_bearer(&token)
+            .json(&json!({ "name": name }))
+            .await
+            .json();
+        chans.push(ch.id);
+    }
+    let m: serde_json::Value = server
+        .post(&format!("/channels/{}/messages", chans[0]))
+        .authorization_bearer(&token)
+        .json(&json!({ "content": "hi" }))
+        .await
+        .json();
+
+    server
+        .post(&format!("/channels/{}/read", chans[1]))
+        .authorization_bearer(&token)
+        .json(&json!({ "message_id": m["id"] }))
+        .await
+        .assert_status(axum::http::StatusCode::NOT_FOUND);
+}
+
 // ---------------------------------------------------------------------------
 // Feature 5: Join links
 // ---------------------------------------------------------------------------
