@@ -1342,6 +1342,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ece-native"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6911cc97c62febd8cbcb2cb49ed21c58ccd418a80c43f20df4973ee08484e65d"
+dependencies = [
+ "aes-gcm",
+ "hkdf 0.12.4",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "ed25519"
 version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6110,6 +6121,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "p256",
  "percent-encoding",
  "postgresql_embedded",
  "rand 0.8.6",
@@ -6136,6 +6148,7 @@ dependencies = [
  "wavvon-hub-env",
  "wavvon-identity",
  "wavvon-rate-limit",
+ "web-push-native",
  "webauthn-authenticator-rs",
  "webauthn-rs",
  "wtransport",
@@ -6176,6 +6189,20 @@ dependencies = [
  "tokio",
  "tracing",
  "wavvon-hub-env",
+]
+
+[[package]]
+name = "web-push-native"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7628c93e39aeee4c0bca50ae333052b4f174c653e8fca1d0a8e34f9bc4879c0c"
+dependencies = [
+ "aes-gcm",
+ "ece-native",
+ "hkdf 0.13.0",
+ "http",
+ "p256",
+ "sha2 0.11.0",
 ]
 
 [[package]]

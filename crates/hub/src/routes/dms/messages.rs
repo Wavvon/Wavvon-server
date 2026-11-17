@@ -386,6 +386,12 @@ pub async fn send_dm(
         content: ws_content,
         timestamp: now,
     });
+    crate::push::notify_dm(
+        state.clone(),
+        conversation_id.clone(),
+        user.public_key.clone(),
+        members.iter().map(|m| m.public_key.clone()).collect(),
+    );
 
     // Federate to each remote member's delivery hub.
     // Phase 5: if the member has a HomeHubList designation stored here, deliver
@@ -907,6 +913,15 @@ pub async fn receive_federated_dm(
         content: ws_content,
         timestamp: req.created_at.max(now),
     });
+    // A mirror copy was already pushed by the home hub that accepted it.
+    if !req.mirror {
+        crate::push::notify_dm(
+            state.clone(),
+            req.conversation_id.clone(),
+            req.sender.clone(),
+            recipients.to_vec(),
+        );
+    }
 
     // Step 2 of home-hub.md "DM delivery": this hub accepted the message, and
     // the recipient's *other* home hubs have to end up with it too, or a

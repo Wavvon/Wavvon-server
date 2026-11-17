@@ -97,7 +97,7 @@ fn is_global_v4(v4: Ipv4Addr) -> bool {
 /// Perform SSRF-safe DNS resolution without blocking the runtime. Returns the
 /// addresses, every one passing `allowed`, so the caller can pin the
 /// connection to them, preventing DNS-rebinding between check and connect.
-async fn resolve_and_check(
+pub(crate) async fn resolve_and_check(
     host: &str,
     port: u16,
     allowed: &(dyn Fn(SocketAddr) -> bool + Sync),

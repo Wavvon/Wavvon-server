@@ -173,6 +173,11 @@ pub const CAPABILITIES: &[&str] = &[
     // `recovery_attestation_requested` WebSocket event says when one opens.
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
+    // Web Push for a closed web client (push.rs): `GET /push/vapid-key`,
+    // `PUT`/`DELETE /push/subscriptions` with the client's notify modes. A
+    // mention, a reply or a DM to a member with no socket open is pushed with
+    // only the hub, the channel or conversation and the kind, never text.
+    "push.web",
     "recovery.attest.requests",
     // `PUT /roles/order` reorders every role below the caller in one call.
     // Without it a client renumbers roles with one PATCH each, which can
