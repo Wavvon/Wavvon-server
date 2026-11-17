@@ -33,6 +33,13 @@ pub struct NotifyPrefs {
     pub hub: Option<NotifyMode>,
     #[serde(default)]
     pub channels: HashMap<String, NotifyMode>,
+    /// A timed mute: the epoch-ms deadline after which the hub's mode no
+    /// longer applies. The client sends a deadline rather than re-sending
+    /// its modes when the mute ends, because a closed tab cannot.
+    #[serde(default)]
+    pub hub_until: Option<i64>,
+    #[serde(default)]
+    pub channels_until: HashMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,9 +53,15 @@ pub enum NotifyMode {
 impl NotifyPrefs {
     /// Mentions, replies and DMs push under `all` and `mentions` alike; only
     /// `silent` stops them, channel over hub, as the client decides.
-    fn silences(&self, channel_id: Option<&str>) -> bool {
-        let channel = channel_id.and_then(|c| self.channels.get(c));
-        channel.or(self.hub.as_ref()) == Some(&NotifyMode::Silent)
+    /// A mode whose deadline has passed counts as unset, so an expired
+    /// channel mute falls back to the hub's mode.
+    fn silences(&self, channel_id: Option<&str>, now_ms: i64) -> bool {
+        let live = |mode: Option<&NotifyMode>, until: Option<i64>| {
+            mode.filter(|_| until.is_none_or(|u| u > now_ms)).copied()
+        };
+        let channel = channel_id
+            .and_then(|c| live(self.channels.get(c), self.channels_until.get(c).copied()));
+        channel.or(live(self.hub.as_ref(), self.hub_until)) == Some(NotifyMode::Silent)
     }
 }
 
@@ -242,12 +255,16 @@ async fn push_to(state: &AppState, pubkey: &str, channel_id: Option<&str>, paylo
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
     let subs: Vec<_> = subs
         .into_iter()
         .filter(|(_, _, _, notify)| {
             !serde_json::from_str::<NotifyPrefs>(notify)
                 .unwrap_or_default()
-                .silences(channel_id)
+                .silences(channel_id, now_ms)
         })
         .collect();
     if subs.is_empty() || over_budget(state, pubkey) {
@@ -372,11 +389,28 @@ mod tests {
     #[test]
     fn silent_channel_overrides_hub_and_hub_applies_to_dms() {
         let mut p = NotifyPrefs::default();
-        assert!(!p.silences(Some("c")));
+        assert!(!p.silences(Some("c"), 0));
         p.hub = Some(NotifyMode::Silent);
-        assert!(p.silences(Some("c")) && p.silences(None));
+        assert!(p.silences(Some("c"), 0) && p.silences(None, 0));
         p.channels.insert("c".into(), NotifyMode::Mentions);
-        assert!(!p.silences(Some("c")));
+        assert!(!p.silences(Some("c"), 0));
+    }
+
+    #[test]
+    fn a_timed_mute_stops_silencing_at_its_deadline() {
+        let mut p = NotifyPrefs {
+            hub: Some(NotifyMode::Silent),
+            hub_until: Some(1_000),
+            ..Default::default()
+        };
+        assert!(p.silences(None, 999));
+        assert!(!p.silences(None, 1_000));
+        p.hub_until = None;
+        p.channels.insert("c".into(), NotifyMode::Mentions);
+        p.channels_until.insert("c".into(), 500);
+        // An expired channel mode falls back to the (silent) hub mode.
+        assert!(!p.silences(Some("c"), 400));
+        assert!(p.silences(Some("c"), 600));
     }
 
     #[test]

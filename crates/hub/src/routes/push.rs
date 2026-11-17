@@ -64,7 +64,9 @@ pub async fn put_subscription(
     if req.endpoint.len() > MAX_ENDPOINT_LEN {
         return Err(bad("endpoint too long"));
     }
-    if req.notify.channels.len() > MAX_NOTIFY_CHANNELS {
+    if req.notify.channels.len() > MAX_NOTIFY_CHANNELS
+        || req.notify.channels_until.len() > MAX_NOTIFY_CHANNELS
+    {
         return Err(bad("too many channels in notify"));
     }
     b64url_decode(&req.keys.p256dh)
