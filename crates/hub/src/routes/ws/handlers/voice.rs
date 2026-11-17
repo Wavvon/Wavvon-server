@@ -1130,6 +1130,7 @@ const MIN_POSITION_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 pub(in crate::routes::ws) async fn handle_voice_position_update(
     cs: &mut ConnState,
     state: &Arc<AppState>,
+    ws_tx: &mut WsTx,
     msg: WsClientMessage,
 ) -> DispatchResult {
     let (zone_id, position) = match msg {
@@ -1155,19 +1156,18 @@ pub(in crate::routes::ws) async fn handle_voice_position_update(
     }
     cs.last_position_update = Some(now);
 
-    let allowed = {
+    let refusal = {
         let zones = state.voice_zones.read().await;
-        if let Some(z) = zones.get(&(ch_id.clone(), zone_id.clone())) {
-            match z.auth_mode.as_str() {
-                "creator_only" => z.creator_pubkey == cs.public_key,
-                _ => true,
+        match zones.get(&(ch_id.clone(), zone_id.clone())) {
+            None => Some("Unknown voice zone."),
+            Some(z) if z.auth_mode == "creator_only" && z.creator_pubkey != cs.public_key => {
+                Some("Only the zone creator can move in this zone.")
             }
-        } else {
-            false
+            Some(_) => None,
         }
     };
-    if !allowed {
-        return DispatchResult::Continue;
+    if let Some(message) = refusal {
+        return send_error(ws_tx, "voice_position_update", message).await;
     }
 
     state
