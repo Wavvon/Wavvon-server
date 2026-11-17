@@ -178,6 +178,11 @@ pub const CAPABILITIES: &[&str] = &[
     // mention, a reply or a DM to a member with no socket open is pushed with
     // only the hub, the channel or conversation and the kind, never text.
     "push.web",
+    // The push subscription's notify also carries `hub_until` and
+    // `channels_until`, epoch-ms deadlines of a timed mute; past one, that
+    // mode counts as unset. An older hub ignores them and keeps a timed mute
+    // silent until the client next re-sends its modes.
+    "push.web.muteuntil",
     "recovery.attest.requests",
     // `PUT /roles/order` reorders every role below the caller in one call.
     // Without it a client renumbers roles with one PATCH each, which can
