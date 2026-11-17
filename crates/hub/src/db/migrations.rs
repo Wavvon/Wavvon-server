@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -364,6 +364,21 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
                     package      BYTEA NOT NULL,
                     preview      BYTEA,
                     preview_mime TEXT,
+                    uploaded_by  TEXT NOT NULL,
+                    uploaded_at  BIGINT NOT NULL
+                )",
+            )
+            .execute(&mut *conn)
+            .await?;
+        }
+        // Hub language packs (Wavvon-server#401): one package per language code.
+        15 => {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS hub_languages (
+                    code         TEXT PRIMARY KEY,
+                    name         TEXT NOT NULL,
+                    sha256       TEXT NOT NULL UNIQUE,
+                    package      BYTEA NOT NULL,
                     uploaded_by  TEXT NOT NULL,
                     uploaded_at  BIGINT NOT NULL
                 )",

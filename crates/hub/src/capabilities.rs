@@ -98,6 +98,12 @@ pub const CAPABILITIES: &[&str] = &[
     // invite preview carries them with `description` and `online_count`.
     // An admin page must not offer fields an older hub would silently drop.
     "hub.landing",
+    // `PUT /hub/languages` takes a `.wavvonlang` package (language-packs.md
+    // §3), one per code; `DELETE /hub/languages/{sha256}` removes it and
+    // `PUT /hub/languages/default` sets the default code. `GET /hub/languages`
+    // lists them, `GET /hub/languages/{sha256}` serves one with immutable
+    // caching, and `/info` carries `languages` while there is any.
+    "hub.languages",
     // `DELETE /me` — a member can remove themselves from the hub: profile and
     // roles cleared, the pubkey kept as the anchor moderation and message
     // history point at. Gated because a client must not offer "leave this

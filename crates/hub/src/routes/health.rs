@@ -184,6 +184,7 @@ pub async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
         canonical_url: state.canonical_url.read().await.clone(),
         landing: Some(crate::routes::hub::read_landing(&state.db).await),
         theme: crate::routes::hub_theme::read_theme_info(&state.db).await,
+        languages: crate::routes::hub_languages::info_languages(&state.db).await,
     })
 }
 
@@ -319,6 +320,10 @@ pub struct InfoResponse {
     /// The hub default theme, while one is set (`hub.theme`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<crate::routes::hub_theme::HubThemeInfo>,
+    /// The hub's language packs and default language, while it has any
+    /// (`hub.languages`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub languages: Option<crate::routes::hub_languages::HubLanguages>,
 }
 
 fn default_true() -> bool {
