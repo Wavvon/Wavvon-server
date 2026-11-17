@@ -66,6 +66,11 @@ pub const CAPABILITIES: &[&str] = &[
     // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
     // it takes inline `attachments` only, so a client hides the attach button.
     "attachments.stored",
+    // `POST /channels/{id}/read` takes an optional `message_id` and moves the
+    // caller's read marker back to just before that message ("mark unread").
+    // An older hub ignores the body and marks the channel read, the opposite
+    // of what was asked, so a client offers the action only on this string.
+    "channels.markunread",
     // A channel can have `slowmode_secs` (one message per member per that
     // many seconds; `messages.slowmode.bypass` exempts). A refused send is a
     // 429 whose JSON body carries `retry_after_secs`.
