@@ -20,9 +20,9 @@ mod common;
 
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
+use wavvon_test_server::TestServer;
 
 async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
     let (db_pool, guard) = common::create_test_db().await;

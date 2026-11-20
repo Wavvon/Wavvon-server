@@ -7,9 +7,9 @@
 use std::sync::Arc;
 
 use axum::http::header;
-use axum_test::TestServer;
 use wavvon_hub::server;
 use wavvon_hub::web_client::WebClientConfig;
+use wavvon_test_server::TestServer;
 
 /// Build a test server with an optional WebClientConfig.
 #[path = "common.rs"]

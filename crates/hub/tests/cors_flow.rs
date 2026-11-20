@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use wavvon_hub::server::create_router_with_cors;
+use wavvon_test_server::TestServer;
 
 #[path = "common.rs"]
 mod common;

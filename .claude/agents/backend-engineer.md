@@ -28,7 +28,7 @@ constraints. Read it; don't duplicate it here. This file is about how you work.
 
 ## Tests
 
-Integration tests in `crates/hub/tests/*_flow.rs`, `axum_test::TestServer`
+Integration tests in `crates/hub/tests/*_flow.rs`, `wavvon_test_server::TestServer` (crates/test-server, in-process)
 against a fresh isolated PostgreSQL database per test. New endpoints need at
 minimum a **happy path and a rejection test** — the rejection test is the one
 that actually catches regressions.

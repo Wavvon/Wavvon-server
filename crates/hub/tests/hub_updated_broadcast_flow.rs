@@ -15,7 +15,7 @@ use wavvon_identity::Identity;
 mod common;
 
 /// Boot a real TCP listener on a random port -- a real socket is needed
-/// because `tokio_tungstenite` speaks actual TCP, unlike `axum_test`.
+/// because `tokio_tungstenite` speaks actual TCP, unlike `wavvon_test_server`.
 /// Mirrors `squad_rooms_flow.rs`'s `start_hub`.
 async fn start_hub() -> (String, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;

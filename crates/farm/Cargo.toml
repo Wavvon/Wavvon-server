@@ -49,7 +49,7 @@ tracing-opentelemetry = { workspace = true }
 config = { workspace = true }
 
 [dev-dependencies]
-axum-test = "19"
+wavvon-test-server = { path = "../test-server" }
 uuid = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }

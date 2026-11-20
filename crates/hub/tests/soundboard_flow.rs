@@ -19,7 +19,7 @@ mod common;
 /// Boot a real TCP listener on a random port. A real socket is needed
 /// because the `played` test exercises `tokio_tungstenite` over the main
 /// chat WS, which (like `screen_share_flow.rs`/`ws_read_gating_flow.rs`)
-/// `axum_test`'s in-process harness can't drive.
+/// `wavvon_test_server`'s in-process harness can't drive.
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
 
