@@ -304,11 +304,10 @@ pub struct AppState {
     /// Plain HTTP client for outbound requests that don't go through the
     /// federation protocol (e.g. sending push invites to foreign hubs).
     pub http_client: reqwest::Client,
-    // Voice (voice-transport-v2.md): channel_id → {public_key → WT session}.
-    // `None` means the pubkey has joined voice over WS but hasn't (yet, or
-    // no longer) bound a live WebTransport datagram session — mirrors the
-    // old sentinel-address membership marker, minus the sentinel.
-    pub voice_channels: RwLock<HashMap<String, HashMap<String, Option<wtransport::Connection>>>>,
+    // Voice (voice-transport-v3.md): channel_id → {public_key → transport
+    // session}. `None` means the pubkey has joined voice over WS but hasn't
+    // (yet, or no longer) bound a live transport session.
+    pub voice_channels: RwLock<HashMap<String, crate::voice_relay::VoiceRoom>>,
     /// sender_id assignment: channel_id → { pubkey → sender_id }
     pub voice_sender_ids: RwLock<HashMap<String, HashMap<String, u16>>>,
     /// Next available sender_id counter per channel

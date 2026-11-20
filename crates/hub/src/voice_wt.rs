@@ -1,4 +1,5 @@
-//! WebTransport voice relay (voice-transport-v2.md).
+//! WebTransport adapter for the voice relay (voice-transport-v2.md; the
+//! relay itself is transport-agnostic, see `voice_relay`).
 //!
 //! A single QUIC/WebTransport endpoint, bound on `WAVVON_VOICE_UDP_PORT`,
 //! replaces the old raw-UDP relay and the `/voice/ws` web relay. Clients
@@ -15,6 +16,21 @@ use wtransport::{Endpoint, Identity as WtIdentity, ServerConfig};
 
 use crate::auth::handlers::unix_timestamp;
 use crate::state::AppState;
+use crate::voice_relay::{self, VoiceLink};
+
+/// A WebTransport session as the relay sees it.
+struct WtLink(wtransport::Connection);
+
+impl VoiceLink for WtLink {
+    fn send(&self, packet: &[u8]) {
+        let _ = self.0.send_datagram(packet);
+    }
+
+    fn close(&self, reason: &str) {
+        self.0
+            .close(wtransport::VarInt::from_u32(0), reason.as_bytes());
+    }
+}
 
 /// Self-signed cert validity window (voice-transport-v2.md) — the maximum
 /// WebTransport's `serverCertificateHashes` trust tier allows.
@@ -247,14 +263,7 @@ async fn handle_session(incoming: IncomingSession, state: Arc<AppState>) -> anyh
         return Ok(());
     };
 
-    // Single-use: same `voice_pending_binds` map the VoiceJoin flow mints
-    // into, consumed here instead of by a VXRG UDP packet.
-    let bind = {
-        let now = std::time::Instant::now();
-        let mut binds = state.voice_pending_binds.write().await;
-        binds.retain(|_, v| v.expires_at > now);
-        binds.remove(token)
-    };
+    let bind = voice_relay::take_bind(&state, token).await;
     let Some(bind) = bind else {
         tracing::info!(%peer, "voice WT session refused: unknown, used or expired token");
         session_request.forbidden().await;
@@ -270,20 +279,14 @@ async fn handle_session(incoming: IncomingSession, state: Arc<AppState>) -> anyh
         "voice WT session opened"
     );
 
-    {
-        let mut channels = state.voice_channels.write().await;
-        channels
-            .entry(bind.channel_id.clone())
-            .or_default()
-            .insert(bind.pubkey.clone(), Some(connection.clone()));
-    }
+    voice_relay::attach(&state, &bind, Arc::new(WtLink(connection.clone()))).await;
 
     let ended = loop {
         tokio::select! {
             datagram = connection.receive_datagram() => {
                 match datagram {
                     Ok(datagram) => {
-                        relay_datagram(&state, &bind.channel_id, &bind.pubkey, &datagram.payload()).await;
+                        voice_relay::relay(&state, &bind.channel_id, &bind.pubkey, &datagram.payload()).await;
                     }
                     Err(e) => break e.to_string(),
                 }
@@ -299,95 +302,7 @@ async fn handle_session(incoming: IncomingSession, state: Arc<AppState>) -> anyh
         "voice WT session closed"
     );
 
-    // Session ended: clear the audio-carrying handle but leave the
-    // roster/membership entry alone — WS `leave_voice` (disconnect or
-    // explicit VoiceLeave) is the sole authority for removing it, mirroring
-    // the old sentinel-address state after a UDP session died.
-    if let Some(chan) = state.voice_channels.write().await.get_mut(&bind.channel_id) {
-        if let Some(slot) = chan.get_mut(&bind.pubkey) {
-            *slot = None;
-        }
-    }
+    voice_relay::detach(&state, &bind).await;
 
     Ok(())
-}
-
-/// Header-only fan-out: prepends `[sender_id][packet_type]` and forwards to
-/// every other bound session in the channel (or, for a whispering sender,
-/// exclusively to the resolved whisper target set). Never inspects
-/// `payload` beyond copying it verbatim.
-async fn relay_datagram(state: &AppState, channel_id: &str, sender_pk: &str, payload: &[u8]) {
-    // Enforcement point tying the WT session's lifetime to the WS session's:
-    // `leave_voice` clears this set on disconnect, so a datagram racing
-    // ahead of session teardown is dropped here.
-    if !state.voice_relay_active.read().await.contains(sender_pk) {
-        return;
-    }
-
-    // Below the channel's `min_talk_power` with no talk grant: present and
-    // listening, but not transmitting (permissions.md, "Talk power is not
-    // this"). Decided once on join and parked in memory, because this runs per
-    // datagram and cannot ask the database anything.
-    if state.voice_talk_blocked.read().await.contains(sender_pk) {
-        return;
-    }
-
-    // Outbound loss, measured here because only here can it be measured: the
-    // sender cannot know which of its own datagrams never arrived. `ctr` is in
-    // the cleartext header, so this reads a counter and still never touches the
-    // sealed payload. A datagram too short to carry one is forwarded untracked
-    // rather than dropped — the relay's job is forwarding, not validating.
-    if let Some(ctr) = crate::voice_loss::read_ctr(payload) {
-        let mut losses = state.voice_outbound_loss.write().await;
-        let next = crate::voice_loss::track(losses.get(sender_pk).copied(), ctr);
-        losses.insert(sender_pk.to_string(), next);
-    }
-
-    let sender_id: u16 = state
-        .voice_sender_ids
-        .read()
-        .await
-        .get(channel_id)
-        .and_then(|m| m.get(sender_pk))
-        .copied()
-        .unwrap_or(0);
-
-    let whisper_targets = state
-        .whisper_target_pubkeys
-        .read()
-        .await
-        .get(sender_pk)
-        .cloned();
-    let packet_type: u8 = if whisper_targets.is_some() {
-        0x01
-    } else {
-        0x00
-    };
-
-    let mut outbound = Vec::with_capacity(3 + payload.len());
-    outbound.extend_from_slice(&sender_id.to_be_bytes());
-    outbound.push(packet_type);
-    outbound.extend_from_slice(payload);
-
-    let channels = state.voice_channels.read().await;
-    let Some(participants) = channels.get(channel_id) else {
-        return;
-    };
-
-    if let Some(targets) = whisper_targets {
-        for pk in &targets {
-            if let Some(Some(conn)) = participants.get(pk.as_str()) {
-                let _ = conn.send_datagram(&outbound);
-            }
-        }
-    } else {
-        for (pk, session) in participants {
-            if pk == sender_pk {
-                continue;
-            }
-            if let Some(conn) = session {
-                let _ = conn.send_datagram(&outbound);
-            }
-        }
-    }
 }
