@@ -33,6 +33,7 @@ pub mod subkey_revocation_worker;
 pub mod temp_channel_worker;
 pub mod theme_package;
 pub mod voice_loss;
+pub mod voice_relay;
 pub mod voice_wt;
 pub mod web_client;
 pub mod web_client_fetch;
