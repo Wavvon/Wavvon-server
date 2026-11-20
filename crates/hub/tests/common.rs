@@ -132,11 +132,14 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         .expect("Failed to connect to PostgreSQL (admin)");
 
     let db_name = format!("wavvon_test_{}", uuid::Uuid::new_v4().simple());
+    let template = migrated_template(&admin_pool, &base_url).await;
 
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("Failed to create test database");
+    sqlx::query(&format!(
+        "CREATE DATABASE \"{db_name}\" TEMPLATE \"{template}\""
+    ))
+    .execute(&admin_pool)
+    .await
+    .expect("Failed to create test database");
 
     let guard = TestDbGuard(Arc::new(TestDbGuardInner {
         db_name: db_name.clone(),
@@ -157,10 +160,6 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         .await
         .expect("Failed to connect to test database");
 
-    db::migrations::run(&pool)
-        .await
-        .expect("Failed to run migrations on test database");
-
     // Fresh hubs now seed `invite_only = true` by default (task #31), but
     // the vast majority of this suite predates that and assumes open
     // registration — dozens of test files build their own harness directly
@@ -174,6 +173,71 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         .expect("reset invite_only for test database");
 
     (pool, guard)
+}
+
+/// The name of a database holding the migrated schema, built once and then
+/// cloned by every test: `CREATE DATABASE ... TEMPLATE` copies files, which
+/// is far cheaper than running every migration per test. The name carries a
+/// fingerprint of the migrations source, so a changed schema builds a new
+/// template. nextest runs each test in its own process, so creation is
+/// serialised across processes with an advisory lock, and the template is
+/// built under a temporary name and renamed only once complete.
+async fn migrated_template(admin_pool: &PgPool, base_url: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    include_str!("../src/db/migrations.rs").hash(&mut hasher);
+    let name = format!("wavvon_test_tpl_{:016x}", hasher.finish());
+
+    let mut conn = admin_pool.acquire().await.expect("admin connection");
+    sqlx::query("SELECT pg_advisory_lock(7272740)")
+        .execute(&mut *conn)
+        .await
+        .expect("template lock");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&name)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("look up template");
+    if !exists {
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'wavvon_test_tpl_%'",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .expect("list old templates");
+        for old in stale {
+            sqlx::query(&format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"))
+                .execute(&mut *conn)
+                .await
+                .expect("drop old template");
+        }
+        let building = format!("{name}_building");
+        sqlx::query(&format!("CREATE DATABASE \"{building}\""))
+            .execute(&mut *conn)
+            .await
+            .expect("create template");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("{base_url}/{building}"))
+            .await
+            .expect("connect to template");
+        db::migrations::run(&pool)
+            .await
+            .expect("Failed to run migrations on the template database");
+        pool.close().await;
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{building}\" RENAME TO \"{name}\""
+        ))
+        .execute(&mut *conn)
+        .await
+        .expect("publish template");
+    }
+    sqlx::query("SELECT pg_advisory_unlock(7272740)")
+        .execute(&mut *conn)
+        .await
+        .expect("template unlock");
+    name
 }
 
 /// A test database with **no schema at all**, plus its URL.
