@@ -1,6 +1,6 @@
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
 #[path = "common.rs"]
 mod common;

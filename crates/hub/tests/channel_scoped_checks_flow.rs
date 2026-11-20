@@ -1,7 +1,7 @@
 use axum::http::StatusCode;
-use axum_test::multipart::{MultipartForm, Part};
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
+use wavvon_test_server::multipart::{MultipartForm, Part};
 
 #[path = "common.rs"]
 mod common;

@@ -1,10 +1,10 @@
-use axum_test::TestServer;
 use serde_json::json;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::routes::hub::HubSettings;
 use wavvon_hub::routes::invite_models::InviteResponse;
 use wavvon_hub::routes::role_models::RoleResponse;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
 #[path = "common.rs"]
 mod common;
@@ -1347,7 +1347,7 @@ async fn verify_raw(
     identity: &Identity,
     invite_code: Option<&str>,
     subkey_cert: Option<serde_json::Value>,
-) -> axum_test::TestResponse {
+) -> wavvon_test_server::TestResponse {
     let pub_key = identity.public_key_hex();
     let resp = server
         .post("/auth/challenge")

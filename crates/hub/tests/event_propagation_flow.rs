@@ -1,8 +1,8 @@
-/// Integration tests for event card propagation to sub-channels
-/// (events.md §6).
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
+/// Integration tests for event card propagation to sub-channels
+/// (events.md §6).
+use wavvon_test_server::TestServer;
 
 #[path = "common.rs"]
 mod common;

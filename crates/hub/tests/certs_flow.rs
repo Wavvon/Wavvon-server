@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::cert_worker;
@@ -10,6 +9,7 @@ use wavvon_hub::routes::certs::{Certification, IssuanceRow};
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
 // ---------------------------------------------------------------------------
 // Shared test setup

@@ -51,7 +51,7 @@ fn signed_cert(
 /// is stored under. `PUT`ting a designation for a master the hub has never met
 /// is refused, so every designation test has to arrive the way a client does.
 async fn join_and_link(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
     identity: &Identity,
 ) -> wavvon_identity::MasterIdentity {
     let master = identity.master().unwrap();
@@ -213,7 +213,7 @@ async fn designation_refuses_a_master_the_hub_has_never_met() {
 
 /// Authenticate as a bare device subkey, the way a paired device does on a hub
 /// that has not met it yet: challenge, sign, no cert presented.
-async fn auth_as_subkey(server: &axum_test::TestServer, subkey: &DeviceSubkey) -> String {
+async fn auth_as_subkey(server: &wavvon_test_server::TestServer, subkey: &DeviceSubkey) -> String {
     let pub_key = subkey.public_key_hex();
     let resp = server
         .post("/auth/challenge")

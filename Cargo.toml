@@ -8,6 +8,7 @@ members = [
     "crates/farm",
     "crates/agent",
     "crates/demo-seed",
+    "crates/test-server",
 ]
 
 [workspace.dependencies]

@@ -342,7 +342,7 @@ async fn non_admin_cannot_access_admin_survey_routes() {
 // ---------------------------------------------------------------------------
 
 async fn create_role(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
     token: &str,
     name: &str,
     permissions: &[&str],
