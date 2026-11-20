@@ -102,11 +102,19 @@ pub async fn start(
     };
     // ponytail: IPv4 only, one socket. Add a second socket on `[::]` when a
     // hub needs IPv6 voice.
-    let candidates: Vec<SocketAddr> = ips
+    let mut candidates: Vec<SocketAddr> = ips
         .into_iter()
         .filter(|ip| ip.is_ipv4())
         .map(|ip| SocketAddr::new(ip, bound))
         .collect();
+    // Browsers never send ICE checks to a loopback candidate, even from the
+    // same machine, so a hub configured as `localhost` (development, CI)
+    // also advertises the address it routes out of.
+    if candidates.iter().all(|a| a.ip().is_loopback()) {
+        if let Some(ip) = outbound_ipv4() {
+            candidates.push(SocketAddr::new(ip, bound));
+        }
+    }
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let handle = RtcHandle {
@@ -117,6 +125,15 @@ pub async fn start(
     }
     tokio::spawn(run(state, socket, candidates, cmd_rx, cmd_tx));
     Ok(bound)
+}
+
+/// The local IPv4 address the OS routes outbound traffic from. Connecting a
+/// UDP socket sends nothing; it only picks the route (to a TEST-NET address).
+fn outbound_ipv4() -> Option<IpAddr> {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    probe.connect("192.0.2.1:9").ok()?;
+    let ip = probe.local_addr().ok()?.ip();
+    (!ip.is_unspecified() && !ip.is_loopback()).then_some(ip)
 }
 
 async fn run(
