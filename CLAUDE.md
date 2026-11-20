@@ -343,7 +343,7 @@ member?" goes through one resolver.
 
 ## Tests
 
-Integration tests in `crates/hub/tests/*_flow.rs` use `wavvon_test_server::TestServer` (crates/test-server, in-process)
+Integration tests in `crates/hub/tests/*_flow.rs` compile as **one binary** (`tests/main.rs` declares each file as a module, `autotests = false`), so the crate links once rather than once per file; a new test file needs its `mod` line there. They use `wavvon_test_server::TestServer` (crates/test-server, in-process)
 against a **fresh, isolated PostgreSQL database per test**
 (`common::create_test_db()` creates it via `PgPoolOptions` and runs the real
 migrations). Set `TEST_DATABASE_URL` if your server isn't
@@ -354,7 +354,7 @@ suffices.
 New endpoints need at minimum a happy-path and a rejection test.
 
 A `PoolTimedOut` failure is almost always `max_connections` exhaustion under
-parallelism, not a real fault — re-run the single binary, or lower
+parallelism, not a real fault — re-run the failing module (`-E 'test(/^voice_rtc_flow::/)'`), or lower
 `test-threads` (`-j 2`). The nextest profile already caps it at 4.
 
 **Every test has a deadline.** `.config/nextest.toml` kills a test after two

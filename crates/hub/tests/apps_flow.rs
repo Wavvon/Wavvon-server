@@ -7,8 +7,7 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Grants `apps.register` to everyone on this hub, which is how an admin
 /// would do it: a permission on a role, not a property of an identity.

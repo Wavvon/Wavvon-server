@@ -7,8 +7,7 @@
 /// - GET  /farm/users            (admin-only, pagination)
 /// - POST /farm/users/:pk/revoke-sessions (admin-only)
 /// - POST /farm/hubs creation policy enforcement
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

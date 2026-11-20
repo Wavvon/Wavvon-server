@@ -106,7 +106,7 @@ do it deliberately.
 
 ## Gotchas
 
-- **`PoolTimedOut`** under a parallel test run is PostgreSQL's `max_connections`, not a real fault. Re-run the single binary or use `-- --test-threads=4`. `WAVVON_DB_MAX_CONNECTIONS` (default 5) caps concurrent *queries* per hub — the sum across hubs sharing one server must stay under the server's `max_connections`.
+- **`PoolTimedOut`** under a parallel test run is PostgreSQL's `max_connections`, not a real fault. Re-run the failing module (`-E 'test(/^voice_rtc_flow::/)'`) or lower `--test-threads`. `WAVVON_DB_MAX_CONNECTIONS` (default 5) caps concurrent *queries* per hub — the sum across hubs sharing one server must stay under the server's `max_connections`.
 - **A leftover `wavvon-hub` process locks the build output.** On Windows cargo reports "Access denied (os error 5)". Kill the process; don't clean the target directory.
 - **Migrations are additive**, so pointing a newer binary at an older database is fine. The reverse is not.
 - **Ports**: 3000 TCP (HTTP + WebSocket) and 3001 UDP (voice). The UDP one is the one people forget — behind a proxy that only forwards TCP, everything works except voice.

@@ -1,8 +1,7 @@
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // `messages.created_at` is in milliseconds. The retention sweep compared it
 // against a cutoff in seconds, so a member's message was never old enough to

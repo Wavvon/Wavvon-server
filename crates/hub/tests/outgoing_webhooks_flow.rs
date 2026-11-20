@@ -11,8 +11,7 @@ use wavvon_hub::server;
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Same as common::setup() but also returns the PgPool so tests can poke the
 /// database directly — needed here because the create route rejects

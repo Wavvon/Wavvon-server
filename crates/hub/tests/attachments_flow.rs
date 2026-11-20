@@ -13,8 +13,7 @@ use serde_json::{json, Value};
 use wavvon_identity::Identity;
 use wavvon_test_server::multipart::{MultipartForm, Part};
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 const MB: usize = 1024 * 1024;
 

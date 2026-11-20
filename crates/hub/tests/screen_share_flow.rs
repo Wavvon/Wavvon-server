@@ -10,11 +10,10 @@ use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
 /// Boot a real TCP listener on a random port and return the base URL.
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "ss-test".to_string(),

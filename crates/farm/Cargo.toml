@@ -2,6 +2,7 @@
 name = "wavvon-farm"
 version = "0.2.0"
 edition = "2021"
+autotests = false
 
 [[bin]]
 name = "wavvon-farm"
@@ -56,3 +57,7 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 # Multi-node TLS: a self-signed certificate to pin, and a real handshake to
 # prove the pin is checked rather than decorative.
 rcgen = "0.14"
+
+[[test]]
+name = "farm"
+path = "tests/main.rs"

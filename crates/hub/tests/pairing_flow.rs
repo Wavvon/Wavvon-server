@@ -6,8 +6,7 @@ use wavvon_identity::{
     PairingStatus, SubkeyCert,
 };
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 fn now() -> u64 {
     SystemTime::now()

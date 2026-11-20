@@ -5,7 +5,7 @@
 /// 25 MB and refused anything over 2 MB with a bare 413, and an operator who
 /// raised `max_attachment_bytes` saw no effect past ~1.5 MB of file. These
 /// tests send bodies between axum's default and the hub's own caps.
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
 use serde_json::{json, Value};

@@ -3,8 +3,7 @@ use wavvon_identity::{
     recovery_attestation_signing_bytes, recovery_request_signing_bytes, Identity,
 };
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Happy path: put contacts, read them back, delete one

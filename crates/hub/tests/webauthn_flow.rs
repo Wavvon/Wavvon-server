@@ -20,8 +20,7 @@ use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -1,7 +1,6 @@
 use serde_json::json;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// The URL token is the whole credential of an incoming webhook: the right one
 /// posts, a wrong one is refused, and no header changes either answer.

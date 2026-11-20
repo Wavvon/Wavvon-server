@@ -14,8 +14,7 @@ use tokio::net::TcpListener;
 use wavvon_hub::cert_revocation_worker;
 use wavvon_hub::state::AppState;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Helpers

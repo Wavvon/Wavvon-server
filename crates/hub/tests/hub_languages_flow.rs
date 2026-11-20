@@ -5,8 +5,7 @@ use axum::http::StatusCode;
 use wavvon_identity::Identity;
 use zip::write::SimpleFileOptions;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 fn pack(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut w = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));

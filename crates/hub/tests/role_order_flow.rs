@@ -4,8 +4,7 @@
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn create(
     h: &common::TestHarness,

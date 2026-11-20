@@ -11,14 +11,13 @@ use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Same as common::setup() but also returns the PgPool so tests can poke the
 /// database directly (e.g. to mark a dm_outbox row as bounced for a test
 /// that exercises the delivery_failed reporting path).
 async fn setup_with_pool() -> (common::TestHarness, PgPool) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
     let pool_handle = db.clone();
 
     let state = Arc::new(common::base_state(db));
@@ -333,7 +332,7 @@ async fn wait_for_federated_dms(
 /// A real hub on a real port, with its `AppState` so a test can drive the
 /// outbox worker instead of waiting on the spawned delivery.
 async fn start_real_hub(name: &str) -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: name.to_string(),
@@ -473,7 +472,7 @@ async fn dm_retries_when_recipient_hub_comes_online() {
     );
 
     // Bring Hub B up on the previously-chosen port.
-    let (hub_b_db, _hub_b_guard) = crate::common::create_test_db().await;
+    let (hub_b_db, _hub_b_guard) = self::common::create_test_db().await;
     let (chat_tx_b, _) = broadcast::channel(256);
     let (voice_event_tx_b, _) = broadcast::channel(16);
     let hub_b_state = Arc::new(AppState {

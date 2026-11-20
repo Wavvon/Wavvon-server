@@ -13,14 +13,13 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Boot a real TCP listener on a random port -- a real socket is needed
 /// because `tokio_tungstenite` speaks actual TCP, unlike `wavvon_test_server`.
 /// Mirrors `hub_updated_broadcast_flow.rs`'s `start_hub`.
 async fn start_hub() -> (String, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "dm-live-membership-test".to_string(),

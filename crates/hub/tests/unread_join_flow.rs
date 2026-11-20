@@ -4,8 +4,7 @@ use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_hub::routes::invite_models::InviteResponse;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Feature 2: Unread counts

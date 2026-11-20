@@ -7,8 +7,7 @@ use base64::Engine;
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// The jti every token here carries; `farm_hub` records it as live, which is
 /// what the hub would otherwise learn from the farm's revoke-check.

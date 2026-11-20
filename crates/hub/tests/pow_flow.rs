@@ -3,8 +3,7 @@ use wavvon_hub::auth::models::ChallengeResponse;
 use wavvon_identity::{compute_security_level, Identity};
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn do_auth_with_pow(
     server: &TestServer,

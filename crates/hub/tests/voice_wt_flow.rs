@@ -16,8 +16,7 @@ use wavvon_identity::Identity;
 use wtransport::tls::Sha256Digest;
 use wtransport::{ClientConfig, Connection, Endpoint};
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Test harness — real TCP listener (main WS) + a real WT endpoint bound to
@@ -25,7 +24,7 @@ mod common;
 // ---------------------------------------------------------------------------
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     // Reserve an ephemeral UDP port up front: `AppState.voice_udp_port` is a
     // plain field (not behind a lock) baked into the `voice_joined` URL

@@ -3,8 +3,7 @@ use wavvon_hub::routes::chat_models::{ChannelResponse, MessageResponse};
 use wavvon_hub::routes::me::MeResponse;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn create_and_list_channels() {

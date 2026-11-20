@@ -13,8 +13,7 @@
 ///   7. Mock agent reads the `spawn_hub` command and replies `hub_spawned`.
 ///   8. Hub row in DB has `server_id` set (proves delegation, not local spawn).
 ///   9. TOTP setup → confirm → admin re-auth requires TOTP code.
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::Duration;

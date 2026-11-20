@@ -1,8 +1,7 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // Alliance member discovery (alliance-member-discovery.md). The owning hub
 // answers from its own users table, to an allied peer hub, only for members

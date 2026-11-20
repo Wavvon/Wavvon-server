@@ -3,8 +3,7 @@ use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::routes::me::MeResponse;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn full_auth_flow() {

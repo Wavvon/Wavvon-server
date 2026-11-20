@@ -5,8 +5,7 @@
 //! window, and — the property the whole design rests on — that a slug is an
 //! alias and the pubkey keeps working regardless.
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

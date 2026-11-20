@@ -38,7 +38,7 @@ If a test can skip itself (missing `pg_dump`, no built binary), it must print
 worse than no test.
 
 `PoolTimedOut` is `max_connections` exhaustion under parallelism, not a real
-failure — re-run the single binary or use `-- --test-threads=4`.
+failure — re-run the failing module (`-E 'test(/^voice_rtc_flow::/)'`) or lower `--test-threads`.
 
 ## Verification before declaring done
 

@@ -7,8 +7,7 @@
 /// - PATCH /farm/hubs/:hub_id/suspend (admin-only)
 /// - DELETE /farm/hubs/:hub_id (admin or owner)
 /// - GET /farm/info includes hosted_hubs count
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

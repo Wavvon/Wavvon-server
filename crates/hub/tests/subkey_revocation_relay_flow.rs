@@ -15,8 +15,7 @@ use wavvon_hub::state::AppState;
 use wavvon_hub::subkey_revocation_worker;
 use wavvon_identity::{DeviceSubkey, Identity, RevocationEntry};
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Helpers

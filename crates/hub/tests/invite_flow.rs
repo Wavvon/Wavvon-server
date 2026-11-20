@@ -6,8 +6,7 @@ use wavvon_hub::routes::role_models::RoleResponse;
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[allow(dead_code)]
 async fn authenticate_with_invite(

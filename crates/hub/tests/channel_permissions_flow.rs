@@ -4,8 +4,7 @@ use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_hub::routes::role_models::RoleResponse;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn create_channel(
     server: &wavvon_test_server::TestServer,
