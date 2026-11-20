@@ -1,5 +1,4 @@
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use sqlx::PgPool;
 use wavvon_hub::retention_worker::prune_personal_axis;

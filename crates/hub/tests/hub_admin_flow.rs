@@ -7,11 +7,10 @@ use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn setup(startup_name: &str) -> common::TestHarness {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: startup_name.to_string(),

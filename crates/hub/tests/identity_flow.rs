@@ -3,8 +3,7 @@ use wavvon_identity::{
     DeviceSubkey, HomeHubList, Identity, RevocationEntry, SignedPrefsBlob, SubkeyCert,
 };
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 fn signed_designation(
     master: &wavvon_identity::MasterIdentity,

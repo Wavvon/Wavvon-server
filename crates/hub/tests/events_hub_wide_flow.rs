@@ -3,8 +3,7 @@
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn create_channel(server: &common::TestHarness, token: &str) -> String {
     let resp = server

@@ -2,8 +2,7 @@ use axum::http::StatusCode;
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// A channel ban means the channel grants that member nothing. It used to
 /// gate only sending and typing, so the history stayed readable and the

@@ -1,7 +1,6 @@
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn preview_requires_auth() {

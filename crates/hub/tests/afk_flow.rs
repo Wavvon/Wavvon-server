@@ -9,8 +9,7 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Harness — mirrors voice_move_flow.rs so real WS upgrades work over a real
@@ -18,7 +17,7 @@ mod common;
 // ---------------------------------------------------------------------------
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "afk-test".to_string(),

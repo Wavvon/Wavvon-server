@@ -3,8 +3,7 @@ use wavvon_hub::auth::models::ChallengeResponse;
 use wavvon_identity::{compute_security_level, Identity};
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Runs the full challenge/verify handshake for `identity` with no PoW proof
 /// (security_level defaults to 0) and returns the raw `/auth/verify` JSON

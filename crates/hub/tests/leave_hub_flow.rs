@@ -4,8 +4,7 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn join(server: &common::TestHarness, who: &Identity) -> String {
     common::authenticate(server, who).await

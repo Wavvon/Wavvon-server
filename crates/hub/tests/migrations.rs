@@ -1,7 +1,6 @@
 use wavvon_hub::db;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn migrations_idempotent_on_fresh_db() {

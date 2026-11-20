@@ -22,8 +22,7 @@
 //! which turns the skip into a failure, because a test that skips itself is a
 //! test that can stop running without anyone noticing.
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

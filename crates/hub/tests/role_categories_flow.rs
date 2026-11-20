@@ -2,8 +2,7 @@ use serde_json::json;
 use wavvon_hub::routes::role_models::{RoleCategoryResponse, RoleResponse};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn category_crud_happy_path_and_ordering() {

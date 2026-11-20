@@ -4,8 +4,7 @@ use wavvon_identity::Identity;
 /// (events.md §6).
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn create_channel(
     server: &TestServer,

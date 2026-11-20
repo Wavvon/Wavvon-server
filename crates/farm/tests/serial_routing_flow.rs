@@ -5,8 +5,7 @@
 //! server on its own random port) so that both the buffered HTTP proxy path
 //! and the WebSocket-upgrade socket bridge can be exercised end-to-end over
 //! real TCP sockets — the same style as `e2e_server_agent.rs`.
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -12,11 +12,10 @@ use wavvon_hub::web_client::WebClientConfig;
 use wavvon_test_server::TestServer;
 
 /// Build a test server with an optional WebClientConfig.
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn setup_with_web_client(cfg: Option<Arc<WebClientConfig>>) -> common::TestHarness {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(common::base_state(db));
 

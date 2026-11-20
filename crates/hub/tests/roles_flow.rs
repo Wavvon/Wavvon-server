@@ -3,8 +3,7 @@ use wavvon_hub::routes::me::MeResponse;
 use wavvon_hub::routes::role_models::RoleResponse;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn first_user_gets_owner_and_everyone() {

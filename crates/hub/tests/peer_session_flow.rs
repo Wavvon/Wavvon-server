@@ -1,8 +1,7 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // A peer hub authenticates with `is_hub: true`, and any key may say so. Its
 // session is not a membership: it must reach the alliance surface it is

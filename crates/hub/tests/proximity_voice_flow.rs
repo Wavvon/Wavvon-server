@@ -15,15 +15,14 @@ use wavvon_hub::server;
 use wavvon_hub::state::{AppState, AttenuationConfig, VoiceZone};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Harness — mirrors voice_relay_flow.rs so WS upgrades work.
 // ---------------------------------------------------------------------------
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "proximity-voice-test".to_string(),

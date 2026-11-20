@@ -2,8 +2,7 @@ use axum::http::StatusCode;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 const STRICT: &str = "default-src 'none'; sandbox";
 

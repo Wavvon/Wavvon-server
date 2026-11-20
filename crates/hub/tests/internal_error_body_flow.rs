@@ -4,8 +4,7 @@ use wavvon_hub::server;
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // A failed query used to answer with the database's own error text. The body
 // now carries only the request id, and the id matches the response header.

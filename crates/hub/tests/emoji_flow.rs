@@ -2,8 +2,7 @@ use axum::http::StatusCode;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde_json::json;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\nbody";
 

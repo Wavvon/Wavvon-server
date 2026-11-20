@@ -10,8 +10,7 @@ use tokio::sync::mpsc;
 use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 struct Browser {
     secret: p256::SecretKey,

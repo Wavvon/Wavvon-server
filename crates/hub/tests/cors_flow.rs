@@ -3,11 +3,10 @@ use std::sync::Arc;
 use wavvon_hub::server::create_router_with_cors;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn setup_with_cors(cors_origins: &str) -> common::TestHarness {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(common::base_state(db));
 

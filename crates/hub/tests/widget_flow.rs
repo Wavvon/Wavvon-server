@@ -5,8 +5,7 @@
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn widget_is_off_by_default_and_never_shows_the_hidden_or_a_key() {

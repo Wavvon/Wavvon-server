@@ -17,8 +17,7 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Build a test server with LAN-mode `AppState` fields set directly (no real
 /// bind/mDNS involved — this is exercising the `/info` surface only).

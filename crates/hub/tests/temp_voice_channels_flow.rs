@@ -13,8 +13,7 @@ use wavvon_hub::state::AppState;
 use wavvon_hub::temp_channel_worker;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Test harness — real TCP listener so WS upgrades work (mirrors
@@ -22,7 +21,7 @@ mod common;
 // ---------------------------------------------------------------------------
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "temp-voice-test".to_string(),
@@ -550,7 +549,7 @@ async fn channels_updated_broadcast_on_spawn_and_gc() {
 /// `temp_channel_worker::tick` directly, without booting a full hub + TCP
 /// listener.
 async fn db_only_state() -> (Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
     let state = Arc::new(AppState {
         hub_name: "temp-voice-db-test".to_string(),
         ..common::base_state(db)

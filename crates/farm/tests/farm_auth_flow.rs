@@ -2,8 +2,7 @@
 ///
 /// Each test spins up an isolated PostgreSQL database and hits the API through
 /// wavvon-test-server's TestServer — no network, fast and hermetic.
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 

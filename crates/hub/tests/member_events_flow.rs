@@ -7,8 +7,7 @@ use tokio_tungstenite::tungstenite::Message as TsMessage;
 use wavvon_hub::server;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn subscribed_app(server: &common::TestHarness, events: &[&str]) -> String {
     sqlx::query(

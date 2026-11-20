@@ -3,8 +3,7 @@ use wavvon_hub::routes::post_models::{PostDetail, PostSearchHit, PostSummary};
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Create a forum channel and return its id.
 async fn create_forum_channel(server: &TestServer, token: &str) -> String {

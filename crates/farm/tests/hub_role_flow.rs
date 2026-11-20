@@ -15,8 +15,7 @@ use wavvon_farm::db::provision::{
     database_name, provision_hub, provision_hub_role, role_name, with_credentials, Isolation,
 };
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Drop the databases and roles a test provisioned directly.
 ///

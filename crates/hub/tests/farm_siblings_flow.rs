@@ -12,8 +12,7 @@
 
 use wavvon_hub::farm_siblings::{reconcile, Sibling};
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 fn sibling(pk: &str) -> Sibling {
     Sibling {

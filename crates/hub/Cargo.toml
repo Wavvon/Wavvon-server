@@ -2,6 +2,7 @@
 name = "wavvon-hub"
 version = "0.9.0"
 edition = "2021"
+autotests = false
 
 [[bin]]
 name = "wavvon-hub"
@@ -84,3 +85,7 @@ tokio = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+
+[[test]]
+name = "hub"
+path = "tests/main.rs"

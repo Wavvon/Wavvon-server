@@ -20,11 +20,10 @@ use wavvon_identity::Identity;
 // Test harness — real TCP listener so WS upgrades work.
 // ---------------------------------------------------------------------------
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "voice-relay-test".to_string(),

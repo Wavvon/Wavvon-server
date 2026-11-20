@@ -9,8 +9,7 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Registers `n` members and returns their pubkeys. Display names are
 /// zero-padded so the roster's `(display_name, public_key)` ordering is

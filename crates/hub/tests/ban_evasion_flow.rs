@@ -12,8 +12,7 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = common::create_test_db().await;
