@@ -660,7 +660,8 @@ async fn a_running_hub_accepts_only_an_answer_bound_to_itself() {
         ..common::base_state(db)
     });
     let hub_key = state.hub_identity.public_key_hex();
-    let server = axum_test::TestServer::new(wavvon_hub::server::create_router(state.clone()));
+    let server =
+        wavvon_test_server::TestServer::new(wavvon_hub::server::create_router(state.clone()));
     let other_hub = Identity::generate().public_key_hex();
 
     for (answer, ok) in [

@@ -343,7 +343,7 @@ member?" goes through one resolver.
 
 ## Tests
 
-Integration tests in `crates/hub/tests/*_flow.rs` use `axum_test::TestServer`
+Integration tests in `crates/hub/tests/*_flow.rs` use `wavvon_test_server::TestServer` (crates/test-server, in-process)
 against a **fresh, isolated PostgreSQL database per test**
 (`common::create_test_db()` creates it via `PgPoolOptions` and runs the real
 migrations). Set `TEST_DATABASE_URL` if your server isn't

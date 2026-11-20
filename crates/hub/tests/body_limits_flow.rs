@@ -8,13 +8,13 @@
 mod common;
 
 use axum::http::StatusCode;
-use axum_test::multipart::{MultipartForm, Part};
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
+use wavvon_test_server::multipart::{MultipartForm, Part};
 
 const MB: usize = 1024 * 1024;
 
-async fn channel(server: &axum_test::TestServer, token: &str) -> String {
+async fn channel(server: &wavvon_test_server::TestServer, token: &str) -> String {
     let resp = server
         .post("/channels")
         .authorization_bearer(token)

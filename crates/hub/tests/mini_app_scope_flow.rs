@@ -23,7 +23,7 @@ mod common;
 
 /// Boot a real TCP listener on a random port and return the base URL.
 /// Mirrors `ws_read_gating_flow.rs`'s `start_hub` — a real socket is needed
-/// because `tokio_tungstenite` speaks actual TCP, unlike `axum_test`.
+/// because `tokio_tungstenite` speaks actual TCP, unlike `wavvon_test_server`.
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
     let (db, guard) = crate::common::create_test_db().await;
 

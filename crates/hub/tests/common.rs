@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -14,6 +13,7 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 use webauthn_rs::WebauthnBuilder;
 
 /// Base PostgreSQL URL for the test database server.
@@ -249,7 +249,7 @@ pub async fn sweep_stale_test_databases() -> usize {
     dropped
 }
 
-/// Wraps `axum_test::TestServer` together with the `TestDbGuard` for the
+/// Wraps `wavvon_test_server::TestServer` together with the `TestDbGuard` for the
 /// database backing it, so the database is torn down exactly when the
 /// server (and everything derived from it) goes out of scope — including
 /// on test panic. `Deref`s to `TestServer` so existing call sites that use

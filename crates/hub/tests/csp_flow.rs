@@ -7,7 +7,7 @@ mod common;
 
 const STRICT: &str = "default-src 'none'; sandbox";
 
-fn csp(resp: &axum_test::TestResponse) -> String {
+fn csp(resp: &wavvon_test_server::TestResponse) -> String {
     resp.headers()["content-security-policy"]
         .to_str()
         .unwrap()

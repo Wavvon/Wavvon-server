@@ -298,7 +298,10 @@ async fn update_role_rejects_an_unknown_permission_before_applying_anything() {
 /// gives it to a second identity. That identity is the delegate every test
 /// below escalates from: it can manage roles, and it holds nothing else
 /// beyond what `everyone` carries (send/read messages, posts, games, events).
-async fn manager_delegate(server: &axum_test::TestServer, owner_token: &str) -> (Identity, String) {
+async fn manager_delegate(
+    server: &wavvon_test_server::TestServer,
+    owner_token: &str,
+) -> (Identity, String) {
     let resp = server
         .post("/roles")
         .authorization_bearer(owner_token)

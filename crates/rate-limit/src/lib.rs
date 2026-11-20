@@ -310,7 +310,7 @@ pub async fn tag_client_ip(
 // ── Middleware ────────────────────────────────────────────────────────────────
 
 /// Middleware that enforces the given limiter.  If the request has no
-/// `ConnectInfo` extension (e.g., under `axum_test::TestServer`, or behind a
+/// `ConnectInfo` extension (e.g., under `wavvon_test_server::TestServer`, or behind a
 /// transport that didn't add one), the request is passed through — the
 /// operator is expected to rate-limit at the edge proxy in that case.
 pub async fn enforce(

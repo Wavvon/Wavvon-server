@@ -13,13 +13,13 @@ mod common;
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
 use wavvon_farm::state::FarmState;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
 // ---------------------------------------------------------------------------
 // Setup helpers

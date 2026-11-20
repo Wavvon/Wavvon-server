@@ -8,7 +8,7 @@ use wavvon_identity::Identity;
 mod common;
 
 async fn create_channel(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
     token: &str,
     name: &str,
     parent_id: Option<&str>,
@@ -28,7 +28,7 @@ async fn create_channel(
 }
 
 async fn create_role(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
     token: &str,
     name: &str,
     permissions: &[&str],
@@ -43,7 +43,12 @@ async fn create_role(
     resp.json::<RoleResponse>()
 }
 
-async fn assign_role(server: &axum_test::TestServer, token: &str, pubkey: &str, role_id: &str) {
+async fn assign_role(
+    server: &wavvon_test_server::TestServer,
+    token: &str,
+    pubkey: &str,
+    role_id: &str,
+) {
     server
         .put(&format!("/users/{pubkey}/roles/{role_id}"))
         .authorization_bearer(token)
@@ -52,7 +57,7 @@ async fn assign_role(server: &axum_test::TestServer, token: &str, pubkey: &str, 
 }
 
 async fn set_overwrite(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
     token: &str,
     channel_id: &str,
     role_id: &str,
@@ -362,7 +367,7 @@ async fn admin_routes_reject_non_admin() {
 /// assigned to `user2`. This mirrors the delegated subtree-manager the
 /// channel-permission-overwrites feature exists to enable.
 async fn setup_manager(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
 ) -> (String, String, String, RoleResponse, String) {
     let owner = Identity::generate();
     let owner_token = common::authenticate(server, &owner).await;

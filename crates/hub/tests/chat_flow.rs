@@ -504,7 +504,7 @@ async fn an_ephemeral_reply_is_listed_only_for_its_recipient() {
     let (db, guard) = common::create_test_db().await;
     let app =
         wavvon_hub::server::create_router(std::sync::Arc::new(common::base_state(db.clone())));
-    let server = common::TestHarness::new(axum_test::TestServer::new(app), guard);
+    let server = common::TestHarness::new(wavvon_test_server::TestServer::new(app), guard);
 
     let alice = Identity::generate();
     let alice_token = common::authenticate(&server, &alice).await;

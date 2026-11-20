@@ -61,7 +61,7 @@ async fn push_service(
     (url, rx)
 }
 
-async fn channel(server: &axum_test::TestServer, token: &str) -> ChannelResponse {
+async fn channel(server: &wavvon_test_server::TestServer, token: &str) -> ChannelResponse {
     server
         .post("/channels")
         .authorization_bearer(token)
@@ -160,7 +160,7 @@ async fn a_mention_pushes_hub_channel_and_kind_only() {
 #[tokio::test]
 async fn a_silent_channel_is_not_pushed_and_a_gone_endpoint_is_dropped() {
     let harness = common::setup_allowing_private_webhooks().await;
-    let server: &axum_test::TestServer = &harness;
+    let server: &wavvon_test_server::TestServer = &harness;
     let alice = Identity::generate();
     let alice_token = common::authenticate(server, &alice).await;
     let bob_token = common::authenticate(server, &Identity::generate()).await;

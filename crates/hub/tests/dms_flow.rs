@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::broadcast;
@@ -10,6 +9,7 @@ use wavvon_hub::routes::dm_models::ConversationResponse;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
 #[path = "common.rs"]
 mod common;

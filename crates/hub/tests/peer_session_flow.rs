@@ -8,7 +8,7 @@ mod common;
 // session is not a membership: it must reach the alliance surface it is
 // entitled to and nothing else, whatever the hub's admission settings.
 
-async fn authenticate_as_hub(server: &axum_test::TestServer, hub: &Identity) -> String {
+async fn authenticate_as_hub(server: &wavvon_test_server::TestServer, hub: &Identity) -> String {
     let pub_key = hub.public_key_hex();
     let challenge: serde_json::Value = server
         .post("/auth/challenge")
@@ -32,7 +32,7 @@ async fn authenticate_as_hub(server: &axum_test::TestServer, hub: &Identity) -> 
         .to_string()
 }
 
-async fn make_channel(server: &axum_test::TestServer, owner: &str, name: &str) -> String {
+async fn make_channel(server: &wavvon_test_server::TestServer, owner: &str, name: &str) -> String {
     let ch: serde_json::Value = server
         .post("/channels")
         .authorization_bearer(owner)

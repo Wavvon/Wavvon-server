@@ -73,7 +73,7 @@ wtransport = "0.7.1" # Voice transport v2 (voice-transport-v2.md): single WebTra
 postgresql_embedded = { version = "0.22", default-features = false, features = ["bundled", "theseus", "tls-rustls-ring", "tokio"] }
 
 [dev-dependencies]
-axum-test = "19"
+wavvon-test-server = { path = "../test-server" }
 hkdf = "0.12"
 # Software authenticator for the passkey ceremony test. Upstream's own test
 # suite uses it, and it is what makes attestation + signature verification

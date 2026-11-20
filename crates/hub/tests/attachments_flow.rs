@@ -8,10 +8,10 @@
 use std::io::Cursor;
 
 use axum::http::StatusCode;
-use axum_test::multipart::{MultipartForm, Part};
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
+use wavvon_test_server::multipart::{MultipartForm, Part};
 
 #[path = "common.rs"]
 mod common;
@@ -59,7 +59,7 @@ async fn upload_raw(
     name: &str,
     bytes: Vec<u8>,
     as_file: bool,
-) -> axum_test::TestResponse {
+) -> wavvon_test_server::TestResponse {
     let mut form = MultipartForm::new().add_part("file", Part::bytes(bytes).file_name(name));
     if as_file {
         form = form.add_text("as_file", "true");
@@ -83,7 +83,7 @@ async fn upload(
     resp.json()
 }
 
-fn header(resp: &axum_test::TestResponse, name: &str) -> String {
+fn header(resp: &wavvon_test_server::TestResponse, name: &str) -> String {
     resp.header(name).to_str().unwrap_or_default().to_string()
 }
 
@@ -92,7 +92,7 @@ async fn send(
     token: &str,
     channel_id: &str,
     ids: &[&str],
-) -> axum_test::TestResponse {
+) -> wavvon_test_server::TestResponse {
     server
         .post(&format!("/channels/{channel_id}/messages"))
         .authorization_bearer(token)
