@@ -1488,3 +1488,51 @@ pub(in crate::routes::ws) async fn handle_voice_key_offer(
     }
     DispatchResult::Continue
 }
+
+/// `voice_rtc_offer`: binds the WebRTC transport for the session minted by
+/// `voice_join` (voice-transport-v3.md). The token is single-use and must
+/// belong to this connection's identity; the answer goes back on this socket.
+pub(in crate::routes::ws) async fn handle_voice_rtc_offer(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    ws_tx: &mut WsTx,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let WsClientMessage::VoiceRtcOffer { token, sdp } = msg else {
+        return DispatchResult::Continue;
+    };
+    let Some(rtc) = state.voice_rtc.get() else {
+        return send_error(
+            ws_tx,
+            "voice_rtc_offer",
+            "Voice over WebRTC is not available on this hub.",
+        )
+        .await;
+    };
+    let Some(bind) = crate::voice_relay::take_bind(state, &token).await else {
+        return send_error(
+            ws_tx,
+            "voice_rtc_offer",
+            "Unknown, used or expired voice token.",
+        )
+        .await;
+    };
+    if bind.pubkey != cs.public_key {
+        return send_error(
+            ws_tx,
+            "voice_rtc_offer",
+            "This voice token belongs to another member.",
+        )
+        .await;
+    }
+    match rtc.answer(bind, sdp).await {
+        Ok(sdp) => {
+            let reply = WsServerMessage::VoiceRtcAnswer { sdp };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&reply).unwrap().into()))
+                .await;
+            DispatchResult::Continue
+        }
+        Err(e) => send_error(ws_tx, "voice_rtc_offer", e).await,
+    }
+}

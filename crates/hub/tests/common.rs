@@ -376,6 +376,7 @@ pub fn base_state(db: PgPool) -> AppState {
         voice_wt_url: None,
         canonical_url: Arc::new(RwLock::new(None)),
         voice_cert_hash: RwLock::new(None),
+        voice_rtc: std::sync::OnceLock::new(),
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),

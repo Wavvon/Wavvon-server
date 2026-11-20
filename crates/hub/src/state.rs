@@ -333,6 +333,8 @@ pub struct AppState {
     /// (see `voice_wt::spawn_cert_rotation`) — always read fresh, never cached
     /// by callers.
     pub voice_cert_hash: RwLock<Option<String>>,
+    /// The WebRTC voice relay (voice-transport-v3.md), once started.
+    pub voice_rtc: std::sync::OnceLock<crate::voice_rtc::RtcHandle>,
     pub voice_event_tx: broadcast::Sender<(String, WsServerMessage)>,
     // DM relay: broadcast DMs to all WS clients (they filter by conversation membership)
     pub dm_tx: broadcast::Sender<DmEvent>,
