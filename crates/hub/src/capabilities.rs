@@ -227,6 +227,10 @@ pub const CAPABILITIES: &[&str] = &[
     // this — and offer the grant route, which an older hub answers 404. On an
     // older hub a raised hand is still how the threshold is cleared.
     "voice.talk",
+    // Voice over WebRTC data channels (voice-transport-v3.md): after
+    // `voice_joined`, `voice_rtc_offer` with the token is answered by
+    // `voice_rtc_answer`. A client picks this transport only here.
+    "voice.webrtc",
     // Webhook deliveries (app dispatch, outgoing webhooks) carry
     // `X-Wavvon-Signature-V1` over the timestamp and the body. Advertised so a
     // program can tell a hub that never sends it from a replayed request

@@ -816,6 +816,7 @@ fn visitor_may_send(msg: &WsClientMessage) -> bool {
             | WsClientMessage::VoiceLeave { .. }
             | WsClientMessage::VoiceSpeaking { .. }
             | WsClientMessage::VoiceKeyOffer { .. }
+            | WsClientMessage::VoiceRtcOffer { .. }
             | WsClientMessage::Ping { .. }
     )
 }
@@ -973,6 +974,9 @@ async fn dispatch_client_msg(
         // ── V4 voice encryption ────────────────────────────────────────────
         WsClientMessage::VoiceKeyOffer { .. } => {
             voice::handle_voice_key_offer(cs, state, msg).await
+        }
+        WsClientMessage::VoiceRtcOffer { .. } => {
+            voice::handle_voice_rtc_offer(cs, state, ws_tx, msg).await
         }
 
         // ── Bots ───────────────────────────────────────────────────────────

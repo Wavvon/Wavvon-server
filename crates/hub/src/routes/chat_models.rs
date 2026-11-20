@@ -518,6 +518,11 @@ pub enum WsClientMessage {
     Ping { nonce: i64 },
     #[serde(rename = "voice_leave")]
     VoiceLeave { channel_id: String },
+    /// The WebRTC transport for a voice session (voice-transport-v3.md):
+    /// the client's SDP offer, bound by the single-use `voice_token` from
+    /// `voice_joined`. Answered with `voice_rtc_answer`.
+    #[serde(rename = "voice_rtc_offer")]
+    VoiceRtcOffer { token: String, sdp: String },
     #[serde(rename = "voice_speaking")]
     VoiceSpeaking { channel_id: String, speaking: bool },
     #[serde(rename = "typing")]
@@ -838,6 +843,10 @@ pub enum WsServerMessage {
         channel_id: String,
         public_key: String,
     },
+    /// The hub's SDP answer to `voice_rtc_offer`, carrying its ICE-lite
+    /// candidates. The voice data channel is negotiated out of band (stream 0).
+    #[serde(rename = "voice_rtc_answer")]
+    VoiceRtcAnswer { sdp: String },
     #[serde(rename = "voice_roster_update")]
     VoiceRosterUpdate {
         channel_id: String,

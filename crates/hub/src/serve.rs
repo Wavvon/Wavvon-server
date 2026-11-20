@@ -440,8 +440,9 @@ pub async fn run(
                 .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
         })
         .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
-    let voice_wt_url: Option<String> =
-        voice_udp_host.map(|host| format!("https://{host}:{voice_udp_port}/voice"));
+    let voice_wt_url: Option<String> = voice_udp_host
+        .as_ref()
+        .map(|host| format!("https://{host}:{voice_udp_port}/voice"));
 
     // ---- WebAuthn / passkey setup ----
     let rp_id: String = settings
@@ -526,6 +527,7 @@ pub async fn run(
         // also how a later rename reaches it.
         canonical_url: Arc::new(RwLock::new(public_url.clone())),
         voice_cert_hash: RwLock::new(None),
+        voice_rtc: std::sync::OnceLock::new(),
         voice_event_tx,
         dm_tx,
         online_users: RwLock::new(HashMap::new()),
@@ -624,6 +626,26 @@ pub async fn run(
     .await
     .context("Failed to start voice WebTransport relay")?;
     tracing::info!("Voice WebTransport listening on port {bound_voice_port}");
+
+    // Voice over WebRTC (voice-transport-v3.md) runs beside WebTransport until
+    // the clients have moved, so it needs a port of its own meanwhile: the
+    // voice port plus one. It takes over the voice port when WebTransport goes.
+    let rtc_port = if voice_udp_port == 0 {
+        0
+    } else {
+        voice_udp_port + 1
+    };
+    let rtc_ips: Vec<std::net::IpAddr> = match voice_udp_host.as_deref() {
+        Some(host) => tokio::net::lookup_host((host, rtc_port))
+            .await
+            .map(|addrs| addrs.map(|a| a.ip()).collect())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let bound_rtc_port = wavvon_hub::voice_rtc::start(state.clone(), rtc_port, rtc_ips)
+        .await
+        .context("Failed to start voice WebRTC relay")?;
+    tracing::info!("Voice WebRTC listening on port {bound_rtc_port}");
 
     // Retry undelivered federated DMs in the background.
     dm_worker::spawn(state.clone());
