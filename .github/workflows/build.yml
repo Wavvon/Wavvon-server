@@ -15,7 +15,7 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           command: check advisories
-      - uses: bnjbvr/cargo-machete@ac30a525c0a8d163a92d727b3ff079ee3f6ecb08
+      - uses: bnjbvr/cargo-machete@431e75731b681a69a4cfdeb1315b505778bb5c70
 
   check:
     name: cargo check + test
