@@ -135,6 +135,8 @@ jobs:
     environment: release
     permissions:
       contents: write
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
 
     steps:
       - name: Checkout
