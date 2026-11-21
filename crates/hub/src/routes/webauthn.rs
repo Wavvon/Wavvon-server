@@ -28,7 +28,9 @@ fn pubkey_to_uuid(pubkey: &str) -> Uuid {
 
 #[derive(Deserialize)]
 pub struct RegBeginRequest {
-    pub user_pubkey: String,
+    /// Optional, and only ever checked against the session: the passkey is
+    /// always bound to the identity that is signed in.
+    pub user_pubkey: Option<String>,
     pub display_name: Option<String>,
 }
 
@@ -38,20 +40,38 @@ pub struct RegBeginResponse {
     pub options: serde_json::Value,
 }
 
-/// POST /auth/webauthn/begin — start passkey registration.
+/// POST /auth/webauthn/begin — start passkey registration for the signed-in
+/// identity.
+///
+/// A passkey is a login: `register_finish` and `assert_finish` both issue a
+/// session for the identity it is bound to. So it is bound to the caller's own
+/// session, never to a key named in the body — otherwise anyone could register
+/// an authenticator of theirs under somebody else's identity and sign in as it.
 pub async fn register_begin(
     State(state): State<Arc<AppState>>,
+    user: AuthUser,
     Json(body): Json<RegBeginRequest>,
 ) -> Result<Json<RegBeginResponse>, (StatusCode, String)> {
+    if body
+        .user_pubkey
+        .as_deref()
+        .is_some_and(|k| k != user.public_key)
+    {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "A passkey can only be registered for the signed-in identity".to_string(),
+        ));
+    }
+    let user_pubkey = user.public_key;
     let display = body
         .display_name
-        .unwrap_or_else(|| body.user_pubkey[..8.min(body.user_pubkey.len())].to_string());
+        .unwrap_or_else(|| user_pubkey[..8.min(user_pubkey.len())].to_string());
 
     // Exclude credentials the user already has so re-registration on the same
     // authenticator is blocked (prevents duplicate rows).
     let existing: Vec<String> =
         sqlx::query_scalar("SELECT credential_id FROM webauthn_credentials WHERE user_pubkey = $1")
-            .bind(&body.user_pubkey)
+            .bind(&user_pubkey)
             .fetch_all(&state.db)
             .await
             .unwrap_or_default();
@@ -76,8 +96,8 @@ pub async fn register_begin(
     let (ccr, reg_state) = state
         .webauthn
         .start_passkey_registration(
-            pubkey_to_uuid(&body.user_pubkey),
-            &body.user_pubkey,
+            pubkey_to_uuid(&user_pubkey),
+            &user_pubkey,
             &display,
             exclude,
         )
@@ -92,7 +112,7 @@ pub async fn register_begin(
     state.webauthn_reg_challenges.write().await.insert(
         session_id.clone(),
         RegChallenge {
-            user_pubkey: body.user_pubkey,
+            user_pubkey,
             state: reg_state,
         },
     );

@@ -82,8 +82,10 @@ async fn passkey_register_then_authenticate() {
     let mut authenticator = SoftPasskey::new(true);
 
     // -- registration -------------------------------------------------------
+    let signed_in = common::authenticate(&server, &identity).await;
     let res = server
         .post("/auth/webauthn/begin")
+        .add_header("authorization", format!("Bearer {signed_in}"))
         .json(&json!({ "user_pubkey": pubkey, "display_name": "Ceremony Test" }))
         .await;
     res.assert_status_ok();
@@ -161,6 +163,30 @@ async fn passkey_register_then_authenticate() {
 // ---------------------------------------------------------------------------
 
 /// A user with no passkeys gets an empty array from GET /me/credentials.
+/// A passkey is a login, so registering one must take the identity's own
+/// session. Before this, `begin` took any `user_pubkey` from the body and
+/// `finish` signed the caller in as it.
+#[tokio::test]
+async fn passkey_registration_needs_the_identitys_own_session() {
+    let server = setup_server().await;
+    let victim = Identity::generate().public_key_hex();
+
+    let res = server
+        .post("/auth/webauthn/begin")
+        .json(&json!({ "user_pubkey": victim }))
+        .await;
+    res.assert_status(axum::http::StatusCode::UNAUTHORIZED);
+
+    let attacker = Identity::generate();
+    let token = common::authenticate(&server, &attacker).await;
+    let res = server
+        .post("/auth/webauthn/begin")
+        .add_header("authorization", format!("Bearer {token}"))
+        .json(&json!({ "user_pubkey": victim }))
+        .await;
+    res.assert_status(axum::http::StatusCode::FORBIDDEN);
+}
+
 #[tokio::test]
 async fn list_credentials_empty() {
     let server = setup_server().await;
