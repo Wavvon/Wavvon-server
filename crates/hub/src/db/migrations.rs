@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -411,6 +411,14 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             .execute(&mut *conn)
             .await?;
         }
+        // Passkeys removed (decisions.md, "Passkeys removed"): what was left
+        // after the PRF identity path went was a per-hub sign-in from the
+        // hub's own page, which is not what they were for.
+        17 => {
+            sqlx::query("DROP TABLE IF EXISTS webauthn_credentials")
+                .execute(conn)
+                .await?;
+        }
         _ => unreachable!("no schema step {version}"),
     }
     Ok(())
@@ -572,21 +580,6 @@ async fn baseline(pool: &PgPool) -> Result<()> {
             scope              TEXT NOT NULL DEFAULT 'member', -- 'member' | 'lobby' | 'mini_app'
             mini_app_channel_id TEXT, -- set only for scope='mini_app': bound channel + host
             mini_app_host    TEXT
-        )",
-    )
-    .execute(pool)
-    .await?;
-
-    // WebAuthn passkey credentials.
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS webauthn_credentials (
-            credential_id  TEXT PRIMARY KEY,
-            user_pubkey    TEXT NOT NULL,
-            passkey_json   TEXT NOT NULL,
-            friendly_name  TEXT,
-            aaguid         TEXT,
-            created_at     BIGINT NOT NULL,
-            last_used_at   BIGINT
         )",
     )
     .execute(pool)

@@ -59,9 +59,9 @@ RUN mkdir -p /web-client && \
 # will not start on an older runtime base (bit us on v0.2.1: GLIBC_2.38).
 FROM rust:1-slim-trixie AS builder
 
-# perl + make: webauthn-rs links OpenSSL, which we build vendored
-# (openssl-src runs OpenSSL's perl Configure). Client-facing TLS is
-# still rustls.
+# perl + make came in for a vendored OpenSSL, which left with webauthn-rs.
+# Kept until an image build without them confirms the remaining native
+# build scripts (aws-lc-sys, ring) do not need them.
 RUN apt-get update && apt-get install -y \
     perl \
     make \

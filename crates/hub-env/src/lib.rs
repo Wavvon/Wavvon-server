@@ -40,8 +40,8 @@ pub const OWNER_PUBKEY: &str = "WAVVON_OWNER_PUBKEY";
 /// `FARM_URL` plus its pubkey (see `wavvon_hub::settings::effective_public_url`),
 /// because the farm cannot know the URL at spawn time — the pubkey in it does
 /// not exist until the hub's first boot. It is here so a launcher *can*
-/// override, and because a hub that has no public URL silently loses voice,
-/// invite links and passkeys.
+/// override, and because a hub that has no public URL silently loses voice
+/// and invite links.
 pub const PUBLIC_URL: &str = "WAVVON_PUBLIC_URL";
 
 /// Host the voice relay advertises (WebRTC over UDP), when it is not the

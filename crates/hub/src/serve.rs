@@ -13,7 +13,6 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
-use webauthn_rs::WebauthnBuilder;
 
 /// Start the hub server and run until it fails or a stop signal arrives.
 pub async fn run(
@@ -38,7 +37,7 @@ pub async fn run(
     if public_url.is_none() {
         tracing::warn!(
             "No public URL: {} is unset and this hub is not farm-managed. Voice, \
-             invite links and passkeys all need one and will be unavailable.",
+             invite links need one and will be unavailable.",
             wavvon_hub_env::PUBLIC_URL,
         );
     }
@@ -440,67 +439,6 @@ pub async fn run(
         })
         .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
 
-    // ---- WebAuthn / passkey setup ----
-    let rp_id: String = settings
-        .webauthn_rp_id
-        .clone()
-        .or_else(|| {
-            public_url.as_deref().and_then(|u| {
-                Url::parse(u)
-                    .ok()
-                    .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
-            })
-        })
-        .unwrap_or_else(|| "localhost".to_string());
-
-    // Origin only — scheme, host and port, never the path. WebAuthn compares
-    // the browser's origin, and a hub behind a farm (or any path-prefixing
-    // proxy) has a public URL with a path on the end; passing that whole URL
-    // would build a relying party nothing ever matches.
-    let rp_origin: Url = public_url
-        .as_deref()
-        .and_then(|u| Url::parse(u).ok())
-        .and_then(|parsed| Url::parse(&parsed.origin().ascii_serialization()).ok())
-        .unwrap_or_else(|| {
-            Url::parse(&format!("http://localhost:{}", settings.http_port)).unwrap()
-        });
-
-    let hub_display_name = "Wavvon Hub";
-
-    // A relying party the browser will refuse must not take the hub down with
-    // it. This used to `.expect()`, and the first farm-hosted hub to boot found
-    // out why that was wrong: a farm reached at an IP derives an rp_id of
-    // `127.0.0.1`, WebAuthn requires an effective *domain*, and the whole
-    // process died at startup. Losing passkeys on a hub that could never have
-    // offered them is the correct outcome; refusing to start is not — and on a
-    // farm it takes out a community per misconfigured address.
-    let webauthn = Arc::new(
-        WebauthnBuilder::new(&rp_id, &rp_origin)
-            .and_then(|b| b.rp_name(hub_display_name).build())
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    rp_id,
-                    rp_origin = %rp_origin,
-                    error = %e,
-                    "WebAuthn is unavailable on this hub: passkey registration and \
-                     sign-in will fail. A relying-party id must be a domain — an IP \
-                     address or a bare host cannot be one. Set WAVVON_WEBAUTHN_RP_ID, \
-                     or reach this hub by hostname."
-                );
-                let fallback = Url::parse("http://localhost").expect("static URL");
-                WebauthnBuilder::new("localhost", &fallback)
-                    .and_then(|b| b.rp_name(hub_display_name).build())
-                    .expect("the localhost relying party is always valid")
-            }),
-    );
-
-    if rp_id != "localhost" && settings.tls_cert.is_none() {
-        tracing::warn!(
-            "WebAuthn requires HTTPS for non-localhost rp_id '{rp_id}'; \
-             passkey registration/assertion will fail on plain HTTP"
-        );
-    }
-
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),
         hub_identity,
@@ -555,9 +493,6 @@ pub async fn run(
         accept_unbound_auth: false,
         metrics_enabled: settings.metrics,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
-        webauthn,
-        webauthn_reg_challenges: RwLock::new(HashMap::new()),
-        webauthn_auth_challenges: RwLock::new(HashMap::new()),
         webhook_circuit: Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),

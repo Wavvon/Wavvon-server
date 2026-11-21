@@ -129,22 +129,6 @@ pub fn create_router_full(
     let auth_routes = Router::new()
         .route("/auth/challenge", post(auth::handlers::challenge))
         .route("/auth/verify", post(auth::handlers::verify))
-        .route(
-            "/auth/webauthn/begin",
-            post(routes::webauthn::register_begin),
-        )
-        .route(
-            "/auth/webauthn/finish",
-            post(routes::webauthn::register_finish),
-        )
-        .route(
-            "/auth/webauthn/assert/begin",
-            post(routes::webauthn::assert_begin),
-        )
-        .route(
-            "/auth/webauthn/assert/finish",
-            post(routes::webauthn::assert_finish),
-        )
         .layer(from_fn(move |req, next| {
             let l = auth_limiter.clone();
             async move { rate_limit::enforce(l, req, next).await }
@@ -325,11 +309,6 @@ pub fn create_router_full(
             get(routes::me::me)
                 .patch(routes::me::update_me)
                 .delete(routes::me::leave_hub),
-        )
-        .route("/me/credentials", get(routes::webauthn::list_credentials))
-        .route(
-            "/me/credentials/{id}",
-            patch(routes::webauthn::rename_credential).delete(routes::webauthn::delete_credential),
         )
         .route("/channels", get(routes::channels::list_channels))
         .route(

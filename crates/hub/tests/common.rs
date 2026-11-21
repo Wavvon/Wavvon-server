@@ -6,7 +6,6 @@ use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::sync::{broadcast, RwLock};
-use url::Url;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
@@ -14,7 +13,6 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 use wavvon_test_server::TestServer;
-use webauthn_rs::WebauthnBuilder;
 
 /// Base PostgreSQL URL for the test database server.
 /// Override with the `TEST_DATABASE_URL` environment variable.
@@ -369,17 +367,6 @@ impl Deref for TestHarness {
     }
 }
 
-fn make_test_webauthn() -> Arc<webauthn_rs::Webauthn> {
-    let origin = Url::parse("http://localhost:3000").unwrap();
-    Arc::new(
-        WebauthnBuilder::new("localhost", &origin)
-            .unwrap()
-            .rp_name("test-hub")
-            .build()
-            .unwrap(),
-    )
-}
-
 /// Builds a `TestHarness` on top of an already-created (and migrated) test
 /// database, without touching any hub_settings. Shared by [`setup`] (which
 /// forces `invite_only` back off — see its doc comment) and [`setup_raw`]
@@ -473,9 +460,6 @@ pub fn base_state(db: PgPool) -> AppState {
         accept_unbound_auth: true,
         metrics_enabled: false,
         http_video_stream_budget: 2,
-        webauthn: make_test_webauthn(),
-        webauthn_reg_challenges: RwLock::new(HashMap::new()),
-        webauthn_auth_challenges: RwLock::new(HashMap::new()),
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
