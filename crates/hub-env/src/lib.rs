@@ -44,7 +44,7 @@ pub const OWNER_PUBKEY: &str = "WAVVON_OWNER_PUBKEY";
 /// invite links and passkeys.
 pub const PUBLIC_URL: &str = "WAVVON_PUBLIC_URL";
 
-/// Host clients dial for voice (WebTransport over UDP), when it is not the
+/// Host the voice relay advertises (WebRTC over UDP), when it is not the
 /// public URL's host: a hub behind an HTTP proxy that drops UDP (Cloudflare's
 /// proxied records) keeps its site proxied and points voice at a DNS-only
 /// name.

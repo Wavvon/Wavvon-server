@@ -62,7 +62,8 @@ there. The failure is easy to misread, because a hub that dies on startup looks
 downstream like a wall of unrelated client timeouts.
 
 **`WAVVON_PUBLIC_URL` is not optional in practice.** Without it
-`/info.voice_wt_url` is null and clients cannot connect voice at all; invite
+the voice relay advertises only loopback plus the machine's own address, so
+clients elsewhere cannot connect voice; invite
 links and passkeys degrade the same way. A farm-spawned hub derives its own and
 doesn't need it set.
 

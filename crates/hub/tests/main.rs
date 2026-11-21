@@ -108,7 +108,6 @@ mod voice_move_flow;
 mod voice_relay_flow;
 mod voice_rtc_flow;
 mod voice_speaking_flow;
-mod voice_wt_flow;
 mod web_client_fetch_flow;
 mod web_client_flow;
 mod webauthn_flow;

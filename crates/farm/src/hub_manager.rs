@@ -37,7 +37,7 @@ pub struct HubManager {
     farm_url: String,
     /// Base port for allocating new hub process HTTP ports.
     base_port: u16,
-    /// Base port for allocating new hub voice (WebTransport/QUIC over UDP) ports.
+    /// Base port for allocating new hub voice (WebRTC over UDP) ports.
     /// Separate range from `base_port` so the two never collide.
     voice_base_port: u16,
     /// The farm's own PostgreSQL URL. Each hub's database is created on this

@@ -13,7 +13,7 @@
 //!   terminates TLS with a real certificate.
 //! - `pin` — the agent advertises the SHA-256 of its self-signed certificate
 //!   and the farm accepts that certificate and no other. The same primitive
-//!   voice already uses (`voice_cert_hash`), rather than a new one.
+//!   WebTransport voice used to pin with, rather than a new one.
 //!
 //! A private network between farm and nodes is not forbidden; it just becomes
 //! an operator choice that makes either mode trivially satisfiable, rather

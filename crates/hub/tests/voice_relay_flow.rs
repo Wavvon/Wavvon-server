@@ -1,7 +1,7 @@
 //! Voice join/leave lifecycle over the main hub WS (voice-transport-v2.md).
 //!
-//! The actual audio relay (WebTransport datagrams, cert-hash trust, token
-//! rejection) is covered by `voice_wt_flow.rs`; this file exercises the
+//! The actual audio relay (WebRTC data channels, token rejection) is
+//! covered by `voice_rtc_flow.rs`; this file exercises the
 //! WS-side bookkeeping that transport sits on top of: `voice_relay_active`
 //! lifecycle, roster membership, and the invisible-presence gate on voice
 //! surfaces.
@@ -127,9 +127,9 @@ async fn send_ws(
 // Unit-style helpers that operate directly on AppState.
 // ---------------------------------------------------------------------------
 
-/// Simulate a voice_join: insert the pubkey with no bound WT session into
+/// Simulate a voice_join: insert the pubkey with no bound session into
 /// voice_channels and mark the relay slot active (mirrors the WS handler
-/// before the client's WebTransport session connects).
+/// before the client's WebRTC session connects).
 async fn sim_join(state: &AppState, pubkey: &str, channel_id: &str) {
     state
         .voice_channels
@@ -258,10 +258,6 @@ async fn drain_until_voice_joined(
                 assert!(
                     tok.chars().all(|c| c.is_ascii_hexdigit()),
                     "token must be hex"
-                );
-                assert!(
-                    v["voice_wt_url"].as_str().unwrap().starts_with("https://"),
-                    "voice_joined must carry an absolute https voice_wt_url"
                 );
                 return tok;
             }
@@ -605,7 +601,7 @@ async fn pong_carries_the_outbound_loss_the_relay_measured() {
 
     // What the relay would have accumulated after a span of 100 counters with
     // 10 of them missing. Injected rather than driven through a real
-    // WebTransport session: the arithmetic has its own unit tests, and what is
+    // WebRTC session: the arithmetic has its own unit tests, and what is
     // untested is whether the number reaches this socket at all.
     {
         let mut losses = state.voice_outbound_loss.write().await;

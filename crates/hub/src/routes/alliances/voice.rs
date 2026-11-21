@@ -2,9 +2,9 @@
 //!
 //! The owning hub's relay **is** the room. A member of hub B who joins voice
 //! in a channel hub A shares with their alliance gets a short-lived,
-//! voice-scoped session on **hub A** and dials hub A's WebTransport relay as an
+//! voice-scoped session on **hub A** and binds a WebRTC session to hub A's relay as an
 //! ordinary pubkey. One room, one hub, one `sender_id` space, one E2E key
-//! fan-out — and nothing in `voice_wt.rs`, `voice_channels`,
+//! fan-out — and nothing in `voice_relay.rs`, `voice_channels`,
 //! `voice_sender_ids` or the datagram format changes.
 //!
 //! Hub B's only job is the one thing hub A cannot do for itself: sign an
