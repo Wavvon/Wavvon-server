@@ -110,7 +110,6 @@ mod voice_rtc_flow;
 mod voice_speaking_flow;
 mod web_client_fetch_flow;
 mod web_client_flow;
-mod webauthn_flow;
 mod whisper_optout_flow;
 mod whisper_role_target_flow;
 mod widget_flow;

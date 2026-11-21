@@ -228,15 +228,8 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         wavvon_hub_env::PUBLIC_URL,
         "(unset)",
         "Public base URL of this hub (e.g. https://wavvon.example.com). Drives the \
-         voice endpoint, invite links and the WebAuthn relying-party ID. \
+         voice endpoint and invite links. \
          Farm-hosted hubs derive it from WAVVON_FARM_URL and need not set it",
-    ),
-    (
-        "WAVVON_WEBAUTHN_RP_ID",
-        "(unset)",
-        "WebAuthn Relying Party ID override (e.g. example.com). \
-         Defaults to the hostname extracted from WAVVON_PUBLIC_URL, \
-         or `localhost` when neither is set",
     ),
     (
         "WAVVON_LAN_MODE",
@@ -379,14 +372,11 @@ pub struct Settings {
     /// Max concurrent video streams started over HTTP, hub-wide.
     /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
     pub http_video_stream_budget: u32,
-    /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
+    /// Public HTTPS URL of this hub.
     /// Env: WAVVON_PUBLIC_URL
     pub public_url: Option<String>,
     /// Env: WAVVON_VOICE_PUBLIC_HOST
     pub voice_public_host: Option<String>,
-    /// WebAuthn Relying Party ID override. Falls back to public_url hostname.
-    /// Env: WAVVON_WEBAUTHN_RP_ID
-    pub webauthn_rp_id: Option<String>,
     /// Explicit opt-in for LAN/offline mode. See `crate::lan` and lan-mode.md.
     /// Env: WAVVON_LAN_MODE
     pub lan_mode: bool,
@@ -404,10 +394,10 @@ pub struct Settings {
 /// Where this hub is actually reachable from the outside, or `None` when
 /// nothing knows.
 ///
-/// Four things need it and all four fail *silently* without it: the voice
+/// Three things need it and all three fail *silently* without it: the voice
 /// relay's ICE candidate (without it only loopback and the machine's own
-/// address are advertised, so remote clients cannot join voice), the first-boot owner invite link, the WebAuthn
-/// relying-party id, and the canonical URL a client stores for this hub.
+/// address are advertised, so remote clients cannot join voice), the first-boot owner invite link,
+/// and the canonical URL a client stores for this hub.
 ///
 /// A farm-hosted hub is the case that motivated this. The farm cannot pass the
 /// URL at spawn: it contains the hub's pubkey, and that does not exist until

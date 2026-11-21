@@ -21,7 +21,7 @@ pub struct AuthUser {
     /// Session scope:
     /// - `"member"` — full access, subject to normal role/permission checks.
     ///   Default for token paths that predate scoping (farm
-    ///   tokens, webauthn/device-token logins).
+    ///   tokens, device logins).
     /// - `"lobby"` (lobby-survey.md Feature 1) — confined to
     ///   `LOBBY_ALLOWED_PATHS` below, regardless of any roles held.
     /// - `"mini_app"` (mini-apps.md "Scoped session token") — minted by

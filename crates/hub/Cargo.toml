@@ -58,7 +58,6 @@ tempfile = "3"
 # with it perl as a build prerequisite — everything else here is already
 # rustls. Pinned exactly because upstream ships this line as `-dev`
 # prereleases, which a caret requirement would not resolve.
-webauthn-rs = { version = "0.6.1-dev", features = ["danger-allow-state-serialisation"] }
 url = "2"
 # Web Push (push.rs): RFC 8291 payload encryption in pure Rust. Default
 # features off: the VAPID half pulls jwt-simple and an RSA stack for one
@@ -76,10 +75,6 @@ postgresql_embedded = { version = "0.22", default-features = false, features = [
 [dev-dependencies]
 wavvon-test-server = { path = "../test-server" }
 hkdf = "0.12"
-# Software authenticator for the passkey ceremony test. Upstream's own test
-# suite uses it, and it is what makes attestation + signature verification
-# testable without a physical key. Version-matched to webauthn-rs.
-webauthn-authenticator-rs = { version = "0.6.1-dev", features = ["softpasskey"] }
 tokio = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 tokio-tungstenite = "0.24"

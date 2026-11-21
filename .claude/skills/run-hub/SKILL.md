@@ -64,7 +64,7 @@ downstream like a wall of unrelated client timeouts.
 **`WAVVON_PUBLIC_URL` is not optional in practice.** Without it
 the voice relay advertises only loopback plus the machine's own address, so
 clients elsewhere cannot connect voice; invite
-links and passkeys degrade the same way. A farm-spawned hub derives its own and
+links degrade the same way. A farm-spawned hub derives its own and
 doesn't need it set.
 
 **An empty `WAVVON_*` value means "unset".** That matters mainly in a
