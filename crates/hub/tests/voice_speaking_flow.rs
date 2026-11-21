@@ -8,15 +8,14 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // `voice_speaking` named its channel and was broadcast there as sent, so a
 // member who was not in the room could light up a speaking indicator in it.
 // Multi-thread for the reason ban_closes_socket_flow.rs gives.
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
     let state = Arc::new(common::base_state(db));
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

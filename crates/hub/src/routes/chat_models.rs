@@ -518,6 +518,11 @@ pub enum WsClientMessage {
     Ping { nonce: i64 },
     #[serde(rename = "voice_leave")]
     VoiceLeave { channel_id: String },
+    /// The WebRTC transport for a voice session (voice-transport-v3.md):
+    /// the client's SDP offer, bound by the single-use `voice_token` from
+    /// `voice_joined`. Answered with `voice_rtc_answer`.
+    #[serde(rename = "voice_rtc_offer")]
+    VoiceRtcOffer { token: String, sdp: String },
     #[serde(rename = "voice_speaking")]
     VoiceSpeaking { channel_id: String, speaking: bool },
     #[serde(rename = "typing")]
@@ -770,19 +775,10 @@ pub enum WsServerMessage {
         /// don't have to self-locate by pubkey).
         sender_id: u16,
         participants: Vec<VoiceParticipantInfo>,
-        /// Single-use token the client presents when opening its WebTransport
-        /// session (`voice_wt_url?token=<hex>`) so the hub can bind the
-        /// session to (channel_id, pubkey). Delivered confidentially over
+        /// Single-use token the client presents in `voice_rtc_offer` so the
+        /// hub can bind its WebRTC session to (channel_id, pubkey). Delivered confidentially over
         /// the authenticated TLS WebSocket; 30-second TTL.
         voice_token: String,
-        /// Absolute `https://host:port/voice` URL for this hub's WebTransport
-        /// voice endpoint (voice-transport-v2.md). Built from the same
-        /// advertise host as the old `voice_udp_addr`.
-        voice_wt_url: String,
-        /// Hex SHA-256 digest of the WT endpoint's current certificate, for
-        /// `WebTransportOptions.serverCertificateHashes` (self-signed tier).
-        /// `None` when a CA-issued cert is in use.
-        voice_cert_hash: Option<String>,
         /// False when the channel's `min_talk_power` is above what the joiner
         /// carries and nobody has granted them the floor: they are in the room
         /// and hearing it, and the relay drops what they send.
@@ -838,6 +834,10 @@ pub enum WsServerMessage {
         channel_id: String,
         public_key: String,
     },
+    /// The hub's SDP answer to `voice_rtc_offer`, carrying its ICE-lite
+    /// candidates. The voice data channel is negotiated out of band (stream 0).
+    #[serde(rename = "voice_rtc_answer")]
+    VoiceRtcAnswer { sdp: String },
     #[serde(rename = "voice_roster_update")]
     VoiceRosterUpdate {
         channel_id: String,

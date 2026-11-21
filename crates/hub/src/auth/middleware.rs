@@ -21,7 +21,7 @@ pub struct AuthUser {
     /// Session scope:
     /// - `"member"` — full access, subject to normal role/permission checks.
     ///   Default for token paths that predate scoping (farm
-    ///   tokens, webauthn/device-token logins).
+    ///   tokens, device logins).
     /// - `"lobby"` (lobby-survey.md Feature 1) — confined to
     ///   `LOBBY_ALLOWED_PATHS` below, regardless of any roles held.
     /// - `"mini_app"` (mini-apps.md "Scoped session token") — minted by
@@ -127,8 +127,8 @@ const MINI_APP_ALLOWED_PATHS: &[&str] = &[];
 /// nothing here should ever let them read a message, see a roster, or learn who
 /// is on this hub.
 ///
-/// - `/info` — the capability list, `voice_wt_url` and `voice_cert_hash`, which
-///   are what the client needs to dial the relay at all.
+/// - `/info` — the capability list, which tells the client how to reach the
+///   relay at all (`voice.webrtc`).
 /// - the two DH-key routes — E2E voice keys are wrapped static-static X25519, so
 ///   the visitor must be able to publish its own key and read its peers'. Both
 ///   directions are needed; with only one, a visitor can be heard or can hear,

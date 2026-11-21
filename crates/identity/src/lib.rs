@@ -1,3 +1,4 @@
+pub mod dm;
 pub mod ecies;
 mod master;
 mod pow;

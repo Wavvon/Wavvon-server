@@ -77,14 +77,10 @@ static BUCKET: LazyLock<TokenBucket> = LazyLock::new(TokenBucket::new);
 /// `payload` should be the same JSON value used for the app WS `hub_event`
 /// envelope. Errors are logged and swallowed — outgoing webhook delivery is
 /// best-effort and must never block `publish_hub_event`.
-pub async fn dispatch_event(
-    state: &Arc<AppState>,
-    event_type: &str,
-    channel_id: Option<&str>,
-    seq: i64,
-    now: i64,
-    payload: &serde_json::Value,
-) {
+pub async fn dispatch_event(state: &Arc<AppState>, event: &HubEvent) {
+    let event_type = event.event.as_str();
+    let channel_id = event.channel_id.as_deref();
+    let seq = event.seq;
     #[derive(sqlx::FromRow)]
     struct SubRow {
         webhook_id: String,
@@ -152,9 +148,18 @@ pub async fn dispatch_event(
             continue;
         }
 
-        let (envelope_payload, truncated) = truncate_if_needed(payload.clone());
+        let (envelope_payload, truncated) = truncate_if_needed(event.payload.clone());
 
-        let mut envelope = HubEvent::new(seq, event_type, hub_url.as_str(), now, envelope_payload);
+        let mut envelope = HubEvent::new(
+            seq,
+            event_type,
+            hub_url.as_str(),
+            event.at,
+            envelope_payload,
+        );
+        envelope.actor_pubkey = event.actor_pubkey.clone();
+        envelope.target_pubkey = event.target_pubkey.clone();
+        envelope.channel_id = event.channel_id.clone();
         envelope.webhook_id = Some(webhook.id.clone());
         envelope.truncated = truncated;
 

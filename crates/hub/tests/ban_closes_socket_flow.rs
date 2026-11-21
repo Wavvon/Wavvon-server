@@ -8,8 +8,7 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // A socket is authenticated once, at the handshake, so deleting a banned or
 // kicked member's sessions logged nobody out of a tab already connected: it
@@ -20,7 +19,7 @@ mod common;
 // which then waits for them -- a minute of pool timeout per test.
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
     let state = Arc::new(common::base_state(db));
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use sqlx::PgPool; // still used by insert_revocation and return type
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
@@ -8,12 +7,12 @@ use wavvon_hub::routes::me::MeResponse;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::{DeviceSubkey, Identity, MasterIdentity, SubkeyCert};
+use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn setup() -> (common::TestHarness, PgPool) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         ..common::base_state(db.clone())

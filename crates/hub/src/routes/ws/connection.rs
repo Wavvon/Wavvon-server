@@ -816,6 +816,7 @@ fn visitor_may_send(msg: &WsClientMessage) -> bool {
             | WsClientMessage::VoiceLeave { .. }
             | WsClientMessage::VoiceSpeaking { .. }
             | WsClientMessage::VoiceKeyOffer { .. }
+            | WsClientMessage::VoiceRtcOffer { .. }
             | WsClientMessage::Ping { .. }
     )
 }
@@ -930,7 +931,7 @@ async fn dispatch_client_msg(
             voice::handle_voice_zone_destroy(cs, state, msg).await
         }
         WsClientMessage::VoicePositionUpdate { .. } => {
-            voice::handle_voice_position_update(cs, state, msg).await
+            voice::handle_voice_position_update(cs, state, ws_tx, msg).await
         }
 
         // ── Video signaling ────────────────────────────────────────────────
@@ -973,6 +974,9 @@ async fn dispatch_client_msg(
         // ── V4 voice encryption ────────────────────────────────────────────
         WsClientMessage::VoiceKeyOffer { .. } => {
             voice::handle_voice_key_offer(cs, state, msg).await
+        }
+        WsClientMessage::VoiceRtcOffer { .. } => {
+            voice::handle_voice_rtc_offer(cs, state, ws_tx, msg).await
         }
 
         // ── Bots ───────────────────────────────────────────────────────────
@@ -1024,11 +1028,11 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
         .execute(&state.db)
         .await;
     }
-    // WS leave_voice is authoritative for roster (voice-transport-v2.md):
-    // proactively close any still-live WT session rather than leaving it to
-    // idle out on its own now that it has no roster entry.
+    // WS leave_voice is authoritative for roster: proactively close any
+    // still-live transport session rather than leaving it to idle out on its
+    // own now that it has no roster entry.
     if let Some(session) = removed_session {
-        session.close(wtransport::VarInt::from_u32(0), b"voice_leave");
+        session.close("voice_leave");
     }
 
     // Remove any un-consumed pending bind for this pubkey.

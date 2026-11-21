@@ -1,7 +1,6 @@
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// `GET /hub/members` pages by the last row's `public_key`. It used to stop
 /// at 1000 rows and say nothing, so a large hub's admin list was silently

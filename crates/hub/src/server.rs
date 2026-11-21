@@ -129,22 +129,6 @@ pub fn create_router_full(
     let auth_routes = Router::new()
         .route("/auth/challenge", post(auth::handlers::challenge))
         .route("/auth/verify", post(auth::handlers::verify))
-        .route(
-            "/auth/webauthn/begin",
-            post(routes::webauthn::register_begin),
-        )
-        .route(
-            "/auth/webauthn/finish",
-            post(routes::webauthn::register_finish),
-        )
-        .route(
-            "/auth/webauthn/assert/begin",
-            post(routes::webauthn::assert_begin),
-        )
-        .route(
-            "/auth/webauthn/assert/finish",
-            post(routes::webauthn::assert_finish),
-        )
         .layer(from_fn(move |req, next| {
             let l = auth_limiter.clone();
             async move { rate_limit::enforce(l, req, next).await }
@@ -231,6 +215,31 @@ pub fn create_router_full(
                 .delete(routes::hub_icons::delete_icon),
         )
         .route(
+            "/hub/theme",
+            axum::routing::put(routes::hub_theme::put_theme)
+                .delete(routes::hub_theme::delete_theme)
+                .layer(DefaultBodyLimit::max(routes::hub_theme::BODY_LIMIT)),
+        )
+        .route("/hub/theme/{sha256}", get(routes::hub_theme::get_theme))
+        .route(
+            "/hub/languages",
+            get(routes::hub_languages::list_languages)
+                .put(routes::hub_languages::put_language)
+                .layer(DefaultBodyLimit::max(routes::hub_languages::BODY_LIMIT)),
+        )
+        .route(
+            "/hub/languages/default",
+            axum::routing::put(routes::hub_languages::put_default),
+        )
+        .route(
+            "/hub/languages/{sha256}",
+            get(routes::hub_languages::get_language).delete(routes::hub_languages::delete_language),
+        )
+        .route(
+            "/hub/theme/{sha256}/preview",
+            get(routes::hub_theme::get_theme_preview),
+        )
+        .route(
             "/admin/settings/pow",
             get(routes::hub::get_pow_settings).patch(routes::hub::patch_pow_settings),
         )
@@ -300,11 +309,6 @@ pub fn create_router_full(
             get(routes::me::me)
                 .patch(routes::me::update_me)
                 .delete(routes::me::leave_hub),
-        )
-        .route("/me/credentials", get(routes::webauthn::list_credentials))
-        .route(
-            "/me/credentials/{id}",
-            patch(routes::webauthn::rename_credential).delete(routes::webauthn::delete_credential),
         )
         .route("/channels", get(routes::channels::list_channels))
         .route(
@@ -547,6 +551,13 @@ pub fn create_router_full(
         // ---- Unread counts (Feature 2) ----
         // Must be registered before /channels/{channel_id} to avoid "unread" being matched as a path param.
         .route("/channels/unread", get(routes::channels::get_unread_counts))
+        // ---- Web Push (push.rs) ----
+        .route("/push/vapid-key", get(routes::push::get_vapid_key))
+        .route(
+            "/push/subscriptions",
+            axum::routing::put(routes::push::put_subscription)
+                .delete(routes::push::delete_subscription),
+        )
         .route(
             "/channels/{channel_id}/read",
             post(routes::channels::mark_channel_read),

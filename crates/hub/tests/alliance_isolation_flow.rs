@@ -1,8 +1,7 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // One hub, two alliances that have nothing to do with each other.
@@ -16,7 +15,7 @@ mod common;
 /// Authenticates `hub` as a **federating peer** (`is_hub: true`), the posture
 /// every hub takes when it talks to another. It needs no invite: a peer is not
 /// a person joining a community.
-async fn authenticate_as_hub(server: &axum_test::TestServer, hub: &Identity) -> String {
+async fn authenticate_as_hub(server: &wavvon_test_server::TestServer, hub: &Identity) -> String {
     let pub_key = hub.public_key_hex();
     let challenge: serde_json::Value = server
         .post("/auth/challenge")
@@ -39,7 +38,7 @@ async fn authenticate_as_hub(server: &axum_test::TestServer, hub: &Identity) -> 
 
 /// Creates an alliance owning one shared text channel, and returns its id.
 async fn alliance_with_shared_channel(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
     owner_token: &str,
     name: &str,
     channel_name: &str,

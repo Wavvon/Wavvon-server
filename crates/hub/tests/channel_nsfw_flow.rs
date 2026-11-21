@@ -1,10 +1,9 @@
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Create a text channel, optionally marking it NSFW at creation time.
 async fn create_channel(

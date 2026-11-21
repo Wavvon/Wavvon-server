@@ -33,8 +33,10 @@ fn nonce_at(secs: u64) -> String {
 /// Build the canonical JSON payload exactly as the discovery API expects.
 ///
 /// Keys are in alphabetical order: bio, hub_url, [invite_code,] language,
-/// nonce, tags. Tags are sorted alphabetically for determinism. The invite is
-/// signed when present so nobody else can rewrite a listing's invite link.
+/// nonce, tags[, theme_preview_url]. Tags are sorted alphabetically for
+/// determinism. The invite is signed when present so nobody else can rewrite a
+/// listing's invite link; the theme preview (themes.md §4) when the hub has a
+/// theme with one.
 fn build_canonical_payload(
     bio: &str,
     hub_url: &str,
@@ -42,6 +44,7 @@ fn build_canonical_payload(
     language: &str,
     nonce: &str,
     tags: &[String],
+    theme_preview_url: Option<&str>,
 ) -> String {
     let mut sorted_tags = tags.to_vec();
     sorted_tags.sort();
@@ -62,6 +65,9 @@ fn build_canonical_payload(
     });
     if let Some(code) = invite_code.filter(|c| !c.is_empty()) {
         obj["invite_code"] = serde_json::Value::String(code.to_string());
+    }
+    if let Some(url) = theme_preview_url {
+        obj["theme_preview_url"] = serde_json::Value::String(url.to_string());
     }
 
     // serde_json::json! uses an IndexMap-backed object when the
@@ -104,6 +110,16 @@ pub async fn sign_for_directory(
     perms.require(DIRECTORY_PUBLISH)?;
 
     let nonce = current_nonce();
+    let theme_preview_url = crate::routes::hub_theme::read_theme_info(&state.db)
+        .await
+        .filter(|t| t.has_preview)
+        .map(|t| {
+            format!(
+                "{}/hub/theme/{}/preview",
+                req.hub_url.trim_end_matches('/'),
+                t.sha256
+            )
+        });
     let canonical_payload = build_canonical_payload(
         &req.bio,
         &req.hub_url,
@@ -111,6 +127,7 @@ pub async fn sign_for_directory(
         &req.language,
         &nonce,
         &req.tags,
+        theme_preview_url.as_deref(),
     );
 
     let signature = state.hub_identity.sign(canonical_payload.as_bytes());
@@ -153,6 +170,7 @@ mod tests {
             "en",
             "2026-05-10T20:15Z",
             &["rust".to_string(), "gaming".to_string(), "art".to_string()],
+            None,
         );
 
         // Must deserialize to a Value so we can inspect field order.
@@ -175,14 +193,22 @@ mod tests {
 
     #[test]
     fn canonical_payload_signs_the_invite_when_present() {
-        let with = build_canonical_payload("", "https://h", Some("abc"), "en", "n", &[]);
+        let with = build_canonical_payload("", "https://h", Some("abc"), "en", "n", &[], None);
         assert_eq!(
             with,
             r#"{"bio":"","hub_url":"https://h","invite_code":"abc","language":"en","nonce":"n","tags":[]}"#
         );
         assert_eq!(
-            build_canonical_payload("", "https://h", Some(""), "en", "n", &[]),
-            build_canonical_payload("", "https://h", None, "en", "n", &[]),
+            build_canonical_payload("", "https://h", Some(""), "en", "n", &[], None),
+            build_canonical_payload("", "https://h", None, "en", "n", &[], None),
+        );
+    }
+
+    #[test]
+    fn canonical_payload_signs_the_theme_preview_last() {
+        assert_eq!(
+            build_canonical_payload("", "https://h", None, "en", "n", &[], Some("https://h/p")),
+            r#"{"bio":"","hub_url":"https://h","language":"en","nonce":"n","tags":[],"theme_preview_url":"https://h/p"}"#
         );
     }
 

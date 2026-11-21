@@ -6,7 +6,6 @@ use bytes::Bytes;
 use sqlx::PgPool;
 use tokio::sync::{broadcast, mpsc, RwLock};
 use wavvon_identity::Identity;
-use webauthn_rs::prelude::{PasskeyAuthentication, PasskeyRegistration, Webauthn};
 
 use crate::federation::client::FederationClient;
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
@@ -152,11 +151,11 @@ pub struct WhisperTargetDef {
     pub id: String,
 }
 
-/// A pending WebTransport session-bind for a voice participant.
+/// A pending voice session-bind for a voice participant.
 ///
 /// Minted at `VoiceJoin` and consumed, single-use, when the client opens a
-/// WT session against `voice_wt_url` presenting the matching token
-/// (voice-transport-v2.md). Expires after `expires_at`.
+/// WebRTC session with `voice_rtc_offer` presenting the matching token
+/// (voice-transport-v3.md). Expires after `expires_at`.
 pub struct PendingVoiceBind {
     pub channel_id: String,
     pub pubkey: String,
@@ -198,6 +197,8 @@ pub struct RateLimiters {
     /// shape (fixed window, same eviction policy) at a cadence sized for
     /// chat-like content rather than the much rarer badge handshake.
     pub forum_federated_write: Mutex<HashMap<String, (u32, Instant)>>,
+    /// Web pushes per recipient identity (push.rs, 30/60 s).
+    pub push: Mutex<HashMap<String, (u32, Instant)>>,
     /// Per-caller limiter for `GET /alliances/{id}/people` (60 requests/60 s).
     /// Keyed by the asking member on the hub that proxies, and by the asking hub
     /// on the hub that answers -- the same route, one key space.
@@ -253,24 +254,11 @@ impl Default for RateLimiters {
             preview: Mutex::new(HashMap::new()),
             badge_offer: Mutex::new(HashMap::new()),
             forum_federated_write: Mutex::new(HashMap::new()),
+            push: Mutex::new(HashMap::new()),
             alliance_people: Mutex::new(HashMap::new()),
             app_cooldowns: Mutex::new(HashMap::new()),
         }
     }
-}
-
-/// In-flight WebAuthn registration: session_id → (user_pubkey, state).
-pub struct RegChallenge {
-    pub user_pubkey: String,
-    pub state: PasskeyRegistration,
-}
-
-/// In-flight WebAuthn authentication: session_id → (user_pubkey, state, passkeys).
-/// Passkeys are stored so the sign_count can be updated after a successful assertion.
-pub struct AuthChallenge {
-    pub user_pubkey: String,
-    pub state: PasskeyAuthentication,
-    pub passkeys: Vec<webauthn_rs::prelude::Passkey>,
 }
 
 /// `(issuer_pubkey, master_pubkey)` → `(fetched_at, portfolio)`.
@@ -301,23 +289,15 @@ pub struct AppState {
     /// Plain HTTP client for outbound requests that don't go through the
     /// federation protocol (e.g. sending push invites to foreign hubs).
     pub http_client: reqwest::Client,
-    // Voice (voice-transport-v2.md): channel_id → {public_key → WT session}.
-    // `None` means the pubkey has joined voice over WS but hasn't (yet, or
-    // no longer) bound a live WebTransport datagram session — mirrors the
-    // old sentinel-address membership marker, minus the sentinel.
-    pub voice_channels: RwLock<HashMap<String, HashMap<String, Option<wtransport::Connection>>>>,
+    // Voice (voice-transport-v3.md): channel_id → {public_key → transport
+    // session}. `None` means the pubkey has joined voice over WS but hasn't
+    // (yet, or no longer) bound a live transport session.
+    pub voice_channels: RwLock<HashMap<String, crate::voice_relay::VoiceRoom>>,
     /// sender_id assignment: channel_id → { pubkey → sender_id }
     pub voice_sender_ids: RwLock<HashMap<String, HashMap<String, u16>>>,
     /// Next available sender_id counter per channel
     pub voice_next_sender_id: RwLock<HashMap<String, u16>>,
     pub voice_udp_port: u16,
-    /// Absolute `https://host:port/voice` URL for this hub's WebTransport
-    /// voice endpoint, or `None` when no public host is known (no
-    /// `WAVVON_PUBLIC_URL` and not in LAN mode). Derived once at startup
-    /// from (in priority order) `WAVVON_PUBLIC_URL`'s host, then the
-    /// LAN-mode advertise address, both paired with `voice_udp_port`.
-    /// Surfaced on `/info` and in `voice_joined` — see voice-transport-v2.md.
-    pub voice_wt_url: Option<String>,
     /// The address clients should store for this hub, published on `/info`.
     ///
     /// Starts as the locally-derived public URL and is replaced by whatever
@@ -325,12 +305,8 @@ pub struct AppState {
     /// it has been given a new name, without a restart. `RwLock` because the
     /// heartbeat task writes it while request handlers read it.
     pub canonical_url: Arc<RwLock<Option<String>>>,
-    /// Hex SHA-256 digest of the WT endpoint's current self-signed
-    /// certificate. `None` when a CA-issued cert (`WAVVON_TLS_CERT`/`_KEY`)
-    /// is in use, or before the cert has been generated. Rotates in place
-    /// (see `voice_wt::spawn_cert_rotation`) — always read fresh, never cached
-    /// by callers.
-    pub voice_cert_hash: RwLock<Option<String>>,
+    /// The WebRTC voice relay (voice-transport-v3.md), once started.
+    pub voice_rtc: std::sync::OnceLock<crate::voice_rtc::RtcHandle>,
     pub voice_event_tx: broadcast::Sender<(String, WsServerMessage)>,
     // DM relay: broadcast DMs to all WS clients (they filter by conversation membership)
     pub dm_tx: broadcast::Sender<DmEvent>,
@@ -393,10 +369,10 @@ pub struct AppState {
     /// Original target descriptors for re-resolution on any VoiceJoin/Leave.
     pub whisper_target_defs: RwLock<HashMap<String, Vec<WhisperTargetDef>>>,
     /// Whisper targets: sender_pubkey → set of target pubkeys. Since every
-    /// voice participant (desktop and web alike) is a WT session keyed by
-    /// pubkey (voice-transport-v2.md), this one pubkey-keyed set is enough —
+    /// voice participant (desktop and web alike) is a session keyed by
+    /// pubkey (voice-transport-v3.md), this one pubkey-keyed set is enough —
     /// there is no separate SocketAddr-based target set to keep in sync.
-    /// The WT receive loop (`voice_wt.rs`) routes a whispering sender's
+    /// The relay (`voice_relay.rs`) routes a whispering sender's
     /// datagrams exclusively to this set with packet_type = 0x01.
     pub whisper_target_pubkeys: RwLock<HashMap<String, HashSet<String>>>,
 
@@ -421,7 +397,7 @@ pub struct AppState {
     /// Pubkeys that currently own a live voice relay slot.
     ///
     /// Inserted on `VoiceJoin`; removed on `leave_voice` (called on WS
-    /// disconnect and on explicit `VoiceLeave`).  The WT receive loop checks
+    /// disconnect and on explicit `VoiceLeave`).  The relay checks
     /// this set before forwarding a datagram so that a session whose WS
     /// connection closed cannot keep relaying traffic.
     ///
@@ -468,12 +444,12 @@ pub struct AppState {
     /// in. Nothing about it is persisted, so no grant outlives a restart.
     pub voice_talk_blocked: RwLock<HashSet<String>>,
 
-    /// Pending WebTransport session-binds waiting for the client to open its
-    /// `voice_wt_url?token=<hex>` session (voice-transport-v2.md).
+    /// Pending voice session-binds waiting for the client's `voice_rtc_offer`
+    /// (voice-transport-v3.md).
     ///
     /// Key is the hex register token (64 chars, 32 random bytes).
     /// Entries are inserted at `VoiceJoin` and consumed, single-use, on the
-    /// first WT session request presenting a matching token.  Expired
+    /// first `voice_rtc_offer` presenting a matching token.  Expired
     /// entries are purged opportunistically on each new mint and on each
     /// session-accept attempt.
     pub voice_pending_binds: RwLock<HashMap<String, PendingVoiceBind>>,
@@ -543,13 +519,6 @@ pub struct AppState {
     /// ponytail: coarse hub-wide counter, not per-channel. Upgrade to a
     /// finer-grained budget if one cap proves too blunt.
     pub http_video_stream_budget: usize,
-
-    /// WebAuthn relying-party instance. Shared across all requests.
-    pub webauthn: Arc<Webauthn>,
-    /// In-flight registration challenges: session_id → RegChallenge.
-    pub webauthn_reg_challenges: RwLock<HashMap<String, RegChallenge>>,
-    /// In-flight authentication challenges: session_id → AuthChallenge.
-    pub webauthn_auth_challenges: RwLock<HashMap<String, AuthChallenge>>,
 
     /// ME2: Circuit breaker for the auto-moderation webhook.
     ///

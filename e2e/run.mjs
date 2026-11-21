@@ -254,7 +254,10 @@ try {
         headers: { Authorization: `Bearer ${vt}` },
       });
       checkEq(info.status, 200, "a visitor must be able to read /info");
-      check(info.body.voice_wt_url, "the visitor needs a relay URL to dial");
+      check(
+        info.body.capabilities?.includes("voice.webrtc"),
+        "the visitor needs to know how to reach the relay",
+      );
 
       // And nothing else on hub A.
       for (const path of ["/users", "/channels", "/conversations", "/me"]) {

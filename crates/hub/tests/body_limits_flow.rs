@@ -5,16 +5,16 @@
 /// 25 MB and refused anything over 2 MB with a bare 413, and an operator who
 /// raised `max_attachment_bytes` saw no effect past ~1.5 MB of file. These
 /// tests send bodies between axum's default and the hub's own caps.
-mod common;
+use crate::common;
 
 use axum::http::StatusCode;
-use axum_test::multipart::{MultipartForm, Part};
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
+use wavvon_test_server::multipart::{MultipartForm, Part};
 
 const MB: usize = 1024 * 1024;
 
-async fn channel(server: &axum_test::TestServer, token: &str) -> String {
+async fn channel(server: &wavvon_test_server::TestServer, token: &str) -> String {
     let resp = server
         .post("/channels")
         .authorization_bearer(token)

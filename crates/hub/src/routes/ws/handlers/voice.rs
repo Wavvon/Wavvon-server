@@ -314,13 +314,13 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         crate::routes::ws::connection::leave_voice(state, &cs.public_key, &stale).await;
     }
 
-    // --- Token-gated WebTransport session bind (voice-transport-v2.md) ---
+    // --- Token-gated voice session bind (voice-transport-v3.md) ---
     //
     // 1. Mint a 32-byte random single-use token.
     // 2. Store it in voice_pending_binds with a 30-second TTL.
-    // 3. Return it (plus the WT URL/cert hash) in the voice_joined reply;
-    //    the client opens a WT session against `voice_wt_url?token=<hex>`,
-    //    which consumes the token and binds the session (`voice_wt.rs`).
+    // 3. Return it in the voice_joined reply; the client sends it in
+    //    `voice_rtc_offer`, which consumes it and binds the WebRTC session
+    //    (`voice_rtc.rs`).
     //
     // Purge stale pending binds opportunistically (on each new mint).
     let voice_token: String = {
@@ -348,8 +348,8 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         );
     }
 
-    // Register the pubkey in voice_channels (roster membership) with no WT
-    // session bound yet — `voice_wt.rs` fills it in once the client opens
+    // Register the pubkey in voice_channels (roster membership) with no
+    // session bound yet — `voice_rtc.rs` fills it in once the client offers
     // its session with the token above; until then no audio is relayed to
     // it (the fan-out only ever sends to a `Some(connection)` slot).
     state
@@ -408,19 +408,11 @@ pub(in crate::routes::ws) async fn handle_voice_join(
 
     let participants = get_voice_participants(state, &channel_id, Some(&cs.public_key)).await;
 
-    let voice_wt_url = state
-        .voice_wt_url
-        .clone()
-        .unwrap_or_else(|| format!("https://localhost:{}/voice", state.voice_udp_port));
-    let voice_cert_hash = state.voice_cert_hash.read().await.clone();
-
     let reply = WsServerMessage::VoiceJoined {
         channel_id: channel_id.clone(),
         sender_id,
         participants,
         voice_token,
-        voice_wt_url,
-        voice_cert_hash,
         may_speak,
     };
     let json = serde_json::to_string(&reply).unwrap();
@@ -529,7 +521,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         let _ = ws_tx.send(Message::Text(json.into())).await;
     }
 
-    // Publish member.joined audit event.
+    // Publish voice.joined audit event.
     {
         let state_c = state.clone();
         let pk = cs.public_key.clone();
@@ -538,7 +530,7 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         tokio::spawn(async move {
             crate::apps::events::publish_hub_event(
                 &state_c,
-                "member.joined",
+                "voice.joined",
                 Some(&pk),
                 None,
                 Some(&ch),
@@ -579,7 +571,7 @@ pub(in crate::routes::ws) async fn handle_voice_leave(
         tokio::spawn(async move {
             crate::apps::events::publish_hub_event(
                 &state_c,
-                "member.left",
+                "voice.left",
                 Some(&pk),
                 None,
                 Some(&ch),
@@ -672,8 +664,8 @@ pub(in crate::routes::ws) async fn handle_voice_whisper_start(
 
     // Resolve targets to pubkeys. "user" → the pubkey; "channel" → everyone
     // in that voice channel; "role" → every role member currently in voice.
-    // This pubkey set drives both the notification delivery and the WT
-    // relay's whisper routing (`voice_wt.rs`).
+    // This pubkey set drives both the notification delivery and the
+    // relay's whisper routing (`voice_relay.rs`).
     let target_pks = resolve_whisper_target_pubkeys(state, &targets, &cs.public_key).await;
     state
         .whisper_target_pubkeys
@@ -1130,6 +1122,7 @@ const MIN_POSITION_INTERVAL: std::time::Duration = std::time::Duration::from_mil
 pub(in crate::routes::ws) async fn handle_voice_position_update(
     cs: &mut ConnState,
     state: &Arc<AppState>,
+    ws_tx: &mut WsTx,
     msg: WsClientMessage,
 ) -> DispatchResult {
     let (zone_id, position) = match msg {
@@ -1155,19 +1148,18 @@ pub(in crate::routes::ws) async fn handle_voice_position_update(
     }
     cs.last_position_update = Some(now);
 
-    let allowed = {
+    let refusal = {
         let zones = state.voice_zones.read().await;
-        if let Some(z) = zones.get(&(ch_id.clone(), zone_id.clone())) {
-            match z.auth_mode.as_str() {
-                "creator_only" => z.creator_pubkey == cs.public_key,
-                _ => true,
+        match zones.get(&(ch_id.clone(), zone_id.clone())) {
+            None => Some("Unknown voice zone."),
+            Some(z) if z.auth_mode == "creator_only" && z.creator_pubkey != cs.public_key => {
+                Some("Only the zone creator can move in this zone.")
             }
-        } else {
-            false
+            Some(_) => None,
         }
     };
-    if !allowed {
-        return DispatchResult::Continue;
+    if let Some(message) = refusal {
+        return send_error(ws_tx, "voice_position_update", message).await;
     }
 
     state
@@ -1487,4 +1479,52 @@ pub(in crate::routes::ws) async fn handle_voice_key_offer(
         state.send_to_user(&bundle.recipient_pubkey, delivery).await;
     }
     DispatchResult::Continue
+}
+
+/// `voice_rtc_offer`: binds the WebRTC transport for the session minted by
+/// `voice_join` (voice-transport-v3.md). The token is single-use and must
+/// belong to this connection's identity; the answer goes back on this socket.
+pub(in crate::routes::ws) async fn handle_voice_rtc_offer(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    ws_tx: &mut WsTx,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let WsClientMessage::VoiceRtcOffer { token, sdp } = msg else {
+        return DispatchResult::Continue;
+    };
+    let Some(rtc) = state.voice_rtc.get() else {
+        return send_error(
+            ws_tx,
+            "voice_rtc_offer",
+            "Voice over WebRTC is not available on this hub.",
+        )
+        .await;
+    };
+    let Some(bind) = crate::voice_relay::take_bind(state, &token).await else {
+        return send_error(
+            ws_tx,
+            "voice_rtc_offer",
+            "Unknown, used or expired voice token.",
+        )
+        .await;
+    };
+    if bind.pubkey != cs.public_key {
+        return send_error(
+            ws_tx,
+            "voice_rtc_offer",
+            "This voice token belongs to another member.",
+        )
+        .await;
+    }
+    match rtc.answer(bind, sdp).await {
+        Ok(sdp) => {
+            let reply = WsServerMessage::VoiceRtcAnswer { sdp };
+            let _ = ws_tx
+                .send(Message::Text(serde_json::to_string(&reply).unwrap().into()))
+                .await;
+            DispatchResult::Continue
+        }
+        Err(e) => send_error(ws_tx, "voice_rtc_offer", e).await,
+    }
 }

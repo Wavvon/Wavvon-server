@@ -1,17 +1,16 @@
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_hub::auth::models::ChallengeResponse;
 use wavvon_identity::{compute_security_level, Identity};
+use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn do_auth_with_pow(
     server: &TestServer,
     identity: &Identity,
     pow_nonce: Option<u64>,
     pow_level: Option<u8>,
-) -> axum_test::TestResponse {
+) -> wavvon_test_server::TestResponse {
     let pub_key = identity.public_key_hex();
     let resp = server
         .post("/auth/challenge")

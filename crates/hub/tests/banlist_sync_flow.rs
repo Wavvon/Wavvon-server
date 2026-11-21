@@ -1,8 +1,7 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // A ban list names its issuer in the payload. The worker took that name on
 // trust and never checked the signature, so one source could claim another

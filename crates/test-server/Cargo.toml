@@ -1,0 +1,15 @@
+[package]
+name = "wavvon-test-server"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "In-process HTTP test client for the hub and farm routers"
+
+[dependencies]
+axum = { workspace = true }
+bytes = "1"
+http-body-util = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_urlencoded = "0.7"
+tower = { version = "0.5", features = ["util"] }

@@ -1,10 +1,9 @@
 use axum::http::StatusCode;
-use axum_test::multipart::{MultipartForm, Part};
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
+use wavvon_test_server::multipart::{MultipartForm, Part};
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // Routes that act on a channel without asking the channel: each used to check
 // a hub-wide permission, or nothing at all, where the channel's own overwrite

@@ -66,6 +66,11 @@ pub const CAPABILITIES: &[&str] = &[
     // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
     // it takes inline `attachments` only, so a client hides the attach button.
     "attachments.stored",
+    // `POST /channels/{id}/read` takes an optional `message_id` and moves the
+    // caller's read marker back to just before that message ("mark unread").
+    // An older hub ignores the body and marks the channel read, the opposite
+    // of what was asked, so a client offers the action only on this string.
+    "channels.markunread",
     // A channel can have `slowmode_secs` (one message per member per that
     // many seconds; `messages.slowmode.bypass` exempts). A refused send is a
     // 429 whose JSON body carries `retry_after_secs`.
@@ -89,10 +94,21 @@ pub const CAPABILITIES: &[&str] = &[
     // message_id and created_at (sent alongside) and the member set. A client
     // seeing this signs v2; a hub without it still takes v1.
     "dms.plaintext.v2",
+    // Hub events `member.joined` / `member.left` mean joining and leaving the
+    // hub itself; the voice-channel pair is `voice.joined` / `voice.left`. On
+    // an older hub `member.joined` still means a voice join, so an app must
+    // not treat it as a greeting trigger without this string.
+    "events.member.joined",
     // `PATCH /hub` takes `landing_image` and `landing_colors`, and the
     // invite preview carries them with `description` and `online_count`.
     // An admin page must not offer fields an older hub would silently drop.
     "hub.landing",
+    // `PUT /hub/languages` takes a `.wavvonlang` package (language-packs.md
+    // §3), one per code; `DELETE /hub/languages/{sha256}` removes it and
+    // `PUT /hub/languages/default` sets the default code. `GET /hub/languages`
+    // lists them, `GET /hub/languages/{sha256}` serves one with immutable
+    // caching, and `/info` carries `languages` while there is any.
+    "hub.languages",
     // `DELETE /me` — a member can remove themselves from the hub: profile and
     // roles cleared, the pubkey kept as the anchor moderation and message
     // history point at. Gated because a client must not offer "leave this
@@ -103,6 +119,11 @@ pub const CAPABILITIES: &[&str] = &[
     // joining (and optionally holds back recent joiners), plus a join-rate
     // alert that can throw it. Events hub.lockdown and raid.suspected.
     "hub.lockdown",
+    // `PUT`/`DELETE /hub/theme` take a `.wavvontheme` package (themes.md §4),
+    // `GET /hub/theme/{sha256}` serves it with immutable caching, and `/info`
+    // carries `theme { sha256, has_preview }` while one is set. Gated so a
+    // client offers the upload, and fetches a theme, only where both exist.
+    "hub.theme",
     // `GET /public/widget.json`, `GET /widget`, `/admin/settings/widget`
     // and `widget_hidden` on `/me`: an admin page offers the widget, and a
     // member the opt-out, only where the hub honours them.
@@ -152,6 +173,16 @@ pub const CAPABILITIES: &[&str] = &[
     // `recovery_attestation_requested` WebSocket event says when one opens.
     // A client that does not see this string has only the request id the
     // person recovering sends by other means, so it must keep that field.
+    // Web Push for a closed web client (push.rs): `GET /push/vapid-key`,
+    // `PUT`/`DELETE /push/subscriptions` with the client's notify modes. A
+    // mention, a reply or a DM to a member with no socket open is pushed with
+    // only the hub, the channel or conversation and the kind, never text.
+    "push.web",
+    // The push subscription's notify also carries `hub_until` and
+    // `channels_until`, epoch-ms deadlines of a timed mute; past one, that
+    // mode counts as unset. An older hub ignores them and keeps a timed mute
+    // silent until the client next re-sends its modes.
+    "push.web.muteuntil",
     "recovery.attest.requests",
     // `PUT /roles/order` reorders every role below the caller in one call.
     // Without it a client renumbers roles with one PATCH each, which can
@@ -196,6 +227,10 @@ pub const CAPABILITIES: &[&str] = &[
     // this — and offer the grant route, which an older hub answers 404. On an
     // older hub a raised hand is still how the threshold is cleared.
     "voice.talk",
+    // Voice over WebRTC data channels (voice-transport-v3.md): after
+    // `voice_joined`, `voice_rtc_offer` with the token is answered by
+    // `voice_rtc_answer`. A client picks this transport only here.
+    "voice.webrtc",
     // Webhook deliveries (app dispatch, outgoing webhooks) carry
     // `X-Wavvon-Signature-V1` over the timestamp and the body. Advertised so a
     // program can tell a hub that never sends it from a replayed request

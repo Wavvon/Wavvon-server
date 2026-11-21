@@ -5,8 +5,7 @@
 /// They do not start an HTTP server; they call the bootstrap function directly.
 use serde_json::json;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use wavvon_hub::bootstrap::{maybe_bootstrap, BootstrapConfig};
 

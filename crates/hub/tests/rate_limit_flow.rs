@@ -1,18 +1,17 @@
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::routes::chat_models::ChannelResponse;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn start_real_hub() -> (String, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "rate-test".to_string(),
@@ -35,7 +34,7 @@ async fn start_real_hub() -> (String, common::TestDbGuard) {
 }
 
 async fn setup_server() -> common::TestHarness {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "rate-test".to_string(),

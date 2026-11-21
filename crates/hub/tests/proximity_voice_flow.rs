@@ -15,15 +15,14 @@ use wavvon_hub::server;
 use wavvon_hub::state::{AppState, AttenuationConfig, VoiceZone};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // Harness — mirrors voice_relay_flow.rs so WS upgrades work.
 // ---------------------------------------------------------------------------
 
 async fn start_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
 
     let state = Arc::new(AppState {
         hub_name: "proximity-voice-test".to_string(),
@@ -252,4 +251,80 @@ async fn voice_join_delivers_zone_snapshot() {
     assert_eq!(zones_arr.len(), 1, "exactly one zone in snapshot");
     assert_eq!(zones_arr[0]["zone_id"], "snap-zone");
     assert_eq!(zones_arr[0]["name"], "Arena");
+}
+
+async fn next_error(ws_rx: &mut WsStream) -> Option<Value> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match ws_rx.next().await {
+                Some(Ok(TsMessage::Text(raw))) => {
+                    let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+                    if v.get("type").and_then(|t| t.as_str()) == Some("error") {
+                        return v;
+                    }
+                }
+                Some(Ok(_)) => continue,
+                _ => panic!("WS stream ended"),
+            }
+        }
+    })
+    .await
+    .ok()
+}
+
+/// An update for an unknown zone, or from a non-creator in a `creator_only`
+/// zone, is answered with an `error` frame; an allowed update is not.
+#[tokio::test]
+async fn position_update_refusals_send_error_frame() {
+    let (base, state, _guard) = start_hub().await;
+
+    let identity = Identity::generate();
+    let token = authenticate_http(&base, &identity).await;
+    let ch = create_channel(&base, &token, "zone-err").await;
+
+    let mut locked = make_zone("locked", &ch.id, &"cccc".repeat(16));
+    locked.auth_mode = "creator_only".to_string();
+    let open = make_zone("open", &ch.id, &"cccc".repeat(16));
+    {
+        let mut zones = state.voice_zones.write().await;
+        zones.insert((ch.id.clone(), "locked".to_string()), locked);
+        zones.insert((ch.id.clone(), "open".to_string()), open);
+    }
+
+    let (mut ws_tx, mut ws_rx) = connect_ws(&base, &token).await;
+    send_ws(
+        &mut ws_tx,
+        json!({ "type": "voice_join", "channel_id": ch.id, "udp_port": 0 }),
+    )
+    .await;
+    // Join is done once the snapshot arrives.
+    loop {
+        if let Some(Ok(TsMessage::Text(raw))) = ws_rx.next().await {
+            if raw.contains("voice_zone_state") {
+                break;
+            }
+        }
+    }
+
+    for zone in ["nope", "locked"] {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        send_ws(
+            &mut ws_tx,
+            json!({ "type": "voice_position_update", "zone_id": zone, "position": [1.0, 2.0] }),
+        )
+        .await;
+        let err = next_error(&mut ws_rx).await.expect("error frame expected");
+        assert_eq!(err["context"], "voice_position_update");
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    send_ws(
+        &mut ws_tx,
+        json!({ "type": "voice_position_update", "zone_id": "open", "position": [1.0, 2.0] }),
+    )
+    .await;
+    assert!(
+        next_error(&mut ws_rx).await.is_none(),
+        "allowed update must not error"
+    );
 }

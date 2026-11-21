@@ -1,6 +1,6 @@
 /// End-to-end integration test: server agent WebSocket flow.
 ///
-/// Unlike the other farm tests (which use axum-test's in-memory transport),
+/// Unlike the other farm tests (which use the in-process wavvon-test-server),
 /// this test binds a real TCP listener so that tokio-tungstenite can establish
 /// a genuine WebSocket connection.  The flow exercised:
 ///
@@ -13,8 +13,7 @@
 ///   7. Mock agent reads the `spawn_hub` command and replies `hub_spawned`.
 ///   8. Hub row in DB has `server_id` set (proves delegation, not local spawn).
 ///   9. TOTP setup → confirm → admin re-auth requires TOTP code.
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::Duration;

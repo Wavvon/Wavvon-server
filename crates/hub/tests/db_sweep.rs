@@ -8,8 +8,7 @@
 //! Run explicitly with:
 //!   cargo test -p wavvon-hub --test db_sweep -- --ignored --nocapture
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 #[ignore]

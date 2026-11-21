@@ -1,14 +1,13 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // Alliance member discovery (alliance-member-discovery.md). The owning hub
 // answers from its own users table, to an allied peer hub, only for members
 // who opted in AND under an alliance whose manager allowed it.
 
-async fn authenticate_as_hub(server: &axum_test::TestServer, hub: &Identity) -> String {
+async fn authenticate_as_hub(server: &wavvon_test_server::TestServer, hub: &Identity) -> String {
     let pub_key = hub.public_key_hex();
     let challenge: serde_json::Value = server
         .post("/auth/challenge")

@@ -4,8 +4,7 @@
 use serde_json::{json, Value};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn lockdown_refuses_newcomers_and_holds_back_recent_joiners() {

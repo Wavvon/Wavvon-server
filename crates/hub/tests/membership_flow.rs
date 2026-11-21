@@ -9,8 +9,7 @@ use wavvon_identity::{
     recovery_attestation_signing_bytes, recovery_request_signing_bytes, Identity,
 };
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 async fn is_member(server: &common::TestHarness, who: &Identity) -> bool {
     sqlx::query_scalar("SELECT is_member FROM users WHERE public_key = $1")

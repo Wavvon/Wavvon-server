@@ -2,19 +2,17 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tokio::sync::{broadcast, RwLock};
-use url::Url;
 use wavvon_hub::auth::models::{ChallengeResponse, VerifyResponse};
 use wavvon_hub::db;
 use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
-use webauthn_rs::WebauthnBuilder;
+use wavvon_test_server::TestServer;
 
 /// Base PostgreSQL URL for the test database server.
 /// Override with the `TEST_DATABASE_URL` environment variable.
@@ -132,11 +130,14 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         .expect("Failed to connect to PostgreSQL (admin)");
 
     let db_name = format!("wavvon_test_{}", uuid::Uuid::new_v4().simple());
+    let template = migrated_template(&admin_pool, &base_url).await;
 
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .expect("Failed to create test database");
+    sqlx::query(&format!(
+        "CREATE DATABASE \"{db_name}\" TEMPLATE \"{template}\""
+    ))
+    .execute(&admin_pool)
+    .await
+    .expect("Failed to create test database");
 
     let guard = TestDbGuard(Arc::new(TestDbGuardInner {
         db_name: db_name.clone(),
@@ -157,10 +158,6 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         .await
         .expect("Failed to connect to test database");
 
-    db::migrations::run(&pool)
-        .await
-        .expect("Failed to run migrations on test database");
-
     // Fresh hubs now seed `invite_only = true` by default (task #31), but
     // the vast majority of this suite predates that and assumes open
     // registration — dozens of test files build their own harness directly
@@ -174,6 +171,71 @@ pub async fn create_test_db() -> (PgPool, TestDbGuard) {
         .expect("reset invite_only for test database");
 
     (pool, guard)
+}
+
+/// The name of a database holding the migrated schema, built once and then
+/// cloned by every test: `CREATE DATABASE ... TEMPLATE` copies files, which
+/// is far cheaper than running every migration per test. The name carries a
+/// fingerprint of the migrations source, so a changed schema builds a new
+/// template. nextest runs each test in its own process, so creation is
+/// serialised across processes with an advisory lock, and the template is
+/// built under a temporary name and renamed only once complete.
+async fn migrated_template(admin_pool: &PgPool, base_url: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    include_str!("../src/db/migrations.rs").hash(&mut hasher);
+    let name = format!("wavvon_test_tpl_{:016x}", hasher.finish());
+
+    let mut conn = admin_pool.acquire().await.expect("admin connection");
+    sqlx::query("SELECT pg_advisory_lock(7272740)")
+        .execute(&mut *conn)
+        .await
+        .expect("template lock");
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)")
+            .bind(&name)
+            .fetch_one(&mut *conn)
+            .await
+            .expect("look up template");
+    if !exists {
+        let stale: Vec<String> = sqlx::query_scalar(
+            "SELECT datname FROM pg_database WHERE datname LIKE 'wavvon_test_tpl_%'",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .expect("list old templates");
+        for old in stale {
+            sqlx::query(&format!("DROP DATABASE IF EXISTS \"{old}\" WITH (FORCE)"))
+                .execute(&mut *conn)
+                .await
+                .expect("drop old template");
+        }
+        let building = format!("{name}_building");
+        sqlx::query(&format!("CREATE DATABASE \"{building}\""))
+            .execute(&mut *conn)
+            .await
+            .expect("create template");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("{base_url}/{building}"))
+            .await
+            .expect("connect to template");
+        db::migrations::run(&pool)
+            .await
+            .expect("Failed to run migrations on the template database");
+        pool.close().await;
+        sqlx::query(&format!(
+            "ALTER DATABASE \"{building}\" RENAME TO \"{name}\""
+        ))
+        .execute(&mut *conn)
+        .await
+        .expect("publish template");
+    }
+    sqlx::query("SELECT pg_advisory_unlock(7272740)")
+        .execute(&mut *conn)
+        .await
+        .expect("template unlock");
+    name
 }
 
 /// A test database with **no schema at all**, plus its URL.
@@ -249,7 +311,7 @@ pub async fn sweep_stale_test_databases() -> usize {
     dropped
 }
 
-/// Wraps `axum_test::TestServer` together with the `TestDbGuard` for the
+/// Wraps `wavvon_test_server::TestServer` together with the `TestDbGuard` for the
 /// database backing it, so the database is torn down exactly when the
 /// server (and everything derived from it) goes out of scope — including
 /// on test panic. `Deref`s to `TestServer` so existing call sites that use
@@ -303,17 +365,6 @@ impl Deref for TestHarness {
     fn deref(&self) -> &TestServer {
         &self.server
     }
-}
-
-fn make_test_webauthn() -> Arc<webauthn_rs::Webauthn> {
-    let origin = Url::parse("http://localhost:3000").unwrap();
-    Arc::new(
-        WebauthnBuilder::new("localhost", &origin)
-            .unwrap()
-            .rp_name("test-hub")
-            .build()
-            .unwrap(),
-    )
 }
 
 /// Builds a `TestHarness` on top of an already-created (and migrated) test
@@ -373,9 +424,8 @@ pub fn base_state(db: PgPool) -> AppState {
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_zones: RwLock::new(HashMap::new()),
         voice_udp_port: 0,
-        voice_wt_url: None,
         canonical_url: Arc::new(RwLock::new(None)),
-        voice_cert_hash: RwLock::new(None),
+        voice_rtc: std::sync::OnceLock::new(),
         voice_event_tx,
         dm_tx: broadcast::channel(16).0,
         online_users: RwLock::new(std::collections::HashMap::new()),
@@ -410,9 +460,6 @@ pub fn base_state(db: PgPool) -> AppState {
         accept_unbound_auth: true,
         metrics_enabled: false,
         http_video_stream_budget: 2,
-        webauthn: make_test_webauthn(),
-        webauthn_reg_challenges: RwLock::new(HashMap::new()),
-        webauthn_auth_challenges: RwLock::new(HashMap::new()),
         webhook_circuit: std::sync::Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),

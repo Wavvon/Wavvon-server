@@ -9,13 +9,12 @@
 use serde_json::json;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Registers `n` members and returns their pubkeys. Display names are
 /// zero-padded so the roster's `(display_name, public_key)` ordering is
 /// deterministic and a cursor walk can be checked against it.
-async fn seed_members(server: &axum_test::TestServer, n: usize) -> Vec<String> {
+async fn seed_members(server: &wavvon_test_server::TestServer, n: usize) -> Vec<String> {
     let mut keys = Vec::with_capacity(n);
     for i in 0..n {
         let id = Identity::generate();
@@ -162,7 +161,7 @@ async fn users_search_survives_multibyte_queries_past_the_cap() {
 
 /// Opens a 1:1 conversation between two fresh identities and returns
 /// `(conversation_id, sender_token)`.
-async fn open_conversation(server: &axum_test::TestServer) -> (String, String) {
+async fn open_conversation(server: &wavvon_test_server::TestServer) -> (String, String) {
     let a = Identity::generate();
     let a_token = common::authenticate(server, &a).await;
     let b = Identity::generate();

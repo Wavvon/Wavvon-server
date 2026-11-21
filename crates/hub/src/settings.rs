@@ -171,6 +171,22 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
          this to /web-client automatically.",
     ),
     (
+        "WAVVON_WEB_CLIENT_URL",
+        "(unset)",
+        "https URL of a built web client (.tar.gz or .zip) to serve at / instead of a local \
+         directory. Requires WAVVON_WEB_CLIENT_SHA256 and cannot be combined with \
+         WAVVON_WEB_CLIENT_DIR. Downloaded once, verified, and cached under \
+         web-client-cache/ in the working directory; a hash mismatch or failed download \
+         stops the hub rather than falling back.",
+    ),
+    (
+        "WAVVON_WEB_CLIENT_SHA256",
+        "(unset)",
+        "Hex SHA-256 of the archive named by WAVVON_WEB_CLIENT_URL. Required with it: the \
+         web client holds its users' keys, so the operator pins an exact build. To upgrade, \
+         change URL and hash together.",
+    ),
+    (
         "WAVVON_APPS_ALLOW_CAMERA",
         "false",
         "Set to `true` to allow bot mini-apps that declare `requires_camera: true` to \
@@ -212,15 +228,8 @@ pub const ENV_VAR_HELP: &[(&str, &str, &str)] = &[
         wavvon_hub_env::PUBLIC_URL,
         "(unset)",
         "Public base URL of this hub (e.g. https://wavvon.example.com). Drives the \
-         voice endpoint, invite links and the WebAuthn relying-party ID. \
+         voice endpoint and invite links. \
          Farm-hosted hubs derive it from WAVVON_FARM_URL and need not set it",
-    ),
-    (
-        "WAVVON_WEBAUTHN_RP_ID",
-        "(unset)",
-        "WebAuthn Relying Party ID override (e.g. example.com). \
-         Defaults to the hostname extracted from WAVVON_PUBLIC_URL, \
-         or `localhost` when neither is set",
     ),
     (
         "WAVVON_LAN_MODE",
@@ -335,6 +344,16 @@ pub struct Settings {
     ///
     /// Env: WAVVON_WEB_CLIENT_DIR
     pub web_client_dir: Option<String>,
+    /// `https` URL of a built web client (`.tar.gz` or `.zip`) the hub downloads
+    /// at boot and serves in place of `WAVVON_WEB_CLIENT_DIR`. Needs
+    /// `web_client_sha256`; exclusive with `web_client_dir`.
+    ///
+    /// Env: WAVVON_WEB_CLIENT_URL
+    pub web_client_url: Option<String>,
+    /// SHA-256 (hex) the archive at `web_client_url` must have.
+    ///
+    /// Env: WAVVON_WEB_CLIENT_SHA256
+    pub web_client_sha256: Option<String>,
     /// Allow bot mini-apps that declare `requires_camera: true` to receive
     /// camera access in client webview/iframe sandboxes.
     ///
@@ -353,14 +372,11 @@ pub struct Settings {
     /// Max concurrent video streams started over HTTP, hub-wide.
     /// Env: WAVVON_HTTP_VIDEO_STREAM_BUDGET
     pub http_video_stream_budget: u32,
-    /// Public HTTPS URL of this hub. Used to derive the WebAuthn rp_id.
+    /// Public HTTPS URL of this hub.
     /// Env: WAVVON_PUBLIC_URL
     pub public_url: Option<String>,
     /// Env: WAVVON_VOICE_PUBLIC_HOST
     pub voice_public_host: Option<String>,
-    /// WebAuthn Relying Party ID override. Falls back to public_url hostname.
-    /// Env: WAVVON_WEBAUTHN_RP_ID
-    pub webauthn_rp_id: Option<String>,
     /// Explicit opt-in for LAN/offline mode. See `crate::lan` and lan-mode.md.
     /// Env: WAVVON_LAN_MODE
     pub lan_mode: bool,
@@ -378,10 +394,10 @@ pub struct Settings {
 /// Where this hub is actually reachable from the outside, or `None` when
 /// nothing knows.
 ///
-/// Four things need it and all four fail *silently* without it: the voice
-/// WebTransport endpoint (`voice_wt_url` stays `None`, so no client can join
-/// voice at all), the first-boot owner invite link, the WebAuthn
-/// relying-party id, and the canonical URL a client stores for this hub.
+/// Three things need it and all three fail *silently* without it: the voice
+/// relay's ICE candidate (without it only loopback and the machine's own
+/// address are advertised, so remote clients cannot join voice), the first-boot owner invite link,
+/// and the canonical URL a client stores for this hub.
 ///
 /// A farm-hosted hub is the case that motivated this. The farm cannot pass the
 /// URL at spawn: it contains the hub's pubkey, and that does not exist until

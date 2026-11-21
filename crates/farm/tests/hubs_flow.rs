@@ -7,19 +7,18 @@
 /// - PATCH /farm/hubs/:hub_id/suspend (admin-only)
 /// - DELETE /farm/hubs/:hub_id (admin or owner)
 /// - GET /farm/info includes hosted_hubs count
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
 use wavvon_farm::server;
 use wavvon_farm::state::FarmState;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
 // ---------------------------------------------------------------------------
 // Setup helpers

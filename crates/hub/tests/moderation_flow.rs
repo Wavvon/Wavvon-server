@@ -10,8 +10,7 @@ use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn ban_blocks_authentication() {
@@ -265,7 +264,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Spin up a real listener so we can connect a WebSocket client to it.
 async fn spawn_real_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
     let state = Arc::new(common::base_state(db));
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -907,6 +906,24 @@ async fn the_floor_is_granted_never_taken() {
     .await;
     assert_eq!(frame["type"], "voice_joined");
     assert!(blocked, "asking for the floor is not being given it");
+
+    // The first socket's `leave_voice` runs after the socket closes; if it
+    // lands after the next join it takes the member out of the room and the
+    // grant below answers 409 (#434). Wait for the leave first.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while state
+        .voice_channels
+        .read()
+        .await
+        .get(&channel.id)
+        .is_some_and(|room| room.contains_key(&user2_pk))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "first voice session never left"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 
     // Nor can they hand it to themselves through the grant route: that one
     // wants moderation.mute, which is the same permission that silences.

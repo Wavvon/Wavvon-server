@@ -4,15 +4,14 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
-use axum_test::TestServer;
 use serde_json::json;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 use wavvon_hub::server;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Same as common::setup() but also returns the PgPool so tests can poke the
 /// database directly — needed here because the create route rejects

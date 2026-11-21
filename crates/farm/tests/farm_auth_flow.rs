@@ -1,14 +1,12 @@
 /// Integration tests for the farm auth routes and revoke-check endpoint.
 ///
 /// Each test spins up an isolated PostgreSQL database and hits the API through
-/// axum-test's TestServer — no network, fast and hermetic.
-#[path = "common.rs"]
-mod common;
+/// wavvon-test-server's TestServer — no network, fast and hermetic.
+use crate::common;
 
 use std::sync::Arc;
 
 use axum::http::HeaderValue;
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_farm::db;
 use wavvon_farm::hub_manager::HubManager;
@@ -16,6 +14,7 @@ use wavvon_farm::server;
 use wavvon_farm::state::FarmState;
 use wavvon_farm::token::verify_token;
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
 // ---------------------------------------------------------------------------
 // Test setup helper

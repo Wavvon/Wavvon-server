@@ -13,7 +13,6 @@ use wavvon_hub::federation::client::FederationClient;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
 use wavvon_identity::Identity;
-use webauthn_rs::WebauthnBuilder;
 
 /// Start the hub server and run until it fails or a stop signal arrives.
 pub async fn run(
@@ -38,7 +37,7 @@ pub async fn run(
     if public_url.is_none() {
         tracing::warn!(
             "No public URL: {} is unset and this hub is not farm-managed. Voice, \
-             invite links and passkeys all need one and will be unavailable.",
+             invite links need one and will be unavailable.",
             wavvon_hub_env::PUBLIC_URL,
         );
     }
@@ -144,7 +143,12 @@ pub async fn run(
     );
     match settings.web_client_dir.as_deref() {
         Some(dir) => tracing::info!("web client: serving from {dir}"),
-        None => tracing::info!("web client: disabled (set WAVVON_WEB_CLIENT_DIR to enable)"),
+        None => match settings.web_client_url.as_deref() {
+            Some(url) => tracing::info!("web client: serving the pinned download from {url}"),
+            None => tracing::info!(
+                "web client: disabled (set WAVVON_WEB_CLIENT_DIR or WAVVON_WEB_CLIENT_URL to enable)"
+            ),
+        },
     }
 
     if is_new {
@@ -417,13 +421,12 @@ pub async fn run(
         }
     }
 
-    // Publicly-reachable host for the voice WebTransport endpoint
-    // (voice-transport-v2.md). Voice is dialled directly, never through the
-    // farm's HTTP proxy — a datagram carries no path to route on — so only
-    // the *host* is taken here, and the port is this hub's own allocated one.
-    // WAVVON_VOICE_PUBLIC_HOST wins: a public host behind a proxy that drops
-    // UDP needs voice on a DNS-only name. The certificate is pinned by hash
-    // from /info, so that name needs no CA certificate of its own.
+    // Publicly-reachable host for voice (voice-transport-v3.md): the WebRTC
+    // relay advertises it as its ICE candidate. Voice is reached directly,
+    // never through the farm's HTTP proxy — a datagram carries no path to
+    // route on — so only the *host* is taken here, and the port is this hub's
+    // own allocated one. WAVVON_VOICE_PUBLIC_HOST wins: a public host behind a
+    // proxy that drops UDP needs voice on a DNS-only name.
     let voice_udp_host: Option<String> = settings
         .voice_public_host
         .clone()
@@ -435,69 +438,6 @@ pub async fn run(
                 .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
         })
         .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
-    let voice_wt_url: Option<String> =
-        voice_udp_host.map(|host| format!("https://{host}:{voice_udp_port}/voice"));
-
-    // ---- WebAuthn / passkey setup ----
-    let rp_id: String = settings
-        .webauthn_rp_id
-        .clone()
-        .or_else(|| {
-            public_url.as_deref().and_then(|u| {
-                Url::parse(u)
-                    .ok()
-                    .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
-            })
-        })
-        .unwrap_or_else(|| "localhost".to_string());
-
-    // Origin only — scheme, host and port, never the path. WebAuthn compares
-    // the browser's origin, and a hub behind a farm (or any path-prefixing
-    // proxy) has a public URL with a path on the end; passing that whole URL
-    // would build a relying party nothing ever matches.
-    let rp_origin: Url = public_url
-        .as_deref()
-        .and_then(|u| Url::parse(u).ok())
-        .and_then(|parsed| Url::parse(&parsed.origin().ascii_serialization()).ok())
-        .unwrap_or_else(|| {
-            Url::parse(&format!("http://localhost:{}", settings.http_port)).unwrap()
-        });
-
-    let hub_display_name = "Wavvon Hub";
-
-    // A relying party the browser will refuse must not take the hub down with
-    // it. This used to `.expect()`, and the first farm-hosted hub to boot found
-    // out why that was wrong: a farm reached at an IP derives an rp_id of
-    // `127.0.0.1`, WebAuthn requires an effective *domain*, and the whole
-    // process died at startup. Losing passkeys on a hub that could never have
-    // offered them is the correct outcome; refusing to start is not — and on a
-    // farm it takes out a community per misconfigured address.
-    let webauthn = Arc::new(
-        WebauthnBuilder::new(&rp_id, &rp_origin)
-            .and_then(|b| b.rp_name(hub_display_name).build())
-            .unwrap_or_else(|e| {
-                tracing::warn!(
-                    rp_id,
-                    rp_origin = %rp_origin,
-                    error = %e,
-                    "WebAuthn is unavailable on this hub: passkey registration and \
-                     sign-in will fail. A relying-party id must be a domain — an IP \
-                     address or a bare host cannot be one. Set WAVVON_WEBAUTHN_RP_ID, \
-                     or reach this hub by hostname."
-                );
-                let fallback = Url::parse("http://localhost").expect("static URL");
-                WebauthnBuilder::new("localhost", &fallback)
-                    .and_then(|b| b.rp_name(hub_display_name).build())
-                    .expect("the localhost relying party is always valid")
-            }),
-    );
-
-    if rp_id != "localhost" && settings.tls_cert.is_none() {
-        tracing::warn!(
-            "WebAuthn requires HTTPS for non-localhost rp_id '{rp_id}'; \
-             passkey registration/assertion will fail on plain HTTP"
-        );
-    }
 
     let state = Arc::new(AppState {
         hub_name: "my-hub".to_string(),
@@ -515,12 +455,11 @@ pub async fn run(
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_udp_port,
-        voice_wt_url,
         // Seeded with what we can work out ourselves; a farm-managed hub has
         // this replaced by the farm's answer on the first heartbeat, which is
         // also how a later rename reaches it.
         canonical_url: Arc::new(RwLock::new(public_url.clone())),
-        voice_cert_hash: RwLock::new(None),
+        voice_rtc: std::sync::OnceLock::new(),
         voice_event_tx,
         dm_tx,
         online_users: RwLock::new(HashMap::new()),
@@ -554,9 +493,6 @@ pub async fn run(
         accept_unbound_auth: false,
         metrics_enabled: settings.metrics,
         http_video_stream_budget: settings.http_video_stream_budget as usize,
-        webauthn,
-        webauthn_reg_challenges: RwLock::new(HashMap::new()),
-        webauthn_auth_challenges: RwLock::new(HashMap::new()),
         webhook_circuit: Arc::new(tokio::sync::Mutex::new(
             wavvon_hub::state::WebhookCircuit::default(),
         )),
@@ -605,20 +541,20 @@ pub async fn run(
         None
     };
 
-    // Start the WebTransport voice relay (voice-transport-v2.md). Uses the
-    // *raw* WAVVON_TLS_CERT/WAVVON_TLS_KEY, not `effective_tls_cert`/`_key`
-    // — a LAN-mode self-signed cert has no rotation story and isn't bounded
-    // to the 14-day validity `serverCertificateHashes` requires, so voice
-    // always manages its own identity independently of LAN mode.
-    let bound_voice_port = wavvon_hub::voice_wt::start(
-        state.clone(),
-        voice_udp_port,
-        settings.tls_cert.as_deref(),
-        settings.tls_key.as_deref(),
-    )
-    .await
-    .context("Failed to start voice WebTransport relay")?;
-    tracing::info!("Voice WebTransport listening on port {bound_voice_port}");
+    // Voice over WebRTC data channels (voice-transport-v3.md) on the voice
+    // UDP port.
+    let rtc_port = voice_udp_port;
+    let rtc_ips: Vec<std::net::IpAddr> = match voice_udp_host.as_deref() {
+        Some(host) => tokio::net::lookup_host((host, rtc_port))
+            .await
+            .map(|addrs| addrs.map(|a| a.ip()).collect())
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let bound_rtc_port = wavvon_hub::voice_rtc::start(state.clone(), rtc_port, rtc_ips)
+        .await
+        .context("Failed to start voice WebRTC relay")?;
+    tracing::info!("Voice WebRTC listening on port {bound_rtc_port}");
 
     // Retry undelivered federated DMs in the background.
     dm_worker::spawn(state.clone());
@@ -761,12 +697,20 @@ pub async fn run(
     // Load and validate the web client directory when configured.
     // Fail fast here so a misconfigured path doesn't silently result in a
     // running hub that 404s everything at /.
-    let web_client_cfg = match settings.web_client_dir.as_deref() {
-        Some(dir) => match wavvon_hub::web_client::WebClientConfig::load(dir) {
+    let web_client_dir = match wavvon_hub::web_client_fetch::resolve_settings(&settings).await {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("web client configuration error: {e:#}");
+            std::process::exit(1);
+        }
+    };
+    let web_client_cfg = match web_client_dir {
+        Some(dir) => match wavvon_hub::web_client::WebClientConfig::load(&dir) {
             Ok(cfg) => {
                 tracing::info!(
-                    "web client: loaded {} bytes for index.html from {dir}",
-                    cfg.index_html.len()
+                    "web client: loaded {} bytes for index.html from {}",
+                    cfg.index_html.len(),
+                    dir.display()
                 );
                 Some(std::sync::Arc::new(cfg))
             }

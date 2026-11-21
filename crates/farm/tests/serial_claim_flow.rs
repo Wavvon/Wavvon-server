@@ -15,14 +15,13 @@
 //! hand — it proves the proxy works *given* a serial, which is a different
 //! claim from "a real hub ever gets one".
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
+use wavvon_test_server::TestServer;
 
 async fn setup() -> (TestServer, Arc<FarmState>, common::TestDbGuard) {
     let (db_pool, guard) = common::create_test_db().await;

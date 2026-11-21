@@ -22,8 +22,7 @@
 //! which turns the skip into a failure, because a test that skips itself is a
 //! test that can stop running without anyone noticing.
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -312,14 +311,6 @@ async fn a_hub_created_through_the_farm_becomes_reachable_through_it() {
         info["canonical_url"].as_str().unwrap(),
         format!("{farm_url}/hub/mangiadapippo"),
         "the hub must have learned its address from the heartbeat response"
-    );
-
-    // 7. And it has a voice endpoint, which needs a public URL it could only
-    //    have derived itself.
-    assert!(
-        info["voice_wt_url"].is_string(),
-        "a farm-hosted hub with no voice endpoint is the public-URL bug \
-         returning: {info}"
     );
 
     // Reachable by pubkey too — the address of last resort.

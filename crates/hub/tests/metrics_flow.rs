@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use wavvon_hub::server;
 use wavvon_hub::state::AppState;
+use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // `GET /metrics` is opt-in (decisions.md, "Observability"): a hub that has
 // not set WAVVON_METRICS answers as if the route did not exist.

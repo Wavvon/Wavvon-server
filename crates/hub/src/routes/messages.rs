@@ -524,6 +524,14 @@ pub async fn send_message_with(
         ));
     }
 
+    crate::push::notify_channel_message(
+        state.clone(),
+        channel_id.clone(),
+        message.sender.clone(),
+        message.content.clone(),
+        message.reply_to.as_ref().map(|r| r.sender.clone()),
+    );
+
     // Publish message.created audit event for bot subscriptions.
     {
         let state_c = state.clone();

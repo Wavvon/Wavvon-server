@@ -1,8 +1,7 @@
 use serde_json::json;
 use wavvon_identity::{DhKeyRecord, Identity};
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 fn make_dh_publish_body(identity: &Identity) -> serde_json::Value {
     let (_, dh_pub) = identity.dh_keypair();

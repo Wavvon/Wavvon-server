@@ -1,10 +1,9 @@
-use axum_test::TestServer;
 use serde_json::{json, Value};
 use wavvon_hub::routes::post_models::{PostDetail, PostSearchHit, PostSummary};
 use wavvon_identity::Identity;
+use wavvon_test_server::TestServer;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 /// Create a forum channel and return its id.
 async fn create_forum_channel(server: &TestServer, token: &str) -> String {
@@ -555,15 +554,15 @@ async fn forum_post_reaction_invalid_emoji_rejected() {
 // ── Attachments ───────────────────────────────────────────────────────────────
 
 async fn upload_file(
-    server: &axum_test::TestServer,
+    server: &wavvon_test_server::TestServer,
     token: &str,
     channel_id: &str,
     name: &str,
     bytes: Vec<u8>,
 ) -> String {
-    let form = axum_test::multipart::MultipartForm::new().add_part(
+    let form = wavvon_test_server::multipart::MultipartForm::new().add_part(
         "file",
-        axum_test::multipart::Part::bytes(bytes).file_name(name),
+        wavvon_test_server::multipart::Part::bytes(bytes).file_name(name),
     );
     let resp = server
         .post(&format!("/channels/{channel_id}/upload"))
@@ -736,7 +735,7 @@ async fn forum_get_post_not_found_returns_404() {
 // ── Federation read-through (forum.md section 9, phase 1) ───────────────────
 //
 // These need two real HTTP hubs talking to each other over the federation
-// client, so `axum_test::TestServer` (in-process, no network) doesn't work
+// client, so `wavvon_test_server::TestServer` (in-process, no network) doesn't work
 // here -- mirrors the `start_hub` harness in `alliance_flow.rs`.
 
 use std::sync::Arc;

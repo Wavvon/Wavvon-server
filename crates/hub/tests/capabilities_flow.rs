@@ -8,8 +8,7 @@
 
 use wavvon_hub::capabilities::CAPABILITIES;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 #[tokio::test]
 async fn info_advertises_capabilities_unauthenticated() {

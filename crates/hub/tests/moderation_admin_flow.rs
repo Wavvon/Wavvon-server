@@ -12,8 +12,7 @@ use wavvon_hub::server;
 use wavvon_hub::state::{AppState, WebhookCircuit};
 use wavvon_identity::Identity;
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 // ---------------------------------------------------------------------------
 // ME1 — Federated ban list admin routes
@@ -563,7 +562,7 @@ async fn get_moderation_settings_circuit_open() {
     let owner_token = http_authenticate(&hub_url, &owner).await;
 
     // Force the circuit open in memory.
-    let open_until = crate::common_helpers::unix_ts() + 600;
+    let open_until = self::common_helpers::unix_ts() + 600;
     {
         let mut circuit = state.webhook_circuit.lock().await;
         circuit.consecutive_failures = 3;
@@ -697,7 +696,7 @@ mod common_helpers {
 }
 
 async fn spawn_real_hub() -> (String, Arc<AppState>, common::TestDbGuard) {
-    let (db, guard) = crate::common::create_test_db().await;
+    let (db, guard) = self::common::create_test_db().await;
     let state = Arc::new(common::base_state(db));
     let app = server::create_router(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

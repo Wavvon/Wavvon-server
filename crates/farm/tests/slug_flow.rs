@@ -5,15 +5,14 @@
 //! window, and — the property the whole design rests on — that a slug is an
 //! alias and the pubkey keeps working regardless.
 
-#[path = "common.rs"]
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 
-use axum_test::TestServer;
 use serde_json::json;
 use wavvon_farm::token::{sign_token, FarmTokenPayload};
 use wavvon_farm::{db, hub_manager::HubManager, server, state::FarmState, unix_now};
+use wavvon_test_server::TestServer;
 
 /// Mint a member token for `pubkey`, the way `/auth/verify` would.
 async fn token_for(state: &FarmState, pubkey: &str) -> String {
@@ -127,7 +126,7 @@ async fn insert_hub(h: &Harness, id: &str, pubkey: Option<&str>) {
     .unwrap();
 }
 
-async fn claim(h: &Harness, hub: &str, slug: &str) -> axum_test::TestResponse {
+async fn claim(h: &Harness, hub: &str, slug: &str) -> wavvon_test_server::TestResponse {
     h.server
         .post(&format!("/farm/hubs/{hub}/slugs"))
         .authorization_bearer(&h.owner_token)
