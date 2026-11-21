@@ -907,6 +907,24 @@ async fn the_floor_is_granted_never_taken() {
     assert_eq!(frame["type"], "voice_joined");
     assert!(blocked, "asking for the floor is not being given it");
 
+    // The first socket's `leave_voice` runs after the socket closes; if it
+    // lands after the next join it takes the member out of the room and the
+    // grant below answers 409 (#434). Wait for the leave first.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while state
+        .voice_channels
+        .read()
+        .await
+        .get(&channel.id)
+        .is_some_and(|room| room.contains_key(&user2_pk))
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "first voice session never left"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
     // Nor can they hand it to themselves through the grant route: that one
     // wants moderation.mute, which is the same permission that silences.
     let st = state.clone();
