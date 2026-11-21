@@ -122,7 +122,7 @@ pub async fn get_voice_participants(
 }
 
 /// Resolve all users with `role_id` that are currently present in any voice
-/// channel (roster membership — regardless of whether their WT session has
+/// channel (roster membership — regardless of whether their voice session has
 /// bound yet) into their pubkeys.
 async fn resolve_role_pubkeys(state: &AppState, role_id: &str) -> HashSet<String> {
     let role_users: Vec<String> =
@@ -140,8 +140,8 @@ async fn resolve_role_pubkeys(state: &AppState, role_id: &str) -> HashSet<String
 }
 
 /// Resolve "user"/"channel"/"role" whisper target defs into the pubkey set
-/// used for pubkey-keyed delivery (the WT relay's whisper routing in
-/// `voice_wt.rs`, keyed by pubkey since every session is). Shared by the
+/// used for pubkey-keyed delivery (the relay's whisper routing in
+/// `voice_relay.rs`, keyed by pubkey since every session is). Shared by the
 /// initial resolution in `handle_voice_whisper_start` and the
 /// membership-change rebuild in `re_resolve_whisper_sessions` below, so both
 /// stay in sync.

@@ -69,7 +69,7 @@ impl WebClientConfig {
 /// - `style-src-attr 'unsafe-inline'`: React sets `style=` attributes all over.
 ///   Style *elements* stay locked to same-origin files.
 /// - `connect-src https: wss:` and `img-src/media-src https:`: the client is
-///   multi-hub, so other hubs' APIs, sockets, WebTransport relays, uploads and
+///   multi-hub, so other hubs' APIs, sockets, voice relays, uploads and
 ///   stickers live on origins nobody can list in advance. Banner and hub-icon
 ///   URLs are likewise operator-chosen. Plain `http:`/`ws:` are allowed too:
 ///   a hub on a LAN or a dev box has no TLS, and since `https:` already admits

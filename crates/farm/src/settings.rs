@@ -15,7 +15,7 @@ pub struct Settings {
     /// Base port for hub child processes. Hub i gets base_port + i.
     /// Env: WAVVON_HUB_BASE_PORT
     pub hub_base_port: u16,
-    /// Base port for hub child processes' voice (WebTransport/QUIC over UDP)
+    /// Base port for hub child processes' voice (WebRTC over UDP)
     /// port. Defaults to `hub_base_port + 1000` when unset — see `load()`.
     /// Env: WAVVON_VOICE_BASE_PORT
     pub voice_base_port: Option<u16>,

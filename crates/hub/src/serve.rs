@@ -422,13 +422,12 @@ pub async fn run(
         }
     }
 
-    // Publicly-reachable host for the voice WebTransport endpoint
-    // (voice-transport-v2.md). Voice is dialled directly, never through the
-    // farm's HTTP proxy — a datagram carries no path to route on — so only
-    // the *host* is taken here, and the port is this hub's own allocated one.
-    // WAVVON_VOICE_PUBLIC_HOST wins: a public host behind a proxy that drops
-    // UDP needs voice on a DNS-only name. The certificate is pinned by hash
-    // from /info, so that name needs no CA certificate of its own.
+    // Publicly-reachable host for voice (voice-transport-v3.md): the WebRTC
+    // relay advertises it as its ICE candidate. Voice is reached directly,
+    // never through the farm's HTTP proxy — a datagram carries no path to
+    // route on — so only the *host* is taken here, and the port is this hub's
+    // own allocated one. WAVVON_VOICE_PUBLIC_HOST wins: a public host behind a
+    // proxy that drops UDP needs voice on a DNS-only name.
     let voice_udp_host: Option<String> = settings
         .voice_public_host
         .clone()
@@ -440,9 +439,6 @@ pub async fn run(
                 .and_then(|parsed| parsed.host_str().map(|h| h.to_string()))
         })
         .or_else(|| lan_advertise_ip.map(|ip| ip.to_string()));
-    let voice_wt_url: Option<String> = voice_udp_host
-        .as_ref()
-        .map(|host| format!("https://{host}:{voice_udp_port}/voice"));
 
     // ---- WebAuthn / passkey setup ----
     let rp_id: String = settings
@@ -521,12 +517,10 @@ pub async fn run(
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_udp_port,
-        voice_wt_url,
         // Seeded with what we can work out ourselves; a farm-managed hub has
         // this replaced by the farm's answer on the first heartbeat, which is
         // also how a later rename reaches it.
         canonical_url: Arc::new(RwLock::new(public_url.clone())),
-        voice_cert_hash: RwLock::new(None),
         voice_rtc: std::sync::OnceLock::new(),
         voice_event_tx,
         dm_tx,
@@ -612,29 +606,9 @@ pub async fn run(
         None
     };
 
-    // Start the WebTransport voice relay (voice-transport-v2.md). Uses the
-    // *raw* WAVVON_TLS_CERT/WAVVON_TLS_KEY, not `effective_tls_cert`/`_key`
-    // — a LAN-mode self-signed cert has no rotation story and isn't bounded
-    // to the 14-day validity `serverCertificateHashes` requires, so voice
-    // always manages its own identity independently of LAN mode.
-    let bound_voice_port = wavvon_hub::voice_wt::start(
-        state.clone(),
-        voice_udp_port,
-        settings.tls_cert.as_deref(),
-        settings.tls_key.as_deref(),
-    )
-    .await
-    .context("Failed to start voice WebTransport relay")?;
-    tracing::info!("Voice WebTransport listening on port {bound_voice_port}");
-
-    // Voice over WebRTC (voice-transport-v3.md) runs beside WebTransport until
-    // the clients have moved, so it needs a port of its own meanwhile: the
-    // voice port plus one. It takes over the voice port when WebTransport goes.
-    let rtc_port = if voice_udp_port == 0 {
-        0
-    } else {
-        voice_udp_port + 1
-    };
+    // Voice over WebRTC data channels (voice-transport-v3.md) on the voice
+    // UDP port.
+    let rtc_port = voice_udp_port;
     let rtc_ips: Vec<std::net::IpAddr> = match voice_udp_host.as_deref() {
         Some(host) => tokio::net::lookup_host((host, rtc_port))
             .await

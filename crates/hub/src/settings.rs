@@ -405,8 +405,8 @@ pub struct Settings {
 /// nothing knows.
 ///
 /// Four things need it and all four fail *silently* without it: the voice
-/// WebTransport endpoint (`voice_wt_url` stays `None`, so no client can join
-/// voice at all), the first-boot owner invite link, the WebAuthn
+/// relay's ICE candidate (without it only loopback and the machine's own
+/// address are advertised, so remote clients cannot join voice), the first-boot owner invite link, the WebAuthn
 /// relying-party id, and the canonical URL a client stores for this hub.
 ///
 /// A farm-hosted hub is the case that motivated this. The farm cannot pass the
