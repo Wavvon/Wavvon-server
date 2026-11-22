@@ -118,6 +118,8 @@ pub async fn screenshare_start(
                 via_http: true,
                 session_id: HTTP_SESSION_ID.to_string(),
                 init_chunk: None,
+                replay: Default::default(),
+                relayed: 0,
                 started_at: std::time::Instant::now(),
                 max_kbps: None,
             },

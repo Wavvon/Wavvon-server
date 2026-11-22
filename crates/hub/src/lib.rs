@@ -38,6 +38,7 @@ pub mod voice_rtc;
 pub mod web_client;
 pub mod web_client_fetch;
 pub mod webhook_url;
+pub mod webm_replay;
 
 /// Whether `ip` is in Cloudflare's published proxy ranges: a record proxied
 /// there passes HTTP and WebSockets but drops the UDP voice runs on.

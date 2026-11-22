@@ -4,7 +4,8 @@ use axum::extract::ws::Message;
 use futures_util::SinkExt;
 
 use crate::routes::chat_models::{HubStreamInfo, WsClientMessage, WsServerMessage};
-use crate::state::{ActiveShare, AppState, ScreenChunkEvent};
+use crate::state::{ActiveShare, AppState, ScreenChunkEvent, ScreenStreamMeta};
+use bytes::Bytes;
 
 use crate::routes::ws::conn_state::{ConnState, DispatchResult};
 
@@ -68,25 +69,11 @@ pub(in crate::routes::ws) async fn handle_subscribe(
             if cs.streams_on_request {
                 continue;
             }
-            if let Some(init_bytes) = &meta.init_chunk {
-                let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
-                    channel_id: channel_id.clone(),
-                    stream_id: stream_id.clone(),
-                    sharer_pubkey: meta.sharer_pubkey.clone(),
-                    seq: 0,
-                    is_init: true,
-                };
-                let json = serde_json::to_string(&chunk_envelope).unwrap();
-                if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                    return DispatchResult::Break;
-                }
-                if ws_tx
-                    .send(Message::Binary(init_bytes.to_vec().into()))
-                    .await
-                    .is_err()
-                {
-                    return DispatchResult::Break;
-                }
+            let (parts, cutoff) = join_replay(meta);
+            cs.replay_cutoff
+                .insert((channel_id.clone(), stream_id.clone()), cutoff);
+            if !send_join_replay(ws_tx, &channel_id, stream_id, &meta.sharer_pubkey, parts).await {
+                return DispatchResult::Break;
             }
         }
     }
@@ -147,6 +134,49 @@ fn within_bitrate(
     true
 }
 
+/// What a viewer joining a stream already under way is sent first: the header
+/// and the bytes since the newest keyframe, or, for a stream that is not
+/// parseable WebM, the cached first chunk. Returns the parts as
+/// `(is_init, bytes)` and the relay position they cover.
+pub(in crate::routes::ws) fn join_replay(meta: &ScreenStreamMeta) -> (Vec<(bool, Bytes)>, u64) {
+    match meta.replay.snapshot() {
+        Some((header, group)) => (vec![(true, header), (false, group)], meta.relayed),
+        None => (
+            meta.init_chunk.iter().map(|b| (true, b.clone())).collect(),
+            0,
+        ),
+    }
+}
+
+/// Sends a join replay; false when the socket is gone.
+pub(in crate::routes::ws) async fn send_join_replay(
+    ws_tx: &mut WsTx,
+    channel_id: &str,
+    stream_id: &str,
+    sharer_pubkey: &str,
+    parts: Vec<(bool, Bytes)>,
+) -> bool {
+    for (is_init, bytes) in parts {
+        let envelope = WsServerMessage::ScreenShareChunkOut {
+            channel_id: channel_id.to_string(),
+            stream_id: stream_id.to_string(),
+            sharer_pubkey: sharer_pubkey.to_string(),
+            seq: 0,
+            is_init,
+        };
+        let json = serde_json::to_string(&envelope).unwrap();
+        if ws_tx.send(Message::Text(json.into())).await.is_err()
+            || ws_tx
+                .send(Message::Binary(bytes.to_vec().into()))
+                .await
+                .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
 pub(in crate::routes::ws) async fn handle_binary_chunk(
     cs: &mut ConnState,
     state: &Arc<AppState>,
@@ -156,34 +186,29 @@ pub(in crate::routes::ws) async fn handle_binary_chunk(
         // Viewers key chunks by stream id, so a chunk for a stream this sender
         // did not start would play under the real sharer's name.
         let key = (ch_id.clone(), cs.public_key.clone());
+        let mut shares = state.screen_shares.write().await;
+        let Some(meta) = shares
+            .get_mut(&key)
+            .and_then(|active| active.streams.get_mut(&st_id))
+        else {
+            return DispatchResult::Continue;
+        };
         if is_init {
-            let mut shares = state.screen_shares.write().await;
-            let Some(meta) = shares
-                .get_mut(&key)
-                .and_then(|active| active.streams.get_mut(&st_id))
-            else {
-                return DispatchResult::Continue;
-            };
             meta.init_chunk = Some(data.clone());
-        } else {
-            let max_kbps = {
-                let shares = state.screen_shares.read().await;
-                match shares.get(&key).and_then(|a| a.streams.get(&st_id)) {
-                    Some(meta) => meta.max_kbps,
-                    None => return DispatchResult::Continue,
-                }
-            };
-            if let Some(kbps) = max_kbps {
-                let now = std::time::Instant::now();
-                let entry = cs
-                    .chunk_allowance
-                    .entry(st_id.clone())
-                    .or_insert((f64::from(kbps) * 125.0 * BITRATE_BURST_SECS, now));
-                if !within_bitrate(entry, kbps, data.len(), now) {
-                    return DispatchResult::Continue;
-                }
+        } else if let Some(kbps) = meta.max_kbps {
+            let now = std::time::Instant::now();
+            let entry = cs
+                .chunk_allowance
+                .entry(st_id.clone())
+                .or_insert((f64::from(kbps) * 125.0 * BITRATE_BURST_SECS, now));
+            if !within_bitrate(entry, kbps, data.len(), now) {
+                return DispatchResult::Continue;
             }
         }
+        meta.replay.feed(&data);
+        meta.relayed += 1;
+        // Sent under the lock: a join replay is taken under the same lock, so
+        // every chunk is either in the replay or after its cutoff.
         let _ = state.screen_share_tx.send(ScreenChunkEvent {
             channel_id: ch_id,
             stream_id: st_id,
@@ -191,6 +216,7 @@ pub(in crate::routes::ws) async fn handle_binary_chunk(
             seq,
             is_init,
             data,
+            hub_seq: meta.relayed,
         });
     }
     DispatchResult::Continue
@@ -269,6 +295,8 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
                 via_http: false,
                 session_id: cs.session_id.clone(),
                 init_chunk: None,
+                replay: Default::default(),
+                relayed: 0,
                 started_at: std::time::Instant::now(),
                 max_kbps: match (kbps, limits.max_kbps) {
                     (Some(d), Some(m)) => Some(d.min(m)),
@@ -462,27 +490,20 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
             .send(Message::Text(serde_json::to_string(&ack).unwrap().into()))
             .await;
 
-        // Replay init chunk if available.
         let shares = state.screen_shares.read().await;
         if let Some(active) = shares.get(&(source_channel_id.clone(), sharer_pubkey)) {
             if let Some(meta) = active.streams.get(&stream_id) {
-                if let Some(init_bytes) = &meta.init_chunk {
-                    let chunk_env = WsServerMessage::ScreenShareChunkOut {
-                        channel_id: source_channel_id.clone(),
-                        stream_id: stream_id.clone(),
-                        sharer_pubkey: meta.sharer_pubkey.clone(),
-                        seq: 0,
-                        is_init: true,
-                    };
-                    let _ = ws_tx
-                        .send(Message::Text(
-                            serde_json::to_string(&chunk_env).unwrap().into(),
-                        ))
-                        .await;
-                    let _ = ws_tx
-                        .send(Message::Binary(init_bytes.to_vec().into()))
-                        .await;
-                }
+                let (parts, cutoff) = join_replay(meta);
+                cs.replay_cutoff
+                    .insert((source_channel_id.clone(), stream_id.clone()), cutoff);
+                let _ = send_join_replay(
+                    ws_tx,
+                    &source_channel_id,
+                    &stream_id,
+                    &meta.sharer_pubkey,
+                    parts,
+                )
+                .await;
             }
         }
     } else {

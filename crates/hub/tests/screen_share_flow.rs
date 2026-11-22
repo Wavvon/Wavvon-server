@@ -333,6 +333,129 @@ async fn late_joiner_receives_init_chunk() {
     }
 }
 
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    TsMessage,
+>;
+
+fn webm_el(id: &[u8], body: &[u8]) -> Vec<u8> {
+    let mut v = id.to_vec();
+    v.extend_from_slice(&[0x40 | (body.len() >> 8) as u8, body.len() as u8]);
+    v.extend_from_slice(body);
+    v
+}
+
+/// A WebM cluster of unknown size holding one video block on track 1.
+fn webm_cluster(key: bool, payload: &[u8]) -> Vec<u8> {
+    let mut v = vec![
+        0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    ];
+    let mut block = vec![0x81, 0, 0, if key { 0x80 } else { 0 }];
+    block.extend_from_slice(payload);
+    v.extend(webm_el(&[0xA3], &block));
+    v
+}
+
+fn webm_header() -> Vec<u8> {
+    let mut v = webm_el(&[0x1A, 0x45, 0xDF, 0xA3], &[0x42, 0x86, 0x81, 0x01]);
+    v.extend_from_slice(&[
+        0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    ]);
+    let entry = webm_el(
+        &[0xAE],
+        &[webm_el(&[0xD7], &[1]), webm_el(&[0x83], &[1])].concat(),
+    );
+    v.extend(webm_el(&[0x16, 0x54, 0xAE, 0x6B], &entry));
+    v
+}
+
+async fn send_late_chunk(
+    tx: &mut WsSink,
+    channel_id: &str,
+    seq: u32,
+    is_init: bool,
+    bytes: Vec<u8>,
+) {
+    send_text(
+        tx,
+        json!({ "type": "screen_share_chunk", "channel_id": channel_id, "stream_id": "str-late", "seq": seq, "is_init": is_init }),
+    )
+    .await;
+    tx.send(TsMessage::Binary(bytes)).await.unwrap();
+}
+
+/// A viewer joining mid-stream gets the header and the bytes since the newest
+/// keyframe, then live chunks from there on and none of those twice
+/// (Wavvon-clients#486). The first chunk alone left it decoding slices from
+/// the middle of the stream.
+#[tokio::test]
+async fn late_joiner_receives_header_and_newest_keyframe_group() {
+    let (base, _state, _guard) = start_hub().await;
+    let sharer_id = Identity::generate();
+    let viewer_id = Identity::generate();
+    let sharer_token = authenticate_http(&base, &sharer_id).await;
+    let viewer_token = authenticate_http(&base, &viewer_id).await;
+    let ch = create_channel(&base, &sharer_token, "late").await;
+
+    let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "screen_share_start", "channel_id": ch.id, "stream_id": "str-late", "kind": "screen", "mime": "video/webm;codecs=vp8", "has_audio": false }),
+    )
+    .await;
+
+    let header = webm_header();
+    let newest = webm_cluster(true, b"key-2");
+    send_late_chunk(
+        &mut sharer_tx,
+        &ch.id,
+        0,
+        true,
+        [header.clone(), webm_cluster(true, b"key-1")].concat(),
+    )
+    .await;
+    send_late_chunk(
+        &mut sharer_tx,
+        &ch.id,
+        1,
+        false,
+        webm_cluster(false, b"delta"),
+    )
+    .await;
+    send_late_chunk(&mut sharer_tx, &ch.id, 2, false, newest.clone()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let (mut viewer_tx, mut viewer_rx) = connect_ws(&base, &viewer_token).await;
+    send_text(
+        &mut viewer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    assert_eq!(
+        next_text(&mut viewer_rx).await["type"],
+        "screen_share_started"
+    );
+
+    let mut received = Vec::new();
+    send_late_chunk(&mut sharer_tx, &ch.id, 3, false, b"live-tail".to_vec()).await;
+    for _ in 0..3 {
+        let env = next_text(&mut viewer_rx).await;
+        assert_eq!(env["type"], "screen_share_chunk");
+        let TsMessage::Binary(data) = next_raw(&mut viewer_rx).await else {
+            panic!("expected a binary frame after the envelope");
+        };
+        received.push((env["is_init"].as_bool().unwrap(), data.to_vec()));
+    }
+    assert_eq!(received[0], (true, header));
+    assert_eq!(received[1], (false, newest));
+    assert_eq!(received[2], (false, b"live-tail".to_vec()));
+}
+
 /// Co-op multi-stream: multiple users can share simultaneously in the same channel.
 /// Each gets their own slot keyed by (channel_id, pubkey); a viewer sees both.
 #[tokio::test]
