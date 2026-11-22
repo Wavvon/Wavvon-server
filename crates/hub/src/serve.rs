@@ -260,6 +260,12 @@ pub async fn run(
         .await?;
     }
 
+    // A new hub starts with a soundboard (#447). Non-fatal: a hub that cannot
+    // write its uploads directory still serves, with an empty soundboard.
+    if let Err(e) = wavvon_hub::routes::soundboard::seed_default_clips(&db).await {
+        tracing::warn!("default soundboard not installed: {e}");
+    }
+
     // If owner_pubkey is configured, seed that key as the hub owner before
     // serving any traffic. Idempotent: skipped if the key is already owner.
     // The farm sets this when spawning a hub created by a specific user.
