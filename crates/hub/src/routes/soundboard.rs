@@ -327,19 +327,20 @@ pub async fn mark_played(
         permissions::channel_permissions(&state.db, &user.public_key, &req.channel_id).await?;
     perms.require(VOICE_SOUNDBOARD_USE)?;
 
-    let clip_name: Option<String> =
-        sqlx::query_scalar("SELECT name FROM soundboard_clips WHERE id = $1")
+    let clip: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT name, emoji FROM soundboard_clips WHERE id = $1")
             .bind(&id)
             .fetch_optional(&state.db)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    let clip_name =
-        clip_name.ok_or_else(|| (StatusCode::NOT_FOUND, "Clip not found".to_string()))?;
+    let (clip_name, emoji) =
+        clip.ok_or_else(|| (StatusCode::NOT_FOUND, "Clip not found".to_string()))?;
 
     let ws_msg = WsServerMessage::SoundboardPlayed {
         channel_id: req.channel_id.clone(),
         clip_id: id,
         clip_name,
+        emoji,
         public_key: user.public_key,
     };
     let json: Arc<str> = Arc::from(serde_json::to_string(&ws_msg).unwrap().as_str());

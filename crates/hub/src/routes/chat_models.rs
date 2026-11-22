@@ -1067,6 +1067,8 @@ pub enum WsServerMessage {
         channel_id: String,
         clip_id: String,
         clip_name: String,
+        /// The clip's emoji, for the player's avatar burst; null when it has none.
+        emoji: Option<String>,
         public_key: String,
     },
 
