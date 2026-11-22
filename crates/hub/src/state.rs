@@ -81,6 +81,11 @@ pub struct ScreenStreamMeta {
     /// Cached WebM init segment for late joiners. Set on the first chunk
     /// where `is_init == true`.
     pub init_chunk: Option<Bytes>,
+    /// The header and the bytes since the newest keyframe, which is what a
+    /// viewer joining mid-stream can decode.
+    pub replay: crate::webm_replay::WebmReplay,
+    /// Chunks relayed so far; each carries its position as `hub_seq`.
+    pub relayed: u64,
     /// Wall time when this stream was registered. Used to distinguish
     /// "share started before I subscribed" (push needed) from
     /// "share started after I subscribed" (broadcast delivers it).
@@ -111,6 +116,9 @@ pub struct ScreenChunkEvent {
     pub seq: u32,
     pub is_init: bool,
     pub data: Bytes,
+    /// Position in the relay order of its stream, so a viewer handed a join
+    /// replay can skip the chunks it already holds.
+    pub hub_seq: u64,
 }
 
 /// Attenuation parameters for a voice zone.

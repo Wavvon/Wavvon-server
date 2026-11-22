@@ -224,20 +224,17 @@ pub(super) async fn handle_socket(
                 if cs.streams_on_request {
                     continue;
                 }
-                if let Some(init_bytes) = &meta.init_chunk {
-                    let chunk_envelope = WsServerMessage::ScreenShareChunkOut {
-                        channel_id: ch_id.clone(),
-                        stream_id: stream_id.clone(),
-                        sharer_pubkey: meta.sharer_pubkey.clone(),
-                        seq: 0,
-                        is_init: true,
-                    };
-                    let json = serde_json::to_string(&chunk_envelope).unwrap();
-                    let _ = ws_tx.send(Message::Text(json.into())).await;
-                    let _ = ws_tx
-                        .send(Message::Binary(init_bytes.to_vec().into()))
-                        .await;
-                }
+                let (parts, cutoff) = screen::join_replay(meta);
+                cs.replay_cutoff
+                    .insert((ch_id.clone(), stream_id.clone()), cutoff);
+                let _ = screen::send_join_replay(
+                    &mut ws_tx,
+                    ch_id,
+                    stream_id,
+                    &meta.sharer_pubkey,
+                    parts,
+                )
+                .await;
             }
         }
     }
@@ -571,7 +568,12 @@ pub(super) async fn handle_socket(
                         } else {
                             in_channel || is_cross_subscriber
                         };
-                        if deliver {
+                        // Already in the join replay this connection was sent.
+                        let replayed = cs
+                            .replay_cutoff
+                            .get(&(ev.channel_id.clone(), ev.stream_id.clone()))
+                            .is_some_and(|&cut| ev.hub_seq <= cut);
+                        if deliver && !replayed {
                             // Guarantee screen_share_started arrives before the
                             // first chunk for this stream, regardless of the order
                             // the hub processes the sharer's messages.

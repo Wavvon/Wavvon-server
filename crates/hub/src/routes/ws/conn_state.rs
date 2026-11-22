@@ -57,6 +57,9 @@ pub(super) struct ConnState {
     /// The streams this connection opened, by (channel_id, stream_id). Read
     /// only when `streams_on_request` is set.
     pub opened_streams: HashSet<(String, String)>,
+    /// (channel_id, stream_id) to the last relayed chunk a join replay
+    /// already covered; chunks up to it are not delivered again.
+    pub replay_cutoff: HashMap<(String, String), u64>,
     /// Rate-limit map for component interactions.
     /// Key: (user_pubkey, custom_id).  Value: last interaction instant.
     pub component_rate_limit: HashMap<(String, String), Instant>,
@@ -94,6 +97,7 @@ impl ConnState {
             notified_streams: HashSet::new(),
             streams_on_request: false,
             opened_streams: HashSet::new(),
+            replay_cutoff: HashMap::new(),
             component_rate_limit: HashMap::new(),
             my_conversations,
             replay_buffer: Vec::new(),
