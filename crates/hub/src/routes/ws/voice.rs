@@ -111,11 +111,20 @@ pub async fn get_voice_participants(
     {
         let (display_name, visiting_from) = voice_identity(state, pk).await;
 
+        let (muted, deafened) = state
+            .voice_self_state
+            .read()
+            .await
+            .get(pk)
+            .copied()
+            .unwrap_or_default();
         result.push(VoiceParticipantInfo {
             public_key: pk.clone(),
             display_name,
             sender_id: sender_ids.get(pk).copied(),
             visiting_from,
+            muted,
+            deafened,
         });
     }
     result

@@ -63,6 +63,7 @@ pub async fn voice_channel_participants(
         }
     }
 
+    let self_state = state.voice_self_state.read().await.clone();
     let mut out: HashMap<String, Vec<VoiceParticipantInfo>> = HashMap::new();
     for (channel_id, members) in voice.iter() {
         let participants: Vec<VoiceParticipantInfo> = members
@@ -74,6 +75,8 @@ pub async fn voice_channel_participants(
                     public_key: pk.clone(),
                     display_name: info.and_then(|i| i.display_name.clone()),
                     visiting_from: info.and_then(|i| i.visiting_from.clone()),
+                    muted: self_state.get(pk).is_some_and(|s| s.0),
+                    deafened: self_state.get(pk).is_some_and(|s| s.1),
                 }
             })
             .collect();
@@ -91,6 +94,8 @@ pub struct VoiceParticipantInfo {
     /// The hub vouching for an alliance-voice visitor; absent for members.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub visiting_from: Option<String>,
+    pub muted: bool,
+    pub deafened: bool,
 }
 
 pub async fn create_channel(

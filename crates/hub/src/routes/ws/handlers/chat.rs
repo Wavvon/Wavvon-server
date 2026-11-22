@@ -159,6 +159,8 @@ pub(in crate::routes::ws) async fn handle_set_status(
                                 .and_then(|m| m.get(&cs.public_key))
                                 .copied(),
                             visiting_from,
+                            muted: false,
+                            deafened: false,
                         },
                     },
                 ));

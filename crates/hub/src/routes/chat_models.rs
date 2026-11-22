@@ -525,6 +525,13 @@ pub enum WsClientMessage {
     VoiceRtcOffer { token: String, sdp: String },
     #[serde(rename = "voice_speaking")]
     VoiceSpeaking { channel_id: String, speaking: bool },
+    /// The sender0027s own mute and deafen state, for the room to show.
+    #[serde(rename = "voice_self_state")]
+    VoiceSelfState {
+        channel_id: String,
+        muted: bool,
+        deafened: bool,
+    },
     #[serde(rename = "typing")]
     Typing { channel_id: String, typing: bool },
     /// Set the sender's presence status. `status` is "online", "away",
@@ -804,6 +811,13 @@ pub enum WsServerMessage {
         channel_id: String,
         public_key: String,
         speaking: bool,
+    },
+    #[serde(rename = "voice_participant_self_state")]
+    VoiceParticipantSelfState {
+        channel_id: String,
+        public_key: String,
+        muted: bool,
+        deafened: bool,
     },
     /// Echo of a client `ping`. Carries the nonce back untouched — the hub
     /// still does no timing of its own.
@@ -1199,6 +1213,11 @@ pub struct VoiceParticipantInfo {
     /// member. Absent for everyone with a `users` row here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visiting_from: Option<String>,
+    /// Self-mute and deafen as last reported (`voice_self_state`).
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub deafened: bool,
 }
 
 #[derive(Serialize, Clone)]

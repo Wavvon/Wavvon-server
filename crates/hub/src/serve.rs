@@ -458,6 +458,7 @@ pub async fn run(
         http_client,
         voice_channels: RwLock::new(HashMap::new()),
         voice_last_active: RwLock::new(HashMap::new()),
+        voice_self_state: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),
         voice_udp_port,
