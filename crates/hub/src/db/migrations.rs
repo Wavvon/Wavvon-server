@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 17;
+pub const SCHEMA_VERSION: i32 = 18;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -416,6 +416,13 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
         // hub's own page, which is not what they were for.
         17 => {
             sqlx::query("DROP TABLE IF EXISTS webauthn_credentials")
+                .execute(conn)
+                .await?;
+        }
+        // The default soundboard (#447): a clip the hub ships with has no
+        // uploader, so the column admits NULL; the API reports it as "".
+        18 => {
+            sqlx::query("ALTER TABLE soundboard_clips ALTER COLUMN uploader DROP NOT NULL")
                 .execute(conn)
                 .await?;
         }

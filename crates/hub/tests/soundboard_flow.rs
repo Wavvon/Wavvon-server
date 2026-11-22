@@ -570,3 +570,50 @@ async fn played_rejects_member_without_use_soundboard() {
         .unwrap();
     assert_eq!(played.status(), reqwest::StatusCode::FORBIDDEN);
 }
+
+/// A hub starts with a default soundboard, installed once (#447): six clips
+/// with an emoji and no uploader, reported as "". A deleted default does not
+/// come back on the next start.
+#[tokio::test]
+async fn default_soundboard_is_installed_once() {
+    let (base, state, _guard) = start_hub().await;
+    let owner_token = authenticate_http(&base, &Identity::generate()).await;
+    let client = reqwest::Client::new();
+    let list = |client: reqwest::Client, token: String| {
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/soundboard"))
+                .bearer_auth(token)
+                .send()
+                .await
+                .unwrap()
+                .json::<Vec<Value>>()
+                .await
+                .unwrap()
+        }
+    };
+
+    wavvon_hub::routes::soundboard::seed_default_clips(&state.db)
+        .await
+        .unwrap();
+    let clips = list(client.clone(), owner_token.clone()).await;
+    assert_eq!(clips.len(), 6);
+    assert!(clips
+        .iter()
+        .all(|c| c["uploader"] == "" && c["emoji"].is_string()));
+
+    let first = clips[0]["id"].as_str().unwrap().to_string();
+    let deleted = client
+        .delete(format!("{base}/soundboard/{first}"))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), reqwest::StatusCode::NO_CONTENT);
+
+    wavvon_hub::routes::soundboard::seed_default_clips(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(list(client, owner_token).await.len(), 5);
+}

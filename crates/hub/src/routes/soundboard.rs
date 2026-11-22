@@ -64,7 +64,7 @@ pub async fn list_clips(
     Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<ClipInfo>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ClipInfo>(
-        "SELECT id, name, emoji, uploader, size_bytes, duration_ms, created_at
+        "SELECT id, name, emoji, COALESCE(uploader, '') AS uploader, size_bytes, duration_ms, created_at
          FROM soundboard_clips
          WHERE $1::text IS NULL OR (name, id) >
                ((SELECT name FROM soundboard_clips WHERE id = $1), $1)
@@ -252,6 +252,93 @@ pub async fn upload_clip(
             created_at: now,
         }),
     ))
+}
+
+/// The clips a hub ships with (`assets/soundboard/`, made for the project,
+/// see the README there): name, emoji, Opus-in-Ogg bytes.
+const DEFAULT_CLIPS: &[(&str, &str, &[u8])] = &[
+    (
+        "Airhorn",
+        "📯",
+        include_bytes!("../../assets/soundboard/airhorn.ogg"),
+    ),
+    (
+        "Applause",
+        "👏",
+        include_bytes!("../../assets/soundboard/applause.ogg"),
+    ),
+    (
+        "Ding",
+        "🔔",
+        include_bytes!("../../assets/soundboard/ding.ogg"),
+    ),
+    (
+        "Drum roll",
+        "🥁",
+        include_bytes!("../../assets/soundboard/drum-roll.ogg"),
+    ),
+    (
+        "Sad trombone",
+        "🎺",
+        include_bytes!("../../assets/soundboard/sad-trombone.ogg"),
+    ),
+    (
+        "Ta-da",
+        "🎉",
+        include_bytes!("../../assets/soundboard/tada.ogg"),
+    ),
+];
+
+/// Gives a hub its default soundboard, once. A hub whose library already
+/// has clips keeps it as it is; either way the `soundboard_defaults_seeded`
+/// setting is written, so clips an admin deletes do not come back on the
+/// next start.
+pub async fn seed_default_clips(db: &sqlx::PgPool) -> Result<(), String> {
+    let seeded: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM hub_settings WHERE key = 'soundboard_defaults_seeded')",
+    )
+    .fetch_one(db)
+    .await
+    .map_err(|e| format!("DB error: {e}"))?;
+    if seeded {
+        return Ok(());
+    }
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM soundboard_clips")
+        .fetch_one(db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+    if existing == 0 {
+        let dir = soundboard_dir();
+        tokio::fs::create_dir_all(dir.trim_end_matches('/'))
+            .await
+            .map_err(|e| format!("FS error: {e}"))?;
+        let now = crate::auth::handlers::unix_timestamp();
+        for (name, emoji, bytes) in DEFAULT_CLIPS {
+            let duration_ms = validate_ogg_opus(bytes)?;
+            let id = Uuid::new_v4().to_string();
+            tokio::fs::write(clip_audio_path(&id), bytes)
+                .await
+                .map_err(|e| format!("Write error: {e}"))?;
+            sqlx::query(
+                "INSERT INTO soundboard_clips (id, name, emoji, uploader, size_bytes, duration_ms, created_at)
+                 VALUES ($1, $2, $3, NULL, $4, $5, $6)",
+            )
+            .bind(&id)
+            .bind(name)
+            .bind(emoji)
+            .bind(bytes.len() as i64)
+            .bind(duration_ms)
+            .bind(now)
+            .execute(db)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+        }
+    }
+    sqlx::query("INSERT INTO hub_settings (key, value) VALUES ('soundboard_defaults_seeded', 'true') ON CONFLICT (key) DO NOTHING")
+        .execute(db)
+        .await
+        .map_err(|e| format!("DB error: {e}"))?;
+    Ok(())
 }
 
 /// DELETE /soundboard/:id -- requires `voice.soundboard.manage`.
