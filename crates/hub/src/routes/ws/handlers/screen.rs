@@ -202,6 +202,14 @@ pub(in crate::routes::ws) async fn handle_binary_chunk(
                 .entry(st_id.clone())
                 .or_insert((f64::from(kbps) * 125.0 * BITRATE_BURST_SECS, now));
             if !within_bitrate(entry, kbps, data.len(), now) {
+                // A dropped slice breaks the byte stream for every viewer
+                // from here on, so it must not pass in silence.
+                tracing::warn!(
+                    stream_id = %st_id,
+                    kbps,
+                    bytes = data.len(),
+                    "screen share chunk over the stream's bitrate: dropped"
+                );
                 return DispatchResult::Continue;
             }
         }
