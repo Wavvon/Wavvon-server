@@ -429,7 +429,14 @@ async fn played_broadcasts_soundboard_played_to_channel() {
     let role_id = create_role(&base, &owner_token, "Speaker", &["voice.soundboard.use"]).await;
     assign_role(&base, &owner_token, &member.public_key_hex(), &role_id).await;
 
-    let resp = upload_clip(&base, &owner_token, "Airhorn", None, build_ogg_opus(1_000)).await;
+    let resp = upload_clip(
+        &base,
+        &owner_token,
+        "Airhorn",
+        Some("📯"),
+        build_ogg_opus(1_000),
+    )
+    .await;
     let clip: Value = resp.json().await.unwrap();
     let clip_id = clip["id"].as_str().unwrap().to_string();
 
@@ -477,6 +484,7 @@ async fn played_broadcasts_soundboard_played_to_channel() {
     assert_eq!(event["channel_id"], ch.id);
     assert_eq!(event["clip_id"], clip_id);
     assert_eq!(event["clip_name"], "Airhorn");
+    assert_eq!(event["emoji"], "📯");
     assert_eq!(event["public_key"], member.public_key_hex());
 }
 
