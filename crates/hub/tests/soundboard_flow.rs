@@ -313,16 +313,19 @@ async fn upload_rejects_bad_format() {
     assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
 }
 
+/// There is no count cap: how many clips a hub holds is its operator's call
+/// (#448). The list pages in the hub's dialect, by name, without gaps or
+/// repeats.
 #[tokio::test]
-async fn upload_rejects_fifty_first_clip() {
+async fn no_clip_cap_and_the_list_pages() {
     let (base, _state, _guard) = start_hub().await;
     let owner_token = authenticate_http(&base, &Identity::generate()).await;
 
-    for i in 0..50 {
+    for i in 0..51 {
         let resp = upload_clip(
             &base,
             &owner_token,
-            &format!("clip-{i}"),
+            &format!("clip-{i:02}"),
             None,
             build_ogg_opus(500),
         )
@@ -330,12 +333,35 @@ async fn upload_rejects_fifty_first_clip() {
         assert_eq!(
             resp.status(),
             reqwest::StatusCode::CREATED,
-            "clip {i} should upload successfully"
+            "clip {i} should upload"
         );
     }
 
-    let resp = upload_clip(&base, &owner_token, "clip-51", None, build_ogg_opus(500)).await;
-    assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
+    let client = reqwest::Client::new();
+    let mut names = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let mut url = format!("{base}/soundboard?limit=20");
+        if let Some(c) = &cursor {
+            url.push_str(&format!("&cursor={c}"));
+        }
+        let page: Vec<Value> = client
+            .get(url)
+            .bearer_auth(&owner_token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if page.is_empty() {
+            break;
+        }
+        cursor = page.last().map(|c| c["id"].as_str().unwrap().to_string());
+        names.extend(page.iter().map(|c| c["name"].as_str().unwrap().to_string()));
+    }
+    let expected: Vec<String> = (0..51).map(|i| format!("clip-{i:02}")).collect();
+    assert_eq!(names, expected);
 }
 
 // ---------------------------------------------------------------------------

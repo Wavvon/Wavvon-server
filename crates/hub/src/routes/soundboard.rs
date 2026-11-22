@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Path, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
@@ -20,13 +20,13 @@ use uuid::Uuid;
 use crate::auth::middleware::AuthUser;
 use crate::permissions::{self, VOICE_SOUNDBOARD_MANAGE, VOICE_SOUNDBOARD_USE};
 use crate::routes::chat_models::{ChatEvent, WsServerMessage};
+use crate::routes::paging::PageQuery;
 use crate::state::AppState;
 
-/// Hard caps (soundboard.md §1 Decisions). Hub-configurable caps are a
-/// documented follow-up, not implemented here.
+/// What keeps a clip a soundboard clip (soundboard.md §1 Decisions). How many
+/// clips a hub holds is its operator's call, so there is no count cap.
 const MAX_CLIP_BYTES: usize = 512 * 1024;
 const MAX_CLIP_DURATION_MS: i64 = 10_000;
-const MAX_CLIPS_PER_HUB: i64 = 50;
 
 /// Audio bytes live under the same directory as attachment uploads
 /// (`uploads.rs`), keyed by clip id rather than a random filename since the
@@ -54,17 +54,25 @@ pub struct ClipInfo {
     pub created_at: i64,
 }
 
-/// GET /soundboard -- list every clip in the hub's library. Any
-/// authenticated member may list; playing one is gated separately by
-/// `use_soundboard`.
+/// GET /soundboard -- the hub's clip library by name, in the hub's list
+/// dialect (`limit`, and `cursor` = the id of the last clip of the previous
+/// page). Any authenticated member may list; playing one is gated separately
+/// by `use_soundboard`.
 pub async fn list_clips(
     State(state): State<Arc<AppState>>,
     _user: AuthUser,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<ClipInfo>>, (StatusCode, String)> {
     let rows = sqlx::query_as::<_, ClipInfo>(
         "SELECT id, name, emoji, uploader, size_bytes, duration_ms, created_at
-         FROM soundboard_clips ORDER BY name",
+         FROM soundboard_clips
+         WHERE $1::text IS NULL OR (name, id) >
+               ((SELECT name FROM soundboard_clips WHERE id = $1), $1)
+         ORDER BY name, id
+         LIMIT $2",
     )
+    .bind(page.cursor())
+    .bind(page.limit())
     .fetch_all(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
@@ -115,17 +123,6 @@ pub async fn upload_clip(
 ) -> Result<(StatusCode, Json<ClipInfo>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(VOICE_SOUNDBOARD_MANAGE)?;
-
-    let clip_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM soundboard_clips")
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    if clip_count >= MAX_CLIPS_PER_HUB {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!("This hub already has the maximum of {MAX_CLIPS_PER_HUB} soundboard clips"),
-        ));
-    }
 
     let mut name: Option<String> = None;
     let mut emoji: Option<String> = None;
