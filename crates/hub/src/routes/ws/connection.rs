@@ -817,6 +817,7 @@ fn visitor_may_send(msg: &WsClientMessage) -> bool {
         WsClientMessage::VoiceJoin { .. }
             | WsClientMessage::VoiceLeave { .. }
             | WsClientMessage::VoiceSpeaking { .. }
+            | WsClientMessage::VoiceSelfState { .. }
             | WsClientMessage::VoiceKeyOffer { .. }
             | WsClientMessage::VoiceRtcOffer { .. }
             | WsClientMessage::Ping { .. }
@@ -916,6 +917,9 @@ async fn dispatch_client_msg(
         }
         WsClientMessage::VoiceLeave { .. } => voice::handle_voice_leave(cs, state, msg).await,
         WsClientMessage::VoiceSpeaking { .. } => voice::handle_voice_speaking(cs, state, msg).await,
+        WsClientMessage::VoiceSelfState { .. } => {
+            voice::handle_voice_self_state(cs, state, msg).await
+        }
         WsClientMessage::VoiceWhisperStart { .. } => {
             voice::handle_voice_whisper_start(cs, state, msg).await
         }
@@ -1000,6 +1004,7 @@ pub async fn leave_voice_for_test(state: &AppState, public_key: &str, channel_id
 
 pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     state.voice_last_active.write().await.remove(public_key);
+    state.voice_self_state.write().await.remove(public_key);
     let (removed_session, became_empty) = {
         let mut channels = state.voice_channels.write().await;
         let session = channels

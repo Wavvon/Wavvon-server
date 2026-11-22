@@ -434,6 +434,8 @@ pub(in crate::routes::ws) async fn handle_voice_join(
                     display_name: display_name.clone(),
                     sender_id: Some(sender_id),
                     visiting_from,
+                    muted: false,
+                    deafened: false,
                 },
             },
         ));
@@ -629,6 +631,50 @@ pub(in crate::routes::ws) async fn handle_voice_speaking(
             channel_id,
             public_key: cs.public_key.clone(),
             speaking,
+        },
+    ));
+    DispatchResult::Continue
+}
+
+pub(in crate::routes::ws) async fn handle_voice_self_state(
+    cs: &ConnState,
+    state: &Arc<AppState>,
+    msg: WsClientMessage,
+) -> DispatchResult {
+    let WsClientMessage::VoiceSelfState {
+        channel_id,
+        muted,
+        deafened,
+    } = msg
+    else {
+        return DispatchResult::Continue;
+    };
+    // Only a participant of that room reports a state in it, as for speaking.
+    let in_room = state
+        .voice_channels
+        .read()
+        .await
+        .get(&channel_id)
+        .is_some_and(|room| room.contains_key(&cs.public_key));
+    if !in_room {
+        return DispatchResult::Continue;
+    }
+    state
+        .voice_self_state
+        .write()
+        .await
+        .insert(cs.public_key.clone(), (muted, deafened));
+    // Same gate as speaking: an invisible participant is not announced.
+    if crate::routes::users::is_invisible(&state.db, &cs.public_key).await {
+        return DispatchResult::Continue;
+    }
+    let _ = state.voice_event_tx.send((
+        channel_id.clone(),
+        WsServerMessage::VoiceParticipantSelfState {
+            channel_id,
+            public_key: cs.public_key.clone(),
+            muted,
+            deafened,
         },
     ));
     DispatchResult::Continue

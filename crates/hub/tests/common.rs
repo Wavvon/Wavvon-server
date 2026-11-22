@@ -419,6 +419,7 @@ pub fn base_state(db: PgPool) -> AppState {
         peer_tokens: RwLock::new(HashMap::new()),
         voice_channels: RwLock::new(HashMap::new()),
         voice_last_active: RwLock::new(HashMap::new()),
+        voice_self_state: RwLock::new(HashMap::new()),
         whisper_target_pubkeys: RwLock::new(HashMap::new()),
         voice_sender_ids: RwLock::new(HashMap::new()),
         voice_next_sender_id: RwLock::new(HashMap::new()),

@@ -393,6 +393,11 @@ pub struct AppState {
     /// `VoiceSpeaking` message; removed by `leave_voice`.
     pub voice_last_active: RwLock<HashMap<String, i64>>,
 
+    /// Pubkey -> (muted, deafened) as the member0027s client reported it with
+    /// `voice_self_state`. Informational: a muted client sends no audio
+    /// anyway. Ephemeral; removed by `leave_voice`.
+    pub voice_self_state: RwLock<HashMap<String, (bool, bool)>>,
+
     /// Pubkeys that have opted out of RECEIVING whispers (whisper.md).
     /// Ephemeral, in-memory only -- resets on hub restart. Consulted at the
     /// top of every whisper-target resolution function (`resolve_whisper_targets`,

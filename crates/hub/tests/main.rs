@@ -107,6 +107,7 @@ mod voice_encryption_flow;
 mod voice_move_flow;
 mod voice_relay_flow;
 mod voice_rtc_flow;
+mod voice_self_state_flow;
 mod voice_speaking_flow;
 mod web_client_fetch_flow;
 mod web_client_flow;

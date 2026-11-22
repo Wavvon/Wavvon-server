@@ -219,6 +219,11 @@ pub const CAPABILITIES: &[&str] = &[
     // the member lacks them only on a hub that says so; an older hub gates
     // both on `voice.join` alone.
     "voice.media.permissions",
+    // `voice_self_state` is accepted and relayed as
+    // `voice_participant_self_state`, and voice rosters carry `muted` and
+    // `deafened`. A client shows a the mute icon of a participant only here: an
+    // older hub sends neither, and "absent" must not read as "unmuted".
+    "voice.mute.state",
     // `min_talk_power` gates transmitting, not joining, and the floor is
     // granted by a moderator rather than taken with `raise-hand`. Two things
     // a client may only do once it sees this string: read `may_speak` on
