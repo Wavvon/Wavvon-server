@@ -97,6 +97,10 @@ permission_catalogue! {
     VOICE_SOUNDBOARD_MANAGE => "voice.soundboard.manage", Hub,
     /// Resolved against the **destination** channel, not the source.
     VOICE_MOVE_MEMBERS => "voice.move_members", HubAndChannel,
+    /// Running a room's stage: pinning members for everyone in it. Not a
+    /// moderation power, so an event host can hold it on one room without
+    /// being able to mute anyone.
+    VOICE_STAGE => "voice.stage", HubAndChannel,
 
     // ── Stickers ────────────────────────────────────────────────────────
     /// Packs and their stickers, including "add to a pack" from chat.

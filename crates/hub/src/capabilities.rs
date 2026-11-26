@@ -225,7 +225,7 @@ pub const CAPABILITIES: &[&str] = &[
     // older hub sends neither, and "absent" must not read as "unmuted".
     "voice.mute.state",
     // The stage is the room's: `POST`/`DELETE /channels/{id}/voice-pins/{pubkey}`
-    // (`moderation.mute`), `GET /channels/{id}/voice-pins`, and `voice_pins`
+    // (`voice.stage`), `GET /channels/{id}/voice-pins`, and `voice_pins`
     // snapshots to the room. A client shows pins as shared only here; an older
     // hub has no stage of its own.
     "voice.pins",

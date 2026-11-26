@@ -516,35 +516,49 @@ async fn broadcast_pins(state: &AppState, channel_id: &str) {
     ));
 }
 
+#[derive(serde::Serialize)]
+pub struct VoicePinsResponse {
+    /// In pin order.
+    pub public_keys: Vec<String>,
+    /// The caller's own `voice.stage` here, resolved channel-scoped, so a
+    /// client offers the pin button only where it would be accepted.
+    pub can_pin: bool,
+}
+
 /// GET /channels/{channel_id}/voice-pins — who is on the stage, in pin order.
 pub async fn list_voice_pins(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(channel_id): Path<String>,
-) -> Json<Vec<String>> {
-    Json(
-        state
-            .voice_pins
-            .read()
-            .await
-            .get(&channel_id)
-            .cloned()
-            .unwrap_or_default(),
-    )
+) -> Result<Json<VoicePinsResponse>, (StatusCode, String)> {
+    let can_pin = permissions::channel_permissions(&state.db, &user.public_key, &channel_id)
+        .await?
+        .has(permissions::VOICE_STAGE);
+    let public_keys = state
+        .voice_pins
+        .read()
+        .await
+        .get(&channel_id)
+        .cloned()
+        .unwrap_or_default();
+    Ok(Json(VoicePinsResponse {
+        public_keys,
+        can_pin,
+    }))
 }
 
 /// POST /channels/{channel_id}/voice-pins/{pubkey}
 ///
-/// Puts a member on the room's stage for everyone. Needs `moderation.mute`,
-/// the permission that already runs the room's floor, and the member must be
-/// in the room: a pin is a place on a live stage, not a standing property.
+/// Puts a member on the room's stage for everyone. Needs `voice.stage` in
+/// this channel, and the member must be in the room: a pin is a place on a
+/// live stage, not a standing property.
 pub async fn pin_voice(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path((channel_id, pubkey)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-    perms.require(MODERATION_MUTE)?;
+    let perms = permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+    perms.require(permissions::VOICE_STAGE)?;
 
     let present = {
         let vc = state.voice_channels.read().await;
@@ -571,16 +585,17 @@ pub async fn pin_voice(
 
 /// DELETE /channels/{channel_id}/voice-pins/{pubkey}
 ///
-/// Takes a member off the stage. A moderator may unpin anyone; a member may
-/// step off the stage themselves.
+/// Takes a member off the stage. Whoever holds `voice.stage` here may unpin
+/// anyone; a member may step off the stage themselves.
 pub async fn unpin_voice(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path((channel_id, pubkey)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     if pubkey != user.public_key {
-        let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
-        perms.require(MODERATION_MUTE)?;
+        let perms =
+            permissions::channel_permissions(&state.db, &user.public_key, &channel_id).await?;
+        perms.require(permissions::VOICE_STAGE)?;
     }
     let removed = {
         let mut pins = state.voice_pins.write().await;
