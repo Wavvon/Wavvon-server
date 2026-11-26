@@ -511,7 +511,7 @@ pub mod presets {
                 { "name": "Member", "priority": 5,
                   "permissions": ["messages.read", "messages.send", "forum.posts.create"] },
                 { "name": "Moderator", "priority": 50,
-                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "channels.manage"] }
+                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "channels.manage", "voice.stage"] }
             ],
             "settings": {
                 // Re-added (was pulled in a4e57f9 as a stopgap: the lobby
@@ -553,7 +553,7 @@ pub mod presets {
                 { "name": "Member", "priority": 5,
                   "permissions": ["messages.read", "messages.send", "forum.posts.create", "events.create"] },
                 { "name": "Moderator", "priority": 50,
-                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "moderation.timeout", "channels.manage"] }
+                  "permissions": ["messages.manage", "moderation.mute", "moderation.kick", "moderation.timeout", "channels.manage", "voice.stage"] }
             ],
             "settings": {
                 "require_approval": false
