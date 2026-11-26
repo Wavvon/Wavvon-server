@@ -224,6 +224,11 @@ pub const CAPABILITIES: &[&str] = &[
     // `deafened`. A client shows a the mute icon of a participant only here: an
     // older hub sends neither, and "absent" must not read as "unmuted".
     "voice.mute.state",
+    // The stage is the room's: `POST`/`DELETE /channels/{id}/voice-pins/{pubkey}`
+    // (`moderation.mute`), `GET /channels/{id}/voice-pins`, and `voice_pins`
+    // snapshots to the room. A client shows pins as shared only here; an older
+    // hub has no stage of its own.
+    "voice.pins",
     // `min_talk_power` gates transmitting, not joining, and the floor is
     // granted by a moderator rather than taken with `raise-hand`. Two things
     // a client may only do once it sees this string: read `may_speak` on

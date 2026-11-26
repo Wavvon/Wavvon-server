@@ -841,6 +841,13 @@ pub enum WsServerMessage {
         channel_id: String,
         public_keys: Vec<String>,
     },
+    /// Who is pinned to this voice room's stage, in pin order, sent to everyone
+    /// in it whenever a pin is added or removed (a snapshot, not a diff).
+    #[serde(rename = "voice_pins")]
+    VoicePins {
+        channel_id: String,
+        public_keys: Vec<String>,
+    },
     /// A moderator gave this member the floor: `may_speak` is now true for
     /// them until they leave.
     #[serde(rename = "voice_talk_granted")]
