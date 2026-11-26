@@ -494,3 +494,137 @@ pub async fn list_raise_hands(
             .collect(),
     ))
 }
+
+// --- Voice stage pins ---
+
+/// Tell the room who is on its stage. A snapshot, like `voice_hands`, so a
+/// client that missed one event is right again at the next.
+async fn broadcast_pins(state: &AppState, channel_id: &str) {
+    let public_keys = state
+        .voice_pins
+        .read()
+        .await
+        .get(channel_id)
+        .cloned()
+        .unwrap_or_default();
+    let _ = state.voice_event_tx.send((
+        channel_id.to_string(),
+        WsServerMessage::VoicePins {
+            channel_id: channel_id.to_string(),
+            public_keys,
+        },
+    ));
+}
+
+/// GET /channels/{channel_id}/voice-pins — who is on the stage, in pin order.
+pub async fn list_voice_pins(
+    State(state): State<Arc<AppState>>,
+    _user: AuthUser,
+    Path(channel_id): Path<String>,
+) -> Json<Vec<String>> {
+    Json(
+        state
+            .voice_pins
+            .read()
+            .await
+            .get(&channel_id)
+            .cloned()
+            .unwrap_or_default(),
+    )
+}
+
+/// POST /channels/{channel_id}/voice-pins/{pubkey}
+///
+/// Puts a member on the room's stage for everyone. Needs `moderation.mute`,
+/// the permission that already runs the room's floor, and the member must be
+/// in the room: a pin is a place on a live stage, not a standing property.
+pub async fn pin_voice(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, pubkey)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(MODERATION_MUTE)?;
+
+    let present = {
+        let vc = state.voice_channels.read().await;
+        vc.get(&channel_id)
+            .is_some_and(|participants| participants.contains_key(&pubkey))
+    };
+    if !present {
+        return Err((
+            StatusCode::CONFLICT,
+            "That member is not in this voice channel.".to_string(),
+        ));
+    }
+
+    {
+        let mut pins = state.voice_pins.write().await;
+        let stage = pins.entry(channel_id.clone()).or_default();
+        if !stage.contains(&pubkey) {
+            stage.push(pubkey);
+        }
+    }
+    broadcast_pins(&state, &channel_id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /channels/{channel_id}/voice-pins/{pubkey}
+///
+/// Takes a member off the stage. A moderator may unpin anyone; a member may
+/// step off the stage themselves.
+pub async fn unpin_voice(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path((channel_id, pubkey)): Path<(String, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if pubkey != user.public_key {
+        let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+        perms.require(MODERATION_MUTE)?;
+    }
+    let removed = {
+        let mut pins = state.voice_pins.write().await;
+        let removed = pins.get_mut(&channel_id).is_some_and(|stage| {
+            let before = stage.len();
+            stage.retain(|p| p != &pubkey);
+            stage.len() != before
+        });
+        if pins.get(&channel_id).is_some_and(Vec::is_empty) {
+            pins.remove(&channel_id);
+        }
+        removed
+    };
+    if removed {
+        broadcast_pins(&state, &channel_id).await;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Called by the shared voice teardown: whoever leaves loses their pin, and an
+/// empty room loses its stage.
+pub async fn unpin_on_leave(state: &AppState, channel_id: &str, public_key: &str) {
+    let empty = !state
+        .voice_channels
+        .read()
+        .await
+        .get(channel_id)
+        .is_some_and(|participants| !participants.is_empty());
+    let changed = {
+        let mut pins = state.voice_pins.write().await;
+        let changed = match pins.get_mut(channel_id) {
+            Some(stage) => {
+                let before = stage.len();
+                stage.retain(|p| p != public_key);
+                stage.len() != before
+            }
+            None => false,
+        };
+        if empty || pins.get(channel_id).is_some_and(Vec::is_empty) {
+            pins.remove(channel_id);
+        }
+        changed
+    };
+    if changed && !empty {
+        broadcast_pins(state, channel_id).await;
+    }
+}

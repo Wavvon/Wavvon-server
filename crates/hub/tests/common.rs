@@ -447,6 +447,7 @@ pub fn base_state(db: PgPool) -> AppState {
         voice_outbound_loss: RwLock::new(HashMap::new()),
         staging_voice_grants: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         voice_talk_blocked: Default::default(),
+        voice_pins: Default::default(),
         voice_pending_binds: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         ws_key_senders: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         rate_limiters: Default::default(),

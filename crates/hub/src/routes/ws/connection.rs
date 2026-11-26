@@ -1150,6 +1150,9 @@ pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
     // permission to speak *now*, not a standing property of the member, so it
     // dies with the session that was given it rather than being revoked.
     state.voice_talk_blocked.write().await.remove(public_key);
+    // A pin is a place on this room's stage; it goes with the person, and the
+    // whole stage goes when the room empties.
+    crate::routes::moderation::unpin_on_leave(state, channel_id, public_key).await;
 
     // events.md §7.4: a voice-only presence grant for this exact
     // (pubkey, channel) pair evaporates on leave -- never persisted, never

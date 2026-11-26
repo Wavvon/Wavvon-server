@@ -232,6 +232,11 @@ pub const CAPABILITIES: &[&str] = &[
     // this — and offer the grant route, which an older hub answers 404. On an
     // older hub a raised hand is still how the threshold is cleared.
     "voice.talk",
+    // The stage is the room's: `POST`/`DELETE /channels/{id}/voice-pins/{pubkey}`
+    // (`moderation.mute`), `GET /channels/{id}/voice-pins`, and `voice_pins`
+    // snapshots to the room. A client shows pins as shared only here; an older
+    // hub has no stage of its own.
+    "voice.pins",
     // Voice over WebRTC data channels (voice-transport-v3.md): after
     // `voice_joined`, `voice_rtc_offer` with the token is answered by
     // `voice_rtc_answer`. A client picks this transport only here.

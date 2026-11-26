@@ -630,6 +630,14 @@ pub fn create_router_full(
             post(routes::moderation::grant_talk),
         )
         .route(
+            "/channels/{channel_id}/voice-pins",
+            get(routes::moderation::list_voice_pins),
+        )
+        .route(
+            "/channels/{channel_id}/voice-pins/{pubkey}",
+            post(routes::moderation::pin_voice).delete(routes::moderation::unpin_voice),
+        )
+        .route(
             "/alliances",
             get(routes::alliances::list_alliances).post(routes::alliances::create_alliance),
         )

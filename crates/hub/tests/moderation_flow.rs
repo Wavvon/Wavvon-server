@@ -1371,3 +1371,111 @@ async fn a_weaker_permission_cannot_shorten_a_permanent_sanction() {
         .iter()
         .any(|b| b.target_public_key == target_key && b.expires_at.is_none()));
 }
+
+/// The stage is the room's: only a moderator pins, everyone reads the same
+/// pins, and a pin goes with the person when they leave the room.
+#[tokio::test]
+async fn voice_pins_are_the_rooms_and_last_one_session() {
+    let (hub_url, state, _guard) = spawn_real_hub().await;
+    let client = reqwest::Client::new();
+
+    let owner = Identity::generate();
+    let owner_token = http_authenticate(&hub_url, &owner).await;
+    let user2 = Identity::generate();
+    let user2_token = http_authenticate(&hub_url, &user2).await;
+    let user2_pk = user2.public_key_hex();
+
+    let channel: ChannelResponse = client
+        .post(format!("{hub_url}/channels"))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "name": "pins-chan", "channel_type": "voice" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Nobody in the room: there is no stage to put them on.
+    let absent = client
+        .post(format!(
+            "{hub_url}/channels/{}/voice-pins/{user2_pk}",
+            channel.id
+        ))
+        .bearer_auth(&owner_token)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(absent, 409, "a pin is a place on a live stage");
+
+    let client2 = client.clone();
+    let cid = channel.id.clone();
+    let pk = user2_pk.clone();
+    let tok = user2_token.clone();
+    let owner_tok = owner_token.clone();
+    let hub = hub_url.clone();
+    let (_frame, (self_pin, pinned, listed, self_unpin)) =
+        ws_voice_join_while_open(&hub_url, &user2_token, &channel.id, || async move {
+            let self_pin = client2
+                .post(format!("{hub}/channels/{cid}/voice-pins/{pk}"))
+                .bearer_auth(&tok)
+                .send()
+                .await
+                .unwrap()
+                .status();
+            let pinned = client2
+                .post(format!("{hub}/channels/{cid}/voice-pins/{pk}"))
+                .bearer_auth(&owner_tok)
+                .send()
+                .await
+                .unwrap()
+                .status();
+            let listed: Vec<String> = client2
+                .get(format!("{hub}/channels/{cid}/voice-pins"))
+                .bearer_auth(&tok)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            // Stepping off the stage is anyone's own choice.
+            let self_unpin = client2
+                .delete(format!("{hub}/channels/{cid}/voice-pins/{pk}"))
+                .bearer_auth(&tok)
+                .send()
+                .await
+                .unwrap()
+                .status();
+            // Back on, so leaving the room has a pin to take away.
+            client2
+                .post(format!("{hub}/channels/{cid}/voice-pins/{pk}"))
+                .bearer_auth(&owner_tok)
+                .send()
+                .await
+                .unwrap();
+            (self_pin, pinned, listed, self_unpin)
+        })
+        .await;
+
+    assert_eq!(self_pin, 403, "pinning is a moderator's call");
+    assert_eq!(pinned, 204);
+    assert_eq!(
+        listed,
+        vec![user2_pk.clone()],
+        "every viewer reads the same stage"
+    );
+    assert_eq!(self_unpin, 204);
+
+    // The socket closed: the leave takes the pin with it, and the empty room
+    // keeps no stage at all.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    while state.voice_pins.read().await.contains_key(&channel.id) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the stage outlived the session"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}

@@ -457,6 +457,15 @@ pub struct AppState {
     /// in. Nothing about it is persisted, so no grant outlives a restart.
     pub voice_talk_blocked: RwLock<HashSet<String>>,
 
+    /// Channel id -> who is pinned to that voice room's stage, in pin order.
+    ///
+    /// A pin is the room's, not a viewer's: a moderator puts someone on the
+    /// stage for everyone, as a host would at an event. It lasts one voice
+    /// session the way a talk grant does: the shared teardown in
+    /// `connection.rs` unpins whoever leaves and drops the room's entry when
+    /// it empties. In memory only, so a restart clears every stage.
+    pub voice_pins: RwLock<HashMap<String, Vec<String>>>,
+
     /// Pending voice session-binds waiting for the client's `voice_rtc_offer`
     /// (voice-transport-v3.md).
     ///
