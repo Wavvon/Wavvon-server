@@ -1057,6 +1057,9 @@ pub(crate) async fn load_hub_url(state: &AppState) -> String {
 }
 
 /// Admin-facing member listing with joined / last-seen / online + role summaries.
+/// Members only: a key that authenticated but never joined (stopped at the
+/// invite gate, an alliance visitor) has a  row too, and listed here it
+/// showed up as a nameless member the sidebar never shows.
 /// Paged like every list: `cursor` is the previous page's last `public_key`.
 pub async fn list_members(
     State(state): State<Arc<AppState>>,
@@ -1069,7 +1072,8 @@ pub async fn list_members(
     let users = sqlx::query_as::<_, UserAdminRow>(
         "SELECT public_key, display_name, first_seen_at, last_seen_at, birthday
          FROM users
-         WHERE ($1::text IS NULL OR (first_seen_at, public_key) >
+         WHERE is_member
+           AND ($1::text IS NULL OR (first_seen_at, public_key) >
                 ((SELECT first_seen_at FROM users WHERE public_key = $1), $1))
          ORDER BY first_seen_at, public_key
          LIMIT $2",
