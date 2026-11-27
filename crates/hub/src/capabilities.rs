@@ -145,6 +145,9 @@ pub const CAPABILITIES: &[&str] = &[
     // the admin believed they had named someone, which is the one failure
     // this feature exists to prevent.
     "invites.bound",
+    // `POST /invites` takes an optional `code` the creator chooses (3–32 of
+    // a-z, 0-9, - and _, case-insensitive; 409 when taken).
+    "invites.customcode",
     // `GET /users`, `GET /conversations/{id}/messages` and `GET
     // /admin/reports` honour `limit` + a keyset `cursor`. Without this the
     // hub ignores both and returns one truncated page — a client that pages

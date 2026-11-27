@@ -1856,3 +1856,46 @@ async fn create_invite_rejects_non_positive_and_overflowing_bounds() {
         .json();
     assert_eq!(invites.len(), 1);
 }
+
+/// A creator can choose the code; it is case-insensitive, unique, and limited
+/// to characters that survive a link.
+#[tokio::test]
+async fn a_chosen_invite_code_works_in_any_case_and_only_once() {
+    let server = common::setup_raw().await;
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at, grant_role_id)
+         VALUES ('ownercode', 'system', 1, 0, NULL, $1, 'builtin-owner')",
+    )
+    .bind(now)
+    .execute(&server.state().db)
+    .await
+    .unwrap();
+    let owner = authenticate_with_invite(&server, &Identity::generate(), Some("ownercode")).await;
+
+    let created: InviteResponse = server
+        .post("/invites")
+        .authorization_bearer(&owner)
+        .json(&json!({ "code": "GameNight" }))
+        .await
+        .json();
+    assert_eq!(created.code, "gamenight");
+
+    server
+        .post("/invites")
+        .authorization_bearer(&owner)
+        .json(&json!({ "code": "gamenight" }))
+        .await
+        .assert_status(axum::http::StatusCode::CONFLICT);
+    for bad in ["no", "has space", "ümlaut", &"x".repeat(33)] {
+        server
+            .post("/invites")
+            .authorization_bearer(&owner)
+            .json(&json!({ "code": bad }))
+            .await
+            .assert_status_bad_request();
+    }
+
+    let token = authenticate_with_invite(&server, &Identity::generate(), Some("GAMENIGHT")).await;
+    assert!(!token.is_empty(), "the code redeems whatever its case");
+}

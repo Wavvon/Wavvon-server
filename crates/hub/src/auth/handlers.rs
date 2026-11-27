@@ -602,7 +602,7 @@ pub async fn verify(
         Some(code) => {
             let bound: Option<Option<String>> =
                 sqlx::query_scalar("SELECT bound_pubkey FROM invites WHERE code = $1")
-                    .bind(code)
+                    .bind(crate::routes::invites::normalize_code(code))
                     .fetch_optional(&state.db)
                     .await
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
