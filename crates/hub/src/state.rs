@@ -93,6 +93,28 @@ pub struct ScreenStreamMeta {
     /// The bitrate the relay holds this stream to: what the sharer declared,
     /// or the hub's cap when it declared nothing. None when neither exists.
     pub max_kbps: Option<u32>,
+    /// Shown and sent only to the members in the sharer's voice room, not
+    /// in the hub-wide live list (`screenshare.audience`).
+    pub room_only: bool,
+}
+
+/// Whether `pubkey` may see a stream of `channel_id`: anyone who can see the
+/// channel for a hub-wide stream, only the room's members (and the sharer)
+/// for a room-only one.
+pub async fn may_see_stream(
+    state: &AppState,
+    channel_id: &str,
+    meta: &ScreenStreamMeta,
+    pubkey: &str,
+) -> bool {
+    !meta.room_only
+        || meta.sharer_pubkey == pubkey
+        || state
+            .voice_channels
+            .read()
+            .await
+            .get(channel_id)
+            .is_some_and(|room| room.contains_key(pubkey))
 }
 
 /// All active streams for one (channel, sharer) pair.

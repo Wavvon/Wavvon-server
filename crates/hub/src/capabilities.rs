@@ -201,6 +201,9 @@ pub const CAPABILITIES: &[&str] = &[
     // Without it a client renumbers roles with one PATCH each, which can
     // half-apply, so it offers drag reordering only where this is present.
     "roles.order",
+    // `screen_share_start` takes `audience: "room"`: the stream is listed,
+    // announced and relayed only to the sharer's voice room.
+    "screenshare.audience",
     // `/info` and `GET /hub/settings` carry `stream_limits` (max width, height,
     // fps, kbps; each absent when uncapped), `PATCH /hub` sets them, and a
     // `screen_share_start` declaring more is refused (#278). An older hub has

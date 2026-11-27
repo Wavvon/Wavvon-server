@@ -122,6 +122,7 @@ pub async fn screenshare_start(
                 relayed: 0,
                 started_at: std::time::Instant::now(),
                 max_kbps: None,
+                room_only: false,
             },
         );
     }
