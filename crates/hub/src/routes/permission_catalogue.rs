@@ -43,9 +43,8 @@ pub fn category(id: &str) -> &'static str {
     match id {
         "stickers.external" => "messages",
         "audit.read" => "moderation",
-        "members.read" | "roles.manage" | "invites.manage" | "badges.manage" | "hub.admission" => {
-            "members"
-        }
+        "members.read" | "roles.manage" | "invites.manage" | "badges.manage"
+        | "badges.programs" | "hub.admission" => "members",
         "hub.settings"
         | "hub.appearance"
         | "stickers.packs.manage"
