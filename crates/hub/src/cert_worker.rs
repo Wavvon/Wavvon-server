@@ -113,7 +113,7 @@ pub async fn tick(state: &AppState) -> anyhow::Result<()> {
         if banned.contains(&pubkey) {
             continue;
         }
-        match issue_cert_for(state, &pubkey).await {
+        match issue_cert_for(state, &pubkey, None).await {
             Ok(_) => {
                 issued += 1;
             }

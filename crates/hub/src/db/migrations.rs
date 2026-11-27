@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 19;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -425,6 +425,20 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             sqlx::query("ALTER TABLE soundboard_clips ALTER COLUMN uploader DROP NOT NULL")
                 .execute(conn)
                 .await?;
+        }
+        // Certificate types (certified-admission.md): the kinds of certificate
+        // this hub issues, which another hub can trust one by one.
+        19 => {
+            sqlx::query(
+                "CREATE TABLE IF NOT EXISTS cert_types (
+                    id          TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    description TEXT,
+                    created_at  BIGINT NOT NULL
+                )",
+            )
+            .execute(conn)
+            .await?;
         }
         _ => unreachable!("no schema step {version}"),
     }

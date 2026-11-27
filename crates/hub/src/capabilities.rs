@@ -38,6 +38,12 @@ pub const CAPABILITIES: &[&str] = &[
     // `ban_evasion_match`. Gated so a client shows the hint only where the
     // field can be present; on an older hub its absence means nothing.
     "admission.banevasion",
+    // Certified admission (certified-admission.md): trusted hubs and
+    // hub-and-type pairs earn a fast lane, `cert_others` picks lobby or
+    // refuse for the rest, a certificate can stand in for an invite, and
+    // the hub keeps a catalogue of certificate types at `GET /certs/types`.
+    // Replaces `cert_mode`; a client shows the new admission tab only here.
+    "admission.certfastlane",
     // `GET /alliances/{id}/people` lists the members of one allied hub who
     // opted in (`PATCH /me` `findable_by_allies`) under an alliance whose
     // manager allowed it (`PUT /alliances/{id}/people-visibility`). Gated so a

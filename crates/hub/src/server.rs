@@ -807,6 +807,12 @@ pub fn create_router_full(
             get(routes::certs::list_user_certs),
         )
         .route("/certs/revocations", get(routes::certs::get_revocations))
+        .route("/certs/types", get(routes::certs::list_cert_types))
+        .route("/admin/cert-types", post(routes::certs::create_cert_type))
+        .route(
+            "/admin/cert-types/{id}",
+            axum::routing::delete(routes::certs::delete_cert_type),
+        )
         // ---- Badge admin routes ----
         .route("/badges/pending", get(routes::badges::list_pending))
         .route(

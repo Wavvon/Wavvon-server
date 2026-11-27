@@ -58,6 +58,11 @@ pub struct CertPayload {
     /// Unicode emoji or short icon for the badge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// A certificate's type, by id in the issuer's catalogue
+    /// (`GET /certs/types`). Absent on a plain standing certificate and on
+    /// every badge. Appended, so certificates issued before it still verify.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert_type: Option<String>,
 }
 
 /// A certification envelope (payload + hub signature).
@@ -71,17 +76,116 @@ pub struct Certification {
 // Admin: manual issue
 // ---------------------------------------------------------------------------
 
-/// POST /admin/certs/:pubkey
+#[derive(Deserialize, Default)]
+pub struct IssueRequest {
+    /// A type from this hub's catalogue; absent issues a plain standing cert.
+    #[serde(default)]
+    pub cert_type: Option<String>,
+}
+
+/// POST /admin/certs/:pubkey, with an optional `{ cert_type }` body.
 pub async fn admin_issue(
     State(state): State<Arc<AppState>>,
     user: AuthUser,
     Path(subject_pubkey): Path<String>,
+    body: Option<Json<IssueRequest>>,
 ) -> Result<(StatusCode, Json<Certification>), (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(CERTS_ISSUE)?;
 
-    let cert = issue_cert_for(&state, &subject_pubkey).await?;
+    let cert_type = body.and_then(|Json(b)| b.cert_type);
+    let cert = issue_cert_for(&state, &subject_pubkey, cert_type).await?;
     Ok((StatusCode::CREATED, Json(cert)))
+}
+
+// ---------------------------------------------------------------------------
+// Certificate types: this hub's catalogue
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct CertType {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+/// GET /certs/types: public, so another hub's admin can pick from it.
+pub async fn list_cert_types(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<CertType>>, (StatusCode, String)> {
+    let rows = sqlx::query_as::<_, CertType>(
+        "SELECT id, name, description FROM cert_types ORDER BY created_at, id",
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    Ok(Json(rows))
+}
+
+#[derive(Deserialize)]
+pub struct CreateCertTypeRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// POST /admin/cert-types
+pub async fn create_cert_type(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Json(req): Json<CreateCertTypeRequest>,
+) -> Result<(StatusCode, Json<CertType>), (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(CERTS_SETTINGS)?;
+    let name = req.name.trim();
+    if name.is_empty() || name.len() > 64 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "name must be 1–64 chars".to_string(),
+        ));
+    }
+    let row = CertType {
+        id: Uuid::new_v4().to_string(),
+        name: name.to_string(),
+        description: req
+            .description
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty()),
+    };
+    sqlx::query(
+        "INSERT INTO cert_types (id, name, description, created_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(&row.id)
+    .bind(&row.name)
+    .bind(&row.description)
+    .bind(unix_timestamp())
+    .execute(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    Ok((StatusCode::CREATED, Json(row)))
+}
+
+/// DELETE /admin/cert-types/:id. Certificates already issued with the type
+/// keep it; another hub trusting the id simply sees no new ones.
+pub async fn delete_cert_type(
+    State(state): State<Arc<AppState>>,
+    user: AuthUser,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
+    perms.require(CERTS_SETTINGS)?;
+    let done = sqlx::query("DELETE FROM cert_types WHERE id = $1")
+        .bind(&id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if done.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "No such certificate type".to_string(),
+        ));
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Request body for granting an achievement badge.
@@ -296,12 +400,18 @@ pub async fn get_revocations(
 
 #[derive(Serialize)]
 pub struct CertSettingsResponse {
-    pub cert_mode: String,
     pub cert_auto_issue: bool,
     // Wire name kept for clients; the stored setting is `cert_standing_days`.
     pub cert_min_age_days: i64,
     pub cert_validity_days: i64,
     pub cert_trusted_issuers: Vec<String>,
+    /// Issuer and type pairs: one kind of certificate from one hub.
+    pub cert_trusted_types: Vec<TrustedType>,
+    /// What happens to a newcomer without a trusted certificate while either
+    /// list is set: `lobby` (the usual way in) or `refuse`.
+    pub cert_others: String,
+    /// A trusted certificate stands in for an invite on an invite-only hub.
+    pub cert_replaces_invite: bool,
     /// issuer pubkey → base URL, for the issuers this hub can *pull* a
     /// portfolio from (§11). Sparse: trust does not require an address, and an
     /// issuer without one still has its pushed certs honoured.
@@ -314,13 +424,6 @@ pub async fn get_cert_settings(
 ) -> Result<Json<CertSettingsResponse>, (StatusCode, String)> {
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(CERTS_SETTINGS)?;
-
-    let cert_mode: String =
-        sqlx::query_scalar("SELECT value FROM hub_settings WHERE key = 'cert_mode'")
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB: {e}")))?
-            .unwrap_or_else(|| "none".to_string());
 
     let cert_auto_issue: bool = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'cert_auto_issue'",
@@ -344,11 +447,13 @@ pub async fn get_cert_settings(
     .unwrap_or_default();
 
     Ok(Json(CertSettingsResponse {
-        cert_mode,
         cert_auto_issue,
         cert_min_age_days,
         cert_validity_days,
         cert_trusted_issuers,
+        cert_trusted_types: load_trusted_types(&state).await,
+        cert_others: load_cert_others(&state).await,
+        cert_replaces_invite: load_cert_replaces_invite(&state).await,
         cert_issuer_urls: load_issuer_urls(&state).await,
     }))
 }
@@ -379,13 +484,13 @@ pub struct CertSettingsPatch {
     /// Stored as `cert_standing_days`; the API spells it as `GET` does.
     pub cert_min_age_days: Option<serde_json::Value>,
     pub cert_validity_days: Option<serde_json::Value>,
-    pub cert_mode: Option<String>,
     pub cert_trusted_issuers: Option<serde_json::Value>,
+    pub cert_trusted_types: Option<serde_json::Value>,
+    pub cert_others: Option<String>,
+    pub cert_replaces_invite: Option<serde_json::Value>,
     /// `{ issuer_pubkey: url }`. Replaces the map wholesale, like the trust
     /// list it accompanies.
     pub cert_issuer_urls: Option<serde_json::Value>,
-    pub cert_require: Option<serde_json::Value>,
-    pub cert_min_pow_level: Option<serde_json::Value>,
 }
 
 pub async fn patch_cert_settings(
@@ -396,12 +501,11 @@ pub async fn patch_cert_settings(
     let perms = permissions::user_permissions(&state.db, &user.public_key).await?;
     perms.require(CERTS_SETTINGS)?;
 
-    // Validate cert_mode if provided
-    if let Some(ref mode) = body.cert_mode {
-        if !["none", "any", "trusted"].contains(&mode.as_str()) {
+    if let Some(ref others) = body.cert_others {
+        if !["lobby", "refuse"].contains(&others.as_str()) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "cert_mode must be 'none', 'any', or 'trusted'".to_string(),
+                "cert_others must be 'lobby' or 'refuse'".to_string(),
             ));
         }
     }
@@ -417,11 +521,20 @@ pub async fn patch_cert_settings(
     if let Some(v) = body.cert_validity_days {
         kvs.push(("cert_validity_days", setting_text(&v)));
     }
-    if let Some(v) = body.cert_mode {
-        kvs.push(("cert_mode", v));
+    if let Some(v) = body.cert_others {
+        kvs.push(("cert_others", v));
     }
-    if let Some(v) = body.cert_min_pow_level {
-        kvs.push(("cert_min_pow_level", setting_text(&v)));
+    if let Some(v) = body.cert_replaces_invite {
+        kvs.push(("cert_replaces_invite", setting_text(&v)));
+    }
+    if let Some(v) = body.cert_trusted_types {
+        if serde_json::from_value::<Vec<TrustedType>>(v.clone()).is_err() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "cert_trusted_types must be a list of { issuer, cert_type }".to_string(),
+            ));
+        }
+        kvs.push(("cert_trusted_types", v.to_string()));
     }
     if let Some(v) = body.cert_trusted_issuers {
         kvs.push(("cert_trusted_issuers", v.to_string()));
@@ -437,9 +550,6 @@ pub async fn patch_cert_settings(
             ));
         }
         kvs.push(("cert_issuer_urls", v.to_string()));
-    }
-    if let Some(v) = body.cert_require {
-        kvs.push(("cert_require", v.to_string()));
     }
 
     for (key, value) in kvs {
@@ -466,7 +576,22 @@ pub async fn patch_cert_settings(
 pub async fn issue_cert_for(
     state: &AppState,
     subject_pubkey: &str,
+    cert_type: Option<String>,
 ) -> Result<Certification, (StatusCode, String)> {
+    if let Some(t) = cert_type.as_deref() {
+        let known: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cert_types WHERE id = $1)")
+                .bind(t)
+                .fetch_one(&state.db)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+        if !known {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Unknown certificate type".to_string(),
+            ));
+        }
+    }
     let now = unix_timestamp();
 
     // Load user row
@@ -521,6 +646,7 @@ pub async fn issue_cert_for(
         label: None,
         description: None,
         icon: None,
+        cert_type,
     };
 
     let payload_json = serde_json::to_string(&payload).map_err(|e| {
@@ -608,6 +734,7 @@ async fn issue_badge_for(
         label: Some(label.to_string()),
         description: description.map(|s| s.to_string()),
         icon: icon.map(|s| s.to_string()),
+        cert_type: None,
     };
 
     let payload_json = serde_json::to_string(&payload).map_err(|e| {
@@ -699,6 +826,7 @@ pub(crate) async fn revoke_cert_for(
             label: None,
             description: None,
             icon: None,
+            cert_type: None,
         };
         let payload_json = serde_json::to_string(&payload).map_err(|e| {
             (
@@ -759,56 +887,55 @@ pub async fn load_trusted_issuers(state: &AppState) -> Vec<String> {
     serde_json::from_str(&json_str).unwrap_or_default()
 }
 
-/// Load and parse the cert_require setting ({min_pow_level?, min_member_since_days?}).
-pub async fn load_cert_require(state: &AppState) -> CertRequire {
-    let json_str: String = sqlx::query_scalar::<_, String>(
-        "SELECT value FROM hub_settings WHERE key = 'cert_require'",
+/// One kind of certificate from one hub: the specific-certificates list.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TrustedType {
+    pub issuer: String,
+    pub cert_type: String,
+}
+
+pub async fn load_trusted_types(state: &AppState) -> Vec<TrustedType> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'cert_trusted_types'",
     )
     .fetch_optional(&state.db)
     .await
     .ok()
     .flatten()
-    .unwrap_or_else(|| "{}".to_string());
-
-    serde_json::from_str(&json_str).unwrap_or_default()
+    .and_then(|v| serde_json::from_str(&v).ok())
+    .unwrap_or_default()
 }
 
-/// Load the cert_mode setting: "none" | "any" | "trusted".
-pub async fn load_cert_mode(state: &AppState) -> String {
-    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'cert_mode'")
+/// `lobby` (default) or `refuse`.
+pub async fn load_cert_others(state: &AppState) -> String {
+    sqlx::query_scalar::<_, String>("SELECT value FROM hub_settings WHERE key = 'cert_others'")
         .fetch_optional(&state.db)
         .await
         .ok()
         .flatten()
-        .unwrap_or_else(|| "none".to_string())
+        .filter(|v| v == "refuse")
+        .unwrap_or_else(|| "lobby".to_string())
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
-pub struct CertRequire {
-    #[serde(default)]
-    pub min_pow_level: Option<u8>,
-    #[serde(default)]
-    pub min_member_since_days: Option<u32>,
+pub async fn load_cert_replaces_invite(state: &AppState) -> bool {
+    sqlx::query_scalar::<_, String>(
+        "SELECT value FROM hub_settings WHERE key = 'cert_replaces_invite'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some_and(|v| v == "true")
 }
 
-/// Verify a presented `Certification` against the hub's admission policy.
-///
-/// - Checks signature against `payload.issuer_pubkey`.
-/// - Checks expiry and standing.
-/// - Checks subject matches `auth_master_pubkey`.
-/// - Depending on `cert_mode`:
-///   - "any": any valid cert whose issuer's pubkey matches `/info` (cached) is accepted.
-///   - "trusted": issuer pubkey must be in trusted_issuers list.
-///
-/// The issuer /info check is skipped for locally-issued certs (issuer == this hub's pubkey),
-/// since we hold the key.
+/// Whether a presented certificate earns the fast lane: issued to this
+/// identity, unexpired, in good standing, not a badge, signed by its issuer,
+/// and trusted either as a whole hub or as one of that hub's types.
 pub async fn verify_certification(
-    _state: &AppState,
     cert: &Certification,
     auth_master_pubkey: &str,
-    cert_mode: &str,
     trusted_issuers: &[String],
-    cert_require: &CertRequire,
+    trusted_types: &[TrustedType],
 ) -> bool {
     let now = unix_timestamp();
     let payload = &cert.payload;
@@ -849,29 +976,51 @@ pub async fn verify_certification(
         return false;
     }
 
-    // 5. cert_require property rules (checked independently of trust list)
-    if let Some(min_pow) = cert_require.min_pow_level {
-        match payload.pow_level {
-            Some(level) if level >= min_pow => {}
-            _ => return false,
-        }
-    }
-    if let Some(min_days) = cert_require.min_member_since_days {
-        let required_since = now - (min_days as i64) * 86400;
-        if payload.member_since > required_since {
-            return false;
-        }
-    }
+    trusted_issuers.contains(&payload.issuer_pubkey)
+        || payload.cert_type.as_ref().is_some_and(|t| {
+            trusted_types
+                .iter()
+                .any(|tt| tt.issuer == payload.issuer_pubkey && &tt.cert_type == t)
+        })
+}
 
-    // 6. trust check
-    match cert_mode {
-        "any" => true, // any valid cert satisfies
-        "trusted" => {
-            // issuer pubkey must be in the trusted list
-            trusted_issuers.contains(&payload.issuer_pubkey)
+/// Every hub whose certificates can earn the fast lane: the whole-hub list
+/// and the issuers named by the specific list.
+pub fn trusted_issuer_set(
+    trusted_issuers: &[String],
+    trusted_types: &[TrustedType],
+) -> Vec<String> {
+    let mut all = trusted_issuers.to_vec();
+    for t in trusted_types {
+        if !all.contains(&t.issuer) {
+            all.push(t.issuer.clone());
         }
-        _ => false,
     }
+    all
+}
+
+/// Whether this identity holds a certificate that earns the fast lane, from
+/// what it presented or, failing that, from the portfolios of the trusted
+/// issuers (hub-certifications.md §11).
+pub async fn holds_trusted_certificate(
+    state: &AppState,
+    presented: &[Certification],
+    master_pk: &str,
+    trusted_issuers: &[String],
+    trusted_types: &[TrustedType],
+) -> bool {
+    for cert in presented {
+        if verify_certification(cert, master_pk, trusted_issuers, trusted_types).await {
+            return true;
+        }
+    }
+    let issuers = trusted_issuer_set(trusted_issuers, trusted_types);
+    for cert in pull_portfolios(state, &issuers, master_pk).await {
+        if verify_certification(&cert, master_pk, trusted_issuers, trusted_types).await {
+            return true;
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,24 +1152,28 @@ pub async fn pull_portfolios(
 // /info cert_requirement field types (Task #21)
 // ---------------------------------------------------------------------------
 
-/// Advertised cert requirement for GET /info.
+/// Advertised on GET /info while either trust list is set, so a client
+/// knows which certificates could take it through the fast lane.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct CertRequirement {
-    pub mode: String,
     pub trusted_issuers: Vec<String>,
-    pub require: CertRequire,
+    pub trusted_types: Vec<TrustedType>,
+    /// `lobby` or `refuse`: what happens without one.
+    pub others: String,
+    pub replaces_invite: bool,
 }
 
-/// Load the full cert requirement descriptor for /info.
 pub async fn load_cert_requirement(state: &AppState) -> Option<CertRequirement> {
-    let mode = load_cert_mode(state).await;
-    if mode == "none" {
+    let trusted_issuers = load_trusted_issuers(state).await;
+    let trusted_types = load_trusted_types(state).await;
+    if trusted_issuers.is_empty() && trusted_types.is_empty() {
         return None;
     }
     Some(CertRequirement {
-        mode,
-        trusted_issuers: load_trusted_issuers(state).await,
-        require: load_cert_require(state).await,
+        trusted_issuers,
+        trusted_types,
+        others: load_cert_others(state).await,
+        replaces_invite: load_cert_replaces_invite(state).await,
     })
 }
 
@@ -1089,6 +1242,7 @@ impl From<IssuanceDbRow> for IssuanceRow {
                 label: None,
                 description: None,
                 icon: None,
+                cert_type: None,
             });
         Self {
             id: r.id,

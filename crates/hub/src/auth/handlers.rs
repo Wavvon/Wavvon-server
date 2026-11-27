@@ -301,6 +301,49 @@ pub async fn verify(
     // fail opaquely against a gated hub. Exempt it like owner/first-user.
     let owner_exempt = existing_users == 0 || already_owner || req.is_hub == Some(true);
 
+    // Certified admission (certified-admission.md): a newcomer holding a
+    // certificate this hub trusts takes the fast lane past the lobby, the PoW
+    // floor, approval and the challenge; without one, they come in the usual
+    // way or, on a hub set to refuse, not at all. Only for a first seat: a
+    // member was admitted already, and with both trust lists empty there is
+    // no fast lane and nothing here changes.
+    let seated_member: bool = sqlx::query_scalar(
+        "SELECT COALESCE((SELECT is_member FROM users WHERE public_key = $1), FALSE)",
+    )
+    .bind(&canonical_pubkey)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    let trusted_issuers = crate::routes::certs::load_trusted_issuers(&state).await;
+    let trusted_types = crate::routes::certs::load_trusted_types(&state).await;
+    let fast_lane_on = !trusted_issuers.is_empty() || !trusted_types.is_empty();
+    let certified = if fast_lane_on && !owner_exempt && !seated_member {
+        // With a subkey cert the subject is the master, otherwise the auth key.
+        let master_pk = req
+            .subkey_cert
+            .as_ref()
+            .map(|c| c.master_pubkey.clone())
+            .unwrap_or_else(|| req.public_key.clone());
+        crate::routes::certs::holds_trusted_certificate(
+            &state,
+            req.certifications.as_deref().unwrap_or(&[]),
+            &master_pk,
+            &trusted_issuers,
+            &trusted_types,
+        )
+        .await
+    } else {
+        false
+    };
+    if fast_lane_on
+        && !certified
+        && !owner_exempt
+        && !seated_member
+        && crate::routes::certs::load_cert_others(&state).await == "refuse"
+    {
+        return Err((StatusCode::FORBIDDEN, "cert_required".to_string()));
+    }
+
     // Check security level requirement (lobby-survey.md Feature 1).
     let min_level: u32 = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'min_security_level'",
@@ -329,7 +372,7 @@ pub async fn verify(
     // harmless no-op here.
     let mut claimed_security_level: u32 = 0;
 
-    if min_level > 0 && !owner_exempt {
+    if min_level > 0 && !owner_exempt && !certified {
         let nonce = req.security_nonce.unwrap_or(0);
         let claimed_level = req.security_level.unwrap_or(0);
 
@@ -365,7 +408,7 @@ pub async fn verify(
     .and_then(|v| v.parse().ok())
     .unwrap_or(0);
 
-    if min_pow_level > 0 {
+    if min_pow_level > 0 && !certified {
         match &req.pow_proof {
             None => {
                 return Err((StatusCode::FORBIDDEN, "pow_required".to_string()));
@@ -388,71 +431,6 @@ pub async fn verify(
                     return Err((StatusCode::FORBIDDEN, "pow_required".to_string()));
                 }
             }
-        }
-    }
-
-    // Check cert_mode requirement (Task #21).
-    let cert_mode = crate::routes::certs::load_cert_mode(&state).await;
-    if cert_mode != "none" {
-        let trusted_issuers = crate::routes::certs::load_trusted_issuers(&state).await;
-        let cert_require = crate::routes::certs::load_cert_require(&state).await;
-
-        // Resolve the master pubkey: with a subkey cert it's the master, otherwise the auth pubkey.
-        let master_pk = req
-            .subkey_cert
-            .as_ref()
-            .map(|c| c.master_pubkey.clone())
-            .unwrap_or_else(|| req.public_key.clone());
-
-        // One predicate, applied to pushed and pulled certs alike. It used to
-        // be re-implemented inline here, beside the copy in certs.rs — two
-        // admission rules that had to be kept in step by hand.
-        let mut satisfied = false;
-        for cert in req.certifications.as_deref().unwrap_or(&[]) {
-            if crate::routes::certs::verify_certification(
-                &state,
-                cert,
-                &master_pk,
-                &cert_mode,
-                &trusted_issuers,
-                &cert_require,
-            )
-            .await
-            {
-                satisfied = true;
-                break;
-            }
-        }
-
-        // Nothing presented, or nothing presented that passes: fetch the
-        // candidate's portfolio from the issuers we trust and try again
-        // (hub-certifications.md §11). This is the path that makes the feature
-        // work at all — no client sends the `certifications` array, so before
-        // it a hub with `cert_mode != none` refused everyone with
-        // `cert_required`. Costs at most a handful of short, cached, usually
-        // loopback requests, and only on the miss.
-        if !satisfied {
-            for cert in
-                crate::routes::certs::pull_portfolios(&state, &trusted_issuers, &master_pk).await
-            {
-                if crate::routes::certs::verify_certification(
-                    &state,
-                    &cert,
-                    &master_pk,
-                    &cert_mode,
-                    &trusted_issuers,
-                    &cert_require,
-                )
-                .await
-                {
-                    satisfied = true;
-                    break;
-                }
-            }
-        }
-
-        if !satisfied {
-            return Err((StatusCode::FORBIDDEN, "cert_required".to_string()));
         }
     }
 
@@ -503,7 +481,10 @@ pub async fn verify(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
     let initial_status = if ban_match.is_some()
-        || ((require_approval || application) && existing_users > 0 && req.is_hub != Some(true))
+        || ((require_approval || application)
+            && existing_users > 0
+            && req.is_hub != Some(true)
+            && !certified)
     {
         "pending"
     } else {
@@ -577,7 +558,11 @@ pub async fn verify(
             .flatten()
             .unwrap_or(0) as u32;
 
-    let effective_pow_level = stored_pow_level.max(claimed_security_level);
+    let effective_pow_level = if certified {
+        stored_pow_level.max(claimed_security_level).max(min_level)
+    } else {
+        stored_pow_level.max(claimed_security_level)
+    };
 
     // Persist any improvement so /lobby/status and future logins see it even
     // when the higher level came directly through /auth/verify's
@@ -657,7 +642,7 @@ pub async fn verify(
     // locked out the whole hub, its owner first, the moment the mode was
     // switched on. A federating peer is not being admitted at all and cannot
     // answer a puzzle, which kept two hubs from forming an alliance (#108).
-    if challenge_mode != "off" && !is_member && !peer && !presents_named_invite {
+    if challenge_mode != "off" && !is_member && !peer && !presents_named_invite && !certified {
         match &req.challenge_token {
             None => {
                 return Err((
@@ -791,7 +776,13 @@ pub async fn verify(
                 invite_created_by = Some(redemption.created_by);
                 invite_grant_role_id = redemption.grant_role_id;
             }
-            None => crate::routes::invites::refuse_if_invite_only(&state.db).await?,
+            None => {
+                let invite_waived =
+                    certified && crate::routes::certs::load_cert_replaces_invite(&state).await;
+                if !invite_waived {
+                    crate::routes::invites::refuse_if_invite_only(&state.db).await?;
+                }
+            }
         }
     }
 
