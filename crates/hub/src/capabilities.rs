@@ -72,6 +72,10 @@ pub const CAPABILITIES: &[&str] = &[
     // `{id, url, name, mime, kind, size, width, height, state}`. A hub without
     // it takes inline `attachments` only, so a client hides the attach button.
     "attachments.stored",
+    // The badge catalogue (achievement-badges.md): `GET /badges/defs`, badges
+    // by hand, by rule (with levels) and from programs holding
+    // `badges.programs`. A client shows the catalogue only where it exists.
+    "badges.catalogue",
     // `POST /channels/{id}/read` takes an optional `message_id` and moves the
     // caller's read marker back to just before that message ("mark unread").
     // An older hub ignores the body and marks the channel read, the opposite

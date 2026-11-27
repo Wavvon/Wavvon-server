@@ -359,6 +359,12 @@ pub(in crate::routes::ws) async fn handle_voice_join(
         .entry(channel_id.clone())
         .or_default()
         .insert(cs.public_key.clone(), None);
+    crate::routes::badge_defs::voice_joined(
+        &state.db,
+        &cs.public_key,
+        crate::auth::handlers::unix_timestamp(),
+    )
+    .await;
     // Joining counts as activity for the AFK sweep — a joiner who never
     // speaks still gets the full timeout before being moved.
     state.voice_last_active.write().await.insert(

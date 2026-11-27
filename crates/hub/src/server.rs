@@ -808,6 +808,43 @@ pub fn create_router_full(
         )
         .route("/certs/revocations", get(routes::certs::get_revocations))
         .route("/certs/types", get(routes::certs::list_cert_types))
+        // ---- Badge catalogue (achievement-badges.md) ----
+        .route("/badges/defs", get(routes::badge_defs::list_defs))
+        .route("/admin/badge-defs", post(routes::badge_defs::create_def))
+        .route(
+            "/admin/badge-defs/preview",
+            post(routes::badge_defs::preview_def),
+        )
+        .route(
+            "/admin/badge-defs/{id}",
+            axum::routing::patch(routes::badge_defs::patch_def)
+                .delete(routes::badge_defs::delete_def),
+        )
+        .route(
+            "/admin/badge-defs/{id}/awards",
+            get(routes::badge_defs::list_awards),
+        )
+        .route(
+            "/admin/badge-defs/{id}/grant",
+            post(routes::badge_defs::grant_manual),
+        )
+        .route(
+            "/admin/badge-defs/{id}/awards/{pubkey}",
+            axum::routing::delete(routes::badge_defs::revoke_manual),
+        )
+        .route("/badges/programs", post(routes::badge_defs::program_create))
+        .route(
+            "/badges/programs/{id}",
+            axum::routing::delete(routes::badge_defs::program_delete),
+        )
+        .route(
+            "/badges/programs/{id}/grant",
+            post(routes::badge_defs::program_grant),
+        )
+        .route(
+            "/badges/programs/{id}/awards/{pubkey}",
+            axum::routing::delete(routes::badge_defs::program_revoke),
+        )
         .route("/admin/cert-types", post(routes::certs::create_cert_type))
         .route(
             "/admin/cert-types/{id}",

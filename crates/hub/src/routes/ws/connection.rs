@@ -43,7 +43,16 @@ pub(super) async fn handle_socket(
     // Increment the online-users refcount for this pubkey.
     {
         let mut online = state.online_users.write().await;
-        *online.entry(public_key.clone()).or_insert(0) += 1;
+        let count = online.entry(public_key.clone()).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            crate::routes::badge_defs::went_online(
+                &state.db,
+                &public_key,
+                crate::auth::handlers::unix_timestamp(),
+            )
+            .await;
+        }
     }
 
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -766,6 +775,12 @@ pub(super) async fn handle_socket(
     };
 
     if went_offline {
+        crate::routes::badge_defs::went_offline(
+            &state.db,
+            &public_key,
+            crate::auth::handlers::unix_timestamp(),
+        )
+        .await;
         // If the user's current presence is "invisible", other clients were
         // never told they came online in the first place (see connect,
         // above) — or were already told they went offline the moment
@@ -1003,6 +1018,12 @@ pub async fn leave_voice_for_test(state: &AppState, public_key: &str, channel_id
 }
 
 pub async fn leave_voice(state: &AppState, public_key: &str, channel_id: &str) {
+    crate::routes::badge_defs::voice_left(
+        &state.db,
+        public_key,
+        crate::auth::handlers::unix_timestamp(),
+    )
+    .await;
     state.voice_last_active.write().await.remove(public_key);
     state.voice_self_state.write().await.remove(public_key);
     let (removed_session, became_empty) = {

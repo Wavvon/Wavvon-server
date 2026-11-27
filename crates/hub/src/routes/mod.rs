@@ -4,6 +4,7 @@ pub mod alliances;
 pub mod app_models;
 pub mod application;
 pub mod apps;
+pub mod badge_defs;
 pub mod badges;
 pub mod banlist;
 pub mod certs;

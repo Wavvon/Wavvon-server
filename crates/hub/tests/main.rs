@@ -10,6 +10,7 @@ mod apps_flow;
 mod attachments_flow;
 mod auth_flow;
 mod backup_flow;
+mod badge_catalogue_flow;
 mod ban_closes_socket_flow;
 mod ban_evasion_flow;
 mod banlist_sync_flow;
