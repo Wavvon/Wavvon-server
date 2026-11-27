@@ -143,10 +143,27 @@ pub async fn create_invite(
         }
     }
 
-    let code = generate_invite_code();
+    let code = match req.code.as_deref() {
+        Some(chosen) => {
+            let c = normalize_code(chosen);
+            let ok_len = (3..=32).contains(&c.len());
+            let ok_chars = c
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
+            if !ok_len || !ok_chars {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "code must be 3–32 of a-z, 0-9, - and _".to_string(),
+                ));
+            }
+            c
+        }
+        None => generate_invite_code(),
+    };
 
-    sqlx::query(
-        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey) VALUES ($1, $2, $3, 0, $4, $5, $6, $7)",
+    let inserted = sqlx::query(
+        "INSERT INTO invites (code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey) VALUES ($1, $2, $3, 0, $4, $5, $6, $7)
+         ON CONFLICT (code) DO NOTHING",
     )
     .bind(&code)
     .bind(&user.public_key)
@@ -158,6 +175,12 @@ pub async fn create_invite(
     .execute(&state.db)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    if inserted.rows_affected() == 0 {
+        return Err((
+            StatusCode::CONFLICT,
+            "That invite code is taken".to_string(),
+        ));
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -309,6 +332,7 @@ pub async fn validate_and_use_invite(
     code: &str,
     candidates: &[&str],
 ) -> Result<InviteRedemption, (StatusCode, String)> {
+    let code = &normalize_code(code);
     let now = crate::auth::handlers::unix_timestamp();
 
     // First verify the code exists and hasn't expired (expiry is checked here
@@ -562,6 +586,7 @@ async fn get_join_info(
     State(state): State<Arc<AppState>>,
     Path(code): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let code = normalize_code(&code);
     let invite = sqlx::query_as::<_, InviteRow>(
         "SELECT code, created_by, max_uses, uses, expires_at, created_at, grant_role_id, bound_pubkey FROM invites WHERE code = $1",
     )
@@ -633,6 +658,7 @@ pub async fn join_with_invite(
     user: crate::auth::middleware::AuthUser,
     Path(code): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let code = normalize_code(&code);
     let now = crate::auth::handlers::unix_timestamp();
 
     let invite = sqlx::query_as::<_, InviteRow>(
@@ -736,6 +762,13 @@ pub async fn refuse_if_invite_only(db: &sqlx::PgPool) -> Result<(), (StatusCode,
         ));
     }
     Ok(())
+}
+
+/// Codes are case-insensitive: stored lowercase (random ones are lowercase
+/// hex already) and looked up the same way, so "GameNight" and "gamenight"
+/// are one invite.
+pub fn normalize_code(code: &str) -> String {
+    code.trim().to_ascii_lowercase()
 }
 
 fn generate_invite_code() -> String {

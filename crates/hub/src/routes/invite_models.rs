@@ -13,6 +13,11 @@ pub struct CreateInviteRequest {
     /// recipient and admits several people is a contradiction, and honouring
     /// a larger number silently would be the worse reading of the two.
     pub bound_pubkey: Option<String>,
+    /// A code the creator chooses ("gamenight") instead of a random one:
+    /// 3–32 of a-z, 0-9, `-` and `_`, case-insensitive. How guessable it is
+    /// stays the admin's call; a use limit or an expiry is theirs to add.
+    #[serde(default)]
+    pub code: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
