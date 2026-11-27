@@ -201,6 +201,9 @@ pub const CAPABILITIES: &[&str] = &[
     // Without it a client renumbers roles with one PATCH each, which can
     // half-apply, so it offers drag reordering only where this is present.
     "roles.order",
+    // `PUT /roles/order` takes `builtin-everyone` too, so a role can rank
+    // below it.
+    "roles.order.everyone",
     // `screen_share_start` takes `audience: "room"`: the stream is listed,
     // announced and relayed only to the sharer's voice room.
     "screenshare.audience",
