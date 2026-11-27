@@ -1,4 +1,4 @@
-//! Integration tests for hub certification issuance (#20) and auth gate (#21).
+//! Integration tests for hub certification issuance and certified admission.
 
 use std::sync::Arc;
 
@@ -209,174 +209,7 @@ async fn cert_worker_issues_on_tick() {
 }
 
 // ---------------------------------------------------------------------------
-// Task #21 — Auth gate
-// ---------------------------------------------------------------------------
-
-/// When cert_mode = 'none' (default), /auth/verify succeeds without any certs.
-#[tokio::test]
-async fn cert_mode_none_no_cert_needed() {
-    let (_, server) = setup().await;
-    let id = Identity::generate();
-    let _ = do_auth(&server, &Identity::generate()).await; // owner
-    let token = do_auth(&server, &id).await;
-    assert!(!token.is_empty());
-}
-
-/// When cert_mode = 'any', /auth/verify without a cert returns 403 cert_required.
-#[tokio::test]
-async fn cert_mode_any_rejects_no_cert() {
-    let (state, server) = setup().await;
-
-    // Set up owner.
-    let owner = Identity::generate();
-    let owner_token = do_auth(&server, &owner).await;
-
-    // Enable cert_mode = 'any'.
-    server
-        .patch("/admin/settings/certs")
-        .authorization_bearer(&owner_token)
-        .json(&json!({ "cert_mode": "any" }))
-        .await
-        .assert_status(axum::http::StatusCode::NO_CONTENT);
-
-    // A new user tries to auth without a cert.
-    let newcomer = Identity::generate();
-    let pk = newcomer.public_key_hex();
-    let ch_resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": pk }))
-        .await;
-    ch_resp.assert_status_ok();
-    let ch: ChallengeResponse = ch_resp.json();
-    let challenge_bytes = hex::decode(&ch.challenge).unwrap();
-    let sig =
-        newcomer.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
-    let sig_hex = hex::encode(sig.to_bytes());
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": pk,
-            "challenge": ch.challenge,
-            "signature": sig_hex,
-        }))
-        .await;
-    resp.assert_status_forbidden();
-    assert!(resp.text().contains("cert_required"));
-
-    // Suppress unused state warning.
-    let _ = state.hub_name.as_str();
-}
-
-/// When cert_mode = 'any', a valid cert from any hub is accepted.
-#[tokio::test]
-async fn cert_mode_any_accepts_valid_cert() {
-    let (state, server) = setup().await;
-
-    // Owner registers first.
-    let owner = Identity::generate();
-    let owner_token = do_auth(&server, &owner).await;
-
-    // Enable cert_mode = 'any'.
-    server
-        .patch("/admin/settings/certs")
-        .authorization_bearer(&owner_token)
-        .json(&json!({ "cert_mode": "any" }))
-        .await
-        .assert_status(axum::http::StatusCode::NO_CONTENT);
-
-    // Create a newcomer and issue them a cert from THIS hub (simulates
-    // them having been a member of a hub that trusts them).
-    let newcomer = Identity::generate();
-    let newcomer_pk = newcomer.public_key_hex();
-
-    // Insert minimal user row so issue_cert_for can find them.
-    let now = wavvon_hub::auth::handlers::unix_timestamp();
-    sqlx::query(
-        "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_member)
-         VALUES ($1, $2, $3, 'approved', TRUE)",
-    )
-    .bind(&newcomer_pk)
-    .bind(now - 86400)
-    .bind(now)
-    .execute(&state.db)
-    .await
-    .unwrap();
-
-    let cert = wavvon_hub::routes::certs::issue_cert_for(&state, &newcomer_pk)
-        .await
-        .unwrap();
-
-    // Now authenticate presenting the cert. Use newcomer_pk as both public_key and
-    // the cert's subject (no subkey cert, so master = auth pubkey).
-    let ch_resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": newcomer_pk }))
-        .await;
-    ch_resp.assert_status_ok();
-    let ch: ChallengeResponse = ch_resp.json();
-    let challenge_bytes = hex::decode(&ch.challenge).unwrap();
-    let sig =
-        newcomer.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
-    let sig_hex = hex::encode(sig.to_bytes());
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": newcomer_pk,
-            "challenge": ch.challenge,
-            "signature": sig_hex,
-            "certifications": [cert],
-        }))
-        .await;
-    resp.assert_status_ok();
-    let v: VerifyResponse = resp.json();
-    assert!(!v.token.is_empty());
-}
-
-/// GET /info includes cert_requirement when cert_mode != 'none'.
-#[tokio::test]
-async fn info_includes_cert_requirement() {
-    let (_, server) = setup().await;
-    let owner = Identity::generate();
-    let owner_token = do_auth(&server, &owner).await;
-
-    // Default: cert_requirement is absent.
-    let info: serde_json::Value = server.get("/info").await.json();
-    assert!(info.get("cert_requirement").is_none());
-
-    // Enable cert gate.
-    server
-        .patch("/admin/settings/certs")
-        .authorization_bearer(&owner_token)
-        .json(&json!({ "cert_mode": "any" }))
-        .await
-        .assert_status(axum::http::StatusCode::NO_CONTENT);
-
-    let info: serde_json::Value = server.get("/info").await.json();
-    let req = info
-        .get("cert_requirement")
-        .expect("cert_requirement should be present");
-    assert_eq!(req["mode"], "any");
-}
-
-/// PATCH /admin/settings/certs rejects invalid cert_mode values.
-#[tokio::test]
-async fn patch_cert_settings_rejects_invalid_mode() {
-    let (_, server) = setup().await;
-    let owner = Identity::generate();
-    let owner_token = do_auth(&server, &owner).await;
-
-    let resp = server
-        .patch("/admin/settings/certs")
-        .authorization_bearer(&owner_token)
-        .json(&json!({ "cert_mode": "banana" }))
-        .await;
-    resp.assert_status_bad_request();
-}
-
-// ---------------------------------------------------------------------------
-// §11 — the receiving hub pulls a portfolio from its trusted issuers
+// Certified admission: the fast lane (certified-admission.md)
 // ---------------------------------------------------------------------------
 
 /// A mock issuing hub: serves `GET /identity/:pubkey/certs` with whatever
@@ -405,9 +238,16 @@ async fn start_mock_portfolio_issuer(portfolio: serde_json::Value) -> String {
     format!("http://127.0.0.1:{port}")
 }
 
-/// A standing cert for `subject`, signed by `issuer` the way an issuing hub
-/// signs one: Ed25519 over the payload's JSON.
-fn signed_cert(issuer: &Identity, issuer_url: &str, subject_pubkey: &str) -> serde_json::Value {
+/// A cert for `subject`, signed by `issuer` the way an issuing hub signs one:
+/// Ed25519 over the payload's JSON. `label` makes it a badge, `cert_type` a
+/// typed certificate.
+fn signed(
+    issuer: &Identity,
+    issuer_url: &str,
+    subject_pubkey: &str,
+    label: Option<&str>,
+    cert_type: Option<&str>,
+) -> serde_json::Value {
     let now = wavvon_hub::auth::handlers::unix_timestamp();
     // Built from the real payload type, not a `json!` literal: the signature
     // covers `serde_json::to_string(&payload)` in *struct field order*, and a
@@ -423,9 +263,10 @@ fn signed_cert(issuer: &Identity, issuer_url: &str, subject_pubkey: &str) -> ser
         issued_at: now,
         expires_at: now + 86400,
         capabilities: Vec::new(),
-        label: None,
+        label: label.map(str::to_string),
         description: None,
         icon: None,
+        cert_type: cert_type.map(str::to_string),
     };
     let payload_json = serde_json::to_string(&payload).unwrap();
     let signature = issuer.sign(payload_json.as_bytes());
@@ -435,21 +276,11 @@ fn signed_cert(issuer: &Identity, issuer_url: &str, subject_pubkey: &str) -> ser
     })
 }
 
-/// Turn on `cert_mode = trusted` for `issuer_pubkey`, optionally telling the
-/// hub where to reach it.
-async fn trust_issuer(
-    server: &TestServer,
-    owner_token: &str,
-    issuer_pubkey: &str,
-    issuer_url: Option<&str>,
-) {
-    let mut body = json!({
-        "cert_mode": "trusted",
-        "cert_trusted_issuers": [issuer_pubkey],
-    });
-    if let Some(url) = issuer_url {
-        body["cert_issuer_urls"] = json!({ issuer_pubkey: url });
-    }
+fn signed_cert(issuer: &Identity, issuer_url: &str, subject_pubkey: &str) -> serde_json::Value {
+    signed(issuer, issuer_url, subject_pubkey, None, None)
+}
+
+async fn patch_certs(server: &TestServer, owner_token: &str, body: serde_json::Value) {
     server
         .patch("/admin/settings/certs")
         .authorization_bearer(owner_token)
@@ -458,10 +289,369 @@ async fn trust_issuer(
         .assert_status(axum::http::StatusCode::NO_CONTENT);
 }
 
+/// Trust every certificate of `issuer_pubkey` and refuse everyone else, so
+/// a refusal in these tests can only mean "not certified". Optionally tells
+/// the hub where to reach the issuer.
+async fn trust_issuer(
+    server: &TestServer,
+    owner_token: &str,
+    issuer_pubkey: &str,
+    issuer_url: Option<&str>,
+) {
+    let mut body = json!({
+        "cert_trusted_issuers": [issuer_pubkey],
+        "cert_others": "refuse",
+    });
+    if let Some(url) = issuer_url {
+        body["cert_issuer_urls"] = json!({ issuer_pubkey: url });
+    }
+    patch_certs(server, owner_token, body).await;
+}
+
+/// Sign in as a newcomer, presenting `certs` and an optional invite.
+async fn verify_as(
+    server: &TestServer,
+    who: &Identity,
+    certs: Option<serde_json::Value>,
+    invite: Option<&str>,
+) -> wavvon_test_server::TestResponse {
+    let pk = who.public_key_hex();
+    let ch: ChallengeResponse = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": pk }))
+        .await
+        .json();
+    let sig = who.sign(
+        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&ch.challenge).unwrap())
+            .unwrap(),
+    );
+    let mut body = json!({
+        "public_key": pk,
+        "challenge": ch.challenge,
+        "signature": hex::encode(sig.to_bytes()),
+    });
+    if let Some(c) = certs {
+        body["certifications"] = c;
+    }
+    if let Some(code) = invite {
+        body["invite_code"] = json!(code);
+    }
+    server.post("/auth/verify").json(&body).await
+}
+
+async fn set_hub_setting(state: &AppState, key: &str, value: &str) {
+    sqlx::query(
+        "INSERT INTO hub_settings (key, value) VALUES ($1, $2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(key)
+    .bind(value)
+    .execute(&state.db)
+    .await
+    .unwrap();
+}
+
+async fn approval_status(state: &AppState, pk: &str) -> String {
+    sqlx::query_scalar("SELECT approval_status FROM users WHERE public_key = $1")
+        .bind(pk)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+}
+
+/// With both trust lists empty there is no fast lane: admission is what
+/// Joining alone sets, as on a hub that never touched certificates.
+#[tokio::test]
+async fn no_trust_lists_no_cert_needed() {
+    let (_, server) = setup().await;
+    let alice = Identity::generate();
+    let token = do_auth(&server, &alice).await;
+    assert!(!token.is_empty());
+}
+
+/// A hub set to refuse turns away a newcomer with nothing trusted.
+#[tokio::test]
+async fn refuse_turns_away_the_uncertified() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    trust_issuer(
+        &server,
+        &owner_token,
+        &Identity::generate().public_key_hex(),
+        None,
+    )
+    .await;
+
+    let resp = verify_as(&server, &Identity::generate(), None, None).await;
+    resp.assert_status_forbidden();
+    assert!(resp.text().contains("cert_required"));
+}
+
+/// A pushed certificate from a trusted hub admits its holder.
+#[tokio::test]
+async fn a_trusted_hubs_certificate_admits() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let issuer = Identity::generate();
+    trust_issuer(&server, &owner_token, &issuer.public_key_hex(), None).await;
+
+    let newcomer = Identity::generate();
+    let cert = signed_cert(&issuer, "http://issuer.example", &newcomer.public_key_hex());
+    verify_as(&server, &newcomer, Some(json!([cert])), None)
+        .await
+        .assert_status_ok();
+}
+
+/// The specific list trusts one type of one hub: that type admits, another
+/// type of the same hub does not.
+#[tokio::test]
+async fn a_trusted_type_admits_and_another_type_does_not() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let issuer = Identity::generate();
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({
+            "cert_trusted_types": [{ "issuer": issuer.public_key_hex(), "cert_type": "verified" }],
+            "cert_others": "refuse",
+        }),
+    )
+    .await;
+
+    let good = Identity::generate();
+    let cert = signed(
+        &issuer,
+        "http://issuer.example",
+        &good.public_key_hex(),
+        None,
+        Some("verified"),
+    );
+    verify_as(&server, &good, Some(json!([cert])), None)
+        .await
+        .assert_status_ok();
+
+    let other = Identity::generate();
+    let cert = signed(
+        &issuer,
+        "http://issuer.example",
+        &other.public_key_hex(),
+        None,
+        Some("organiser"),
+    );
+    verify_as(&server, &other, Some(json!([cert])), None)
+        .await
+        .assert_status_forbidden();
+
+    let plain = Identity::generate();
+    let cert = signed_cert(&issuer, "http://issuer.example", &plain.public_key_hex());
+    verify_as(&server, &plain, Some(json!([cert])), None)
+        .await
+        .assert_status_forbidden();
+}
+
+/// A badge is a cert with a label, and it used to pass the admission check
+/// like a standing certificate: any badge from a trusted hub let its holder in.
+#[tokio::test]
+async fn a_badge_never_admits() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let issuer = Identity::generate();
+    trust_issuer(&server, &owner_token, &issuer.public_key_hex(), None).await;
+
+    let newcomer = Identity::generate();
+    let badge = signed(
+        &issuer,
+        "http://issuer.example",
+        &newcomer.public_key_hex(),
+        Some("Raid Leader"),
+        None,
+    );
+    verify_as(&server, &newcomer, Some(json!([badge])), None)
+        .await
+        .assert_status_forbidden();
+}
+
+/// The fast lane skips approval; the usual way in (`lobby`) still applies it.
+#[tokio::test]
+async fn the_fast_lane_skips_approval_and_the_usual_way_keeps_it() {
+    let (state, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let issuer = Identity::generate();
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({ "cert_trusted_issuers": [issuer.public_key_hex()] }),
+    )
+    .await;
+    set_hub_setting(&state, "require_approval", "true").await;
+
+    let certified = Identity::generate();
+    let cert = signed_cert(
+        &issuer,
+        "http://issuer.example",
+        &certified.public_key_hex(),
+    );
+    verify_as(&server, &certified, Some(json!([cert])), None)
+        .await
+        .assert_status_ok();
+    assert_eq!(
+        approval_status(&state, &certified.public_key_hex()).await,
+        "approved"
+    );
+
+    let usual = Identity::generate();
+    verify_as(&server, &usual, None, None)
+        .await
+        .assert_status_ok();
+    assert_eq!(
+        approval_status(&state, &usual.public_key_hex()).await,
+        "pending"
+    );
+}
+
+/// On an invite-only hub a trusted certificate stands in for an invite only
+/// when the admin says so.
+#[tokio::test]
+async fn a_certificate_replaces_an_invite_only_when_switched_on() {
+    let (state, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let issuer = Identity::generate();
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({ "cert_trusted_issuers": [issuer.public_key_hex()] }),
+    )
+    .await;
+    set_hub_setting(&state, "invite_only", "true").await;
+
+    let first = Identity::generate();
+    let cert = signed_cert(&issuer, "http://issuer.example", &first.public_key_hex());
+    verify_as(&server, &first, Some(json!([cert])), None)
+        .await
+        .assert_status_forbidden();
+
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({ "cert_replaces_invite": true }),
+    )
+    .await;
+    let second = Identity::generate();
+    let cert = signed_cert(&issuer, "http://issuer.example", &second.public_key_hex());
+    verify_as(&server, &second, Some(json!([cert])), None)
+        .await
+        .assert_status_ok();
+}
+
+/// GET /info advertises the trust lists while either is set.
+#[tokio::test]
+async fn info_includes_cert_requirement() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+
+    let info: serde_json::Value = server.get("/info").await.json();
+    assert!(info.get("cert_requirement").is_none());
+
+    let issuer = Identity::generate().public_key_hex();
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({ "cert_trusted_issuers": [issuer] }),
+    )
+    .await;
+    let info: serde_json::Value = server.get("/info").await.json();
+    let req = info
+        .get("cert_requirement")
+        .expect("cert_requirement should be present");
+    assert_eq!(req["trusted_issuers"][0], issuer);
+    assert_eq!(req["others"], "lobby");
+    assert_eq!(req["replaces_invite"], false);
+}
+
+#[tokio::test]
+async fn patch_cert_settings_rejects_invalid_values() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+
+    server
+        .patch("/admin/settings/certs")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "cert_others": "banana" }))
+        .await
+        .assert_status_bad_request();
+    server
+        .patch("/admin/settings/certs")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "cert_trusted_types": ["not an object"] }))
+        .await
+        .assert_status_bad_request();
+}
+
+/// The catalogue: public to read, admin-only to change, and an issuance must
+/// name a type that exists.
+#[tokio::test]
+async fn certificate_types_catalogue() {
+    let (state, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let member = Identity::generate();
+    let member_token = do_auth(&server, &member).await;
+
+    server
+        .post("/admin/cert-types")
+        .authorization_bearer(&member_token)
+        .json(&json!({ "name": "Verified identity" }))
+        .await
+        .assert_status_forbidden();
+    let created: serde_json::Value = server
+        .post("/admin/cert-types")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "name": "Verified identity", "description": "Checked by a moderator" }))
+        .await
+        .json();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let listed: Vec<serde_json::Value> = server.get("/certs/types").await.json();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["name"], "Verified identity");
+
+    let cert: Certification = server
+        .post(&format!("/admin/certs/{}", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "cert_type": id }))
+        .await
+        .json();
+    assert_eq!(cert.payload.cert_type.as_deref(), Some(id.as_str()));
+
+    server
+        .post(&format!("/admin/certs/{}", member.public_key_hex()))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "cert_type": "no-such-type" }))
+        .await
+        .assert_status_bad_request();
+
+    server
+        .delete(&format!("/admin/cert-types/{id}"))
+        .authorization_bearer(&owner_token)
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+    let listed: Vec<serde_json::Value> = server.get("/certs/types").await.json();
+    assert!(listed.is_empty());
+    let _ = state;
+}
+
 /// The whole point of §11: nothing presents a cert, so the hub fetches the
 /// candidate's portfolio from the issuers it trusts and admits them on what it
-/// finds. Without this a hub with `cert_mode != none` refuses everyone, which
-/// is a lockout rather than a relay.
+/// finds.
 #[tokio::test]
 async fn a_trusted_issuer_is_pulled_when_the_client_presents_nothing() {
     let (_, server) = setup().await;
@@ -470,15 +660,12 @@ async fn a_trusted_issuer_is_pulled_when_the_client_presents_nothing() {
 
     let issuer = Identity::generate();
     let newcomer = Identity::generate();
-    let newcomer_pk = newcomer.public_key_hex();
-
     let issuer_url = start_mock_portfolio_issuer(json!([signed_cert(
         &issuer,
         "http://issuer.example",
-        &newcomer_pk
+        &newcomer.public_key_hex()
     )]))
     .await;
-
     trust_issuer(
         &server,
         &owner_token,
@@ -487,73 +674,61 @@ async fn a_trusted_issuer_is_pulled_when_the_client_presents_nothing() {
     )
     .await;
 
-    let ch_resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": newcomer_pk }))
-        .await;
-    ch_resp.assert_status_ok();
-    let ch: ChallengeResponse = ch_resp.json();
-    let sig = newcomer.sign(
-        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&ch.challenge).unwrap())
-            .unwrap(),
-    );
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": newcomer_pk,
-            "challenge": ch.challenge,
-            "signature": hex::encode(sig.to_bytes()),
-            // Deliberately no `certifications`: no client sends one.
-        }))
-        .await;
-    resp.assert_status_ok();
-    let v: VerifyResponse = resp.json();
-    assert!(!v.token.is_empty());
+    verify_as(&server, &newcomer, None, None)
+        .await
+        .assert_status_ok();
 }
 
-/// Trust and reachability are different facts, and the setting that carries
-/// the address is optional. An issuer with no URL is simply not pullable —
-/// its pushed certs would still be honoured — so this candidate is refused.
+/// The issuers named only by the specific list are pulled too.
 #[tokio::test]
-async fn an_issuer_with_no_url_is_not_pulled() {
+async fn an_issuer_trusted_for_one_type_is_pulled() {
     let (_, server) = setup().await;
     let owner = Identity::generate();
     let owner_token = do_auth(&server, &owner).await;
 
     let issuer = Identity::generate();
     let newcomer = Identity::generate();
-    let newcomer_pk = newcomer.public_key_hex();
+    let issuer_url = start_mock_portfolio_issuer(json!([signed(
+        &issuer,
+        "http://issuer.example",
+        &newcomer.public_key_hex(),
+        None,
+        Some("verified")
+    )]))
+    .await;
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({
+            "cert_trusted_types": [{ "issuer": issuer.public_key_hex(), "cert_type": "verified" }],
+            "cert_issuer_urls": { issuer.public_key_hex(): issuer_url },
+            "cert_others": "refuse",
+        }),
+    )
+    .await;
 
+    verify_as(&server, &newcomer, None, None)
+        .await
+        .assert_status_ok();
+}
+
+/// Trust and reachability are different facts. An issuer with no URL is
+/// simply not pullable, so this candidate is refused.
+#[tokio::test]
+async fn an_issuer_with_no_url_is_not_pulled() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let issuer = Identity::generate();
     trust_issuer(&server, &owner_token, &issuer.public_key_hex(), None).await;
 
-    let ch_resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": newcomer_pk }))
-        .await;
-    ch_resp.assert_status_ok();
-    let ch: ChallengeResponse = ch_resp.json();
-    let sig = newcomer.sign(
-        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&ch.challenge).unwrap())
-            .unwrap(),
-    );
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": newcomer_pk,
-            "challenge": ch.challenge,
-            "signature": hex::encode(sig.to_bytes()),
-        }))
-        .await;
+    let resp = verify_as(&server, &Identity::generate(), None, None).await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
     assert!(resp.text().contains("cert_required"));
 }
 
 /// A pulled cert goes through exactly the predicate a presented one does, so
-/// answering the fetch with someone else's cert buys an issuer nothing. This
-/// is what makes "the hub pulls" safe: the fetch chooses *where* to look, never
-/// what counts.
+/// answering the fetch with someone else's cert buys an issuer nothing.
 #[tokio::test]
 async fn a_pulled_cert_signed_by_someone_untrusted_is_refused() {
     let (_, server) = setup().await;
@@ -563,17 +738,12 @@ async fn a_pulled_cert_signed_by_someone_untrusted_is_refused() {
     let issuer = Identity::generate();
     let stranger = Identity::generate();
     let newcomer = Identity::generate();
-    let newcomer_pk = newcomer.public_key_hex();
-
-    // Served from the trusted issuer's address, but signed by a key this hub
-    // has never trusted.
     let issuer_url = start_mock_portfolio_issuer(json!([signed_cert(
         &stranger,
         "http://issuer.example",
-        &newcomer_pk
+        &newcomer.public_key_hex()
     )]))
     .await;
-
     trust_issuer(
         &server,
         &owner_token,
@@ -582,25 +752,7 @@ async fn a_pulled_cert_signed_by_someone_untrusted_is_refused() {
     )
     .await;
 
-    let ch_resp = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": newcomer_pk }))
-        .await;
-    ch_resp.assert_status_ok();
-    let ch: ChallengeResponse = ch_resp.json();
-    let sig = newcomer.sign(
-        &wavvon_identity::auth_challenge_signing_bytes(&hex::decode(&ch.challenge).unwrap())
-            .unwrap(),
-    );
-
-    let resp = server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": newcomer_pk,
-            "challenge": ch.challenge,
-            "signature": hex::encode(sig.to_bytes()),
-        }))
-        .await;
+    let resp = verify_as(&server, &newcomer, None, None).await;
     resp.assert_status(axum::http::StatusCode::FORBIDDEN);
     assert!(resp.text().contains("cert_required"));
 }
@@ -613,85 +765,31 @@ async fn patch_accepts_the_shape_the_admin_ui_sends() {
     let owner = Identity::generate();
     let owner_token = do_auth(&server, &owner).await;
 
-    let resp = server
-        .patch("/admin/settings/certs")
-        .authorization_bearer(&owner_token)
-        .json(&json!({
-            "cert_mode": "any",
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({
             "cert_auto_issue": false,
             "cert_min_age_days": 30,
             "cert_validity_days": 90,
             "cert_trusted_issuers": [],
-        }))
-        .await;
-    resp.assert_status(axum::http::StatusCode::NO_CONTENT);
+            "cert_trusted_types": [],
+            "cert_others": "lobby",
+            "cert_replaces_invite": false,
+        }),
+    )
+    .await;
 
-    let read = server
+    let v: serde_json::Value = server
         .get("/admin/settings/certs")
         .authorization_bearer(&owner_token)
-        .await;
-    read.assert_status_ok();
-    let v: serde_json::Value = read.json();
+        .await
+        .json();
     assert_eq!(
         v["cert_auto_issue"], false,
         "the toggle the admin flipped must stick"
     );
-}
-
-/// A badge is a cert with a label, and it used to pass the admission check
-/// like a standing certificate: any badge from a trusted hub let its holder in.
-#[tokio::test]
-async fn a_badge_does_not_satisfy_cert_mode() {
-    let (state, server) = setup().await;
-    let owner = Identity::generate();
-    let owner_token = do_auth(&server, &owner).await;
-    server
-        .patch("/admin/settings/certs")
-        .authorization_bearer(&owner_token)
-        .json(&json!({ "cert_mode": "any" }))
-        .await
-        .assert_status(axum::http::StatusCode::NO_CONTENT);
-
-    let newcomer = Identity::generate();
-    let newcomer_pk = newcomer.public_key_hex();
-    let now = wavvon_hub::auth::handlers::unix_timestamp();
-    sqlx::query(
-        "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_member)
-         VALUES ($1, $2, $3, 'approved', TRUE)",
-    )
-    .bind(&newcomer_pk)
-    .bind(now - 86400)
-    .bind(now)
-    .execute(&state.db)
-    .await
-    .unwrap();
-
-    let badge: serde_json::Value = server
-        .post(&format!("/admin/certs/{newcomer_pk}/badge"))
-        .authorization_bearer(&owner_token)
-        .json(&json!({ "label": "Raid Leader" }))
-        .await
-        .json();
-
-    let ch: ChallengeResponse = server
-        .post("/auth/challenge")
-        .json(&json!({ "public_key": newcomer_pk }))
-        .await
-        .json();
-    let challenge_bytes = hex::decode(&ch.challenge).unwrap();
-    let sig =
-        newcomer.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
-
-    server
-        .post("/auth/verify")
-        .json(&json!({
-            "public_key": newcomer_pk,
-            "challenge": ch.challenge,
-            "signature": hex::encode(sig.to_bytes()),
-            "certifications": [badge],
-        }))
-        .await
-        .assert_status_forbidden();
+    assert_eq!(v["cert_others"], "lobby");
 }
 
 /// A ban withdraws what the hub vouched for: certificates and badges issued
@@ -705,7 +803,7 @@ async fn a_ban_revokes_the_members_certificates_and_badges() {
     let member_pk = member.public_key_hex();
     do_auth(&server, &member).await;
 
-    wavvon_hub::routes::certs::issue_cert_for(&state, &member_pk)
+    wavvon_hub::routes::certs::issue_cert_for(&state, &member_pk, None)
         .await
         .unwrap();
     server

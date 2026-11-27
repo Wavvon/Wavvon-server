@@ -54,8 +54,8 @@ pub struct VerifyRequest {
     /// so that `PeerHub` can distinguish it from regular user sessions.
     #[serde(default)]
     pub is_hub: Option<bool>,
-    /// Hub certifications presented at auth time. Evaluated when
-    /// cert_mode != 'none' (Task #21).
+    /// Hub certifications presented at auth time: a trusted one earns a
+    /// newcomer the fast lane (certified-admission.md).
     #[serde(default)]
     pub certifications: Option<Vec<Certification>>,
     /// Voice in alliance channels (alliances.md): an origin hub's signed

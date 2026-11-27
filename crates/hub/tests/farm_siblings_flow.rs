@@ -153,7 +153,7 @@ async fn no_siblings_writes_nothing() {
 /// writer and none of them agreed with the hub.
 ///
 /// `load_trusted_issuers` is the only reader whose answer matters — it is what
-/// the auth gate consults in `cert_mode = "trusted"` — and it parsed a
+/// the fast lane consults for whole trusted hubs — and it parsed a
 /// different shape, swallowed the mismatch in `unwrap_or_default()`, and
 /// returned an empty list. Go through it, not around it.
 #[tokio::test]
