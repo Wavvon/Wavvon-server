@@ -81,6 +81,7 @@ pub async fn run() -> Result<()> {
                         .execute(&db)
                         .await?;
                     wavvon_hub::ban_evasion::flag_banned(&db, &pubkey, None, now).await?;
+                    wavvon_hub::routes::certs::revoke_issuances(&db, &pubkey, now).await?;
                     println!("Banned {pubkey}");
                 }
                 "unban" => {

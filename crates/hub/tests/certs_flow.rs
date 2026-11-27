@@ -693,3 +693,45 @@ async fn a_badge_does_not_satisfy_cert_mode() {
         .await
         .assert_status_forbidden();
 }
+
+/// A ban withdraws what the hub vouched for: certificates and badges issued
+/// before it used to stay valid until they expired.
+#[tokio::test]
+async fn a_ban_revokes_the_members_certificates_and_badges() {
+    let (state, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let member = Identity::generate();
+    let member_pk = member.public_key_hex();
+    do_auth(&server, &member).await;
+
+    wavvon_hub::routes::certs::issue_cert_for(&state, &member_pk)
+        .await
+        .unwrap();
+    server
+        .post(&format!("/admin/certs/{member_pk}/badge"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "label": "Raid Leader" }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    let live = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM cert_issuances WHERE subject_pubkey = $1 AND revoked_at IS NULL",
+        )
+        .bind(&member_pk)
+        .fetch_one(&state.db)
+        .await
+        .unwrap()
+    };
+    assert_eq!(live().await, 2);
+
+    server
+        .post("/moderation/bans")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "target_public_key": member_pk, "duration_seconds": 3600 }))
+        .await
+        .assert_status(axum::http::StatusCode::CREATED);
+
+    assert_eq!(live().await, 0, "a temporary ban revokes too");
+}

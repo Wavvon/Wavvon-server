@@ -162,6 +162,7 @@ pub async fn review_report(
                 .await
                 .ok();
                 let _ = crate::ban_evasion::flag_banned(&state.db, &pk, None, now).await;
+                let _ = crate::routes::certs::revoke_cert_for(&state, &pk).await;
             }
         }
         _ => {} // "dismiss" — just update the status below
