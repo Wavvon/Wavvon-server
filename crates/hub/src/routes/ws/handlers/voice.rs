@@ -397,6 +397,35 @@ pub(in crate::routes::ws) async fn handle_voice_join(
 
     cs.voice_channel = Some(channel_id.clone());
 
+    // Room-only streams were hidden from this member until now; announce the
+    // ones running in the room they just joined.
+    {
+        let shares = state.screen_shares.read().await;
+        for ((ch, _), active) in shares.iter() {
+            if ch != &channel_id {
+                continue;
+            }
+            for (sid, meta) in &active.streams {
+                let key = (ch.clone(), sid.clone());
+                if !meta.room_only || cs.notified_streams.contains(&key) {
+                    continue;
+                }
+                let started = WsServerMessage::ScreenShareStarted {
+                    channel_id: ch.clone(),
+                    stream_id: sid.clone(),
+                    sharer_pubkey: meta.sharer_pubkey.clone(),
+                    kind: meta.kind.clone(),
+                    mime: meta.mime.clone(),
+                    has_audio: meta.has_audio,
+                };
+                if let Ok(json) = serde_json::to_string(&started) {
+                    let _ = ws_tx.send(Message::Text(json.into())).await;
+                    cs.notified_streams.insert(key);
+                }
+            }
+        }
+    }
+
     let sender_id: u16 = {
         let mut counter = state.voice_next_sender_id.write().await;
         let c = counter.entry(channel_id.clone()).or_insert(0);

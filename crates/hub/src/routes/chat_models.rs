@@ -567,6 +567,10 @@ pub enum WsClientMessage {
         fps: Option<u32>,
         #[serde(default)]
         kbps: Option<u32>,
+        /// `room`: only the voice room sees it; anything else (or absent):
+        /// the whole hub, as before.
+        #[serde(default)]
+        audience: Option<String>,
     },
     #[serde(rename = "screen_share_chunk")]
     ScreenShareChunk {

@@ -236,22 +236,24 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
     ws_tx: &mut WsTx,
     msg: WsClientMessage,
 ) -> DispatchResult {
-    let (channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps) = match msg {
-        WsClientMessage::ScreenShareStart {
-            channel_id,
-            stream_id,
-            kind,
-            mime,
-            has_audio,
-            width,
-            height,
-            fps,
-            kbps,
-        } => (
-            channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps,
-        ),
-        _ => return DispatchResult::Continue,
-    };
+    let (channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps, audience) =
+        match msg {
+            WsClientMessage::ScreenShareStart {
+                channel_id,
+                stream_id,
+                kind,
+                mime,
+                has_audio,
+                width,
+                height,
+                fps,
+                kbps,
+                audience,
+            } => (
+                channel_id, stream_id, kind, mime, has_audio, width, height, fps, kbps, audience,
+            ),
+            _ => return DispatchResult::Continue,
+        };
 
     let limits = crate::routes::hub::read_stream_limits(&state.db).await;
     if let Some(what) = limits.exceeded_by(width, height, fps, kbps) {
@@ -310,6 +312,7 @@ pub(in crate::routes::ws) async fn handle_screen_share_start(
                     (Some(d), Some(m)) => Some(d.min(m)),
                     (d, m) => d.or(m),
                 },
+                room_only: audience.as_deref() == Some("room"),
             },
         );
     }
@@ -408,6 +411,9 @@ pub(in crate::routes::ws) async fn handle_stream_list(
             continue;
         }
         for (sid, meta) in &active.streams {
+            if !crate::state::may_see_stream(state, ch_id, meta, &cs.public_key).await {
+                continue;
+            }
             stream_list.push(HubStreamInfo {
                 channel_id: ch_id.clone(),
                 stream_id: sid.clone(),
@@ -465,6 +471,17 @@ pub(in crate::routes::ws) async fn handle_stream_subscribe(
         let mut shares = state.screen_shares.write().await;
         let entry = shares.iter_mut().find(|((ch, _), active)| {
             ch == &source_channel_id && active.streams.contains_key(&stream_id)
+        });
+        // A room-only stream answers an outsider as if it were not there.
+        let voice = state.voice_channels.read().await;
+        let entry = entry.filter(|((ch, _), active)| {
+            active.streams.get(&stream_id).is_some_and(|m| {
+                !m.room_only
+                    || m.sharer_pubkey == cs.public_key
+                    || voice
+                        .get(ch.as_str())
+                        .is_some_and(|room| room.contains_key(&cs.public_key))
+            })
         });
         entry.and_then(|((_, sharer), active)| {
             if cs.streams_on_request {

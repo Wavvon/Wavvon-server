@@ -218,6 +218,9 @@ pub(super) async fn handle_socket(
                 if meta.started_at >= chat_rx_since {
                     continue;
                 }
+                if !crate::state::may_see_stream(&state, ch_id, meta, &cs.public_key).await {
+                    continue;
+                }
                 let started = WsServerMessage::ScreenShareStarted {
                     channel_id: ch_id.clone(),
                     stream_id: stream_id.clone(),
@@ -344,6 +347,20 @@ pub(super) async fn handle_socket(
                             } = &event {
                                 let key = (channel_id.clone(), stream_id.clone());
                                 if cs.notified_streams.contains(&key) {
+                                    continue;
+                                }
+                                let hidden = {
+                                    let shares = state.screen_shares.read().await;
+                                    let meta = shares
+                                        .iter()
+                                        .find(|((ch, _), a)| ch == channel_id && a.streams.contains_key(stream_id))
+                                        .and_then(|(_, a)| a.streams.get(stream_id).cloned());
+                                    match meta {
+                                        Some(m) => !crate::state::may_see_stream(&state, channel_id, &m, &cs.public_key).await,
+                                        None => false,
+                                    }
+                                };
+                                if hidden {
                                     continue;
                                 }
                                 cs.notified_streams.insert(key);
@@ -558,7 +575,7 @@ pub(super) async fn handle_socket(
                         let in_channel =
                             ev.sharer_pubkey != cs.public_key
                             && cs.subscribed.contains(&ev.channel_id);
-                        let (is_cross_subscriber, stream_meta) = {
+                        let (is_cross_subscriber, stream_meta, full_meta) = {
                             let shares = state.screen_shares.read().await;
                             let active = shares.get(&(ev.channel_id.clone(), ev.sharer_pubkey.clone()));
                             let cross = active
@@ -567,7 +584,12 @@ pub(super) async fn handle_socket(
                             let meta = active
                                 .and_then(|a| a.streams.get(&ev.stream_id))
                                 .map(|m| (m.sharer_pubkey.clone(), m.kind.clone(), m.mime.clone(), m.has_audio));
-                            (cross, meta)
+                            let full = active.and_then(|a| a.streams.get(&ev.stream_id)).cloned();
+                            (cross, meta, full)
+                        };
+                        let allowed = match &full_meta {
+                            Some(m) => crate::state::may_see_stream(&state, &ev.channel_id, m, &cs.public_key).await,
+                            None => true,
                         };
                         // On request, only what this connection opened; otherwise
                         // every stream of its channels, as before (#276).
@@ -582,7 +604,7 @@ pub(super) async fn handle_socket(
                             .replay_cutoff
                             .get(&(ev.channel_id.clone(), ev.stream_id.clone()))
                             .is_some_and(|&cut| ev.hub_seq <= cut);
-                        if deliver && !replayed {
+                        if deliver && allowed && !replayed {
                             // Guarantee screen_share_started arrives before the
                             // first chunk for this stream, regardless of the order
                             // the hub processes the sharer's messages.

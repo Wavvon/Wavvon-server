@@ -1037,3 +1037,63 @@ async fn a_chunk_for_someone_elses_stream_is_dropped() {
         "no forged chunk reaches the viewer"
     );
 }
+
+/// A room-only share (`audience: "room"`) is announced and listed to the
+/// members of the voice room and to nobody else who can see the channel.
+#[tokio::test]
+async fn a_room_only_share_stays_in_the_room() {
+    let (base, state, _guard) = start_hub().await;
+    let sharer_id = Identity::generate();
+    let inside_id = Identity::generate();
+    let outside_id = Identity::generate();
+    let sharer_token = authenticate_http(&base, &sharer_id).await;
+    let inside_token = authenticate_http(&base, &inside_id).await;
+    let outside_token = authenticate_http(&base, &outside_id).await;
+    let ch = create_channel(&base, &sharer_token, "room").await;
+
+    state
+        .voice_channels
+        .write()
+        .await
+        .entry(ch.id.clone())
+        .or_default()
+        .insert(inside_id.public_key_hex(), None);
+
+    let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
+    let (mut inside_tx, mut inside_rx) = connect_ws(&base, &inside_token).await;
+    let (mut outside_tx, mut outside_rx) = connect_ws(&base, &outside_token).await;
+    for tx in [&mut sharer_tx, &mut inside_tx, &mut outside_tx] {
+        send_text(tx, json!({ "type": "subscribe", "channel_id": ch.id })).await;
+    }
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "room-1",
+            "kind": "screen",
+            "mime": "video/webm;codecs=vp8",
+            "has_audio": false,
+            "audience": "room",
+        }),
+    )
+    .await;
+
+    let started = wait_for_type(&mut inside_rx, "screen_share_started").await;
+    assert_eq!(started["stream_id"], "room-1");
+
+    // The outsider asks for the hub-wide list: the stream is not in it, and
+    // no announcement came before the answer.
+    send_text(&mut outside_tx, json!({ "type": "stream_list" })).await;
+    loop {
+        let v = next_text(&mut outside_rx).await;
+        assert_ne!(
+            v["type"], "screen_share_started",
+            "an outsider was told: {v}"
+        );
+        if v["type"] == "hub_streams" {
+            assert_eq!(v["streams"].as_array().unwrap().len(), 0, "{v}");
+            break;
+        }
+    }
+}
