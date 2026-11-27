@@ -67,6 +67,10 @@ pub const CAPABILITIES: &[&str] = &[
     // here, in beta, because the alternative is an admin panel that looks
     // alive and cannot work.
     "apps.register",
+    // The badge catalogue (achievement-badges.md): `GET /badges/defs`, badges
+    // by hand, by rule (with levels) and from programs holding
+    // `badges.programs`. A client shows the catalogue only where it exists.
+    "badges.catalogue",
     // Attachments are uploaded first (`POST /channels/{id}/upload`), stored on
     // disk and sent as `attachment_ids`; messages, posts and replies carry
     // `{id, url, name, mime, kind, size, width, height, state}`. A hub without

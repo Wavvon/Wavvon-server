@@ -436,6 +436,7 @@ pub async fn send_message_with(
     .execute(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    crate::routes::badge_defs::count_message(&state.db, &user.public_key, now).await;
     crate::attachments::link(
         &mut tx,
         crate::attachments::Owner::Message,

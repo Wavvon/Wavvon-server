@@ -30,7 +30,7 @@ use anyhow::{bail, Result};
 use sqlx::{PgConnection, PgPool};
 
 /// The schema version this binary migrates to: the number of the last step.
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 20;
 
 pub async fn run(pool: &PgPool) -> Result<()> {
     // Single-row table; the CHECK keeps it that way.
@@ -439,6 +439,53 @@ async fn step(version: i32, conn: &mut PgConnection) -> Result<()> {
             )
             .execute(conn)
             .await?;
+        }
+        // The badge catalogue (achievement-badges.md): badges defined once and
+        // earned by hand, by a rule over the running totals below, or from a
+        // program; one current award per badge and member, its cert alongside.
+        20 => {
+            for ddl in [
+                "CREATE TABLE IF NOT EXISTS member_stats (
+                    public_key      TEXT PRIMARY KEY,
+                    messages        BIGINT NOT NULL DEFAULT 0,
+                    active_days     BIGINT NOT NULL DEFAULT 0,
+                    last_active_day BIGINT,
+                    online_seconds  BIGINT NOT NULL DEFAULT 0,
+                    online_since    BIGINT,
+                    voice_seconds   BIGINT NOT NULL DEFAULT 0,
+                    voice_since     BIGINT
+                )",
+                "CREATE TABLE IF NOT EXISTS badge_defs (
+                    id             TEXT PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    icon           TEXT,
+                    description    TEXT,
+                    rule           TEXT NOT NULL,
+                    role_id        TEXT,
+                    keep_while     BOOLEAN NOT NULL DEFAULT FALSE,
+                    program_pubkey TEXT,
+                    declared_rule  TEXT,
+                    hidden         BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at     BIGINT NOT NULL
+                )",
+                "CREATE TABLE IF NOT EXISTS badge_levels (
+                    badge_id  TEXT NOT NULL REFERENCES badge_defs(id) ON DELETE CASCADE,
+                    level     INTEGER NOT NULL,
+                    name      TEXT NOT NULL,
+                    threshold BIGINT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (badge_id, level)
+                )",
+                "CREATE TABLE IF NOT EXISTS badge_awards (
+                    badge_id       TEXT NOT NULL REFERENCES badge_defs(id) ON DELETE CASCADE,
+                    subject_pubkey TEXT NOT NULL,
+                    level          INTEGER NOT NULL,
+                    cert_id        TEXT NOT NULL,
+                    awarded_at     BIGINT NOT NULL,
+                    PRIMARY KEY (badge_id, subject_pubkey)
+                )",
+            ] {
+                sqlx::query(ddl).execute(&mut *conn).await?;
+            }
         }
         _ => unreachable!("no schema step {version}"),
     }

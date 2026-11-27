@@ -691,13 +691,15 @@ pub async fn issue_cert_for(
 }
 
 /// Build, sign, and record an achievement badge (a labelled cert) for a user.
-async fn issue_badge_for(
+/// Build, sign, and record an achievement badge; returns its issuance id too,
+/// which the badge catalogue keeps to revoke exactly that cert later.
+pub(crate) async fn issue_badge_cert(
     state: &AppState,
     subject_pubkey: &str,
     label: &str,
     description: Option<&str>,
     icon: Option<&str>,
-) -> Result<Certification, (StatusCode, String)> {
+) -> Result<(String, Certification), (StatusCode, String)> {
     let now = unix_timestamp();
 
     let user_row: Option<(i64, String)> =
@@ -762,10 +764,39 @@ async fn issue_badge_for(
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    Ok(Certification {
-        payload,
-        signature: sig_hex,
-    })
+    Ok((
+        id,
+        Certification {
+            payload,
+            signature: sig_hex,
+        },
+    ))
+}
+
+async fn issue_badge_for(
+    state: &AppState,
+    subject_pubkey: &str,
+    label: &str,
+    description: Option<&str>,
+    icon: Option<&str>,
+) -> Result<Certification, (StatusCode, String)> {
+    Ok(
+        issue_badge_cert(state, subject_pubkey, label, description, icon)
+            .await?
+            .1,
+    )
+}
+
+/// Revokes one issuance, as a badge level change or a lapsed condition needs.
+pub(crate) async fn revoke_issuance_by_id(db: &sqlx::PgPool, id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE cert_issuances SET revoked_at = $1, standing = 'revoked' WHERE id = $2 AND revoked_at IS NULL",
+    )
+    .bind(unix_timestamp())
+    .bind(id)
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Re-issue with standing="revoked" and mark the old row revoked_at.
@@ -785,6 +816,12 @@ pub async fn revoke_issuances(
     .bind(subject_pubkey)
     .execute(db)
     .await?;
+    // Their badge awards go with the certs: a rule badge comes back on a later
+    // tick once the ban lifts, a hand-granted one does not.
+    sqlx::query("DELETE FROM badge_awards WHERE subject_pubkey = $1")
+        .bind(subject_pubkey)
+        .execute(db)
+        .await?;
     Ok(())
 }
 

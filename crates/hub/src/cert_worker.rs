@@ -31,6 +31,9 @@ pub fn spawn(state: Arc<AppState>) {
 
 /// Run a single issuance sweep. Public for tests.
 pub async fn tick(state: &AppState) -> anyhow::Result<()> {
+    // Rule badges ride the same tick, whatever automatic certificates do.
+    crate::routes::badge_defs::evaluate_all(state).await?;
+
     // Check auto-issue setting
     let auto_issue: bool = sqlx::query_scalar::<_, String>(
         "SELECT value FROM hub_settings WHERE key = 'cert_auto_issue'",

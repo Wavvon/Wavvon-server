@@ -157,6 +157,9 @@ permission_catalogue! {
     CERTS_REVOKE => "certs.revoke", Hub,
     CERTS_SETTINGS => "certs.settings", Hub,
     BADGES_MANAGE => "badges.manage", Hub,
+    /// A program's own badges: create them, grant and revoke only those
+    /// (achievement-badges.md). Never the hub's badges, never a certificate.
+    BADGES_PROGRAMS => "badges.programs", Hub,
 
     // ── Federation and presence ─────────────────────────────────────────
     /// Hub-scoped alliance acts only. Inviting another hub, sharing a channel
