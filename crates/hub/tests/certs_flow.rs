@@ -637,3 +637,59 @@ async fn patch_accepts_the_shape_the_admin_ui_sends() {
         "the toggle the admin flipped must stick"
     );
 }
+
+/// A badge is a cert with a label, and it used to pass the admission check
+/// like a standing certificate: any badge from a trusted hub let its holder in.
+#[tokio::test]
+async fn a_badge_does_not_satisfy_cert_mode() {
+    let (state, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    server
+        .patch("/admin/settings/certs")
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "cert_mode": "any" }))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    let newcomer = Identity::generate();
+    let newcomer_pk = newcomer.public_key_hex();
+    let now = wavvon_hub::auth::handlers::unix_timestamp();
+    sqlx::query(
+        "INSERT INTO users (public_key, first_seen_at, last_seen_at, approval_status, is_member)
+         VALUES ($1, $2, $3, 'approved', TRUE)",
+    )
+    .bind(&newcomer_pk)
+    .bind(now - 86400)
+    .bind(now)
+    .execute(&state.db)
+    .await
+    .unwrap();
+
+    let badge: serde_json::Value = server
+        .post(&format!("/admin/certs/{newcomer_pk}/badge"))
+        .authorization_bearer(&owner_token)
+        .json(&json!({ "label": "Raid Leader" }))
+        .await
+        .json();
+
+    let ch: ChallengeResponse = server
+        .post("/auth/challenge")
+        .json(&json!({ "public_key": newcomer_pk }))
+        .await
+        .json();
+    let challenge_bytes = hex::decode(&ch.challenge).unwrap();
+    let sig =
+        newcomer.sign(&wavvon_identity::auth_challenge_signing_bytes(&challenge_bytes).unwrap());
+
+    server
+        .post("/auth/verify")
+        .json(&json!({
+            "public_key": newcomer_pk,
+            "challenge": ch.challenge,
+            "signature": hex::encode(sig.to_bytes()),
+            "certifications": [badge],
+        }))
+        .await
+        .assert_status_forbidden();
+}
