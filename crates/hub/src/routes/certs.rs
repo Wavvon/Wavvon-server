@@ -642,22 +642,34 @@ async fn issue_badge_for(
 }
 
 /// Re-issue with standing="revoked" and mark the old row revoked_at.
-async fn revoke_cert_for(
-    state: &AppState,
+/// Marks every live certificate and badge issued to a member revoked in the
+/// ledger, which is what `GET /certs/revocations` serves to trusting hubs.
+/// Takes the pool alone so the CLI's ban can call it too.
+pub async fn revoke_issuances(
+    db: &sqlx::PgPool,
     subject_pubkey: &str,
-) -> Result<(), (StatusCode, String)> {
-    let now = unix_timestamp();
-
-    // Mark any existing non-revoked certs revoked in the ledger.
+    now: i64,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE cert_issuances SET revoked_at = $1, standing = 'revoked'
          WHERE subject_pubkey = $2 AND revoked_at IS NULL",
     )
     .bind(now)
     .bind(subject_pubkey)
-    .execute(&state.db)
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub(crate) async fn revoke_cert_for(
+    state: &AppState,
+    subject_pubkey: &str,
+) -> Result<(), (StatusCode, String)> {
+    let now = unix_timestamp();
+
+    revoke_issuances(&state.db, subject_pubkey, now)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
     // Re-issue a cert with standing=revoked so pull-path verifiers see it.
     let user_row: Option<(i64,)> =

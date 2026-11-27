@@ -138,6 +138,11 @@ pub async fn ban_user(
 
     end_membership(&state, &req.target_public_key).await?;
 
+    // A ban withdraws what this hub vouched for: trusting hubs see the
+    // revocation on their next poll. A temporary ban too; automatic issuance
+    // gives back what still applies once it lifts.
+    crate::routes::certs::revoke_cert_for(&state, &req.target_public_key).await?;
+
     tracing::info!(
         "Banned user: {}",
         req.target_public_key
