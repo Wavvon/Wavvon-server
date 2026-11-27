@@ -813,6 +813,11 @@ pub async fn verify_certification(
     if payload.standing != "good" {
         return false;
     }
+    // A badge is a cert with a label: decoration, never a key. Accepting it
+    // let any "Raid Leader" from a trusted hub admit its holder.
+    if payload.label.is_some() {
+        return false;
+    }
     // 4. signature
     let sig_bytes = match hex::decode(&cert.signature) {
         Ok(b) => b,
