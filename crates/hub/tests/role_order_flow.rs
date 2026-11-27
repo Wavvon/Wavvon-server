@@ -85,3 +85,43 @@ async fn roles_reorder_in_one_call_below_the_caller_only() {
         .await
         .assert_status_forbidden();
 }
+
+#[tokio::test]
+async fn everyone_takes_a_place_in_the_order() {
+    let (h, owner) = common::setup_with_owner().await;
+    let a = create(&h, &owner, "A", 30, &[]).await;
+    let b = create(&h, &owner, "B", 20, &[]).await;
+
+    // B goes below everyone.
+    h.put("/roles/order")
+        .authorization_bearer(&owner)
+        .json(&json!({ "role_ids": [a, "builtin-everyone", b] }))
+        .await
+        .assert_status_success();
+    let roles: Vec<Value> = h.get("/roles").authorization_bearer(&owner).await.json();
+    let names: Vec<&str> = roles
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .filter(|n| ["A", "B", "everyone"].contains(n))
+        .collect();
+    assert_eq!(names, ["A", "everyone", "B"]);
+
+    // A request that leaves everyone out keeps it where it is.
+    h.put("/roles/order")
+        .authorization_bearer(&owner)
+        .json(&json!({ "role_ids": [b, a] }))
+        .await
+        .assert_status_success();
+    let roles: Vec<Value> = h.get("/roles").authorization_bearer(&owner).await.json();
+    let everyone = roles
+        .iter()
+        .find(|r| r["id"] == "builtin-everyone")
+        .unwrap();
+    let pri = |n: &str| {
+        roles.iter().find(|r| r["name"] == n).unwrap()["priority"]
+            .as_i64()
+            .unwrap()
+    };
+    assert!(pri("B") > pri("A"));
+    assert_eq!(everyone["priority"].as_i64().unwrap(), 20);
+}

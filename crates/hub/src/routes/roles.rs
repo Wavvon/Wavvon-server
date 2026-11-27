@@ -536,13 +536,19 @@ pub async fn reorder_roles(
         .begin()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    // `everyone` moves like any other role (`roles.order.everyone`), so a
+    // role can sit below it. A request that leaves it out, as a client from
+    // before that capability does, keeps it where it is.
+    let with_everyone = req.role_ids.iter().any(|id| id == "builtin-everyone");
     let movable: Vec<(String, i64)> = sqlx::query_as(
         "SELECT id, priority FROM roles
-         WHERE priority < $1 AND id NOT IN ('builtin-owner', 'builtin-everyone')
+         WHERE priority < $1 AND id <> 'builtin-owner'
+           AND ($2 OR id <> 'builtin-everyone')
          ORDER BY priority DESC
          FOR UPDATE",
     )
     .bind(perms.max_priority)
+    .bind(with_everyone)
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
