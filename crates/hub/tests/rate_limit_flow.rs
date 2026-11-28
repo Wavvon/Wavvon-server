@@ -167,3 +167,26 @@ async fn auth_challenge_rate_limits_burst() {
         "expected at least one 429 after bursting past the auth limit"
     );
 }
+
+/// `GET /join/{code}` tells anyone whether a code is a live invite, and a
+/// chosen code can be a short word, so guessing it is limited like a
+/// sign-in (#471).
+#[tokio::test]
+async fn join_code_lookups_are_rate_limited() {
+    let (hub, _guard) = start_real_hub().await;
+    let client = reqwest::Client::new();
+
+    let mut got_429 = false;
+    for i in 0..20 {
+        let resp = client
+            .get(format!("{hub}/join/guess{i}"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            got_429 = true;
+            break;
+        }
+    }
+    assert!(got_429, "expected a 429 after guessing past the auth limit");
+}
