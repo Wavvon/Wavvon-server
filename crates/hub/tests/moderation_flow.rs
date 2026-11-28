@@ -1494,4 +1494,29 @@ async fn voice_pins_are_the_rooms_and_last_one_session() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+
+    // A room the member cannot see tells them nothing about its stage or its
+    // raised hands (#475).
+    client
+        .put(format!(
+            "{hub_url}/channels/{}/permissions/builtin-everyone",
+            channel.id
+        ))
+        .bearer_auth(&owner_token)
+        .json(&json!({ "allow": [], "deny": ["voice.join", "messages.read"] }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    for path in ["voice-pins", "raise-hands"] {
+        let status = client
+            .get(format!("{hub_url}/channels/{}/{path}", channel.id))
+            .bearer_auth(&user2_token)
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 404, "{path} answered for a hidden room");
+    }
 }

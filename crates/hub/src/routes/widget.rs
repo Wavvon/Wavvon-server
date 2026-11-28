@@ -177,7 +177,20 @@ async fn compute(state: &AppState) -> Option<WidgetData> {
             .fetch_all(&state.db)
             .await
             .unwrap_or_default();
-        let mut out: Vec<WidgetVoiceRoom> = rooms
+        // A public page shows only the rooms a plain member could see (#474).
+        let mut visible = Vec::with_capacity(rooms.len());
+        for (id, pks) in rooms {
+            let open = crate::permissions::everyone_channel_permissions(&state.db, &id)
+                .await
+                .is_ok_and(|p| {
+                    p.has(crate::permissions::VOICE_JOIN)
+                        || p.has(crate::permissions::MESSAGES_READ)
+                });
+            if open {
+                visible.push((id, pks));
+            }
+        }
+        let mut out: Vec<WidgetVoiceRoom> = visible
             .into_iter()
             .filter_map(|(id, pks)| {
                 let members: Vec<String> = pks.iter().filter_map(|pk| name_of(pk)).collect();
