@@ -25,9 +25,27 @@ use crate::voice_relay::{self, VoiceLink};
 /// in-band open handshake is needed before the first packet.
 pub const VOICE_CHANNEL_ID: u16 = 0;
 
+/// Outbound packets waiting for the run loop, across every peer. Past this a
+/// packet is dropped, as the `VoiceLink` contract allows: a late voice frame
+/// is useless, and an unbounded queue let one flooding member grow hub
+/// memory without limit (#472).
+const SEND_QUEUE: usize = 4096;
+
+/// A sealed voice frame is far below this; anything larger is not voice.
+const MAX_VOICE_PACKET: usize = 1500;
+
+/// Inbound packets one peer may relay per second. A 20 ms frame is 50 a
+/// second; the rest is headroom for jitter bursts.
+const MAX_PACKETS_PER_SEC: u32 = 200;
+
 /// How the rest of the hub talks to the run loop that owns the socket.
 pub struct RtcHandle {
     cmd: mpsc::UnboundedSender<Cmd>,
+}
+
+struct Outbound {
+    peer: u64,
+    packet: Vec<u8>,
 }
 
 enum Cmd {
@@ -35,10 +53,6 @@ enum Cmd {
         bind: PendingVoiceBind,
         sdp: String,
         reply: oneshot::Sender<Result<String, String>>,
-    },
-    Send {
-        peer: u64,
-        packet: Vec<u8>,
     },
     Close {
         peer: u64,
@@ -62,11 +76,12 @@ impl RtcHandle {
 struct RtcLink {
     peer: u64,
     cmd: mpsc::UnboundedSender<Cmd>,
+    out: mpsc::Sender<Outbound>,
 }
 
 impl VoiceLink for RtcLink {
     fn send(&self, packet: &[u8]) {
-        let _ = self.cmd.send(Cmd::Send {
+        let _ = self.out.try_send(Outbound {
             peer: self.peer,
             packet: packet.to_vec(),
         });
@@ -83,6 +98,8 @@ struct Peer {
     channel: ChannelId,
     bind: PendingVoiceBind,
     opened: Instant,
+    /// Start of the current one-second window and packets relayed in it.
+    window: (Instant, u32),
 }
 
 /// Binds the voice WebRTC socket on `port` (`0` = ephemeral, for tests),
@@ -123,7 +140,10 @@ pub async fn start(
     if state.voice_rtc.set(handle).is_err() {
         anyhow::bail!("voice WebRTC relay already started");
     }
-    tokio::spawn(run(state, socket, candidates, cmd_rx, cmd_tx));
+    let (out_tx, out_rx) = mpsc::channel(SEND_QUEUE);
+    tokio::spawn(run(
+        state, socket, candidates, cmd_rx, cmd_tx, out_rx, out_tx,
+    ));
     Ok(bound)
 }
 
@@ -142,6 +162,8 @@ async fn run(
     candidates: Vec<SocketAddr>,
     mut cmd_rx: mpsc::UnboundedReceiver<Cmd>,
     cmd_tx: mpsc::UnboundedSender<Cmd>,
+    mut out_rx: mpsc::Receiver<Outbound>,
+    out_tx: mpsc::Sender<Outbound>,
 ) {
     let mut peers: Vec<Peer> = Vec::new();
     let mut next_id: u64 = 1;
@@ -190,8 +212,15 @@ async fn run(
                         next_id += 1;
                         match new_peer(id, bind, &sdp, &candidates) {
                             Ok((peer, answer)) => {
-                                let link = Arc::new(RtcLink { peer: id, cmd: cmd_tx.clone() });
-                                voice_relay::attach(&state, &peer.bind, link).await;
+                                let link = Arc::new(RtcLink {
+                                    peer: id,
+                                    cmd: cmd_tx.clone(),
+                                    out: out_tx.clone(),
+                                });
+                                if !voice_relay::attach(&state, &peer.bind, link).await {
+                                    let _ = reply.send(Err("not in this voice room".to_string()));
+                                    continue;
+                                }
                                 tracing::info!(
                                     member = short(&peer.bind.pubkey),
                                     channel = %peer.bind.channel_id,
@@ -205,18 +234,24 @@ async fn run(
                             }
                         }
                     }
-                    Cmd::Send { peer, packet } => {
-                        if let Some(p) = peers.iter_mut().find(|p| p.id == peer) {
-                            if let Some(mut ch) = p.rtc.channel(p.channel) {
-                                let _ = ch.write(true, &packet);
-                            }
-                        }
-                    }
                     Cmd::Close { peer } => {
                         if let Some(p) = peers.iter_mut().find(|p| p.id == peer) {
                             p.rtc.disconnect();
                         }
                     }
+                }
+            }
+            Some(first) = out_rx.recv() => {
+                // Everything queued goes out now, not one packet per turn of
+                // the loop, so the queue cannot fall behind the socket.
+                let mut next = Some(first);
+                while let Some(Outbound { peer, packet }) = next {
+                    if let Some(p) = peers.iter_mut().find(|p| p.id == peer) {
+                        if let Some(mut ch) = p.rtc.channel(p.channel) {
+                            let _ = ch.write(true, &packet);
+                        }
+                    }
+                    next = out_rx.try_recv().ok();
                 }
             }
             _ = tokio::time::sleep(wait) => {}
@@ -259,6 +294,7 @@ fn new_peer(
             channel,
             bind,
             opened: Instant::now(),
+            window: (Instant::now(), 0),
         },
         answer.to_sdp_string(),
     ))
@@ -277,8 +313,10 @@ async fn drive(state: &AppState, socket: &UdpSocket, peer: &mut Peer) -> Option<
                 let _ = socket.send_to(&t.contents, t.destination).await;
             }
             Ok(Output::Event(Event::ChannelData(data))) if data.id == peer.channel => {
-                voice_relay::relay(state, &peer.bind.channel_id, &peer.bind.pubkey, &data.data)
-                    .await;
+                if data.data.len() <= MAX_VOICE_PACKET && within_rate(&mut peer.window) {
+                    voice_relay::relay(state, &peer.bind.channel_id, &peer.bind.pubkey, &data.data)
+                        .await;
+                }
             }
             Ok(Output::Event(Event::IceConnectionStateChange(
                 IceConnectionState::Disconnected,
@@ -294,6 +332,16 @@ async fn drive(state: &AppState, socket: &UdpSocket, peer: &mut Peer) -> Option<
     }
 }
 
+/// Counts one inbound packet against its peer's one-second window.
+fn within_rate(window: &mut (Instant, u32)) -> bool {
+    let now = Instant::now();
+    if now.duration_since(window.0) >= Duration::from_secs(1) {
+        *window = (now, 0);
+    }
+    window.1 += 1;
+    window.1 <= MAX_PACKETS_PER_SEC
+}
+
 async fn end_peer(state: &AppState, peer: &Peer, reason: &str) {
     tracing::info!(
         member = short(&peer.bind.pubkey),
@@ -307,4 +355,20 @@ async fn end_peer(state: &AppState, peer: &Peer, reason: &str) {
 
 fn short(pubkey: &str) -> &str {
     &pubkey[..pubkey.len().min(12)]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_peer_relays_at_most_its_rate_per_second() {
+        let mut window = (Instant::now(), 0);
+        let passed = (0..MAX_PACKETS_PER_SEC + 50)
+            .filter(|_| within_rate(&mut window))
+            .count();
+        assert_eq!(passed, MAX_PACKETS_PER_SEC as usize);
+        window.0 -= Duration::from_secs(1);
+        assert!(within_rate(&mut window), "a new second starts a new window");
+    }
 }

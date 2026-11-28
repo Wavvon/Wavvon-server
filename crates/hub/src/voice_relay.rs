@@ -30,15 +30,21 @@ pub async fn take_bind(state: &AppState, token: &str) -> Option<PendingVoiceBind
     binds.remove(token)
 }
 
-/// Gives a bound member's session to the relay.
-pub async fn attach(state: &AppState, bind: &PendingVoiceBind, link: Arc<dyn VoiceLink>) {
-    state
-        .voice_channels
-        .write()
-        .await
-        .entry(bind.channel_id.clone())
-        .or_default()
-        .insert(bind.pubkey.clone(), Some(link));
+/// Gives a bound member's session to the relay. `false` when the member
+/// left the room between the bind and now (a moderator move, another socket's
+/// leave): the session must not re-create a roster slot and listen in.
+pub async fn attach(state: &AppState, bind: &PendingVoiceBind, link: Arc<dyn VoiceLink>) -> bool {
+    let mut channels = state.voice_channels.write().await;
+    match channels
+        .get_mut(&bind.channel_id)
+        .and_then(|room| room.get_mut(&bind.pubkey))
+    {
+        Some(slot) => {
+            *slot = Some(link);
+            true
+        }
+        None => false,
+    }
 }
 
 /// The transport session ended: drop the audio-carrying handle but keep the
