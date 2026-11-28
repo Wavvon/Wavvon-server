@@ -413,8 +413,9 @@ pub struct CertSettingsResponse {
     /// A trusted certificate stands in for an invite on an invite-only hub.
     pub cert_replaces_invite: bool,
     /// issuer pubkey → base URL, for the issuers this hub can *pull* a
-    /// portfolio from (§11). Sparse: trust does not require an address, and an
-    /// issuer without one still has its pushed certs honoured.
+    /// portfolio from (§11). Sparse: trust does not require an address; an
+    /// issuer without one is asked at the `issuer_url` its presented cert
+    /// signs.
     pub cert_issuer_urls: std::collections::HashMap<String, String>,
 }
 
@@ -1046,13 +1047,27 @@ pub async fn holds_trusted_certificate(
     trusted_issuers: &[String],
     trusted_types: &[TrustedType],
 ) -> bool {
+    // A presented cert is a copy the holder kept: it stays signed and
+    // unexpired after its issuer revokes it. So it only says which issuer to
+    // ask first; the issuer's live answer, which drops revoked issuances, is
+    // what admits (#469).
+    let mut urls = load_issuer_urls(state).await;
+    let mut issuers: Vec<String> = Vec::new();
     for cert in presented {
-        if verify_certification(cert, master_pk, trusted_issuers, trusted_types).await {
-            return true;
+        if verify_certification(cert, master_pk, trusted_issuers, trusted_types).await
+            && !issuers.contains(&cert.payload.issuer_pubkey)
+        {
+            urls.entry(cert.payload.issuer_pubkey.clone())
+                .or_insert_with(|| cert.payload.issuer_url.clone());
+            issuers.push(cert.payload.issuer_pubkey.clone());
         }
     }
-    let issuers = trusted_issuer_set(trusted_issuers, trusted_types);
-    for cert in pull_portfolios(state, &issuers, master_pk).await {
+    for pk in trusted_issuer_set(trusted_issuers, trusted_types) {
+        if !issuers.contains(&pk) {
+            issuers.push(pk);
+        }
+    }
+    for cert in pull_portfolios(state, &issuers, &urls, master_pk).await {
         if verify_certification(&cert, master_pk, trusted_issuers, trusted_types).await {
             return true;
         }
@@ -1069,8 +1084,8 @@ pub async fn holds_trusted_certificate(
 const PORTFOLIO_CACHE_TTL_SECS: i64 = 600;
 
 /// Cap on issuers contacted for one admission attempt. An admin can trust more
-/// than this; the pull path just stops there, and the pushed-cert path is
-/// unaffected.
+/// than this; the pull path just stops there, after the issuers of the
+/// presented certs, which are asked first.
 const MAX_PULL_ISSUERS: usize = 8;
 
 const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -1082,8 +1097,8 @@ const PULL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 /// every gated auth, and it once spent months silently empty because one
 /// reader expected objects while every writer wrote strings. Trust stays a
 /// flat array of pubkeys; an address is a separate, optional fact about an
-/// issuer. An issuer with no URL is simply not pullable — its pushed certs
-/// still work — which is a better failure than a trust list that fails to
+/// issuer. An issuer with no URL is asked only at the address its presented
+/// cert signs, which is a better failure than a trust list that fails to
 /// parse.
 async fn load_issuer_urls(state: &AppState) -> std::collections::HashMap<String, String> {
     let json_str: String = sqlx::query_scalar::<_, String>(
@@ -1100,8 +1115,8 @@ async fn load_issuer_urls(state: &AppState) -> std::collections::HashMap<String,
 
 /// One issuer's answer for one subject: `GET {issuer_url}/identity/{pk}/certs`.
 ///
-/// A failure is a miss, never an error — the caller falls through to the
-/// pushed certs and then to `cert_required`, so a downed sibling costs an
+/// A failure is a miss, never an error — the caller falls through to
+/// `cert_required` and the usual way in, so a downed sibling costs an
 /// admission attempt, not the hub.
 async fn fetch_portfolio(
     state: &AppState,
@@ -1157,14 +1172,14 @@ async fn fetch_portfolio(
 /// The receiving hub pulls because nothing pushes: no client sends the
 /// `certifications` array `/auth/verify` accepts, so before this a hub with
 /// `cert_mode != none` refused everyone. Certs come back unverified — the
-/// caller runs the same `verify_certification` predicate over them as over a
-/// pushed cert, so a lying issuer gains nothing by answering.
+/// caller runs the same `verify_certification` predicate over them, so a
+/// lying issuer gains nothing by answering.
 pub async fn pull_portfolios(
     state: &AppState,
     trusted_issuers: &[String],
+    urls: &std::collections::HashMap<String, String>,
     master_pubkey: &str,
 ) -> Vec<Certification> {
-    let urls = load_issuer_urls(state).await;
     let targets: Vec<(&String, &String)> = trusted_issuers
         .iter()
         .filter_map(|pk| urls.get(pk).map(|url| (pk, url)))

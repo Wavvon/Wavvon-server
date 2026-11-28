@@ -280,6 +280,43 @@ fn signed_cert(issuer: &Identity, issuer_url: &str, subject_pubkey: &str) -> ser
     signed(issuer, issuer_url, subject_pubkey, None, None)
 }
 
+/// A cert whose signed `issuer_url` points at a live issuer that still
+/// lists it, the way a real hub answers for a certificate it has not revoked.
+/// `still_listed: false` is the issuer after a revocation.
+async fn live_cert(
+    issuer: &Identity,
+    subject_pubkey: &str,
+    cert_type: Option<&str>,
+    still_listed: bool,
+) -> serde_json::Value {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    let cert = signed(issuer, &url, subject_pubkey, None, cert_type);
+    let body = if still_listed {
+        json!([cert])
+    } else {
+        json!([])
+    }
+    .to_string();
+    let app = axum::Router::new().route(
+        "/identity/{pubkey}/certs",
+        axum::routing::get(move || {
+            let b = body.clone();
+            async move {
+                (
+                    axum::http::StatusCode::OK,
+                    [("content-type", "application/json")],
+                    b,
+                )
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    cert
+}
+
 async fn patch_certs(server: &TestServer, owner_token: &str, body: serde_json::Value) {
     server
         .patch("/admin/settings/certs")
@@ -398,10 +435,33 @@ async fn a_trusted_hubs_certificate_admits() {
     trust_issuer(&server, &owner_token, &issuer.public_key_hex(), None).await;
 
     let newcomer = Identity::generate();
-    let cert = signed_cert(&issuer, "http://issuer.example", &newcomer.public_key_hex());
+    let cert = live_cert(&issuer, &newcomer.public_key_hex(), None, true).await;
     verify_as(&server, &newcomer, Some(json!([cert])), None)
         .await
         .assert_status_ok();
+}
+
+/// A copy of a certificate its issuer has since revoked (a ban there, #463)
+/// is still signed and unexpired, but the issuer no longer lists it, and
+/// that live answer is the one that counts (#469).
+#[tokio::test]
+async fn a_presented_certificate_its_issuer_revoked_does_not_admit() {
+    let (_, server) = setup().await;
+    let owner = Identity::generate();
+    let owner_token = do_auth(&server, &owner).await;
+    let issuer = Identity::generate();
+    patch_certs(
+        &server,
+        &owner_token,
+        json!({ "cert_trusted_issuers": [issuer.public_key_hex()], "cert_others": "refuse" }),
+    )
+    .await;
+
+    let banned = Identity::generate();
+    let cert = live_cert(&issuer, &banned.public_key_hex(), None, false).await;
+    verify_as(&server, &banned, Some(json!([cert])), None)
+        .await
+        .assert_status_forbidden();
 }
 
 /// The specific list trusts one type of one hub: that type admits, another
@@ -423,13 +483,7 @@ async fn a_trusted_type_admits_and_another_type_does_not() {
     .await;
 
     let good = Identity::generate();
-    let cert = signed(
-        &issuer,
-        "http://issuer.example",
-        &good.public_key_hex(),
-        None,
-        Some("verified"),
-    );
+    let cert = live_cert(&issuer, &good.public_key_hex(), Some("verified"), true).await;
     verify_as(&server, &good, Some(json!([cert])), None)
         .await
         .assert_status_ok();
@@ -492,11 +546,7 @@ async fn the_fast_lane_skips_approval_and_the_usual_way_keeps_it() {
     set_hub_setting(&state, "require_approval", "true").await;
 
     let certified = Identity::generate();
-    let cert = signed_cert(
-        &issuer,
-        "http://issuer.example",
-        &certified.public_key_hex(),
-    );
+    let cert = live_cert(&issuer, &certified.public_key_hex(), None, true).await;
     verify_as(&server, &certified, Some(json!([cert])), None)
         .await
         .assert_status_ok();
@@ -544,7 +594,7 @@ async fn a_certificate_replaces_an_invite_only_when_switched_on() {
     )
     .await;
     let second = Identity::generate();
-    let cert = signed_cert(&issuer, "http://issuer.example", &second.public_key_hex());
+    let cert = live_cert(&issuer, &second.public_key_hex(), None, true).await;
     verify_as(&server, &second, Some(json!([cert])), None)
         .await
         .assert_status_ok();
