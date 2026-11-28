@@ -239,6 +239,25 @@ async fn a_program_runs_its_own_badges_only() {
         .assert_status(axum::http::StatusCode::NO_CONTENT);
     assert_eq!(award_level(server.state(), &id, &pk).await, Some(2));
 
+    // The same level again is a no-op: no new certificate, no revocation.
+    let issued = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM cert_issuances WHERE subject_pubkey = $1",
+        )
+        .bind(&pk)
+        .fetch_one(&server.state().db)
+        .await
+        .unwrap()
+    };
+    let before = issued().await;
+    server
+        .post(&format!("/badges/programs/{id}/grant"))
+        .authorization_bearer(&program)
+        .json(&json!({ "subject": pk, "level": 2 }))
+        .await
+        .assert_status(axum::http::StatusCode::NO_CONTENT);
+    assert_eq!(issued().await, before, "a re-grant minted a certificate");
+
     // A member without the permission cannot grant anything.
     server
         .post(&format!("/badges/programs/{id}/grant"))
@@ -268,10 +287,56 @@ async fn a_program_runs_its_own_badges_only() {
         .await
         .json();
     assert!(seen.iter().all(|d| d["id"] != id.as_str()));
+    // ... and a program cannot keep granting it.
+    server
+        .post(&format!("/badges/programs/{id}/grant"))
+        .authorization_bearer(&program)
+        .json(&json!({ "subject": pk, "level": 3 }))
+        .await
+        .assert_status(axum::http::StatusCode::CONFLICT);
     server
         .delete(&format!("/admin/badge-defs/{id}"))
         .authorization_bearer(&program)
         .await
         .assert_status(axum::http::StatusCode::NO_CONTENT);
     assert_eq!(live_badge_certs(server.state(), &pk).await, 0);
+}
+
+/// Every grant signs a certificate and revokes the last one, so the budget
+/// counts calls: revoking and granting again in a loop is stopped (#473).
+#[tokio::test]
+async fn a_program_cannot_loop_grant_and_revoke() {
+    let server = common::setup().await;
+    let program = common::authenticate(&server, &Identity::generate()).await;
+    let pk = Identity::generate().public_key_hex();
+    let def: serde_json::Value = server
+        .post("/badges/programs")
+        .authorization_bearer(&program)
+        .json(&json!({ "name": "Loop" }))
+        .await
+        .json();
+    let id = def["id"].as_str().unwrap().to_string();
+
+    let mut refused = false;
+    for _ in 0..40 {
+        let grant = server
+            .post(&format!("/badges/programs/{id}/grant"))
+            .authorization_bearer(&program)
+            .json(&json!({ "subject": pk }))
+            .await;
+        let revoke = server
+            .delete(&format!("/badges/programs/{id}/awards/{pk}"))
+            .authorization_bearer(&program)
+            .await;
+        if grant.status_code() == axum::http::StatusCode::TOO_MANY_REQUESTS
+            || revoke.status_code() == axum::http::StatusCode::TOO_MANY_REQUESTS
+        {
+            refused = true;
+            break;
+        }
+    }
+    assert!(
+        refused,
+        "80 grant and revoke calls in a row were all accepted"
+    );
 }
