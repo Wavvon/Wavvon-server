@@ -307,7 +307,7 @@ next door had been doing all along, each with a comment saying why. **When you
 add a per-user map, ask how many sockets one user has** — the answer is not
 one, and the failure is quiet.
 
-**The auth limiter is per IP and one login costs two requests** — a shared
+**The auth limiter is per IP and one login costs two requests** (three through a join link: `/join/{code}` shares the bucket so a code cannot be guessed for free) — a shared
 address (office, school, CGNAT) spends the default budget on ordinary
 arrivals, and to the person turned away it looks like a hub that will not have
 them. `WAVVON_AUTH_RATE_BURST` / `WAVVON_AUTH_RATE_PER_SEC` exist for that;

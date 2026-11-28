@@ -126,9 +126,25 @@ pub fn create_router_full(
     let join_index_html = web_client.as_ref().map(|c| c.index_html.clone());
 
     // Rate-limited auth sub-router (strict, because anyone can hit these).
+    // `/join/{code}` answers "is this a live invite" to anyone, and an admin
+    // can choose a short code, so a guess costs what a sign-in costs (#471).
     let auth_routes = Router::new()
         .route("/auth/challenge", post(auth::handlers::challenge))
         .route("/auth/verify", post(auth::handlers::verify))
+        .route(
+            "/join/{code}",
+            get(
+                move |state: axum::extract::State<Arc<AppState>>,
+                      path: axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
+                    let index = join_index_html.clone();
+                    async move {
+                        routes::invites::get_join_page_or_info(state, path, headers, index).await
+                    }
+                },
+            )
+            .post(routes::invites::join_with_invite),
+        )
         .layer(from_fn(move |req, next| {
             let l = auth_limiter.clone();
             async move { rate_limit::enforce(l, req, next).await }
@@ -532,21 +548,6 @@ pub fn create_router_full(
         .route(
             "/invites/{code}",
             axum::routing::delete(routes::invites::revoke_invite),
-        )
-        // ---- Join links (Feature 5) ----
-        .route(
-            "/join/{code}",
-            get(
-                move |state: axum::extract::State<Arc<AppState>>,
-                      path: axum::extract::Path<String>,
-                      headers: axum::http::HeaderMap| {
-                    let index = join_index_html.clone();
-                    async move {
-                        routes::invites::get_join_page_or_info(state, path, headers, index).await
-                    }
-                },
-            )
-            .post(routes::invites::join_with_invite),
         )
         // ---- Unread counts (Feature 2) ----
         // Must be registered before /channels/{channel_id} to avoid "unread" being matched as a path param.
