@@ -462,11 +462,27 @@ pub async fn lower_hand(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Who is in a room and on its stage is for those who can see the room:
+/// `voice.join` or `messages.read` here, as `VoiceWatch` asks (#475).
+async fn require_room_visible(
+    state: &AppState,
+    public_key: &str,
+    channel_id: &str,
+) -> Result<permissions::UserPermissions, (StatusCode, String)> {
+    let perms = permissions::channel_permissions(&state.db, public_key, channel_id).await?;
+    if perms.has(permissions::VOICE_JOIN) || perms.has(permissions::MESSAGES_READ) {
+        Ok(perms)
+    } else {
+        Err((StatusCode::NOT_FOUND, "Channel not found".to_string()))
+    }
+}
+
 pub async fn list_raise_hands(
     State(state): State<Arc<AppState>>,
-    _user: AuthUser,
+    user: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<Vec<RaiseHandResponse>>, (StatusCode, String)> {
+    require_room_visible(&state, &user.public_key, &channel_id).await?;
     #[derive(sqlx::FromRow)]
     struct Row {
         id: String,
@@ -531,7 +547,7 @@ pub async fn list_voice_pins(
     user: AuthUser,
     Path(channel_id): Path<String>,
 ) -> Result<Json<VoicePinsResponse>, (StatusCode, String)> {
-    let can_pin = permissions::channel_permissions(&state.db, &user.public_key, &channel_id)
+    let can_pin = require_room_visible(&state, &user.public_key, &channel_id)
         .await?
         .has(permissions::VOICE_STAGE);
     let public_keys = state
