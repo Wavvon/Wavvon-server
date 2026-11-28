@@ -236,6 +236,9 @@ pub struct RateLimiters {
     /// Slash-command cooldowns: (app pubkey, command, invoker) -> when the
     /// invoker last ran it. Per user, so one person's use never blocks another.
     pub app_cooldowns: Mutex<HashMap<(String, String, String), Instant>>,
+    /// Badge grants and revokes per program (badge_defs.rs, 60/60 s). Counts
+    /// calls, not award rows: a re-grant or a revoke adds no row (#473).
+    pub program_badge_calls: Mutex<HashMap<String, (u32, Instant)>>,
 }
 
 impl RateLimiters {
@@ -287,6 +290,7 @@ impl Default for RateLimiters {
             push: Mutex::new(HashMap::new()),
             alliance_people: Mutex::new(HashMap::new()),
             app_cooldowns: Mutex::new(HashMap::new()),
+            program_badge_calls: Mutex::new(HashMap::new()),
         }
     }
 }
