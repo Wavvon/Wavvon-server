@@ -39,8 +39,35 @@ const RULES: &[&str] = &[
 
 /// A program may define this many badges; a runaway bot stops here.
 const PROGRAM_BADGE_CAP: i64 = 50;
-/// And grant this many per minute.
-const PROGRAM_GRANTS_PER_MINUTE: i64 = 60;
+/// And grant or revoke this many times a minute.
+const PROGRAM_BADGE_CALLS_PER_MINUTE: u32 = 60;
+
+/// Every grant mints and signs a certificate and revokes the one before, so
+/// the budget counts calls, not award rows (#473).
+fn program_over_budget(state: &AppState, program: &str) -> ApiResult<()> {
+    let window = std::time::Duration::from_secs(60);
+    let now = std::time::Instant::now();
+    let mut map = state
+        .rate_limiters
+        .program_badge_calls
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if map.len() >= 2_000 {
+        map.retain(|_, (_, t)| now.duration_since(*t) <= window);
+    }
+    let entry = map.entry(program.to_string()).or_insert((0, now));
+    if now.duration_since(entry.1) > window {
+        *entry = (0, now);
+    }
+    entry.0 += 1;
+    if entry.0 > PROGRAM_BADGE_CALLS_PER_MINUTE {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many badge grants this minute".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct BadgeLevel {
@@ -810,23 +837,24 @@ pub async fn program_grant(
         .await?
         .require(BADGES_PROGRAMS)?;
     let def = owned_by(&state, &id, &user.public_key).await?;
-    let recent: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM badge_awards a JOIN badge_defs d ON d.id = a.badge_id
-         WHERE d.program_pubkey = $1 AND a.awarded_at > $2",
-    )
-    .bind(&user.public_key)
-    .bind(unix_timestamp() - 60)
-    .fetch_one(&state.db)
-    .await
-    .map_err(db_err)?;
-    if recent >= PROGRAM_GRANTS_PER_MINUTE {
-        return Err((
-            StatusCode::TOO_MANY_REQUESTS,
-            "Too many badge grants this minute".to_string(),
-        ));
+    // An admin hid it: the catalogue does not show it, and nobody new gets it.
+    if def.hidden {
+        return Err((StatusCode::CONFLICT, "This badge is hidden".to_string()));
     }
+    program_over_budget(&state, &user.public_key)?;
     let levels = levels_of(&state.db, &id).await?;
     let level = pick_level(&levels, req.level)?;
+    let held: Option<i32> = sqlx::query_scalar(
+        "SELECT level FROM badge_awards WHERE badge_id = $1 AND subject_pubkey = $2",
+    )
+    .bind(&id)
+    .bind(&req.subject)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(db_err)?;
+    if held == Some(level.level) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     award(&state, &def, level, &req.subject).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -841,6 +869,7 @@ pub async fn program_revoke(
         .await?
         .require(BADGES_PROGRAMS)?;
     owned_by(&state, &id, &user.public_key).await?;
+    program_over_budget(&state, &user.public_key)?;
     unaward(&state, &id, &pubkey).await?;
     Ok(StatusCode::NO_CONTENT)
 }

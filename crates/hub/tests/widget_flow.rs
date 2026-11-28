@@ -103,4 +103,42 @@ async fn widget_is_off_by_default_and_never_shows_the_hidden_or_a_key() {
     let body: Value = h.get("/public/widget.json").await.json();
     assert_eq!(body["online_count"], 1);
     assert!(body.get("members").is_none(), "{body}");
+
+    // Voice mode lists the rooms a plain member could see, never a staff
+    // room (#474).
+    let mut room_ids = Vec::new();
+    for name in ["Lounge", "Mod office"] {
+        let ch: Value = h
+            .post("/channels")
+            .authorization_bearer(&owner)
+            .json(&json!({ "name": name, "channel_type": "voice" }))
+            .await
+            .json();
+        room_ids.push(ch["id"].as_str().unwrap().to_string());
+    }
+    h.put(&format!(
+        "/channels/{}/permissions/builtin-everyone",
+        room_ids[1]
+    ))
+    .authorization_bearer(&owner)
+    .json(&json!({ "allow": [], "deny": ["voice.join", "messages.read"] }))
+    .await
+    .assert_status_success();
+    for id in &room_ids {
+        state
+            .voice_channels
+            .write()
+            .await
+            .entry(id.clone())
+            .or_default()
+            .insert(visible.public_key_hex(), None);
+    }
+    h.put("/admin/settings/widget")
+        .authorization_bearer(&owner)
+        .json(&json!({ "mode": "voice" }))
+        .await
+        .assert_status_success();
+    let text = h.get("/public/widget.json").await.text();
+    assert!(text.contains("Lounge"), "{text}");
+    assert!(!text.contains("Mod office"), "a staff room leaked: {text}");
 }
