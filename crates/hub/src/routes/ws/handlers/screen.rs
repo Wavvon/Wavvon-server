@@ -52,6 +52,9 @@ pub(in crate::routes::ws) async fn handle_subscribe(
             continue;
         }
         for (stream_id, meta) in &active.streams {
+            if !crate::state::may_see_stream(state, &channel_id, meta, &cs.public_key).await {
+                continue;
+            }
             let started = WsServerMessage::ScreenShareStarted {
                 channel_id: channel_id.clone(),
                 stream_id: stream_id.clone(),

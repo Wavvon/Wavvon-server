@@ -1097,3 +1097,93 @@ async fn a_room_only_share_stays_in_the_room() {
         }
     }
 }
+
+/// Subscribing to the channel after a room-only share started announces it
+/// and replays its frames to the room's members only.
+#[tokio::test]
+async fn a_late_subscriber_outside_the_room_gets_no_room_only_share() {
+    let (base, state, _guard) = start_hub().await;
+    let sharer_id = Identity::generate();
+    let outside_id = Identity::generate();
+    let sharer_token = authenticate_http(&base, &sharer_id).await;
+    let outside_token = authenticate_http(&base, &outside_id).await;
+    // Connected before the channel exists, so the explicit subscribe below
+    // is this socket's first subscription to it.
+    let (mut outside_tx, mut outside_rx) = connect_ws(&base, &outside_token).await;
+    // A pong means the socket finished its setup, subscriptions included.
+    send_text(&mut outside_tx, json!({ "type": "ping", "nonce": 1 })).await;
+    wait_for_type(&mut outside_rx, "pong").await;
+    let ch = create_channel(&base, &sharer_token, "room-late").await;
+
+    let (mut sharer_tx, _sharer_rx) = connect_ws(&base, &sharer_token).await;
+    send_text(
+        &mut sharer_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_start",
+            "channel_id": ch.id,
+            "stream_id": "room-late-1",
+            "kind": "screen",
+            "mime": "video/webm;codecs=vp8",
+            "has_audio": false,
+            "audience": "room",
+        }),
+    )
+    .await;
+    send_text(
+        &mut sharer_tx,
+        json!({
+            "type": "screen_share_chunk",
+            "channel_id": ch.id,
+            "stream_id": "room-late-1",
+            "seq": 0,
+            "is_init": true,
+        }),
+    )
+    .await;
+    sharer_tx
+        .send(TsMessage::Binary(vec![1u8, 2, 3]))
+        .await
+        .unwrap();
+    // The share is registered before the outsider subscribes.
+    let mut registered = false;
+    for _ in 0..100 {
+        if state
+            .screen_shares
+            .read()
+            .await
+            .keys()
+            .any(|(c, _)| c == &ch.id)
+        {
+            registered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(registered, "the room-only share never started");
+
+    send_text(
+        &mut outside_tx,
+        json!({ "type": "subscribe", "channel_id": ch.id }),
+    )
+    .await;
+    send_text(&mut outside_tx, json!({ "type": "stream_list" })).await;
+    loop {
+        let v = next_text(&mut outside_rx).await;
+        assert_ne!(
+            v["type"], "screen_share_started",
+            "an outsider was told: {v}"
+        );
+        assert_ne!(
+            v["type"], "screen_share_chunk",
+            "an outsider got a frame: {v}"
+        );
+        if v["type"] == "hub_streams" {
+            break;
+        }
+    }
+}
